@@ -5,6 +5,7 @@ use std::sync::Arc;
 use moa_config::MoaConfig;
 use moa_core::{traits::LLMProvider, types::provider::ProviderId};
 
+use crate::core::concurrency_factory::ProviderCoordination;
 use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
 /// Default Anthropic model used when Anthropic is the first configured provider.
@@ -19,10 +20,6 @@ pub const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 pub const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-nano";
 /// Default Google model for query rewriting.
 pub const REWRITER_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
-
-/// Factory used to construct a provider from runtime config and a model id.
-pub type ConfigProviderFactory =
-    fn(&MoaConfig, &str) -> moa_core::error::Result<Arc<dyn LLMProvider>>;
 
 /// Accessor for a provider's API-key setting.
 pub type ApiKeyAccessor = for<'a> fn(&'a MoaConfig) -> &'a str;
@@ -49,8 +46,6 @@ pub struct ProviderDescriptor {
     pub rewriter_priority: u8,
     /// Config accessor for this provider's loaded API key.
     pub api_key: ApiKeyAccessor,
-    /// Provider factory using full runtime config.
-    pub build_from_config: ConfigProviderFactory,
 }
 
 /// All built-in provider descriptors.
@@ -66,7 +61,6 @@ const OPENAI_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     default_priority: 0,
     rewriter_priority: 0,
     api_key: openai_api_key,
-    build_from_config: build_openai_provider_from_config,
 };
 
 const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
@@ -78,7 +72,6 @@ const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     default_priority: 1,
     rewriter_priority: 1,
     api_key: anthropic_api_key,
-    build_from_config: build_anthropic_provider_from_config,
 };
 
 const GOOGLE_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
@@ -90,7 +83,6 @@ const GOOGLE_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     default_priority: 2,
     rewriter_priority: 2,
     api_key: google_api_key,
-    build_from_config: build_google_provider_from_config,
 };
 
 /// Returns the provider descriptor for a stable provider name.
@@ -147,31 +139,28 @@ fn google_api_key(config: &MoaConfig) -> &str {
     &config.providers.google.api_key
 }
 
-fn build_anthropic_provider_from_config(
+/// Builds one model client from a composition-root-owned coordination object.
+pub(crate) fn build_provider_with_coordination(
+    provider: ProviderId,
     config: &MoaConfig,
+    coordination: &ProviderCoordination,
     model: &str,
 ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(AnthropicProvider::from_config_with_model(
-        config, model,
-    )?))
-}
-
-fn build_openai_provider_from_config(
-    config: &MoaConfig,
-    model: &str,
-) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(OpenAIProvider::from_config_with_model(
-        config, model,
-    )?))
-}
-
-fn build_google_provider_from_config(
-    config: &MoaConfig,
-    model: &str,
-) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(GeminiProvider::from_config_with_model(
-        config, model,
-    )?))
+    match provider {
+        ProviderId::Anthropic => Ok(Arc::new(
+            AnthropicProvider::from_config_with_model_and_coordination(
+                config,
+                model,
+                coordination,
+            )?,
+        )),
+        ProviderId::OpenAI => Ok(Arc::new(
+            OpenAIProvider::from_config_with_model_and_coordination(config, model, coordination)?,
+        )),
+        ProviderId::Google => Ok(Arc::new(
+            GeminiProvider::from_config_with_model_and_coordination(config, model, coordination)?,
+        )),
+    }
 }
 
 fn is_anthropic_model(model: &str) -> bool {

@@ -33,6 +33,14 @@ The `llm_call` span records GenAI provider, operation, request/response model,
 usage, cache token counts, and time to first chunk through `gen_ai.*`
 attributes. MOA-specific cost and cache-rate details stay under `moa.*`.
 
+### Telemetry Resource Identity
+
+Traces and metrics share one OpenTelemetry resource. A non-empty
+`MOA_SERVICE_INSTANCE_ID` becomes `service.instance.id`; Kubernetes injects the
+pod UID for both edge and orchestrator so collector discovery and backend
+series remain per-pod across rollout. `observability.otlp_headers` applies to
+both OTLP traces and metrics over either supported transport.
+
 Healthy trace shape:
 
 ```text
@@ -226,17 +234,13 @@ claim retry preserve both byte-for-byte. Invalid `traceparent` is treated as
 absent; invalid `tracestate` is dropped while a valid parent remains.
 Non-empty `tracestate` follows W3C Level 2 limits and MOA's 512-byte cap.
 
-## ClickHouse Lineage And Analytics Export
+## Lineage And ClickHouse Analytics Export
 
-When `[clickhouse]` is configured, two background flows carry their own
-metrics:
+Lineage and analytics export are independent background flows:
 
-- Lineage sink (rows to ClickHouse instead of Timescale):
-  `moa_lineage_written_total` counts durably written rows under either
-  backend. Compliance chaining requires the Postgres backend; the orchestrator
-  refuses to start with the ClickHouse backend while any compliance-enabled
-  tenant exists, so unchained compliance rows cannot occur.
-- Analytics exporter (`crates/moa-analytics-export/`):
+- Postgres lineage sink: `moa_lineage_written_total` counts durably written
+  rows. `[clickhouse]` does not select a lineage backend.
+- ClickHouse analytics exporter (`crates/moa-analytics-export/`):
   `moa_analytics_export_lag_seconds{table}` (gauge; freshness of each
   ClickHouse read model — the operative dashboard-staleness signal),
   `moa_analytics_export_rows_total{table}`,

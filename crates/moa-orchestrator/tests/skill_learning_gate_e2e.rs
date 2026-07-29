@@ -21,14 +21,21 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFil
 use moa_artifacts::validation::validate_for_status;
 use moa_config::MoaConfig;
 use moa_core::{
-    types::action_policy::ActionRuleScope, types::experience::LearningCandidate,
+    events::Event, types::action_policy::ActionRuleScope, types::channel::Attachment,
+    types::contact::SessionActorRef, types::events_stream::EventRecord,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
-    types::experience::LearningRiskClass, types::identifiers::StoragePartitionId,
+    types::experience::LearningProposalKind, types::experience::LearningRiskClass,
+    types::identifiers::ModelId, types::identifiers::SegmentId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::provider::ModelTier,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
+use moa_memory_pii::HeuristicPiiClassifier;
 use moa_orchestrator::services::learning_review::accept_skill_candidate_after_authz;
 use moa_skills::artifact::skill_artifact_document_from_package;
+use moa_skills::evidence::{EvidenceScope, SegmentNarrative, sanitize_segment_evidence};
 use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage};
+use moa_skills::regression::generate_skill_test_suite_source_for_name;
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
 use moa_wire::session_store::{LearningCandidateReviewAction, LearningCandidateReviewRequest};
@@ -51,16 +58,12 @@ mod skill_learning_gate {
         let package = skill_package(&harness.skill_name, "Candidate-only gate skill");
         let draft = harness.create_draft(&package).await;
         let skill_name = harness.skill_name.clone();
-        let timeoutless_suite = json!({
-            "relative_path": format!("skills/{skill_name}/tests/suite.toml"),
-            "source_format": "toml",
-            "source_text": format!(
-                "[suite]\nname = \"{skill_name}-regression\"\n\n\
-                 [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n"
-            ),
-        });
+        let timeoutless_suite = format!(
+            "[suite]\nname = \"{skill_name}-regression\"\n\n\
+             [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n"
+        );
         let candidate = harness
-            .append_proposed_candidate("skill_created", &draft, Some(timeoutless_suite))
+            .append_proposed_candidate("skill_created", &draft, Some(&timeoutless_suite))
             .await;
 
         let response = harness.accept(candidate.id).await.expect("accept promotes");
@@ -90,6 +93,150 @@ mod skill_learning_gate {
         );
         let published = harness.load_revision(draft.revision_uid).await;
         assert_eq!(published.status, ArtifactStatus::Published);
+    }
+
+    /// Identifiers planted in the source transcript this gate test learns from.
+    const GATE_USER_EMAIL: &str = "alice@example.com";
+    const GATE_QUEUED_EMAIL: &str = "carol@example.com";
+    const GATE_SUMMARY_EMAIL: &str = "dave@example.com";
+
+    #[tokio::test]
+    #[ignore = "requires compose Postgres and the provider-overrides feature"]
+    async fn accept_promotes_a_suite_generated_from_sanitized_evidence_e2e() {
+        // Pins: a proposal whose regression suite was produced by the real sanitized
+        // generation path survives review end to end — the gate executes it, the
+        // candidate promotes, and the suite that was stored, executed, and reviewed
+        // carries redaction placeholders instead of the identifiers that were in the
+        // source transcript. This is the whole contract in one flow: sanitizing the
+        // learning corpus must not cost the loop its ability to gate.
+        let harness = GateHarness::bootstrap("gate-sanitized").await;
+        let package = skill_package(&harness.skill_name, "Sanitized-evidence gate skill");
+        let draft = harness.create_draft(&package).await;
+
+        let summary = format!("reset the account for {GATE_SUMMARY_EMAIL}");
+        let evidence = sanitize_segment_evidence(
+            &HeuristicPiiClassifier,
+            EvidenceScope {
+                tenant_id: tenant_id_from_storage_partition_id(&harness.storage_partition_id),
+                contact_id: None,
+                session_id: SessionId::new(),
+                segment_id: SegmentId::new(),
+                experience_id: Uuid::now_v7(),
+            },
+            &gate_source_transcript(),
+            SegmentNarrative {
+                task_summary: Some(&summary),
+                assessment_summaries: &[],
+            },
+        )
+        .await
+        .expect("the source transcript's only sensitivity is redactable PII");
+
+        let generated = generate_skill_test_suite_source_for_name(
+            tenant_id_from_storage_partition_id(&harness.storage_partition_id),
+            &harness.skill_name,
+            &evidence,
+        )
+        .expect("generate the suite through the real path");
+        for planted in [GATE_USER_EMAIL, GATE_QUEUED_EMAIL, GATE_SUMMARY_EMAIL] {
+            assert!(
+                !generated.source_toml.contains(planted),
+                "{planted} reached the generated suite: {}",
+                generated.source_toml
+            );
+        }
+
+        let candidate = harness
+            .append_proposed_candidate("skill_created", &draft, Some(&generated.source_toml))
+            .await;
+
+        let response = harness
+            .accept(candidate.id)
+            .await
+            .expect("a sanitized suite is still a gateable suite");
+
+        assert_eq!(response.status, LearningCandidateStatus::Promoted);
+        let evaluation = harness.reload_evaluation(candidate.id).await;
+        assert_eq!(evaluation["regression_execution"], "completed");
+        assert_eq!(evaluation["regression_report"]["decision"], "accepted");
+        assert_eq!(
+            evaluation["regression_report"]["candidate"]["failed_runs"], 0,
+            "the generated suite must actually execute and pass"
+        );
+        let published = harness.load_revision(draft.revision_uid).await;
+        assert_eq!(published.status, ArtifactStatus::Published);
+
+        // The reviewed row is the durable artifact of this decision, so the
+        // redaction has to hold there and not only in the in-memory suite.
+        let reloaded = harness.reload_candidate(candidate.id).await;
+        let stored = serde_json::to_string(&reloaded.payload).expect("serialize candidate payload")
+            + &serde_json::to_string(&reloaded.evaluation_payload)
+                .expect("serialize evaluation payload");
+        for planted in [GATE_USER_EMAIL, GATE_QUEUED_EMAIL, GATE_SUMMARY_EMAIL] {
+            assert!(
+                !stored.contains(planted),
+                "{planted} survived into the reviewed rows: {stored}"
+            );
+        }
+        assert!(
+            stored.contains("[EMAIL_REDACTED]"),
+            "the reviewed suite should carry the redaction placeholder: {stored}"
+        );
+    }
+
+    /// A source transcript carrying an identifier in each caller-authored carrier.
+    ///
+    /// The assistant response is deliberately a single word that the scripted mock
+    /// provider's own output contains, so the generated keyword oracle is
+    /// satisfiable and the gate exercises a real pass rather than a fixture-shaped
+    /// failure. There are no tool calls, so the generated trajectory is empty and
+    /// matches the mock run.
+    fn gate_source_transcript() -> Vec<EventRecord> {
+        let session_id = SessionId::new();
+        let make = |sequence_num: u64, event: Event| EventRecord {
+            id: Uuid::now_v7(),
+            session_id,
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: moa_test_support::fixtures::pg_now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+        vec![
+            make(
+                1,
+                Event::UserMessage {
+                    text: format!("reset the account for {GATE_USER_EMAIL} and confirm"),
+                    attachments: Vec::<Attachment>::new(),
+                },
+            ),
+            make(
+                2,
+                Event::QueuedMessage {
+                    text: format!("also update {GATE_QUEUED_EMAIL}"),
+                    attachments: Vec::<Attachment>::new(),
+                    queued_at: moa_test_support::fixtures::pg_now(),
+                },
+            ),
+            make(
+                3,
+                Event::BrainResponse {
+                    text: "response".to_string(),
+                    thought_signature: None,
+                    model: ModelId::new("scripted-mock"),
+                    model_tier: ModelTier::Auxiliary,
+                    input_tokens_uncached: 8,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 8,
+                    cost_cents: 0,
+                    duration_ms: 1,
+                    llm_ttft_ms: None,
+                },
+            ),
+        ]
     }
 
     #[tokio::test]
@@ -161,17 +308,13 @@ mod skill_learning_gate {
         let package = execution_template_skill_package(&harness.skill_name);
         let draft = harness.create_draft(&package).await;
         let skill_name = &harness.skill_name;
-        let suite = json!({
-            "relative_path": format!("skills/{skill_name}/tests/suite.toml"),
-            "source_format": "toml",
-            "source_text": format!(
-                "[suite]\nname = \"{skill_name}-regression\"\ndefault_timeout_seconds = 90\n\n\
-                 [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n\
-                 [cases.metadata]\nexecution_input = {{}}\n"
-            ),
-        });
+        let suite = format!(
+            "[suite]\nname = \"{skill_name}-regression\"\ndefault_timeout_seconds = 90\n\n\
+             [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n\
+             [cases.metadata]\nexecution_input = {{}}\n"
+        );
         let candidate = harness
-            .append_proposed_candidate("skill_created", &draft, Some(suite))
+            .append_proposed_candidate("skill_created", &draft, Some(&suite))
             .await;
 
         let response = harness.accept(candidate.id).await.expect("accept promotes");
@@ -266,6 +409,7 @@ mod skill_learning_gate {
                 Arc::new(ToolRouter::new(
                     ToolRegistry::default_local(),
                     HashMap::new(),
+                    moa_hands::local_development_sandbox_policy(),
                 )),
                 LearningCandidateReviewRequest {
                     tenant_id: tenant_id_from_storage_partition_id(&self.storage_partition_id),
@@ -324,19 +468,15 @@ mod skill_learning_gate {
             &self,
             operation: &str,
             draft: &moa_artifacts::registry::StoredArtifactRevision,
-            suite_override: Option<serde_json::Value>,
+            suite_override: Option<&str>,
         ) -> LearningCandidate {
             let now = moa_test_support::fixtures::pg_now();
             let skill_name = &self.skill_name;
-            let suite = suite_override.unwrap_or_else(|| {
-                json!({
-                    "relative_path": format!("skills/{skill_name}/tests/suite.toml"),
-                    "source_format": "toml",
-                    "source_text": format!(
-                        "[suite]\nname = \"{skill_name}-regression\"\ndefault_timeout_seconds = 90\n\n\
-                         [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n"
-                    ),
-                })
+            let suite = suite_override.map(ToString::to_string).unwrap_or_else(|| {
+                format!(
+                    "[suite]\nname = \"{skill_name}-regression\"\ndefault_timeout_seconds = 90\n\n\
+                     [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n"
+                )
             });
             let mut payload = json!({
                 "kind": "skill_draft_proposal",
@@ -347,7 +487,6 @@ mod skill_learning_gate {
                 "artifact_name": skill_name,
                 "artifact_path": format!("skills/{skill_name}/SKILL.md"),
                 "source_session_id": Uuid::now_v7(),
-                "generated_regression_suite": suite,
             });
             if operation == "skill_improved" {
                 payload["previous_version"] = json!("1.0");
@@ -357,6 +496,7 @@ mod skill_learning_gate {
                 tenant_id: tenant_id_from_storage_partition_id(&self.storage_partition_id),
                 user_id: None,
                 candidate_type: LearningCandidateType::Skill,
+                proposal_kind: LearningProposalKind::SkillDraft,
                 status: LearningCandidateStatus::Proposed,
                 target_id: Some(format!("skills/{skill_name}/SKILL.md")),
                 target_label: Some(skill_name.to_string()),
@@ -364,7 +504,11 @@ mod skill_learning_gate {
                 task_facets: None,
                 payload,
                 evaluation_payload: None,
-                source_experience_ids: vec![Uuid::now_v7()],
+                // The draft revision this proposal was generated into is a real
+                // row in this fixture, so it is the honest typed source.
+                sources: vec![LearningCandidateSourceRef::ArtifactRevision {
+                    revision_uid: draft.revision_uid,
+                }],
                 confidence: Some(0.9),
                 risk_class: LearningRiskClass::Low,
                 promotion_requirements: vec!["human_review".to_string()],
@@ -378,7 +522,70 @@ mod skill_learning_gate {
                 .append_learning_candidate(&candidate)
                 .await
                 .expect("append gate candidate");
+            // The gate reads its suite from the artifact owner's contribution
+            // rows, so the fixture writes the row the production filing path
+            // writes. The source session is real because the contribution's
+            // source columns carry foreign keys: a suite nobody can attribute is
+            // a suite no erasure can reach, and the table refuses to store one.
+            let source_session_id = self.create_session().await;
+            let mut conn = self
+                .test_db
+                .store()
+                .pool()
+                .acquire()
+                .await
+                .expect("acquire connection for suite contribution");
+            ArtifactRegistry::record_suite_contribution_in_tx(
+                &mut conn,
+                self.storage_partition_id.as_str(),
+                &candidate.tenant_id.to_string(),
+                &moa_artifacts::registry::NewSuiteContribution {
+                    candidate_id: candidate.id,
+                    revision_uid: Some(draft.revision_uid),
+                    kind: moa_artifacts::registry::SuiteContributionKind::Generated,
+                    suite_name: format!("skills/{skill_name}/tests/suite.toml"),
+                    suite_source: suite,
+                    source_session_id: Some(source_session_id.0),
+                    source_experience_id: None,
+                },
+            )
+            .await
+            .expect("record the candidate's generated suite contribution");
             candidate
+        }
+
+        /// Creates the real session the suite contribution's source column names.
+        ///
+        /// `created_by` is not boilerplate: session creation refuses a session
+        /// with neither a contact nor a creator, because an unattributed session
+        /// is one no erasure could enter through. That is the same guarantee the
+        /// contribution's foreign key enforces one level up — which is why this
+        /// fixture cannot fabricate a session id any more than it can fabricate
+        /// an experience id.
+        async fn create_session(&self) -> SessionId {
+            let meta = moa_core::types::session::SessionMeta {
+                tenant_id: tenant_id_from_storage_partition_id(&self.storage_partition_id),
+                created_by: Some(SessionActorRef::Identity {
+                    id: Uuid::from_u128(1),
+                }),
+                model: ModelId::new("test-model"),
+                ..moa_core::types::session::SessionMeta::default()
+            };
+            moa_core::traits::SessionStore::create_session(self.test_db.store(), meta)
+                .await
+                .expect("create source session for the suite contribution")
+        }
+
+        async fn reload_candidate(&self, candidate_id: Uuid) -> LearningCandidate {
+            self.test_db
+                .store()
+                .get_learning_candidate(
+                    &tenant_id_from_storage_partition_id(&self.storage_partition_id),
+                    candidate_id,
+                )
+                .await
+                .expect("reload candidate")
+                .expect("candidate exists")
         }
 
         async fn reload_evaluation(&self, candidate_id: Uuid) -> serde_json::Value {

@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::error::{MoaError, Result};
-use moa_core::traits::{BoundedLeaseDecision, RuntimeCacheStore};
+use moa_core::traits::{
+    BoundedLeaseDecision, RateTokenDecision, RetryBudgetDecision, RuntimeCacheStore,
+};
 use redis::AsyncCommands;
 
 /// Redis-backed runtime cache used for shared coordination state.
@@ -180,6 +182,206 @@ impl RuntimeCacheStore for RedisRuntimeCacheStore {
             MoaError::StorageError("Redis returned a negative bounded lease count".to_string())
         })
     }
+
+    async fn try_consume_rate_tokens(
+        &self,
+        key: &str,
+        limit_per_min: u32,
+        permits: u32,
+        ttl: Duration,
+    ) -> Result<RateTokenDecision> {
+        if limit_per_min == 0 {
+            return Err(MoaError::ValidationError(
+                "rate token limit must be greater than zero".to_string(),
+            ));
+        }
+        let ttl_ms = ttl_millis(ttl)?;
+        let mut connection = self.connection.clone();
+        // Refill is derived from the server clock inside the script, so replicas
+        // with skewed clocks cannot each refill the shared bucket on their own
+        // reading of "now".
+        let script = redis::Script::new(
+            r#"
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            local capacity = tonumber(ARGV[1])
+            local permits = math.min(tonumber(ARGV[2]), capacity)
+            local ttl_ms = tonumber(ARGV[3])
+            local refill_per_ms = capacity / 60000.0
+            local stored = redis.call("HMGET", KEYS[1], "tokens", "at", "cap")
+            local tokens = tonumber(stored[1])
+            local at = tonumber(stored[2])
+            local cap = tonumber(stored[3])
+            if tokens == nil or at == nil or cap ~= capacity then
+                tokens = capacity
+                at = now_ms
+            end
+            local elapsed = now_ms - at
+            if elapsed > 0 then
+                tokens = math.min(capacity, tokens + (elapsed * refill_per_ms))
+            end
+            local admitted = 0
+            local retry_after = 0
+            if tokens >= permits then
+                tokens = tokens - permits
+                admitted = 1
+            else
+                retry_after = math.ceil((permits - tokens) / refill_per_ms)
+            end
+            redis.call("HSET", KEYS[1], "tokens", tostring(tokens), "at", now_ms, "cap", capacity)
+            redis.call("PEXPIRE", KEYS[1], ttl_ms)
+            return {admitted, retry_after}
+            "#,
+        );
+        let (admitted, retry_after_ms): (i64, i64) = script
+            .key(key)
+            .arg(f64::from(limit_per_min))
+            .arg(f64::from(permits))
+            .arg(ttl_ms)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        Ok(RateTokenDecision {
+            admitted: admitted == 1,
+            retry_after: Duration::from_millis(retry_after_ms.max(0) as u64),
+        })
+    }
+
+    async fn extend_cooldown(&self, key: &str, cooldown: Duration) -> Result<Duration> {
+        let cooldown_ms = ttl_millis(cooldown)?;
+        let mut connection = self.connection.clone();
+        let script = redis::Script::new(
+            r#"
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            local deadline = now_ms + tonumber(ARGV[1])
+            local current = tonumber(redis.call("GET", KEYS[1]))
+            if current ~= nil and current > deadline then
+                deadline = current
+            end
+            local remaining = deadline - now_ms
+            if remaining < 1 then
+                redis.call("DEL", KEYS[1])
+                return 0
+            end
+            redis.call("SET", KEYS[1], deadline, "PX", remaining)
+            return remaining
+            "#,
+        );
+        let remaining_ms: i64 = script
+            .key(key)
+            .arg(cooldown_ms)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        Ok(Duration::from_millis(remaining_ms.max(0) as u64))
+    }
+
+    async fn cooldown_remaining(&self, key: &str) -> Result<Duration> {
+        let mut connection = self.connection.clone();
+        let script = redis::Script::new(
+            r#"
+            local current = tonumber(redis.call("GET", KEYS[1]))
+            if current == nil then
+                return 0
+            end
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            local remaining = current - now_ms
+            if remaining < 0 then
+                return 0
+            end
+            return remaining
+            "#,
+        );
+        let remaining_ms: i64 = script
+            .key(key)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        Ok(Duration::from_millis(remaining_ms.max(0) as u64))
+    }
+
+    async fn note_windowed_request(&self, key: &str, window: Duration) -> Result<u64> {
+        let window_ms = ttl_millis(window)?;
+        let mut connection = self.connection.clone();
+        let script = redis::Script::new(
+            r#"
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            local window_ms = tonumber(ARGV[1])
+            local started = tonumber(redis.call("HGET", KEYS[1], "at"))
+            if started == nil or (now_ms - started) >= window_ms then
+                redis.call("HSET", KEYS[1], "at", now_ms, "requests", 0, "retries", 0)
+            end
+            local requests = redis.call("HINCRBY", KEYS[1], "requests", 1)
+            redis.call("PEXPIRE", KEYS[1], window_ms * 2)
+            return requests
+            "#,
+        );
+        let requests: i64 = script
+            .key(key)
+            .arg(window_ms)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        requests.try_into().map_err(|_| {
+            MoaError::StorageError("Redis returned a negative request count".to_string())
+        })
+    }
+
+    async fn try_consume_retry_budget(
+        &self,
+        key: &str,
+        window: Duration,
+        budget_percent: u32,
+        budget_floor: u64,
+    ) -> Result<RetryBudgetDecision> {
+        let window_ms = ttl_millis(window)?;
+        let budget_floor: i64 = budget_floor.try_into().map_err(|_| {
+            MoaError::ValidationError("retry budget floor is too large".to_string())
+        })?;
+        let mut connection = self.connection.clone();
+        let script = redis::Script::new(
+            r#"
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            local window_ms = tonumber(ARGV[1])
+            local percent = tonumber(ARGV[2])
+            local floor_budget = tonumber(ARGV[3])
+            local started = tonumber(redis.call("HGET", KEYS[1], "at"))
+            if started == nil or (now_ms - started) >= window_ms then
+                redis.call("HSET", KEYS[1], "at", now_ms, "requests", 0, "retries", 0)
+            end
+            local requests = tonumber(redis.call("HGET", KEYS[1], "requests")) or 0
+            local retries = tonumber(redis.call("HGET", KEYS[1], "retries")) or 0
+            local budget = math.floor((requests * percent) / 100)
+            if budget < floor_budget then
+                budget = floor_budget
+            end
+            local allowed = 0
+            if retries < budget then
+                retries = redis.call("HINCRBY", KEYS[1], "retries", 1)
+                allowed = 1
+            end
+            redis.call("PEXPIRE", KEYS[1], window_ms * 2)
+            return {allowed, requests, retries}
+            "#,
+        );
+        let (allowed, requests, retries): (i64, i64, i64) = script
+            .key(key)
+            .arg(window_ms)
+            .arg(i64::from(budget_percent))
+            .arg(budget_floor)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        Ok(RetryBudgetDecision {
+            allowed: allowed == 1,
+            requests: requests.max(0) as u64,
+            retries: retries.max(0) as u64,
+        })
+    }
 }
 
 fn ttl_millis(ttl: Duration) -> Result<i64> {
@@ -342,6 +544,37 @@ mod tests {
                 .expect("release bounded lease"),
             0
         );
+    }
+
+    /// Live Redis coverage for the shared pacing, cooldown, and retry-budget Lua
+    /// scripts, held to the same contract as the in-memory backend. Requires
+    /// `MOA_RUN_LIVE_REDIS=1` plus a reachable Redis at `MOA_RUN_LIVE_REDIS_URL`.
+    #[tokio::test]
+    #[ignore = "requires a live Redis; set MOA_RUN_LIVE_REDIS=1"]
+    async fn redis_backend_meets_the_shared_coordination_contract_docker() {
+        let redis_enabled = std::env::var("MOA_RUN_LIVE_REDIS")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if !redis_enabled {
+            panic!("MOA_RUN_LIVE_REDIS=1 is required to run the live Redis coordination test");
+        }
+        let url = std::env::var("MOA_RUN_LIVE_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let store = RedisRuntimeCacheStore::new(&url)
+            .await
+            .expect("connect to live Redis runtime cache");
+
+        crate::tests::assert_shared_coordination_conformance(
+            &store,
+            &format!("moa:test:coordination:{}", uuid_like()),
+        )
+        .await
+        .expect("the Redis backend must satisfy the shared coordination contract");
     }
 
     /// Returns a process-and-time-unique suffix without pulling in a uuid dependency.

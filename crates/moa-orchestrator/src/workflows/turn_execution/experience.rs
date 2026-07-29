@@ -8,6 +8,7 @@ use moa_core::{
     types::identifiers::SegmentId, types::identifiers::SessionId, types::segments::TaskSegment,
     types::session::SessionMeta,
 };
+use moa_skills::evidence::{EvidenceScope, SanitizedLearningEvidence, SegmentNarrative};
 use restate_sdk::prelude::*;
 
 use super::TurnExecutionImpl;
@@ -31,11 +32,22 @@ pub(super) async fn emit_experience_for_assessment(
     duration_ms: Option<u64>,
 ) -> Result<(), HandlerError> {
     let now = durable_utc_now(ctx, "workflow_utc_now").await?;
+    // Sanitize before anything is derived. A segment that cannot be released
+    // produces no experience, no attribution, and no candidate: refusing here is
+    // the whole point, so the turn warns and moves on rather than falling back to
+    // a raw-evidence path that no longer exists.
+    let evidence =
+        match sanitize_segment_for_learning(workflow, meta, segment, assessment, segment_events)
+            .await
+        {
+            Some(evidence) => evidence,
+            None => return Ok(()),
+        };
     let learning = build_segment_learning_bundle(
         meta,
         segment,
         assessment,
-        segment_events,
+        &evidence,
         rewrite,
         duration_ms,
         now,
@@ -43,7 +55,7 @@ pub(super) async fn emit_experience_for_assessment(
     let store = workflow.session_store.clone();
     let experience_id = learning.experience.id;
     let skill_learning_eligible = driver_learning::skill_learning_dispatch_is_eligible(
-        segment_events,
+        &evidence,
         workflow.config.learning.skills.min_tool_calls,
         &learning.experience,
         &learning.attributions,
@@ -205,4 +217,55 @@ pub(super) async fn record_segment_assessment_learning(
     .name("record_segment_assessment_learning")
     .await?;
     Ok(())
+}
+
+/// Sanitizes one assessed segment into typed learning evidence.
+///
+/// Returns `None` when any carrier refuses, after warning with the stable reason
+/// code and the carrier that produced it. Nothing derived from the segment is
+/// written in that case, which is the intended outcome: a partially-sanitized
+/// corpus would let a reviewer approve a draft built from evidence they cannot
+/// see was incomplete.
+async fn sanitize_segment_for_learning(
+    workflow: &TurnExecutionImpl,
+    meta: &SessionMeta,
+    segment: &TaskSegment,
+    assessment: &moa_core::types::segment_assessment::SegmentAssessment,
+    segment_events: &[EventRecord],
+) -> Option<SanitizedLearningEvidence> {
+    let assessment_summaries = assessment
+        .evidence
+        .iter()
+        .map(|evidence| evidence.summary.clone())
+        .collect::<Vec<_>>();
+    let scope = EvidenceScope {
+        tenant_id: meta.tenant_id,
+        contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
+        session_id: meta.id,
+        segment_id: segment.id,
+        experience_id: moa_brain::learning::experience::deterministic_experience_id(segment.id),
+    };
+    let result = moa_skills::evidence::sanitize_segment_evidence(
+        workflow.learning_classifier.as_ref(),
+        scope,
+        segment_events,
+        SegmentNarrative {
+            task_summary: segment.task_summary.as_deref(),
+            assessment_summaries: &assessment_summaries,
+        },
+    )
+    .await;
+    match result {
+        Ok(evidence) => Some(evidence),
+        Err(rejection) => {
+            tracing::warn!(
+                session_id = %meta.id,
+                segment_id = %segment.id,
+                carrier = rejection.carrier.as_str(),
+                reason = rejection.code(),
+                "segment evidence refused sanitization; no learning artifacts derived"
+            );
+            None
+        }
+    }
 }

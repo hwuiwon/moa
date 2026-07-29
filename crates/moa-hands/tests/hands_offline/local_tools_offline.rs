@@ -1,4 +1,5 @@
 include!("../local_tools_support/common.rs");
+include!("../local_tools_support/sandbox_profile.rs");
 include!("../local_tools_support/offline.rs");
 
 #[tokio::test]
@@ -834,15 +835,7 @@ async fn local_provider_installs_skill_package_files() {
         .await
         .unwrap();
     let handle = provider
-        .provision(HandSpec {
-            sandbox_tier: SandboxTier::Local,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        })
+        .provision(hand_spec(SandboxTier::Local))
         .await
         .unwrap();
     let sandbox_dir = match &handle {

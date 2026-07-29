@@ -257,20 +257,17 @@ partitions are detached for S3/Object Lock retention before physical pruning.
 
 ## ClickHouse Copies And Tenant Deletion
 
-When `[clickhouse]` is configured, ClickHouse holds copies that tenant
-offboarding must reach (both run from the edge purge path after the Postgres
-transaction commits, so a ClickHouse failure surfaces without rolling back the
-relational purge):
+When `[clickhouse]` is configured, ClickHouse holds analytics-export copies
+(`events_raw`, `dim_*`, `turn_fact`, and `tool_call_fact`) that tenant
+offboarding must reach. `AnalyticsClickHouseClient::purge_tenant` runs from the
+edge purge path after the Postgres transaction commits and skips tables that
+were never created, so a ClickHouse failure surfaces without rolling back the
+relational purge.
 
-- `turn_lineage` rows: `ClickHouseStore::delete_partition_rows`;
-- analytics-export tables (`events_raw`, `dim_*`, `turn_fact`,
-  `tool_call_fact`): `AnalyticsClickHouseClient::purge_tenant`, which skips
-  tables that were never created.
-
-Retention inside ClickHouse: `turn_lineage` drops via table TTL
-(`clickhouse.lineage_ttl_days`, default 30); the analytics tables currently
-have no TTL — their Postgres sources are the retention authority until the
-events tiering phase.
+Lineage is not copied to ClickHouse. Its storage, reads, retention, and tenant
+deletion stay in Postgres. The ClickHouse analytics tables currently have no
+TTL; their Postgres sources are the retention authority until the events
+tiering phase.
 
 ### Execution Analytics Bootstrap And Schema Drift Recovery
 

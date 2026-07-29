@@ -13,17 +13,20 @@ use moa_config::RegressionMonitorConfig;
 use moa_core::{
     error::MoaError, traits::SessionStore, types::action_policy::ActionRuleScope,
     types::agent::AgentContext, types::contact::SessionActorRef,
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::experience::LearningCandidateType, types::experience::LearningProposalKind,
     types::experience::LearningRiskClass, types::identifiers::ModelId,
     types::identifiers::SegmentId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::learning::LearningEntry, types::segments::TaskSegment, types::session::SessionMeta,
+    types::learning::LearningEntry, types::learning::LearningLogSourceRef,
+    types::segments::TaskSegment, types::session::SessionMeta,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::learning_review::{
     accept_rollback_candidate_after_authz, accept_skill_candidate_after_authz,
-    get_learning_candidate_after_authz, reject_learning_candidate_after_authz,
+    dismiss_learning_candidate_after_authz, get_learning_candidate_after_authz,
+    reject_learning_candidate_after_authz,
 };
 use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_artifact_document_from_package;
@@ -281,11 +284,7 @@ mod skill_learning_review {
             "skill_created",
             &skill_name,
             &draft,
-            Some(json!({
-                "relative_path": "tests/suite.toml",
-                "source_format": "toml",
-                "source_text": "this is [not toml",
-            })),
+            Some("this is [not toml"),
         )
         .await;
         let store = Arc::new(test_db.store().clone());
@@ -406,6 +405,139 @@ mod skill_learning_review {
             .expect("load preserved draft")
             .expect("draft artifact remains visible");
         assert_eq!(preserved.status, ArtifactStatus::Draft);
+    }
+
+    #[tokio::test]
+    async fn dismiss_closes_an_advisory_item_with_exactly_one_audit_under_replay() {
+        // Pins the whole dismissal contract on the real store, in one flow:
+        //
+        //  1. An advisory item — which no code can promote — is closed by dismissal.
+        //  2. The closure writes a DURABLE audit naming the reviewer, the reason, and the
+        //     status it came from. Without it an item is closed with no record of who
+        //     closed it, and a compliance export cannot answer "what happened to this".
+        //  3. A REPLAY (the same Restate re-execution the orchestrator can produce)
+        //     succeeds and writes NOTHING new. The audit is keyed (candidate, decision),
+        //     so a second identical row would be a fabricated second decision.
+        //  4. A REVIEWABLE proposal is refused: dismissal is not a back door for closing
+        //     a skill draft without the regression gate.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let storage_partition_id = unique_workspace("review-dismiss");
+        let tenant = tenant_id_from_storage_partition_id(&storage_partition_id);
+        let scope = tenant_scope(&storage_partition_id);
+        let skill_name = unique_skill_name("review-dismiss");
+        let package = skill_package(&skill_name, "Review dismissed advisory items");
+        let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
+
+        let advisory = append_candidate_with_kind(
+            &test_db,
+            &storage_partition_id,
+            LearningProposalKind::MemoryAdvisory,
+            LearningCandidateStatus::Advisory,
+            &skill_name,
+            &draft,
+        )
+        .await;
+        let store = Arc::new(test_db.store().clone());
+        let request = LearningCandidateReviewRequest {
+            tenant_id: tenant,
+            candidate_id: advisory.id,
+            action: LearningCandidateReviewAction::Dismiss,
+            reviewer_subject: "user:reviewer".to_string(),
+            reason: Some("already covered by an existing note".to_string()),
+        };
+
+        let response = dismiss_learning_candidate_after_authz(store.clone(), request.clone())
+            .await
+            .expect("dismiss advisory item");
+        assert_eq!(response.status, LearningCandidateStatus::Dismissed);
+        assert_eq!(
+            response.published_artifact_revision_uid, None,
+            "a dismissal publishes nothing"
+        );
+
+        let dismissed = test_db
+            .store()
+            .get_learning_candidate(&tenant, advisory.id)
+            .await
+            .expect("reload dismissed candidate")
+            .expect("candidate exists");
+        assert_eq!(dismissed.status, LearningCandidateStatus::Dismissed);
+
+        let decisions = test_db
+            .store()
+            .list_learning_candidate_decisions(advisory.id)
+            .await
+            .expect("list durable decisions");
+        assert_eq!(decisions.len(), 1, "a dismissal writes exactly one audit");
+        assert_eq!(
+            decisions[0].decision,
+            moa_core::types::experience::LearningReviewDecision::Dismissed
+        );
+        assert_eq!(decisions[0].from_status, LearningCandidateStatus::Advisory);
+        assert_eq!(decisions[0].to_status, LearningCandidateStatus::Dismissed);
+        assert_eq!(
+            decisions[0].reviewer_subject.as_deref(),
+            Some("user:reviewer")
+        );
+        assert_eq!(
+            decisions[0].reason.as_deref(),
+            Some("already covered by an existing note")
+        );
+
+        let replayed = dismiss_learning_candidate_after_authz(store.clone(), request)
+            .await
+            .expect("a replayed dismissal succeeds rather than conflicting");
+        assert_eq!(replayed.status, LearningCandidateStatus::Dismissed);
+        assert_eq!(
+            test_db
+                .store()
+                .list_learning_candidate_decisions(advisory.id)
+                .await
+                .expect("list durable decisions after replay")
+                .len(),
+            1,
+            "a replay must not append a second identical audit"
+        );
+
+        let reviewable = append_candidate(
+            &test_db,
+            &storage_partition_id,
+            LearningCandidateType::Skill,
+            LearningCandidateStatus::Proposed,
+            "skill_created",
+            &unique_skill_name("review-dismiss-draft"),
+            &draft,
+        )
+        .await;
+        let refusal = dismiss_learning_candidate_after_authz(
+            store,
+            LearningCandidateReviewRequest {
+                tenant_id: tenant,
+                candidate_id: reviewable.id,
+                action: LearningCandidateReviewAction::Dismiss,
+                reviewer_subject: "user:reviewer".to_string(),
+                reason: None,
+            },
+        )
+        .await;
+        // On the REASON. A `Proposed` draft is also refused by the state check that
+        // follows, so `is_err()` would pass with no kind guard at all — and then a
+        // reviewable proposal sitting in `Advisory`-adjacent state (or any future
+        // status widening) would slip through the one check meant to stop it.
+        let refusal = refusal.expect_err("a reviewable proposal is not dismissible");
+        assert!(
+            format!("{refusal:?}").contains("reviewable proposals are accepted or rejected"),
+            "refusal must name the proposal kind, not the current status: {refusal:?}"
+        );
+        assert!(
+            test_db
+                .store()
+                .list_learning_candidate_decisions(reviewable.id)
+                .await
+                .expect("list decisions for the refused candidate")
+                .is_empty(),
+            "a refused dismissal writes no audit"
+        );
     }
 
     #[tokio::test]
@@ -841,19 +973,26 @@ mod skill_learning_review {
             .is_err(),
             "a claimed rollback proposal is not in Proposed and must be refused"
         );
+        // Asserting on the REASON, not merely on failure. A skill draft carries no
+        // `promoted_revision_uid`, so a handler with no kind check at all still errors
+        // here — for a missing-payload reason, several steps after it should already
+        // have been refused. `is_err()` alone cannot tell those apart, and a
+        // wrong-kind candidate reaching payload parsing is a gate that is not gating.
+        let wrong_kind = accept_rollback_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            review_request(
+                &storage_partition_id,
+                non_rollback.id,
+                LearningCandidateReviewAction::Accept,
+            ),
+        )
+        .await
+        .expect_err("an ordinary skill draft is not a rollback proposal");
         assert!(
-            accept_rollback_candidate_after_authz(
-                store.clone(),
-                store.pool().clone(),
-                review_request(
-                    &storage_partition_id,
-                    non_rollback.id,
-                    LearningCandidateReviewAction::Accept,
-                ),
-            )
-            .await
-            .is_err(),
-            "an ordinary skill draft candidate is not a rollback proposal and must be refused"
+            format!("{wrong_kind:?}").contains("only skill rollback proposals can be accepted"),
+            "refusal must name the wrong proposal kind, not a downstream payload defect: \
+             {wrong_kind:?}"
         );
     }
 
@@ -1403,6 +1542,15 @@ mod skill_learning_review {
         promotion_candidate_id: Uuid,
         promoted_at: chrono::DateTime<Utc>,
     ) {
+        seed_promoted_candidate(
+            test_db,
+            storage_partition_id,
+            skill_name,
+            promoted.revision_uid,
+            promoted.artifact_uid,
+            promotion_candidate_id,
+        )
+        .await;
         let entry = LearningEntry {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
@@ -1415,7 +1563,9 @@ mod skill_learning_review {
                 "published_artifact_revision_uid": promoted.revision_uid,
             }),
             confidence: None,
-            source_refs: vec![promotion_candidate_id],
+            sources: vec![LearningLogSourceRef::ArtifactRevision {
+                revision_uid: promoted.revision_uid,
+            }],
             actor: "review:user:reviewer".to_string(),
             valid_from: promoted_at,
             valid_to: None,
@@ -1443,6 +1593,108 @@ mod skill_learning_review {
             .expect("publish skill revision")
     }
 
+    /// Appends one candidate of an explicit proposal kind at its initial status.
+    ///
+    /// The informational kinds have no draft to publish, so they carry the same
+    /// typed artifact-revision source as a draft proposal only because the fixture
+    /// needs one real referent; the deferred completeness trigger refuses a
+    /// candidate that ends its transaction with no source at all.
+    async fn append_candidate_with_kind(
+        test_db: &moa_test_support::postgres::TestDb,
+        storage_partition_id: &StoragePartitionId,
+        proposal_kind: LearningProposalKind,
+        status: LearningCandidateStatus,
+        skill_name: &str,
+        draft: &moa_artifacts::registry::StoredArtifactRevision,
+    ) -> LearningCandidate {
+        let now = moa_test_support::fixtures::pg_now();
+        let candidate = LearningCandidate {
+            id: Uuid::now_v7(),
+            tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
+            user_id: None,
+            candidate_type: LearningCandidateType::Memory,
+            proposal_kind,
+            status,
+            target_id: Some(format!("memory/{skill_name}")),
+            target_label: Some(skill_name.to_string()),
+            task_fingerprint: None,
+            task_facets: None,
+            payload: json!({ "kind": "memory_advisory", "observation": skill_name }),
+            evaluation_payload: None,
+            sources: vec![LearningCandidateSourceRef::ArtifactRevision {
+                revision_uid: draft.revision_uid,
+            }],
+            confidence: Some(0.4),
+            risk_class: LearningRiskClass::Low,
+            promotion_requirements: Vec::new(),
+            status_reason: None,
+            batch_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        test_db
+            .store()
+            .append_learning_candidate(&candidate)
+            .await
+            .expect("append informational candidate");
+        candidate
+    }
+
+    /// Seeds the promoted candidate a promotion learning entry points back at.
+    ///
+    /// In production a promotion learning entry's `candidate_id` always names the
+    /// candidate that was just promoted, and both the rollback proposal's typed
+    /// `PromotionCandidate` source and the rollback learning entry's `Candidate`
+    /// source carry a real foreign key to it. A fixture that invented a bare
+    /// `Uuid::now_v7()` was describing a promotion that never happened, which the
+    /// schema now refuses to store — so the fixture seeds the promotion instead of
+    /// asserting against a shape production cannot produce.
+    async fn seed_promoted_candidate(
+        test_db: &moa_test_support::postgres::TestDb,
+        storage_partition_id: &StoragePartitionId,
+        skill_name: &str,
+        promoted_revision_uid: Uuid,
+        artifact_uid: Uuid,
+        promotion_candidate_id: Uuid,
+    ) {
+        let now = moa_test_support::fixtures::pg_now();
+        let candidate = LearningCandidate {
+            id: promotion_candidate_id,
+            tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
+            user_id: None,
+            candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
+            status: LearningCandidateStatus::Promoted,
+            target_id: Some(format!("skills/{skill_name}/SKILL.md")),
+            target_label: Some(skill_name.to_string()),
+            task_fingerprint: None,
+            task_facets: None,
+            payload: json!({
+                "kind": "skill_draft_proposal",
+                "operation": "skill_improved",
+                "artifact_uid": artifact_uid,
+                "draft_artifact_revision_uid": promoted_revision_uid,
+                "artifact_name": skill_name,
+            }),
+            evaluation_payload: None,
+            sources: vec![LearningCandidateSourceRef::ArtifactRevision {
+                revision_uid: promoted_revision_uid,
+            }],
+            confidence: Some(0.9),
+            risk_class: LearningRiskClass::Low,
+            promotion_requirements: vec!["human_review".to_string()],
+            status_reason: None,
+            batch_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        test_db
+            .store()
+            .append_learning_candidate(&candidate)
+            .await
+            .expect("seed the promoted candidate a rollback would reverse");
+    }
+
     /// Appends the `skill_improved`/`skill_created` learning-log entry a promotion writes.
     async fn seed_promotion_learning(
         test_db: &moa_test_support::postgres::TestDb,
@@ -1451,6 +1703,15 @@ mod skill_learning_review {
         promoted: &moa_artifacts::registry::StoredArtifactRevision,
         promotion_candidate_id: Uuid,
     ) {
+        seed_promoted_candidate(
+            test_db,
+            storage_partition_id,
+            skill_name,
+            promoted.revision_uid,
+            promoted.artifact_uid,
+            promotion_candidate_id,
+        )
+        .await;
         let entry = LearningEntry {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
@@ -1463,7 +1724,9 @@ mod skill_learning_review {
                 "published_artifact_revision_uid": promoted.revision_uid,
             }),
             confidence: None,
-            source_refs: vec![promotion_candidate_id],
+            sources: vec![LearningLogSourceRef::ArtifactRevision {
+                revision_uid: promoted.revision_uid,
+            }],
             actor: "review:user:reviewer".to_string(),
             valid_from: moa_test_support::fixtures::pg_now(),
             valid_to: None,
@@ -1489,11 +1752,27 @@ mod skill_learning_review {
         status: LearningCandidateStatus,
     ) -> LearningCandidate {
         let now = moa_test_support::fixtures::pg_now();
+        // A rollback reverses a promotion that really happened, and accepting one
+        // writes a learning entry sourced from that promotion's candidate. Seeding
+        // it is what lets the proposal carry the typed `PromotionCandidate` source
+        // the closure walks; without the row, the honest options were to omit the
+        // source (leaving the promotion unreachable from the rollback) or to fail
+        // the foreign key.
+        seed_promoted_candidate(
+            test_db,
+            storage_partition_id,
+            skill_name,
+            promoted_revision_uid,
+            artifact_uid,
+            promotion_candidate_id,
+        )
+        .await;
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillRollback,
             status,
             target_id: Some(artifact_uid.to_string()),
             target_label: Some(skill_name.to_string()),
@@ -1509,7 +1788,18 @@ mod skill_learning_review {
                 "promotion_candidate_id": promotion_candidate_id,
             }),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            // A rollback proposal stands on the revision it would archive AND on
+            // the promotion it reverses. Both are real rows, so both are typed
+            // sources: the promotion link is what makes the original promotion
+            // reachable when an erasure enters through the rollback.
+            sources: vec![
+                LearningCandidateSourceRef::ArtifactRevision {
+                    revision_uid: promoted_revision_uid,
+                },
+                LearningCandidateSourceRef::PromotionCandidate {
+                    candidate_id: promotion_candidate_id,
+                },
+            ],
             confidence: None,
             risk_class: LearningRiskClass::High,
             promotion_requirements: vec!["human_review".to_string()],
@@ -1640,6 +1930,7 @@ mod skill_learning_review {
         Arc::new(ToolRouter::new(
             ToolRegistry::default_local(),
             HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
         ))
     }
 
@@ -1734,13 +2025,9 @@ mod skill_learning_review {
         skill_name: &str,
         draft: &moa_artifacts::registry::StoredArtifactRevision,
     ) -> LearningCandidate {
-        let suite = json!({
-            "relative_path": format!("tenants/{}/skills/{skill_name}/tests/suite.toml", tenant_id_from_storage_partition_id(storage_partition_id)),
-            "source_format": "toml",
-            "source_text": format!(
-                "[suite]\nname = \"{skill_name}-regression\"\n\n[[cases]]\nname = \"smoke\"\ninput = \"run it\"\n"
-            ),
-        });
+        let suite = format!(
+            "[suite]\nname = \"{skill_name}-regression\"\n\n[[cases]]\nname = \"smoke\"\ninput = \"run it\"\n"
+        );
         append_candidate_with_suite(
             test_db,
             storage_partition_id,
@@ -1749,7 +2036,7 @@ mod skill_learning_review {
             operation,
             skill_name,
             draft,
-            Some(suite),
+            Some(suite.as_str()),
         )
         .await
     }
@@ -1763,10 +2050,10 @@ mod skill_learning_review {
         operation: &str,
         skill_name: &str,
         draft: &moa_artifacts::registry::StoredArtifactRevision,
-        generated_suite: Option<serde_json::Value>,
+        generated_suite: Option<&str>,
     ) -> LearningCandidate {
         let now = moa_test_support::fixtures::pg_now();
-        let mut payload = json!({
+        let payload = json!({
             "kind": "skill_draft_proposal",
             "operation": operation,
             "artifact_uid": draft.artifact_uid,
@@ -1776,14 +2063,12 @@ mod skill_learning_review {
             "artifact_path": format!("skills/{skill_name}/SKILL.md"),
             "source_session_id": Uuid::now_v7(),
         });
-        if let Some(suite) = generated_suite {
-            payload["generated_regression_suite"] = suite;
-        }
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
             user_id: None,
             candidate_type,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status,
             target_id: Some(format!("skills/{skill_name}/SKILL.md")),
             target_label: Some(skill_name.to_string()),
@@ -1791,7 +2076,9 @@ mod skill_learning_review {
             task_facets: None,
             payload,
             evaluation_payload: None,
-            source_experience_ids: vec![Uuid::now_v7()],
+            sources: vec![LearningCandidateSourceRef::ArtifactRevision {
+                revision_uid: draft.revision_uid,
+            }],
             confidence: Some(0.86),
             risk_class: LearningRiskClass::Low,
             promotion_requirements: vec!["human_review".to_string()],
@@ -1805,6 +2092,39 @@ mod skill_learning_review {
             .append_learning_candidate(&candidate)
             .await
             .expect("append review candidate");
+        // The suite is attributable storage owned by the artifact registry, so a
+        // fixture that wants the gate to see one has to write the row the
+        // production filing path writes — not a payload key the gate no longer
+        // reads.
+        if let Some(suite_source) = generated_suite {
+            // A real session, because the contribution's source columns carry real
+            // foreign keys: an unattributable suite is exactly what the table
+            // refuses to store, and a fixture that could fake one would be
+            // testing a shape production cannot produce.
+            let source_session_id = create_session_for_tenant(test_db, candidate.tenant_id).await;
+            let mut conn = test_db
+                .store()
+                .pool()
+                .acquire()
+                .await
+                .expect("acquire connection for suite contribution");
+            ArtifactRegistry::record_suite_contribution_in_tx(
+                &mut conn,
+                storage_partition_id.as_str(),
+                &candidate.tenant_id.to_string(),
+                &moa_artifacts::registry::NewSuiteContribution {
+                    candidate_id: candidate.id,
+                    revision_uid: Some(draft.revision_uid),
+                    kind: moa_artifacts::registry::SuiteContributionKind::Generated,
+                    suite_name: format!("skills/{skill_name}/tests/suite.toml"),
+                    suite_source: suite_source.to_string(),
+                    source_session_id: Some(source_session_id.0),
+                    source_experience_id: None,
+                },
+            )
+            .await
+            .expect("record generated suite contribution");
+        }
         candidate
     }
 

@@ -192,7 +192,12 @@ async fn start_edge(
             .await
             .expect("bootstrap edge OAuth server"),
     );
+    let audit = moa_ocsf::AuditRuntime::start(pool.as_ref().clone())
+        .expect("edge test audit runtime should start");
     let state = AppState {
+        // The audit writer is owned by this test for its lifetime; dropping the
+        // runtime aborts it, which is the same ownership the binary has.
+        audit: audit.emitter(),
         config: Arc::new(config),
         auth: Arc::new(FixedAuth {
             identity: Identity {

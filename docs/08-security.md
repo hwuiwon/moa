@@ -33,7 +33,10 @@ before serving a single request:
 Checked-in Kubernetes renders exactly one posture per overlay: base and local
 render `local` with a permissive default and the local hand provider;
 production renders `cloud` with a deny default and the E2B backend, and is the
-only overlay that references the cloud sandbox credential Secret.
+only overlay that references the cloud sandbox credential Secret. Production
+also authors the `production-e2b-v1` sandbox policy: deny-all egress, 900-second
+idle expiry, 3600-second hard lifetime, and otherwise explicit unbounded
+resources.
 
 ## Identity And Authorization
 
@@ -200,13 +203,22 @@ rolling-deployment order and maintenance Jobs.
 
 Tier 1 containers should run non-root, with read-only root filesystems, narrow
 workspace mounts, dropped capabilities, `no-new-privileges`, seccomp/AppArmor,
-bounded process counts, and metadata-endpoint blocking. Local Docker currently
-uses `--network none`, which is stricter than metadata-only blocking and means
-networked local container tools need an explicit design change.
+bounded process counts, and metadata-endpoint blocking.
 
-Every sandbox is ephemeral by default. Durable state belongs in the session
-event log, memory, artifacts, or approved external systems, not in a leftover
-container.
+The network posture is no longer a provider constant. Local Docker maps the
+resolved profile's egress mode onto `--network none` (`DenyAll`) or
+`--network bridge` (`Unrestricted`), and refuses an egress allowlist outright
+because `docker run` has no per-destination filter to enforce one with. The bare
+host tier can enforce no network posture at all, so it admits only
+`Unrestricted` — a deployment that needs deny-all egress must not route to host
+hands. See `docs/06-hands-and-mcp.md` for the full effective-profile contract.
+
+Every sandbox is ephemeral by default, and that is now enforced rather than
+assumed. Each lease carries an immutable hard maximum lifetime that renewal
+cannot extend, and the durable hand-lease reaper destroys expired, idle, and
+abandoned sandboxes without waiting for traffic that may never arrive. Durable
+state belongs in the session event log, memory, artifacts, or approved external
+systems, not in a leftover container.
 
 The root coordinator is sandbox-free, and each worker owns one isolated
 sandbox keyed by `worker_id` (lease key `(session_id, worker_id,
@@ -307,6 +319,142 @@ output, and must not widen what the user can already see. Its
 `tokens_used`/cost are attributed to a system/overhead bucket in observability,
 not to the user's task budget, and a narration failure is a warning rather than a
 turn failure.
+
+## Learning Privacy
+
+Automatic learning is an egress path: it sends transcript-derived content to a
+model provider and writes it into durable draft rows before any human sees it.
+Every one of those boundaries takes `moa_skills::evidence::SanitizedLearningEvidence`,
+a type with private fields, no raw-string or raw-event constructor, and no
+`Deserialize`. Raw transcript evidence is unrepresentable there, not merely
+discouraged.
+
+Sanitization is **irreversible** and is the opposite mechanism from the
+request-scoped tokenization in `moa-dlp`. A DLP token is a placeholder that a
+later restoration step turns back into the original value, scoped to one
+request. Learning sanitization replaces the original bytes with a category
+placeholder and keeps no way back. Mixing them would be a real leak, so text
+carrying the reserved DLP delimiters (`⟦`/`⟧`) is refused before the classifier
+is consulted: a restorable token inside a durable learning artifact would let
+the original value be reconstructed long after the request ended. The delimiters
+are defined once, in `moa-memory-pii`, and `moa-dlp` references them from there.
+
+PII and PHI may proceed, but only after irreversible redaction. These refuse
+outright:
+
+- `Restricted` classification, and any secret/credential-category span. A
+  redacted credential still reached the learning boundary, so redaction is not
+  an acceptable remedy for one.
+- Classifier error or abstention. An unavailable detector must never degrade
+  into an implicit "no sensitive content found".
+- Spans that cannot be applied exactly as detected — empty, inverted,
+  out-of-range, non-UTF-8-boundary, or overlapping. Applying a partial span
+  would leave the original bytes in place while the result claimed to be
+  sanitized.
+- Residual sensitivity after re-classifying the redacted text, which catches a
+  detector that found one of two occurrences.
+
+A refusal produces zero provider calls and zero derived writes for that segment.
+Sibling and recurrence paths gate each member independently.
+
+Rejections are reported as a stable carrier label plus a stable reason code, and
+never carry the refused text or the classifier's own error message. Derived rows
+carry identifiers, the detector version, the redacted category vocabulary, and
+one constant policy revision — enough for a reviewer to trace a draft back to
+its exact source events without the content being copied forward. The raw
+session event log stays the single source-of-truth owner of unredacted
+transcript, so erasure and retention have exactly one place to act.
+
+See `docs/09-skills-and-learning.md` for the carrier list and the learning-loop
+view of the same gate.
+
+## Learning-Derived Erasure
+
+Sanitization governs what learning may *read*. This governs what happens to
+learning already *written* when the subject behind it exercises a right to
+erasure.
+
+Deleting a subject's memories while a skill distilled from those memories keeps
+serving is not erasure. It removes the evidence and leaves the conclusion. MOA
+previously could not do better, because provenance was a bare `UUID[]` with no
+foreign key and no declared referent type: nothing in the database could
+enumerate a derivation, so nothing could reverse one.
+
+Provenance is now normalized and typed. Each referent kind has its own column
+with a composite foreign key that carries the partition, so a cross-tenant
+source is rejected by the constraint rather than by a query someone has to
+remember to write. The privacy-erasure decision and provenance tables force
+tenant RLS in addition to these scoped joins. The closure runs
+`contact/session/event/task_segment -> experience/attribution -> candidate ->
+learning_log -> artifact revision/file -> generated or accumulated suite
+contribution`, recursively following promoted-candidate dependencies and
+artifact-revision contributions into dependent candidates. Erasure walks it in
+reverse through typed joins — never JSON containment, array membership, or
+`LIKE`, all of which silently both over- and under-match.
+
+Four rules decide dispositions, and each exists because its absence produces a
+confident lie:
+
+- **A legal hold mutates nothing.** The blocked path still enumerates read-only
+  and records one idempotent `retained_legal_hold` decision per record. The
+  database refuses to mark such a decision `applied`, so "the hold was honored"
+  is a checkable per-record fact rather than an absence of evidence.
+- **A dry run is a plan.** Dispositions persist with `applied = false`. A dry run
+  that recorded deletions would later be read as proof the data is gone. Ledger
+  identity includes tenant, subject, erase attempt, record kind, and record id,
+  so a dry run or legal-hold attempt cannot mask a later applied attempt.
+- **Fused model output is non-subtractable.** A revision's `definition` and
+  `source_text` may have been written from several people's transcripts at
+  once, so every attributable revision is archived and cleared in place:
+  definition, source, files, and serving state are removed while the revision
+  identity remains for pinned foreign keys. It is never partially rewritten or
+  deleted.
+- **Concurrent learning is fenced before enumeration.** The erase claims its
+  operation and destruction fence *before* it enumerates, and contribution
+  inserts are refused while a fence is in progress. Without that, a turn
+completing mid-erase could file derived learning between enumeration and
+deletion and survive the run.
+
+The public decision vocabulary is closed. Record kinds are
+`learning_candidate`, `learning_log`, `artifact_revision`,
+`artifact_suite_contribution`, `experience_record`, and
+`experience_attribution`; dispositions are `erased`, `invalidated_revision`,
+and `retained_legal_hold`.
+
+Ordering is load-bearing: the reverse-derived learning and artifact stages run
+**before** the vault, graph, digest, and lineage stages, because the closure walk
+needs the source memories to still exist in order to find what was derived from
+them.
+
+### Scope fence — read this before assuming coverage
+
+**Learning-derived erasure does not claim raw session-event, attachment, blob, or
+archive erasure.** Those are separate stores with separate owners and separate
+lifecycles.
+
+The guarantee is bounded to exactly this: no *active learning-derived
+contribution or source byte* survives outside a legal hold. It must never be read
+as "the subject's data is gone." The raw session event log remains the
+single source-of-truth owner of unredacted transcript, and it is erased by its
+own path, not this one.
+
+`experience_records.task_summary` is now written redacted at rest. Every
+candidate for it comes from sanitized evidence: the classifier-approved task
+summary, else the sanitized first user message, else a constant. The raw query
+rewrite's `task_summary` is deliberately *not* a fallback, and that is the whole
+fix — it is the exact text handed to sanitization, so reaching for it when
+sanitization produced nothing would reinstate the value the classifier rejected
+or abstained on, turning the one case where redaction mattered most into the one
+case where it did not happen. It also keeps the stored summary and the embedded
+summary the same bytes; a raw stored summary would fork them, so a row's vector
+would describe text the row does not contain and semantic routing would degrade
+with no failure signal.
+
+**Bounded, named gap:** rows written before this change still hold unredacted
+summaries. Redaction at rest is a write-path property, so it applies going
+forward only — a migration cannot classify, and one that pretended to would
+fabricate a guarantee. Pre-existing rows are reachable only through the erasure
+path described above.
 
 ## Agent Guardrails
 
@@ -411,6 +559,38 @@ The compliance lineage tier carries an explicit attestation caveat until
 external cryptographic review covers canonicalization, hash chaining, signing,
 Merkle proof construction, PII erase semantics, S3 Object Lock configuration,
 timestamp discipline, and replay resistance.
+
+## Telemetry Collector Access And Supply Chain
+
+The Alloy collector holds cluster-wide read access, so its permissions are
+enumerated rather than granted broadly. `k8s/observability/15-alloy-rbac.yaml`
+grants `get`/`list`/`watch` on `pods`, `pods/log` and `namespaces` for log
+collection, and the same three verbs on `monitoring.coreos.com/prometheusrules`
+for rule synchronization. Read-only on rules is the correct ceiling: the
+component's job is to copy git-authored rules into Mimir, so it has no reason to
+be able to modify a rule inside the cluster. Backend credentials reach it only
+through the `grafana-cloud` Secret; none appear in a manifest, a config file, or
+a command line.
+
+CRD schemas used for manifest validation are vendored under `k8s/schemas/`,
+pinned by upstream release tag **and** content checksum in `sources.json`.
+`refresh.sh` verifies every checksum before it regenerates anything and refuses
+on a mismatch. The tag alone is not a pin — a tag can be moved, and a schema
+fetched from a moved tag would quietly widen or narrow what manifest validation
+accepts while continuing to look like it works. CI installs `kubeconform`,
+`alloy` and `promtool` at pinned versions verified by `sha256sum -c` for the
+same reason.
+
+`k8s/scripts/observability-smoke.sh` mutates a live cluster: it rotates
+Deployments, applies and deletes a temporary `PrometheusRule`, and starts a real
+billed turn. It is gated on `MOA_RUN_LIVE_OBSERVABILITY_SMOKE=1` **and** on an
+explicitly named kube context, because a developer's current context is
+routinely some unrelated cluster and every mutating command would otherwise be
+aimed at it. Backend credentials are passed to `curl` through a `0600` config
+file rather than a command line, where `ps` and shell tracing can read them, and
+every temporary resource is removed by an `EXIT` trap on failure as well as
+success — a canary alert rule left in Mimir is a permanently firing alert nobody
+owns.
 
 ## Build Rules
 

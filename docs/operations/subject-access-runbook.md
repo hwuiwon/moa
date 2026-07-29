@@ -14,8 +14,9 @@ curl -sS "$MOA_EDGE_URL/v1/privacy/export" \
   }'
 ```
 
-The API exports rows attributable to the subject user inside the authenticated
-tenant.
+The API exports only rows whose subject identifier is in the resolved subject
+set inside the authenticated tenant. Tenant scope alone is never sufficient to
+include a row.
 
 For agent-facing contacts, set `subject_user_id` to either the contact UUID or
 `contact:<contact-uuid>`. Contact exports are resolved inside the authenticated

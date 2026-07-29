@@ -140,34 +140,6 @@ const ALLOWANCES: &[Allowance] = &[
         4,
         "Task 9 keeps permanent external-template admission reserve, CAS, and replay reads beside the admission coordinator pending a dedicated repository seam"
     ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/session/execution_runs.rs",
-        "OrchestratorCtx::current_graph_pool()",
-        3,
-        "Task 9 keyed Session admission performs three control-plane replay transactions pending constructor-injected admission persistence"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/session/execution_runs.rs",
-        "OrchestratorCtx::current_config()",
-        1,
-        "Task 7 Session-owned template planning reads the model and execution configuration pending constructor injection into SessionImpl"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "OrchestratorCtx::current_config()",
-        2,
-        "Task 9 experiment-run execution targets select the internal model and compile against execution limits pending constructor injection into ExperimentRunImpl"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
-        "OrchestratorCtx::current_config()",
-        2,
-        "Task 9 experiment-trial execution targets select the internal model and compile against execution limits pending constructor injection into ExperimentTrialRunImpl"
-    ),
 ];
 
 // The workspace is deliberately split by category owner: core runtime, memory

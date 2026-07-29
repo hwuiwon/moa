@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use moa_config::SessionLimitsConfig;
-use moa_core::traits::SessionRepository;
+use moa_config::{MoaConfig, SessionLimitsConfig};
+use moa_core::traits::SessionStore;
 use moa_core::{
     error::MoaError, error::Result as MoaResult, events::Event, events::ExecutionInputRequired,
     events::ExecutionProgress, events::ExecutionRunEvidenceRef,
@@ -417,17 +417,29 @@ pub trait Session {
 
 /// Concrete `Session` virtual object implementation.
 pub struct SessionImpl {
-    session_store: Arc<dyn SessionRepository>,
+    session_store: Arc<dyn SessionStore>,
     session_store_backend: Arc<PostgresSessionStore>,
+    /// Control-plane pool the keyed execution-template admission replays against.
+    admission_pool: sqlx::PgPool,
+    /// Runtime configuration Session-owned template planning compiles against.
+    config: Arc<MoaConfig>,
     session_limits: SessionLimitsConfig,
     turn_admission: admission::TurnAdmission,
 }
 
 impl SessionImpl {
     /// Creates a session object with its persistence and scheduling dependencies.
+    ///
+    /// `admission_pool` and `config` are injected rather than read from the
+    /// installed process context: the admission replay transactions and the
+    /// template planner are the only reasons this object needed the whole
+    /// dependency graph, and a constructor parameter is what makes those two
+    /// needs visible at the composition root instead of at the call site.
     #[must_use]
     pub fn new(
         session_store: Arc<PostgresSessionStore>,
+        admission_pool: sqlx::PgPool,
+        config: Arc<MoaConfig>,
         session_limits: SessionLimitsConfig,
         runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
     ) -> Self {
@@ -435,6 +447,8 @@ impl SessionImpl {
         Self {
             session_store: session_store.clone(),
             session_store_backend: session_store,
+            admission_pool,
+            config,
             session_limits,
             turn_admission,
         }

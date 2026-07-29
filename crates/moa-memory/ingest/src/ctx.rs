@@ -497,7 +497,7 @@ pub(crate) fn build_configured_ingestion_embedder(
         return Ok(None);
     }
 
-    match build_embedder_from_config(config, EmbedderConstructionRole::Ingestion) {
+    match build_embedder_from_config(config, None, EmbedderConstructionRole::Ingestion) {
         Ok(embedder) => Ok(Some(embedder)),
         Err(MoaError::MissingEnvironmentVariable(credential_field)) => {
             tracing::warn!(

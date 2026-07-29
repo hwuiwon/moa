@@ -1,9 +1,7 @@
 //! Optional ClickHouse analytics-store configuration.
 //!
-//! When this section is present, high-volume append-only analytics rows
-//! (currently `turn_lineage`) are written to ClickHouse instead of Postgres.
-//! When absent, everything stays in Postgres — presence of the section is the
-//! only switch.
+//! When this section is present, the optional analytics exporter copies
+//! supported Postgres read-model rows into ClickHouse.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +19,6 @@ pub struct ClickHouseConfig {
     pub user: Option<String>,
     /// Optional password for HTTP basic auth.
     pub password: Option<String>,
-    /// Row TTL in days for `turn_lineage`, mirroring the Postgres/Timescale
-    /// 30-day retention drop.
-    pub lineage_ttl_days: u32,
     /// Poll interval in seconds for the analytics exporter loop; also sets the
     /// cursor rewind overlap (`2 × export_poll_secs`).
     pub export_poll_secs: u64,
@@ -39,7 +34,6 @@ impl Default for ClickHouseConfig {
             database: "moa".to_string(),
             user: None,
             password: None,
-            lineage_ttl_days: 30,
             export_poll_secs: 15,
             export_batch_rows: 5000,
         }
@@ -58,11 +52,6 @@ impl ClickHouseConfig {
         if self.database.trim().is_empty() {
             return Err(MoaError::ConfigError(
                 "clickhouse.database must be a non-empty database name".to_string(),
-            ));
-        }
-        if self.lineage_ttl_days == 0 {
-            return Err(MoaError::ConfigError(
-                "clickhouse.lineage_ttl_days must be greater than zero".to_string(),
             ));
         }
         if self.export_poll_secs == 0 {
@@ -93,7 +82,6 @@ mod tests {
 
         config.validate().expect("http endpoint should validate");
         assert_eq!(config.database, "moa");
-        assert_eq!(config.lineage_ttl_days, 30);
         assert_eq!(config.export_poll_secs, 15);
         assert_eq!(config.export_batch_rows, 5000);
     }
@@ -116,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_database_and_zero_ttl() {
+    fn rejects_empty_database() {
         let no_database = ClickHouseConfig {
             url: "http://localhost:8123".to_string(),
             database: " ".to_string(),
@@ -125,15 +113,6 @@ mod tests {
         no_database
             .validate()
             .expect_err("blank database should be rejected");
-
-        let zero_ttl = ClickHouseConfig {
-            url: "http://localhost:8123".to_string(),
-            lineage_ttl_days: 0,
-            ..ClickHouseConfig::default()
-        };
-        zero_ttl
-            .validate()
-            .expect_err("zero retention should be rejected");
     }
 
     #[test]

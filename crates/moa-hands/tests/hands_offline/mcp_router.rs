@@ -59,6 +59,8 @@ async fn configured_mcp_server_without_egress_guard_fails_before_connecting_offl
     // startup error is raised before attempting to connect to the server.
     let config = MoaConfig {
         mcp_servers: vec![McpServerConfig {
+            required: false,
+            discovery: moa_config::McpDiscoveryMode::Eager,
             name: "guard-required".to_string(),
             transport: McpTransportConfig::Http,
             url: Some("http://127.0.0.1:1".to_string()),
@@ -131,6 +133,8 @@ async fn router_injects_mcp_credentials_via_proxy() {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "secure-api".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -151,7 +155,7 @@ async fn router_injects_mcp_credentials_via_proxy() {
             &identity(),
             &ToolInvocation {
                 id: Some("provider-call-router-1".to_string()),
-                name: "ping".to_string(),
+                name: moa_hands::mcp_tool_reference("secure-api", "ping"),
                 input: json!({}),
             },
             ToolCallId::new(),
@@ -193,6 +197,14 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
                 }
                 _ => {
                     assert!(request.contains("\"method\":\"tools/call\""));
+                    // The server must be asked for the name IT published, never
+                    // the server-qualified reference MOA registered the tool
+                    // under: qualification is a local naming concern and a
+                    // connector would reject the qualified name outright.
+                    assert!(
+                        request.contains("\"name\":\"lookup_filing\""),
+                        "tools/call must carry the remote tool name: {request}"
+                    );
                     assert!(request.contains("\"item_key\":\"AAPL-10K\""));
                     r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"filing"}]}}"#
                 }
@@ -211,6 +223,8 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "filings".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -230,7 +244,7 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
             None,
             &ToolInvocation {
                 id: Some("reviewed-provider-call-bad".to_string()),
-                name: "lookup_filing".to_string(),
+                name: moa_hands::mcp_tool_reference("filings", "lookup_filing"),
                 input: json!({"item_key": 7}),
             },
             ToolCallId::new(),
@@ -263,7 +277,7 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
             None,
             &ToolInvocation {
                 id: Some("reviewed-provider-call-good".to_string()),
-                name: "lookup_filing".to_string(),
+                name: moa_hands::mcp_tool_reference("filings", "lookup_filing"),
                 input: json!({"item_key": "AAPL-10K"}),
             },
             ToolCallId::new(),
@@ -300,6 +314,8 @@ async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "secure-api".to_string(),
         transport: McpTransportConfig::Http,
         url: Some("http://127.0.0.1:1".to_string()),
@@ -368,6 +384,8 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "http-api".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -386,7 +404,7 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
             &identity(),
             &ToolInvocation {
                 id: None,
-                name: "explode".to_string(),
+                name: moa_hands::mcp_tool_reference("http-api", "explode"),
                 input: json!({}),
             },
             ToolCallId::new(),
@@ -395,12 +413,22 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("boom"));
+    // Printing the observed error matters here specifically: the other way
+    // this dispatch fails is `unknown tool: ...` from a mis-qualified
+    // reference, and a bare contains-check would report both as the same
+    // uninformative red.
+    assert!(
+        error.to_string().contains("boom"),
+        "the JSON-RPC error should surface verbatim, got: {error}"
+    );
 }
 
 #[tokio::test]
-async fn from_config_rejects_mcp_tool_name_that_collides_with_local_tool() {
-    // Pins: MCP discovery must not silently shadow built-in or hand-routed local tools.
+async fn connector_tool_named_like_a_local_tool_is_qualified_apart_offline() {
+    // Pins: a connector publishing a tool called `bash` no longer takes the whole
+    // router down at construction, and no longer shadows the local `bash`. Both
+    // are served, under distinct names, because one connector's naming choice
+    // must not be able to remove a capability from every other tenant.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -437,6 +465,8 @@ async fn from_config_rejects_mcp_tool_name_that_collides_with_local_tool() {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "shadow-api".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -446,14 +476,30 @@ async fn from_config_rejects_mcp_tool_name_that_collides_with_local_tool() {
         credentials: None,
     }];
 
-    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await {
-        Ok(_) => panic!("MCP tool name collision should reject router construction"),
-        Err(error) => error,
-    };
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("a connector name collision must not fail router construction");
 
+    let qualified = moa_hands::mcp_tool_reference("shadow-api", "bash");
     assert!(
-        matches!(error, moa_core::error::MoaError::ConfigError(ref message) if message.contains("shadow-api") && message.contains("bash") && message.contains("conflicts with an existing local tool name")),
-        "unexpected error: {error:?}"
+        router.has_tool(&qualified),
+        "the connector tool must be registered under its server-qualified reference"
+    );
+    assert!(
+        router.tool_requires_sandbox("bash"),
+        "the local hand-routed `bash` must still be the tool registered as `bash`"
+    );
+    assert!(
+        !router.tool_requires_sandbox(&qualified),
+        "the connector tool must route to its server, not to a sandbox"
+    );
+    assert_eq!(
+        router
+            .tool_definition(&qualified)
+            .expect("connector tool definition")
+            .description,
+        "Remote shell",
+        "the qualified reference must resolve to the connector's own tool"
     );
 }
 
@@ -508,6 +554,8 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "sse-api".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -524,7 +572,8 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
         router
             .tool_schemas()
             .iter()
-            .any(|tool| tool.get("name").and_then(|value| value.as_str()) == Some("sse_echo"))
+            .any(|tool| tool.get("name").and_then(|value| value.as_str())
+                == Some(moa_hands::mcp_tool_reference("sse-api", "sse_echo").as_str()))
     );
 
     let secured_3 = router
@@ -533,7 +582,7 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
             &identity(),
             &ToolInvocation {
                 id: None,
-                name: "sse_echo".to_string(),
+                name: moa_hands::mcp_tool_reference("sse-api", "sse_echo"),
                 input: json!({ "text": "hello" }),
             },
             ToolCallId::new(),
@@ -614,6 +663,8 @@ async fn discovered_tool_idempotency(
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: server_name.to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -628,7 +679,10 @@ async fn discovered_tool_idempotency(
         .expect("build router from discovered MCP tool");
     server.await.expect("fake MCP server should finish");
     router
-        .tool_definition("retry_safe_read")
+        .tool_definition(&moa_hands::mcp_tool_reference(
+            server_name,
+            "retry_safe_read",
+        ))
         .expect("discovered tool should be registered")
         .idempotency_class
 }
@@ -664,5 +718,688 @@ async fn discovery_trusts_idempotent_hint_only_for_explicit_capable_server() {
     assert_eq!(
         discovered_tool_idempotency("false-hint", "2025-03-26", true, Some(false)).await,
         IdempotencyClass::NonIdempotent
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Connector health, determinism, and lazy discovery
+// ---------------------------------------------------------------------------
+
+/// A fake MCP server that answers by JSON-RPC method and can be taken down.
+///
+/// Routing on the method rather than on a request counter is what lets one
+/// server serve a discovery pass, a refresh, and a tool call in any order — the
+/// orders these tests exist to vary.
+struct MethodRoutedMcpServer {
+    url: String,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl MethodRoutedMcpServer {
+    /// Stops the server and waits for the port to stop accepting.
+    async fn shut_down(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        // Give the accept loop a moment to drop the listener so a later connect
+        // fails rather than racing a half-closed socket.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Serves `tools/list` with exactly `tools_json` until shut down.
+async fn spawn_method_routed_mcp_server(tools_json: &str) -> MethodRoutedMcpServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let tools_json = tools_json.to_string();
+    tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                _ = &mut shutdown_rx => return,
+                accepted = listener.accept() => accepted,
+            };
+            let Ok((mut socket, _)) = accepted else {
+                return;
+            };
+            let mut buffer = vec![0_u8; 8192];
+            let Ok(bytes) = socket.read(&mut buffer).await else {
+                continue;
+            };
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            let body = if request.contains("\"method\":\"initialize\"") {
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
+                    .to_string()
+            } else if request.contains("\"method\":\"tools/list\"") {
+                format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":{tools_json}}}}}"#)
+            } else if request.contains("\"method\":\"tools/call\"") {
+                r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}}"#
+                    .to_string()
+            } else {
+                r"{}".to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    MethodRoutedMcpServer {
+        url: format!("http://{addr}"),
+        shutdown: Some(shutdown_tx),
+    }
+}
+
+fn connector(name: &str, url: &str, required: bool) -> McpServerConfig {
+    McpServerConfig {
+        name: name.to_string(),
+        transport: McpTransportConfig::Http,
+        url: Some(url.to_string()),
+        credentials: None,
+        trust_tool_annotations: false,
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
+        required,
+        discovery: moa_config::McpDiscoveryMode::Eager,
+    }
+}
+
+fn local_config(dir: &tempfile::TempDir) -> MoaConfig {
+    let mut config = MoaConfig::default();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    opt_into_development_local_hands(&mut config);
+    config
+}
+
+/// A URL on the loopback discard port, which never accepts a connection.
+fn unreachable_url() -> String {
+    "http://127.0.0.1:1".to_string()
+}
+
+#[tokio::test]
+async fn an_optional_connector_outage_leaves_every_other_connector_serving_offline() {
+    // Pins: one unreachable optional connector removes only its own tools. The
+    // router still builds, the healthy connector's tools are still offered, and
+    // the outage is reported as typed health rather than as a startup failure —
+    // the whole point of marking a connector optional.
+    let healthy = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![
+        connector("reachable", &healthy.url, false),
+        connector("down", &unreachable_url(), false),
+    ];
+
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("an optional connector outage must not fail router construction");
+
+    assert!(
+        router.has_tool(&moa_hands::mcp_tool_reference("reachable", "search")),
+        "the healthy connector's tool must still be offered"
+    );
+
+    let health = router.mcp_connector_health().await;
+    assert!(
+        matches!(
+            health.get("reachable"),
+            Some(moa_hands::McpConnectorHealth::Ready { tools: 1, .. })
+        ),
+        "the healthy connector must report Ready with its tool count, got: {:?}",
+        health.get("reachable")
+    );
+    assert!(
+        matches!(
+            health.get("down"),
+            Some(moa_hands::McpConnectorHealth::Unavailable { .. })
+        ),
+        "the failed optional connector must report Unavailable, got: {:?}",
+        health.get("down")
+    );
+    assert!(
+        !router
+            .tool_names()
+            .iter()
+            .any(|name| name.starts_with(&moa_hands::mcp_tool_reference("down", ""))),
+        "an unavailable connector must contribute no tools"
+    );
+}
+
+#[tokio::test]
+async fn a_required_connector_outage_fails_startup_with_its_typed_health_offline() {
+    // Pins: the same outage that is survivable for an optional connector is a
+    // startup failure for a required one, and the failure names the connector
+    // and the typed health state it reached. A deployment that silently dropped
+    // a required integration would be indistinguishable from one that never
+    // configured it.
+    let healthy = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![
+        connector("reachable", &healthy.url, false),
+        connector("must-work", &unreachable_url(), true),
+    ];
+
+    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await;
+    let error = match error {
+        Ok(_) => panic!("a required connector outage must fail startup"),
+        Err(error) => error,
+    };
+
+    match error {
+        moa_core::error::MoaError::ConfigError(message) => {
+            assert!(
+                message.contains("must-work"),
+                "the failure must name the required connector: {message}"
+            );
+            assert!(
+                message.contains("unavailable"),
+                "the failure must carry the connector's typed health state: {message}"
+            );
+        }
+        other => panic!("expected a ConfigError carrying connector health, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_connector_catalog_is_identical_whatever_order_the_server_lists_tools_in_offline() {
+    // Pins: "same inputs and revision yield the same schemas and order" is a
+    // property of the catalog, not of the remote server. Two servers publishing
+    // the same tools in opposite `tools/list` order must produce one identical
+    // catalog revision and one identical offered order.
+    let forward = spawn_method_routed_mcp_server(
+        r#"[{"name":"alpha","description":"A","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},{"name":"zulu","description":"Z","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+    let reversed = spawn_method_routed_mcp_server(
+        r#"[{"name":"zulu","description":"Z","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},{"name":"alpha","description":"A","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let forward_dir = tempdir().unwrap();
+    let mut forward_config = local_config(&forward_dir);
+    forward_config.mcp_servers = vec![connector("catalog", &forward.url, false)];
+    let forward_router =
+        ToolRouter::from_config(&forward_config, Some(mcp_egress_guard()), None, None)
+            .await
+            .expect("forward-order router");
+
+    let reversed_dir = tempdir().unwrap();
+    let mut reversed_config = local_config(&reversed_dir);
+    reversed_config.mcp_servers = vec![connector("catalog", &reversed.url, false)];
+    let reversed_router =
+        ToolRouter::from_config(&reversed_config, Some(mcp_egress_guard()), None, None)
+            .await
+            .expect("reversed-order router");
+
+    assert_eq!(
+        forward_router.mcp_catalog_revision(),
+        reversed_router.mcp_catalog_revision(),
+        "the catalog revision must not depend on the server's tools/list order"
+    );
+
+    let offered = |router: &ToolRouter| {
+        router
+            .tool_schemas()
+            .iter()
+            .filter_map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|name| name.starts_with(moa_hands::MCP_TOOL_REFERENCE_PREFIX))
+                    .map(ToString::to_string)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        offered(&forward_router),
+        vec![
+            moa_hands::mcp_tool_reference("catalog", "alpha"),
+            moa_hands::mcp_tool_reference("catalog", "zulu"),
+        ]
+    );
+    assert_eq!(offered(&forward_router), offered(&reversed_router));
+}
+
+#[tokio::test]
+async fn a_refresh_that_fails_keeps_serving_the_last_known_good_tools_offline() {
+    // Pins: a connector that was healthy and then goes down is Degraded, not
+    // Unavailable, and its previously discovered tools keep being offered.
+    // Dropping them on one failed refresh would let an unrelated transient error
+    // silently shrink the model's loadout mid-session.
+    let mut server = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![connector("flaky", &server.url, false)];
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("router with a healthy connector");
+    let qualified = moa_hands::mcp_tool_reference("flaky", "search");
+    assert!(
+        router.has_tool(&qualified),
+        "the connector's tool must be discovered before its outage can be tested; \
+         registered tools: {:?}",
+        router.tool_names()
+    );
+    let healthy_revision = router.mcp_catalog_revision();
+
+    server.shut_down().await;
+    let refresh = router.refresh_mcp_catalog().await;
+
+    assert!(
+        matches!(
+            refresh.health.get("flaky"),
+            Some(moa_hands::McpConnectorHealth::Degraded { tools: 1, .. })
+        ),
+        "a connector with a previous success must degrade, not vanish, got: {:?}",
+        refresh.health.get("flaky")
+    );
+    assert!(
+        router.has_tool(&qualified),
+        "the last-known-good tool must still be offered while the connector is down"
+    );
+    assert_eq!(
+        router.mcp_catalog_revision(),
+        healthy_revision,
+        "retaining last-known-good tools must not change the catalog revision"
+    );
+}
+
+#[tokio::test]
+async fn a_lazy_connector_contributes_no_tools_until_the_first_refresh_offline() {
+    // Pins: lazy discovery genuinely defers. A lazily configured connector is
+    // Pending after construction — not Unavailable, because nothing was tried —
+    // and its tools appear only once a refresh discovers them.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    let mut lazy = connector("later", &server.url, false);
+    lazy.discovery = moa_config::McpDiscoveryMode::Lazy;
+    config.mcp_servers = vec![lazy];
+
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("router with a lazily discovered connector");
+    let qualified = moa_hands::mcp_tool_reference("later", "search");
+
+    assert!(
+        matches!(
+            router.mcp_connector_health().await.get("later"),
+            Some(moa_hands::McpConnectorHealth::Pending)
+        ),
+        "a lazy connector must be Pending, not Unavailable, before anything is attempted"
+    );
+    assert!(
+        !router.has_tool(&qualified),
+        "a lazy connector must contribute no tools at startup"
+    );
+
+    let refresh = router.refresh_mcp_catalog().await;
+
+    assert!(
+        matches!(
+            refresh.health.get("later"),
+            Some(moa_hands::McpConnectorHealth::Ready { tools: 1, .. })
+        ),
+        "the first refresh must discover the lazy connector, got: {:?}",
+        refresh.health.get("later")
+    );
+    assert!(
+        router.has_tool(&qualified),
+        "a discovered lazy connector's tools must become available without a restart"
+    );
+}
+
+#[tokio::test]
+async fn a_required_connector_cannot_be_configured_for_lazy_discovery_offline() {
+    // Pins: `required` means "verified at startup". Allowing a required
+    // connector to be discovered lazily would let startup succeed without ever
+    // having contacted the integration the operator declared mandatory.
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    let mut server = connector("must-work", &unreachable_url(), true);
+    server.discovery = moa_config::McpDiscoveryMode::Lazy;
+    config.mcp_servers = vec![server];
+
+    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await;
+    let error = match error {
+        Ok(_) => panic!("required plus lazy must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(
+        matches!(
+            error,
+            moa_core::error::MoaError::ConfigError(ref message)
+                if message.contains("must-work") && message.contains("lazily")
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn two_connectors_configured_under_one_name_are_rejected_offline() {
+    // Pins: duplicate server names are a startup failure rather than a silent
+    // overwrite. Without this, the second entry would replace the first's
+    // configuration — including its credential scope — while both appeared
+    // configured.
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![
+        connector("same", &unreachable_url(), false),
+        connector("same", &unreachable_url(), false),
+    ];
+
+    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await;
+    let error = match error {
+        Ok(_) => panic!("duplicate connector names must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(
+        matches!(
+            error,
+            moa_core::error::MoaError::ConfigError(ref message)
+                if message.contains("duplicate MCP server name") && message.contains("same")
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_connector_schema_change_changes_the_tool_capability_revision_offline() {
+    // Pins: the schema hash a connector tool registers under tracks the schema
+    // itself, so a server that changes a tool's input schema produces a
+    // different revision under an unchanged tool name. That revision is the
+    // capability version a pinned execution run matches against, which is what
+    // makes a mid-flight schema change fail closed instead of silently
+    // invoking a different contract.
+    let original = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false}}]"#,
+    )
+    .await;
+    let changed = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let original_dir = tempdir().unwrap();
+    let mut original_config = local_config(&original_dir);
+    original_config.mcp_servers = vec![connector("api", &original.url, false)];
+    let original_router =
+        ToolRouter::from_config(&original_config, Some(mcp_egress_guard()), None, None)
+            .await
+            .expect("router before the schema change");
+
+    let changed_dir = tempdir().unwrap();
+    let mut changed_config = local_config(&changed_dir);
+    changed_config.mcp_servers = vec![connector("api", &changed.url, false)];
+    let changed_router =
+        ToolRouter::from_config(&changed_config, Some(mcp_egress_guard()), None, None)
+            .await
+            .expect("router after the schema change");
+
+    let qualified = moa_hands::mcp_tool_reference("api", "search");
+    // Asserted separately rather than with `&&`: a compound precondition that
+    // fails tells you nothing about which router was missing the tool.
+    assert!(
+        original_router.has_tool(&qualified),
+        "the pre-change router must serve the tool, got: {:?}",
+        original_router.tool_names()
+    );
+    assert!(
+        changed_router.has_tool(&qualified),
+        "the post-change router must serve the same reference, got: {:?}",
+        changed_router.tool_names()
+    );
+    assert_ne!(
+        original_router.mcp_catalog_revision(),
+        changed_router.mcp_catalog_revision(),
+        "a changed input schema must change the catalog revision under the same tool name"
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_republishes_the_prompt_schemas_a_turn_compiles_from_offline() {
+    // Pins: a catalog refresh reaches the prompt. The schemas a turn compiles
+    // from are read back from the router rather than captured once, so a
+    // connector discovered after startup becomes offerable without a restart —
+    // and a connector's tools cannot linger in a prompt after the catalog
+    // withdrew them.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    let mut lazy = connector("later", &server.url, false);
+    lazy.discovery = moa_config::McpDiscoveryMode::Lazy;
+    config.mcp_servers = vec![lazy];
+
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("router with a lazily discovered connector");
+    let qualified = moa_hands::mcp_tool_reference("later", "search");
+    let offered = |router: &ToolRouter| {
+        router
+            .tool_schema_snapshot()
+            .iter()
+            .filter_map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        !offered(&router).contains(&qualified),
+        "an undiscovered connector must not be in the prompt schemas"
+    );
+
+    router.refresh_mcp_catalog().await;
+
+    assert!(
+        offered(&router).contains(&qualified),
+        "the refreshed catalog must be visible in the prompt schemas"
+    );
+}
+
+#[tokio::test]
+async fn a_permission_pattern_that_governs_no_registered_tool_is_reported_offline() {
+    // Pins the upgrade hazard behind server-qualified connector names: an
+    // operator pattern written against a connector's own tool name stops
+    // matching once that tool registers under its qualified reference, and an
+    // `admin_review` pattern that stops matching leaves the tool running
+    // UNATTENDED. That failure is open and silent, so construction reports it.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"external_action","description":"External","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![connector("crm", &server.url, false)];
+    // Written the way an operator would have written it before qualification.
+    config.permissions.admin_review = vec!["external_*".to_string()];
+    config.permissions.always_deny = vec!["bash".to_string()];
+
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("router with a stale permission pattern still builds");
+
+    let unmatched = router.unmatched_permission_patterns();
+    assert_eq!(
+        unmatched
+            .iter()
+            .map(|entry| (entry.field, entry.pattern.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("permissions.admin_review", "external_*")],
+        "only the pattern that governs nothing may be reported: {unmatched:?}"
+    );
+    assert!(
+        router.has_tool(&moa_hands::mcp_tool_reference("crm", "external_action")),
+        "the tool the stale pattern was written for is registered under its qualified reference"
+    );
+}
+
+#[tokio::test]
+async fn a_lazily_discovered_connector_clears_its_permission_pattern_warning_offline() {
+    // Pins: the report tracks the live catalog rather than a startup snapshot.
+    // A pattern written for a lazy connector's tools genuinely governs nothing
+    // until those tools exist, and must stop being reported once they do —
+    // otherwise the warning becomes permanent noise that operators learn to
+    // ignore, which is worse than not having it.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"external_action","description":"External","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    let mut lazy = connector("crm", &server.url, false);
+    lazy.discovery = moa_config::McpDiscoveryMode::Lazy;
+    config.mcp_servers = vec![lazy];
+    config.permissions.admin_review = vec![format!(
+        "{}*",
+        moa_hands::mcp_tool_reference("crm", "external_")
+    )];
+
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("router with a lazy connector");
+    assert_eq!(
+        router.unmatched_permission_patterns().len(),
+        1,
+        "before discovery the pattern genuinely governs nothing"
+    );
+
+    router.refresh_mcp_catalog().await;
+
+    assert!(
+        router.unmatched_permission_patterns().is_empty(),
+        "once the connector's tools exist the pattern governs them: {:?}",
+        router.unmatched_permission_patterns()
+    );
+}
+
+#[tokio::test]
+async fn a_permission_pattern_is_checked_when_no_connector_is_configured_offline() {
+    // Pins the construction-time check specifically. A deployment with no MCP
+    // servers never runs connector discovery, so the recompute that happens
+    // after a discovery pass never fires — and the pattern check has to happen
+    // during construction or it never happens at all for the majority of
+    // deployments. This is the arm the connector-bearing tests cannot reach.
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    assert!(
+        config.mcp_servers.is_empty(),
+        "this test's whole point is the no-connector path"
+    );
+    config.permissions.always_deny = vec!["bash".to_string()];
+    config.permissions.admin_review = vec!["definitely_not_a_registered_tool".to_string()];
+
+    let router = ToolRouter::from_config(&config, None, None, None)
+        .await
+        .expect("router without connectors");
+
+    let unmatched = router.unmatched_permission_patterns();
+    assert_eq!(
+        unmatched
+            .iter()
+            .map(|entry| (entry.field, entry.pattern.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(
+            "permissions.admin_review",
+            "definitely_not_a_registered_tool"
+        )],
+        "the pattern governing a local tool must not be reported, the other must: {unmatched:?}"
+    );
+}
+
+#[tokio::test]
+async fn dispatching_a_connectors_published_name_says_which_reference_to_use_offline() {
+    // Pins the diagnostic, not just the refusal. A caller that resolved a tool
+    // through a connector's own vocabulary rather than the registry's arrives
+    // with a name that looks right and is not, and a bare "unknown tool" sends
+    // the reader hunting for a typo that does not exist. This is the exact
+    // failure a live execution run produced, so the message has to name the
+    // reference that would have worked.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"screen_company","description":"Screen","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![connector("screener", &server.url, false)];
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+        .await
+        .expect("router with a connector");
+
+    let error = router
+        .execute_authorized(
+            &session(),
+            &identity(),
+            &ToolInvocation {
+                id: None,
+                // The name the SERVER publishes — not the registered reference.
+                name: "screen_company".to_string(),
+                input: json!({}),
+            },
+            ToolCallId::new(),
+            None,
+        )
+        .await
+        .expect_err("a connector's published name must not resolve");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("screen_company"),
+        "the failure must name what was dispatched, got: {message}"
+    );
+    assert!(
+        message.contains(&moa_hands::mcp_tool_reference("screener", "screen_company")),
+        "the failure must name the reference that would have worked, got: {message}"
+    );
+
+    // An ordinary typo must NOT be dressed up as a qualification problem.
+    let plain = router
+        .execute_authorized(
+            &session(),
+            &identity(),
+            &ToolInvocation {
+                id: None,
+                name: "no_such_tool_anywhere".to_string(),
+                input: json!({}),
+            },
+            ToolCallId::new(),
+            None,
+        )
+        .await
+        .expect_err("an unknown name must still fail")
+        .to_string();
+    assert!(
+        !plain.contains("server-qualified"),
+        "a name no connector publishes must not be explained as a qualification mistake: {plain}"
     );
 }

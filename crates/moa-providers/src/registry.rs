@@ -7,8 +7,11 @@ use moa_config::MoaConfig;
 use moa_config::QueryRewriteConfig;
 use moa_core::types::provider::ProviderId;
 use moa_core::{
-    error::MoaError, traits::LLMProvider, types::identifiers::ModelId,
-    types::model::ModelCapabilities, types::provider::ModelTask,
+    error::MoaError,
+    traits::{LLMProvider, RuntimeCacheStore},
+    types::identifiers::ModelId,
+    types::model::ModelCapabilities,
+    types::provider::ModelTask,
 };
 #[cfg(feature = "scripted-provider")]
 use moa_core::{
@@ -27,14 +30,15 @@ use serde_json::Value;
 use moa_memory_pii::PiiClassifier;
 
 use crate::ModelRouter;
+use crate::core::concurrency_factory::ProviderCoordination;
 use crate::core::models::find_model;
 use crate::governance::{CachingPiiClassifier, GovernedLLMProvider};
 use crate::provider_policy::{
     DeploymentProviderPolicy, ProviderCapabilities, provider_capabilities,
 };
 use crate::routing::{
-    PROVIDER_DESCRIPTORS, ProviderDescriptor, infer_provider_id, provider_descriptor,
-    provider_descriptor_by_name, split_explicit_provider,
+    PROVIDER_DESCRIPTORS, ProviderDescriptor, build_provider_with_coordination, infer_provider_id,
+    provider_descriptor, provider_descriptor_by_name, split_explicit_provider,
 };
 #[cfg(feature = "scripted-provider")]
 use crate::{ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse};
@@ -150,25 +154,43 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Builds a registry from configured provider API keys.
+    /// Builds a registry from configured provider API keys and an optional
+    /// runtime coordination cache.
     ///
     /// Per-provider deployment capabilities are read from each provider's
     /// credential config (conservative by default), and an active
     /// `[providers.routing_policy]` policy is attached so routing is constrained to
     /// compliant providers and fails closed. An inactive policy leaves routing
-    /// unchanged with zero overhead.
-    #[must_use]
-    pub fn from_config(config: &MoaConfig) -> Self {
+    /// unchanged with zero overhead. Pass `None` only for deliberately local
+    /// construction such as isolated tests and eval tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when global provider coordination is
+    /// configured without a usable runtime cache.
+    pub fn from_config(
+        config: &MoaConfig,
+        runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
+    ) -> moa_core::error::Result<Self> {
+        let coordination = ProviderCoordination::from_config(config, runtime_cache)?;
         let config = Arc::new(config.clone());
         let mut registry = Self::default();
         let mut capabilities = BTreeMap::new();
         for descriptor in PROVIDER_DESCRIPTORS {
             if configured_secret((descriptor.api_key)(&config)) {
                 capabilities.insert(descriptor.id, provider_capabilities(&config, descriptor.id));
-                let build_config = config.clone();
+                let build_config = Arc::clone(&config);
+                let coordination = coordination.clone();
                 registry.register_factory(
                     descriptor,
-                    Arc::new(move |model| (descriptor.build_from_config)(&build_config, model)),
+                    Arc::new(move |model| {
+                        build_provider_with_coordination(
+                            descriptor.id,
+                            &build_config,
+                            &coordination,
+                            model,
+                        )
+                    }),
                 );
             }
         }
@@ -183,7 +205,7 @@ impl ProviderRegistry {
                 capabilities,
             });
         }
-        registry
+        Ok(registry)
     }
 
     /// Attaches egress DLP governance so every provider this registry resolves is
@@ -1013,7 +1035,8 @@ mod tests {
         let mut config = moa_config::MoaConfig::default();
         config.providers.openai.api_key = "test-key".to_string();
 
-        let registry = ProviderRegistry::from_config(&config);
+        let registry = ProviderRegistry::from_config(&config, None)
+            .expect("local provider registry should build");
         let (id, model) = registry
             .resolve_provider_id(Some("openai:gpt-5.4-mini"))
             .expect("configured custom OpenAI env should enable provider");
@@ -1371,7 +1394,8 @@ mod tests {
         config.providers.anthropic.capabilities.zero_retention = true;
         config.providers.routing_policy.require_zero_retention = true;
 
-        let registry = ProviderRegistry::from_config(&config);
+        let registry = ProviderRegistry::from_config(&config, None)
+            .expect("local provider registry should build");
 
         // The compliant Anthropic provider passes the gate and builds.
         registry

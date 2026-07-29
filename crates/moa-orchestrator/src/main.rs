@@ -1,5 +1,6 @@
 //! Restate-backed `moa-orchestrator` binary entrypoint.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +29,8 @@ use moa_orchestrator::{
         },
         jobs::{
             restate_ingress_base_url, spawn_default_cron_bootstrap, start_action_review_reaper,
-            start_authz_challenge_reaper_if_configured,
+            start_authz_challenge_reaper_if_configured, start_hand_lease_reaper,
+            start_mcp_catalog_refresh,
         },
         kms::KmsRuntime,
     },
@@ -44,6 +46,7 @@ const DEFAULT_HEALTH_PORT: u16 = 10021;
 const DEFAULT_SCIM_PORT: u16 = 10022;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
+const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(15);
 const ORCHESTRATOR_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Process arguments for the orchestrator process.
@@ -101,7 +104,7 @@ async fn async_main() -> anyhow::Result<()> {
     let moa_config = load_moa_config_from_env()?;
     let skip_fga = skip_fga_from_env();
     let moa_config = Arc::new(moa_config);
-    let _telemetry =
+    let telemetry =
         init_observability(moa_config.as_ref(), &TelemetryConfig { json_stdout: true })?;
     let database_search_path = database_search_path(moa_config.as_ref());
     match args.command.as_ref() {
@@ -220,7 +223,6 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.fga_client.clone(),
         runtime_deps.providers.clone(),
         runtime_deps.tool_router.clone(),
-        runtime_deps.tool_schemas.clone(),
         moa_config.session_limits.clone(),
         moa_config.clone(),
         runtime_deps.contact_token_issuer.clone(),
@@ -229,6 +231,7 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.embedding_provider.clone(),
         Arc::new(runtime_deps.channel_adapters.clone()),
         runtime_deps.runtime_cache.clone(),
+        runtime_deps.lineage.score_handle(),
     );
 
     let readiness = Arc::new(AtomicBool::new(false));
@@ -237,6 +240,7 @@ async fn async_main() -> anyhow::Result<()> {
         pool.clone(),
         runtime_deps.kms.clone(),
         restate_admin_url,
+        runtime_deps.lineage.writer.clone(),
     )?;
     let shutdown = CancellationToken::new();
     let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
@@ -246,6 +250,18 @@ async fn async_main() -> anyhow::Result<()> {
     )?;
     let action_review_reaper_handle =
         start_action_review_reaper(&runtime_deps.background_pool, restate_ingress_url.clone());
+    // The destruction owner for every bounded sandbox deadline. It is started
+    // before the servers accept traffic, and startup fails outright if no hand
+    // provider is registered, so no sandbox is ever provisioned under a policy
+    // this process cannot enforce.
+    let hand_lease_reaper_handle = start_hand_lease_reaper(
+        &runtime_deps.background_pool,
+        runtime_deps.tool_router.hand_providers(),
+    )?;
+    // Optional connectors that failed discovery at startup are retried here, and
+    // schema changes republished, without restarting the process.
+    let mcp_catalog_refresh_handle =
+        start_mcp_catalog_refresh(moa_config.as_ref(), runtime_deps.tool_router.clone());
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -275,7 +291,7 @@ async fn async_main() -> anyhow::Result<()> {
         "starting moa-orchestrator"
     );
     readiness.store(true, Ordering::Release);
-    let _cron_bootstrap = {
+    let cron_bootstrap = {
         let probe_state = probe_state.clone();
         spawn_default_cron_bootstrap(
             move || {
@@ -334,56 +350,149 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::info!("shutdown signal received, draining");
             readiness.store(false, Ordering::Release);
 
-            if let Some(poller_handle) = runtime_deps.authz_outbox_poller.take() {
-                poller_handle.shutdown().await;
-            }
-            if let Some(reaper_handle) = authz_challenge_reaper_handle {
-                reaper_handle.shutdown().await;
-            }
-            action_review_reaper_handle.shutdown().await;
-
-            if let Some(writer) = runtime_deps.lineage.writer.clone() {
-                tracing::info!("draining lineage writer");
-                match writer.shutdown().await {
-                    Ok(stats) => tracing::info!(
-                        written = stats.written,
-                        journal_depth = stats.journal_depth,
-                        "lineage writer drained"
-                    ),
-                    Err(error) => tracing::warn!(?error, "lineage writer drain failed"),
-                }
-            }
-
             if probe_state.deregister_on_shutdown() {
                 best_effort_deregister(&probe_state).await;
             }
 
+            // Give the load balancer a bounded window to observe readiness=false
+            // before closing ingress. Audit admission stays open throughout this
+            // interval because in-flight requests may still emit records.
             tokio::time::sleep(SHUTDOWN_DRAIN_DELAY).await;
             shutdown.cancel();
 
-            restate_server
-                .await
-                .context("join Restate handler server during shutdown")?;
-            health_server
-                .await
-                .context("join health probe server during shutdown")??;
-            scim_server
-                .await
-                .context("join SCIM server during shutdown")??;
+            // Restate, SCIM, and channel ingress are the request-owned audit
+            // producers. Join them before closing audit admission so every
+            // accepted request has finished its final audit emission.
+            let _ = join_task_bounded("Restate handler server", restate_server).await;
+            if let Some(result) = join_task_bounded("health probe server", health_server).await
+                && let Err(error) = result
+            {
+                tracing::warn!(%error, "health probe server failed during shutdown");
+            }
+            if let Some(result) = join_task_bounded("SCIM server", scim_server).await
+                && let Err(error) = result
+            {
+                tracing::warn!(%error, "SCIM server failed during shutdown");
+            }
             if let Some(handle) = channel_ingress.take() {
-                handle
-                    .await
-                    .context("join channel ingress during shutdown")?;
+                let _ = join_task_bounded("channel ingress", handle).await;
             }
             if let Some(handle) = analytics_export.take() {
-                handle
-                    .await
-                    .context("join analytics export during shutdown")?;
+                let _ = join_task_bounded("analytics export", handle).await;
             }
+
+            abort_and_join_task("hand lease reaper", hand_lease_reaper_handle).await;
+            if let Some(handle) = mcp_catalog_refresh_handle {
+                abort_and_join_task("MCP catalog refresh", handle).await;
+            }
+            abort_and_join_task("cron bootstrap", cron_bootstrap).await;
+
+            if let Some(poller_handle) = runtime_deps.authz_outbox_poller.take() {
+                let _ = shutdown_future_bounded(
+                    "authz outbox poller",
+                    poller_handle.shutdown(),
+                )
+                .await;
+            }
+            if let Some(reaper_handle) = authz_challenge_reaper_handle {
+                let _ = shutdown_future_bounded(
+                    "authz challenge reaper",
+                    reaper_handle.shutdown(),
+                )
+                .await;
+            }
+            let _ = shutdown_future_bounded(
+                "action review reaper",
+                action_review_reaper_handle.shutdown(),
+            )
+            .await;
+
+            let audit = runtime_deps.audit.clone();
+
+            if let Some(writer) = runtime_deps.lineage.writer.clone() {
+                tracing::info!("draining lineage writer");
+                if let Some(result) =
+                    shutdown_future_bounded("lineage writer", writer.shutdown()).await
+                {
+                    match result {
+                        Ok(stats) => tracing::info!(
+                            written = stats.written,
+                            pending = stats.pending,
+                            "lineage writer drained; any pending rows stay committed for \
+                             another replica"
+                        ),
+                        Err(error) => tracing::warn!(?error, "lineage writer drain failed"),
+                    }
+                }
+            }
+
+            // Audit is last among background writers. Its shutdown closes
+            // admission before draining, so any producer accidentally left
+            // alive is counted as queue_closed rather than silently accepted.
+            let dropped = shutdown_future_bounded("security audit writer", audit.shutdown())
+                .await
+                .unwrap_or_else(|| audit.emitter().dropped_count());
+            if dropped > 0 {
+                tracing::warn!(
+                    dropped,
+                    "security audit events were dropped during this process lifetime; the \
+                     audit trail is incomplete"
+                );
+            }
+
         }
     }
 
+    // No task that records metrics or spans remains. Flush both signals only
+    // after their producers have stopped so final drain counters are included.
+    telemetry.shutdown();
     Ok(())
+}
+
+async fn join_task_bounded<T>(name: &'static str, mut handle: JoinHandle<T>) -> Option<T> {
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, &mut handle).await {
+        Ok(Ok(output)) => Some(output),
+        Ok(Err(error)) => {
+            tracing::warn!(task = name, %error, "background task ended abnormally during shutdown");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                task = name,
+                timeout_secs = SHUTDOWN_TASK_TIMEOUT.as_secs(),
+                "background task exceeded shutdown deadline; aborting"
+            );
+            handle.abort();
+            let _ = handle.await;
+            None
+        }
+    }
+}
+
+async fn abort_and_join_task(name: &'static str, handle: JoinHandle<()>) {
+    handle.abort();
+    if let Err(error) = handle.await
+        && !error.is_cancelled()
+    {
+        tracing::warn!(task = name, %error, "background task ended abnormally during shutdown");
+    }
+}
+
+async fn shutdown_future_bounded<T>(
+    name: &'static str,
+    shutdown: impl Future<Output = T>,
+) -> Option<T> {
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, shutdown).await {
+        Ok(output) => Some(output),
+        Err(_) => {
+            tracing::warn!(
+                task = name,
+                timeout_secs = SHUTDOWN_TASK_TIMEOUT.as_secs(),
+                "background shutdown exceeded deadline"
+            );
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -395,6 +504,14 @@ struct ProbeState {
     client: Client,
     require_registration: bool,
     deregister_on_shutdown: bool,
+    /// Durable lineage writer, when this deployment owns one.
+    ///
+    /// Held so readiness can refuse traffic for a writer that is dead, draining,
+    /// cut off from Postgres, or sitting on a backlog older than its limit. All
+    /// four are readiness conditions and none is a liveness condition: the
+    /// accepted rows are safe in Postgres, and restarting the process would only
+    /// drop leases and slow the drain that is already behind.
+    lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
 }
 
 impl ProbeState {
@@ -403,6 +520,7 @@ impl ProbeState {
         pool: sqlx::PgPool,
         kms: KmsRuntime,
         admin_base_url: String,
+        lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
     ) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(ADMIN_CHECK_TIMEOUT)
@@ -417,6 +535,7 @@ impl ProbeState {
             client,
             require_registration: env_flag("MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS", false),
             deregister_on_shutdown: env_flag("MOA_DEREGISTER_ON_SHUTDOWN", false),
+            lineage_writer,
         })
     }
 
@@ -439,6 +558,12 @@ impl ProbeState {
             .context("Postgres readiness check failed")?;
 
         self.kms.check_readiness().await?;
+
+        if let Some(writer) = &self.lineage_writer
+            && let Some(reason) = writer.unready_reason()
+        {
+            bail!("lineage writer not ready: {reason}");
+        }
 
         let deployments = self.fetch_deployments().await?;
         if self.require_registration && !services_registered(&deployments) {

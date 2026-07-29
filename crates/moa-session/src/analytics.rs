@@ -10,8 +10,9 @@ use moa_core::{
     analytics::CacheDailyMetric, analytics::SessionAnalyticsSummary, analytics::SessionTurnMetric,
     analytics::TenantAnalyticsSummary, analytics::ToolCallSummary, error::MoaError, error::Result,
     types::contact::ContactId, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
-    types::identifiers::SessionId, types::identifiers::TenantId,
+    types::experience::LearningCandidateType, types::experience::LearningProposalKind,
+    types::experience::LearningRiskClass, types::identifiers::SessionId,
+    types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
 
@@ -211,7 +212,7 @@ pub async fn list_learning_candidate_summaries(
 ) -> Result<Vec<LearningCandidateSummary>> {
     let learning_candidates = qualified_relation(schema_name, "learning_candidates");
     let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT id, tenant_id::UUID AS tenant_id, storage_partition_id, user_id, candidate_type, status, \
+        "SELECT id, tenant_id::UUID AS tenant_id, storage_partition_id, user_id, candidate_type, proposal_kind, status, \
          target_id, target_label, task_fingerprint, payload, \
          confidence::DOUBLE PRECISION AS confidence, risk_class, created_at, updated_at \
          FROM {learning_candidates} WHERE tenant_id = "
@@ -441,6 +442,11 @@ fn learning_candidate_summary_from_row(row: &PgRow) -> Result<LearningCandidateS
         &row.try_get::<String, _>("candidate_type")
             .map_err(map_sqlx_error)?,
     )?;
+    let proposal_kind = from_db::<LearningProposalKind>(
+        "learning proposal kind",
+        &row.try_get::<String, _>("proposal_kind")
+            .map_err(map_sqlx_error)?,
+    )?;
     let status = from_db::<LearningCandidateStatus>(
         "learning candidate status",
         &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
@@ -461,6 +467,7 @@ fn learning_candidate_summary_from_row(row: &PgRow) -> Result<LearningCandidateS
             .and_then(|value| Uuid::parse_str(&value).ok())
             .map(ContactId),
         candidate_type,
+        proposal_kind,
         status,
         target_id: row.try_get("target_id").map_err(map_sqlx_error)?,
         target_label: row.try_get("target_label").map_err(map_sqlx_error)?,

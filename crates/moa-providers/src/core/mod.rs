@@ -2,6 +2,8 @@
 
 pub(crate) mod concurrency;
 pub(crate) mod concurrency_factory;
+#[cfg(test)]
+pub(crate) mod coordination_test_support;
 pub mod factory;
 pub(crate) mod global_concurrency;
 pub(crate) mod http;

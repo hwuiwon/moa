@@ -5,6 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::guardrails::AgentGuardrailPolicy;
+use super::hands::{BuiltinPolicyRevision, SandboxPolicySnapshot, SandboxProfile};
 use super::memory::{InformationBarrierClearances, InformationBarrierId};
 
 /// Built-in global default agent revision identifier.
@@ -47,9 +48,35 @@ pub struct ResolvedArtifactRevisionRef {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LockedToolRef {
     /// Stable tool name used in model-visible schemas and tool calls.
+    ///
+    /// For a connector tool this is the server-qualified reference, not the name
+    /// the server publishes, because that is the name the model is shown and the
+    /// only one that identifies the tool unambiguously across connectors.
     pub name: String,
-    /// Stable schema or catalog hash used for replay and audit.
-    pub schema_hash: String,
+    /// Hash over this dependency's name and provider namespace.
+    ///
+    /// This is a tool *identity*, not a schema pin, and the distinction is
+    /// load-bearing: two revisions of a tool whose input schema changed
+    /// completely produce the same value here, because nothing about the schema
+    /// is hashed. Comparing this across agent revisions answers "is this the
+    /// same tool", never "is this the same contract".
+    ///
+    /// **There is no schema pin for turn-scoped tool loadouts today.** A
+    /// connector that changes a tool's schema mid-session changes what the
+    /// router will accept while the model keeps seeing the schema compiled into
+    /// its cached prompt prefix, and nothing here detects that. Execution *runs*
+    /// are pinned by a different mechanism — the authorization envelope matches
+    /// the whole `CapabilityReference`, whose version does cover the input
+    /// schema — so this gap is specific to conversational turns.
+    ///
+    /// Building the missing pin needs a session-scoped carrier for the compiled
+    /// loadout revision, and there are two ways to get one:
+    /// 1. Persist the revision on the session itself, which costs a migration
+    ///    and a session-store change but makes the pin independent of agents.
+    /// 2. Make this field a real schema hash by injecting the live tool catalog
+    ///    into agent resolution, which needs no migration but inverts a
+    ///    dependency so agent resolution reads the running tool router.
+    pub identity_hash: String,
     /// Optional provider or catalog namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -233,6 +260,46 @@ impl AgentToolPolicy {
     }
 }
 
+/// Sandbox policy an agent revision declares for the hands it uses.
+///
+/// This is the third of the four layers intersected into a sandbox's effective
+/// profile. `Unset` is not "no policy": it is the identity element of that
+/// intersection, so an agent that declares nothing cannot widen what the
+/// deployment, the tenant, or the route already bounded. It still carries a
+/// named revision into the policy identity hash, so an agent that later starts
+/// declaring limits changes the hash and cannot reuse an old sandbox.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AgentSandboxPolicy {
+    /// The agent adds no sandbox restriction of its own.
+    #[default]
+    Unset,
+    /// The agent tightens the sandbox with its own authored profile.
+    Declared {
+        /// Revision identifying the agent's authored sandbox policy.
+        revision: String,
+        /// The profile the agent declares.
+        profile: SandboxProfile,
+    },
+}
+
+impl AgentSandboxPolicy {
+    /// Builds the policy-layer snapshot this agent contributes.
+    ///
+    /// [`AgentSandboxPolicy::Unset`] contributes the fully permissive identity
+    /// layer, which restricts nothing but is still hash-significant.
+    pub fn snapshot(&self) -> crate::error::Result<SandboxPolicySnapshot> {
+        match self {
+            Self::Unset => Ok(SandboxPolicySnapshot::builtin(
+                BuiltinPolicyRevision::AgentUnset,
+            )),
+            Self::Declared { revision, profile } => {
+                SandboxPolicySnapshot::new(revision, profile.clone())
+            }
+        }
+    }
+}
+
 /// Compact policy snapshot copied onto a session when an agent revision is selected.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPolicySnapshot {
@@ -257,6 +324,9 @@ pub struct AgentPolicySnapshot {
     /// Runtime input and output guardrail policy.
     #[serde(default)]
     pub guardrail_policy: AgentGuardrailPolicy,
+    /// Runtime sandbox resource and egress policy layer.
+    #[serde(default)]
+    pub sandbox_policy: AgentSandboxPolicy,
     /// Reproducibility lock used for this session or simulation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_lock: Option<AgentRevisionLock>,
@@ -312,6 +382,7 @@ impl AgentContext {
             action_policy: AgentActionPolicy::default(),
             tool_policy: AgentToolPolicy::default(),
             guardrail_policy: AgentGuardrailPolicy::default(),
+            sandbox_policy: AgentSandboxPolicy::Unset,
             revision_lock: Some(revision_lock),
         };
         Self {
@@ -359,5 +430,40 @@ impl AgentContext {
     /// Returns whether this pinned context allows a tool call by name.
     pub fn allows_tool(&self, tool_name: &str) -> crate::error::Result<bool> {
         Ok(self.parsed_policy_snapshot()?.tool_policy.allows(tool_name))
+    }
+
+    /// Returns the tool names this agent explicitly depends on, without
+    /// duplicates and in the order the lock records them.
+    ///
+    /// These are the agent's own tools plus the tools its pinned skills declare.
+    /// The order is not resorted here: the revision lock is already canonically
+    /// ordered so its hash is stable, and imposing a second order would only
+    /// disagree with the pinned one. The locked list comes first because it is
+    /// the replayable set; names appearing only in the tool policy are appended
+    /// so an agent that pins tools without a full revision lock is still
+    /// honoured.
+    ///
+    /// A consumer that must reduce a loadout to fit a schema cap keeps these
+    /// ahead of undeclared tools: an agent or skill that named a tool cannot do
+    /// its job without it, whatever that tool's name happens to sort as.
+    #[must_use]
+    pub fn declared_tool_names(&self) -> Vec<String> {
+        let mut declared = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let policy_tools = self
+            .parsed_policy_snapshot()
+            .map(|snapshot| snapshot.tool_policy.tools)
+            .unwrap_or_default();
+        for name in self
+            .tool_dependencies
+            .iter()
+            .map(|locked| locked.name.clone())
+            .chain(policy_tools)
+        {
+            if seen.insert(name.clone()) {
+                declared.push(name);
+            }
+        }
+        declared
     }
 }

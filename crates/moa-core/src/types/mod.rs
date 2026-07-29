@@ -13,6 +13,7 @@ pub mod credentials;
 pub mod events_stream;
 pub mod execution_planning;
 pub mod experience;
+pub mod experiments;
 pub mod guardrails;
 pub mod hands;
 pub mod identifiers;

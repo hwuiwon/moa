@@ -63,6 +63,7 @@ use crate::{
         consolidate::{Consolidate, ConsolidateImpl},
         execution_run::{ExecutionRun, ExecutionRunImpl},
         execution_task::{ExecutionTask, ExecutionTaskImpl},
+        session_retention::{SessionRetention, SessionRetentionImpl},
         turn_events::TurnEventAppender,
         turn_execution::{TurnExecution, implementation::TurnExecutionImpl},
         worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
@@ -105,6 +106,7 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "KnowledgeSyncIngestion",
     "KnowledgeIndexRebuild",
     "Consolidate",
+    "SessionRetention",
     "TenantPurge",
     "SecurityEvents",
 ];
@@ -149,7 +151,6 @@ pub fn build_endpoint(
     fga_client: Option<FgaClient>,
     providers: Arc<ProviderRegistry>,
     tool_router: Arc<ToolRouter>,
-    tool_schemas: Arc<Vec<serde_json::Value>>,
     session_limits: SessionLimitsConfig,
     config: Arc<MoaConfig>,
     contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
@@ -158,9 +159,18 @@ pub fn build_endpoint(
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
     runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
+    score_lineage: Option<crate::lineage::ScoreLineageHandle>,
 ) -> Endpoint {
     let mut builder = Endpoint::builder()
-        .bind(SessionStoreImpl::new(session_store.clone(), pool.clone(), config.clone()).serve())
+        .bind(
+            SessionStoreImpl::new(
+                session_store.clone(),
+                pool.clone(),
+                config.clone(),
+                runtime_cache.clone(),
+            )
+            .serve(),
+        )
         .bind(
             LLMGatewayImpl::new(providers.clone())
                 .with_session_limits(session_limits.clone())
@@ -197,7 +207,7 @@ pub fn build_endpoint(
         .bind(IngestionVOImpl.serve())
         .bind(
             ToolExecutorImpl::new(tool_router.clone())
-                .with_session_store(session_store.clone())
+                .with_session_store(session_store.clone(), session_store.clone())
                 .serve(),
         )
         .bind(ActionPolicyImpl::new(tool_router.clone(), session_store.clone()).serve())
@@ -218,6 +228,7 @@ pub fn build_endpoint(
                 kms.clone(),
                 credential_vault.clone(),
                 config.as_ref(),
+                runtime_cache.clone(),
             ))
             .serve(),
         )
@@ -237,6 +248,7 @@ pub fn build_endpoint(
                 kms.clone(),
                 config.clone(),
                 session_store.clone(),
+                runtime_cache.clone(),
             )
             .serve(),
         )
@@ -245,14 +257,21 @@ pub fn build_endpoint(
         .bind(SkillsImpl::new(pool.clone()).serve())
         .bind(CronJobImpl.serve())
         .bind(
-            SessionImpl::new(session_store.clone(), session_limits.clone(), runtime_cache).serve(),
+            SessionImpl::new(
+                session_store.clone(),
+                pool.clone(),
+                config.clone(),
+                session_limits.clone(),
+                runtime_cache.clone(),
+            )
+            .serve(),
         )
         .bind(
             WorkerImpl::new(
                 session_store.clone(),
                 session_limits.clone(),
                 providers.clone(),
-                tool_schemas.clone(),
+                tool_router.clone(),
             )
             .serve(),
         )
@@ -298,33 +317,37 @@ pub fn build_endpoint(
                 kms.clone(),
                 credential_vault.clone(),
                 config.clone(),
+                runtime_cache.clone(),
             )
             .serve(),
         )
         .bind(KnowledgeIndexRebuildImpl::new(pool.clone(), embedding_provider.clone()).serve())
-        .bind(
-            ConsolidateImpl::new(
-                pool.clone(),
-                kms,
-                config.clone(),
-                embedding_provider,
-                session_store.clone(),
-            )
-            .serve(),
-        );
+        .bind(SessionRetentionImpl::new(session_store.clone()).serve())
+        .bind(ConsolidateImpl::new(pool.clone(), kms, config.clone(), embedding_provider).serve());
 
     {
         builder = builder.bind(
-            SkillLearningImpl::new(session_store.clone(), config.clone(), providers.clone())
-                .serve(),
+            SkillLearningImpl::new(
+                session_store.clone(),
+                config.clone(),
+                providers.clone(),
+                runtime_cache,
+            )
+            .serve(),
         );
     }
 
     builder = builder
-        .bind(ExperimentRunImpl::new(pool.clone(), session_store.clone()).serve())
+        .bind(ExperimentRunImpl::new(pool.clone(), session_store.clone(), config.clone()).serve())
         .bind(
-            ExperimentTrialRunImpl::new(pool.clone(), session_store.clone(), providers.clone())
-                .serve(),
+            ExperimentTrialRunImpl::new(
+                pool.clone(),
+                session_store.clone(),
+                providers.clone(),
+                score_lineage,
+                config.clone(),
+            )
+            .serve(),
         );
 
     // One durable event-append dependency, built here and owned by both turn
@@ -349,7 +372,6 @@ pub fn build_endpoint(
                 session_store,
                 config,
                 tool_router,
-                tool_schemas,
                 lineage,
                 channel_adapters,
                 event_appender,

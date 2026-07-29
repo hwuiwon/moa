@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 metrics.workspace = true
+metrics-exporter-otel.workspace = true
 metrics-exporter-prometheus.workspace = true
 moa-core = { workspace = true }
 moa-config = { workspace = true }

@@ -224,7 +224,12 @@ async fn instruction_stage_appends_workspace_instructions_when_present_and_skips
 }
 
 #[tokio::test]
-async fn tool_definition_stage_caps_tool_count_at_max_and_orders_deterministically() -> Result<()> {
+async fn tool_definition_stage_caps_by_declared_priority_and_presents_canonically() -> Result<()> {
+    // Pins: the cap drops from the END of the declared loadout, not from the end
+    // of the alphabet. The fixture supplies tools in reverse-lexical order, so
+    // the two orders disagree completely and only one of them can produce the
+    // kept set. Presentation is then sorted by name, because the offered schemas
+    // sit in a cached prompt prefix that must be byte-stable across turns.
     let tool_names = (0..50)
         .rev()
         .map(|index| format!("tool_{index:02}"))
@@ -236,12 +241,13 @@ async fn tool_definition_stage_caps_tool_count_at_max_and_orders_deterministical
         .build();
     let mut ctx = fixture.ctx;
 
-    // ToolDefinitionProcessor sorts schemas by name and caps the stable prefix at 30 tools.
     let output = ToolDefinitionProcessor::new(fixture.tool_schemas.clone())
         .process(&mut ctx)
         .await?;
 
-    let expected_names = (0..30)
+    // The first 30 of the declared order are tool_49 down to tool_20; they are
+    // then presented ascending.
+    let expected_names = (20..50)
         .map(|index| format!("tool_{index:02}"))
         .collect::<Vec<_>>();
     let actual_names = ctx
@@ -251,7 +257,7 @@ async fn tool_definition_stage_caps_tool_count_at_max_and_orders_deterministical
         .collect::<Result<Vec<_>>>()?;
     assert_eq!(
         actual_names, expected_names,
-        "ToolDefinitionProcessor: tool ordering or cap changed"
+        "ToolDefinitionProcessor: the cap must keep the declared-priority prefix and present it by name"
     );
     assert_eq!(
         output.items_included, expected_names,

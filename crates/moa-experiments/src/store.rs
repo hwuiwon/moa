@@ -4,9 +4,15 @@ use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::memory::RlsContext;
 use moa_core::{
-    error::MoaError, error::Result as MoaResult, types::action_policy::ActionRuleScope,
-    types::contact::ContactId, types::identifiers::ModelId, types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    error::MoaError,
+    error::Result as MoaResult,
+    types::action_policy::ActionRuleScope,
+    types::contact::ContactId,
+    types::experiments::{ExperimentCancelSignal, ExperimentScorecard},
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
 use moa_scoring::ensure_score_run_parent;
@@ -15,9 +21,9 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
-    NewExperimentRun, NewExperimentTrial,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTrialRecord,
+    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun,
+    NewExperimentTrial,
 };
 use crate::scores::{SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL};
 
@@ -60,6 +66,39 @@ impl ExperimentStore {
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
         row.as_ref().map(run_from_row).transpose()
+    }
+
+    /// Loads the authorized cancellation fence for a scoped experiment run.
+    pub async fn load_run_cancel_signal(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+    ) -> MoaResult<Option<ExperimentCancelSignal>> {
+        let parts = ScopeParts::from_scope(scope);
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        let signal = sqlx::query_scalar::<_, Option<Value>>(
+            r#"
+            SELECT cancel_signal
+            FROM moa.experiment_run
+            WHERE run_uid = $4
+              AND scope = $1
+              AND storage_partition_id IS NOT DISTINCT FROM $2
+              AND user_id IS NOT DISTINCT FROM $3
+            "#,
+        )
+        .bind(parts.scope)
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(run_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?
+        .flatten();
+        conn.commit().await?;
+        signal
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| MoaError::SerializationError(error.to_string()))
     }
 
     /// Inserts a new experiment run or returns the scoped idempotent existing row.
@@ -589,15 +628,18 @@ impl ExperimentStore {
         &self,
         scope: &ActionRuleScope,
         run_uid: Uuid,
-        reason: String,
+        signal: ExperimentCancelSignal,
     ) -> MoaResult<(Option<ExperimentRunRecord>, Vec<ExperimentTrialRecord>)> {
         let parts = ScopeParts::from_scope(scope);
+        let signal_json = serde_json::to_value(&signal)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
         let run_row = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_run
             SET status = 'cancelled',
+                cancel_signal = $6,
                 error = CASE
                     WHEN status IN ('completed', 'failed', 'cancelled') THEN error
                     ELSE $5
@@ -620,7 +662,8 @@ impl ExperimentStore {
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
-        .bind(reason.clone())
+        .bind(signal.reason.clone())
+        .bind(signal_json)
         .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -645,7 +688,7 @@ impl ExperimentStore {
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
-        .bind(reason)
+        .bind(signal.reason)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -718,6 +761,43 @@ impl ExperimentStore {
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(trial_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        row.as_ref().map(trial_from_row).transpose()
+    }
+
+    /// Persists the independent terminal-evidence digest for one trial.
+    ///
+    /// Replays may write the same digest, but a different digest cannot replace
+    /// the evidence identity already finalized for the trial.
+    pub async fn set_trial_final_evidence_hash(
+        &self,
+        scope: &ActionRuleScope,
+        trial_uid: Uuid,
+        evidence_hash: &[u8],
+    ) -> MoaResult<Option<ExperimentTrialRecord>> {
+        let parts = ScopeParts::from_scope(scope);
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        let row = sqlx::query(&format!(
+            r#"
+            UPDATE moa.experiment_trial
+            SET final_evidence_hash = $5,
+                updated_at = now()
+            WHERE trial_uid = $4
+              AND scope = $1
+              AND storage_partition_id IS NOT DISTINCT FROM $2
+              AND user_id IS NOT DISTINCT FROM $3
+              AND (final_evidence_hash IS NULL OR final_evidence_hash = $5)
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
+        .bind(parts.scope)
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(trial_uid)
+        .bind(evidence_hash)
         .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -1064,7 +1144,7 @@ const TRIAL_COLUMNS: &str = "trial_uid, run_uid, storage_partition_id, user_id, 
      target_kind, variant_key, plan_revision_uid, persona_id, profile_id, \
      scenario_id, data_bundle_ids, artifact_revision_uids, \
      simulator, target_model, seed, session_id, execution_run_uid, \
-     score_run_id, turn_count, stop_reason, error, trace_id, \
+     score_run_id, final_evidence_hash, turn_count, stop_reason, error, trace_id, \
      started_at, completed_at, created_at, updated_at";
 
 fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
@@ -1158,6 +1238,7 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
         session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
         execution_run_uid: row.col("execution_run_uid")?,
         score_run_id: row.col("score_run_id")?,
+        final_evidence_hash: row.col("final_evidence_hash")?,
         turn_count: row.col("turn_count")?,
         stop_reason: stop_reason_text
             .as_deref()

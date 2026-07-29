@@ -1,6 +1,9 @@
 //! Experiment-owned score sources, trial joins, summaries, and comparisons.
 
-use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
+use moa_core::{
+    types::experiments::ScorecardValueType, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use moa_scoring::{Error, ScoreSummaryRow};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -279,11 +282,13 @@ pub async fn compare_experiment_score_breakdown_for_tenant(
 
 fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, Error> {
     let n: i64 = row.try_get("n")?;
+    let value_type: String = row.try_get("value_type")?;
     let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
     let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
     Ok(ScoreSummaryRow {
         name: row.try_get("name")?,
-        value_type: row.try_get("value_type")?,
+        value_type: ScorecardValueType::from_db(&value_type)
+            .ok_or(Error::InvalidScoreValueType { value: value_type })?,
         n: u64::try_from(n).map_err(|_| Error::IntegerTooLarge { field: "n" })?,
         mean_or_rate: numeric_mean.or(boolean_rate),
     })

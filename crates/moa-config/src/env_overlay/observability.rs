@@ -9,7 +9,6 @@ pub(super) fn optional_section_seed(path: &[&str]) -> Option<Value> {
             "database": "moa",
             "user": null,
             "password": null,
-            "lineage_ttl_days": 30,
             "export_poll_secs": 15,
             "export_batch_rows": 5000,
         })),
@@ -95,7 +94,6 @@ mod tests {
         assert_eq!(clickhouse.database, "moa");
         assert_eq!(clickhouse.user, None);
         assert_eq!(clickhouse.password.as_deref(), Some("redacted"));
-        assert_eq!(clickhouse.lineage_ttl_days, 30);
         assert_eq!(clickhouse.export_poll_secs, 30);
         assert_eq!(clickhouse.export_batch_rows, 2500);
     }

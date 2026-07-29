@@ -194,6 +194,28 @@ Full chunk text lives in `moa.knowledge_chunks`; graph properties stay compact
 and citation-friendly. Graph properties must not contain provider tokens,
 account tokens, raw credential material, or unbounded raw source payloads.
 
+## Tenant-Knowledge Retrieval Policy
+
+Tenant knowledge uses vector and lexical retrieval. Both production entry
+points disable graph expansion for this source tier, while contact-memory graph
+retrieval remains unchanged.
+
+Knowledge ingestion still writes the structural `Source -> Document -> Chunk`
+graph plus bounded deterministic title, heading, and fact links used by storage,
+inspection, and lineage. It does not run a separate semantic entity/relation
+extractor, persist semantic extraction cache rows, or expose a configuration
+switch for that unused work.
+
+This is an intentional YAGNI decision based on the 2026-07-28 WixQA
+measurements: deterministic semantic extraction produced zero ranking rescues
+across 350 questions, while its entity-consuming retrieval arm increased p95 by
+up to 64%. A future semantic extractor must first demonstrate a production
+reader and a measured retrieval gain; it should not be added as dormant
+ingestion plumbing.
+
+Experiment-only graph policies and graph-memory features used by other memory
+subsystems are separate from this decision and remain available.
+
 ## Retrieval Contract
 
 `moa-retrieval` owns retrieval fusion and admission; `moa-brain` owns context

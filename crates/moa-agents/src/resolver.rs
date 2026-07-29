@@ -15,9 +15,9 @@ use moa_core::{
     types::agent::AgentActionPolicy, types::agent::AgentContext,
     types::agent::AgentKnowledgePolicy, types::agent::AgentKnowledgeScopeMode,
     types::agent::AgentModelPolicy, types::agent::AgentPolicySnapshot,
-    types::agent::AgentRevisionLock, types::agent::AgentSkillPolicy,
-    types::agent::AgentSkillPolicyMode, types::agent::AgentToolPolicy,
-    types::agent::AgentToolPolicyMode, types::agent::LockedToolRef,
+    types::agent::AgentRevisionLock, types::agent::AgentSandboxPolicy,
+    types::agent::AgentSkillPolicy, types::agent::AgentSkillPolicyMode,
+    types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode, types::agent::LockedToolRef,
     types::agent::ResolvedArtifactRevisionRef, types::guardrails::AgentGuardrailPolicy,
     types::guardrails::AgentGuardrailStagePolicy, types::identifiers::ModelId,
 };
@@ -96,6 +96,7 @@ impl AgentResolver {
             &definition.guardrail_policy,
             model_policy.fallback_model.as_deref(),
         );
+        let sandbox_policy = definition.sandbox_policy.clone();
         let instructions = instructions_from_definition(definition);
         let resolved_policy = ResolvedHashPolicy {
             instructions: &instructions,
@@ -105,15 +106,21 @@ impl AgentResolver {
             action_policy: &action_policy,
             tool_policy: &tool_policy,
             guardrail_policy: &guardrail_policy,
+            sandbox_policy: &sandbox_policy,
         };
         let revision_lock = match pointer.as_ref() {
             Some(pointer) => pointer.revision_lock.clone(),
             None => {
                 let reference_paths = revision.document.reference_paths();
-                let artifact_dependencies = self
+                let resolved = self
                     .resolve_artifact_dependencies(scope, &reference_paths)
                     .await?;
-                let tool_dependencies = locked_tools_from_definition(definition, &reference_paths);
+                let artifact_dependencies = resolved.artifacts;
+                let tool_dependencies = locked_tools_from_definition(
+                    definition,
+                    &reference_paths,
+                    &resolved.skill_tools,
+                );
                 let policy_hash = policy_hash_for(
                     revision.revision_uid,
                     &artifact_dependencies,
@@ -140,6 +147,7 @@ impl AgentResolver {
             action_policy: action_policy.clone(),
             tool_policy: tool_policy.clone(),
             guardrail_policy: guardrail_policy.clone(),
+            sandbox_policy: sandbox_policy.clone(),
             revision_lock: Some(revision_lock.clone()),
         };
         let policy_snapshot = serde_json::to_value(&snapshot)
@@ -222,15 +230,25 @@ impl AgentResolver {
         row.as_ref().map(pointer_from_row).transpose()
     }
 
+    /// Resolves this agent's artifact dependencies and the tools those
+    /// artifacts declare.
+    ///
+    /// Skill-declared tools are collected here rather than by a second pass
+    /// because this is the only place the pinned skill revisions are loaded.
+    /// They belong in the lock for the same reason the agent's own tools do: a
+    /// skill that cannot reach the tool it was written against is a skill that
+    /// silently does nothing, and a consumer reducing a loadout to fit a schema
+    /// cap has no other way to know the tool was required.
     async fn resolve_artifact_dependencies(
         &self,
         scope: &ActionRuleScope,
         refs: &[(String, ArtifactRef)],
-    ) -> Result<Vec<ResolvedArtifactRevisionRef>> {
+    ) -> Result<ResolvedAgentDependencies> {
         let registry = ArtifactRegistry::new(self.pool.clone());
         let mut seen_refs = BTreeSet::new();
         let mut loaded_revisions = BTreeMap::new();
         let mut dependencies = Vec::new();
+        let mut skill_tools = Vec::new();
         for (_, artifact_ref) in refs {
             if !seen_refs.insert(artifact_ref.to_string()) {
                 continue;
@@ -246,6 +264,7 @@ impl AgentResolver {
                         artifact_ref,
                     )
                     .await?;
+                    skill_tools.extend(skill_declared_tools(&revision));
                     dependencies.push(resolved_dependency(artifact_ref, &revision));
                 }
                 ArtifactRef::Action { connector, .. } => {
@@ -265,8 +284,45 @@ impl AgentResolver {
         }
         dependencies.sort_by(|left, right| left.reference.cmp(&right.reference));
         dependencies.dedup_by(|left, right| left.reference == right.reference);
-        Ok(dependencies)
+        skill_tools.sort();
+        skill_tools.dedup();
+        Ok(ResolvedAgentDependencies {
+            artifacts: dependencies,
+            skill_tools,
+        })
     }
+}
+
+/// One agent's resolved artifact dependencies and the tools they declare.
+struct ResolvedAgentDependencies {
+    artifacts: Vec<ResolvedArtifactRevisionRef>,
+    skill_tools: Vec<String>,
+}
+
+/// Returns the registered tool names one published skill revision declares.
+///
+/// Both declaration sites count: `allowed_tools` is the skill's stated tool
+/// surface, and a `Tool`-kind action's reference is a tool the skill will
+/// actually invoke. A skill that lists a tool in neither place is not depending
+/// on it.
+fn skill_declared_tools(revision: &StoredArtifactRevision) -> Vec<String> {
+    let ArtifactDefinition::Skill(skill) = &revision.document.definition else {
+        return Vec::new();
+    };
+    skill
+        .allowed_tools
+        .iter()
+        .cloned()
+        .chain(
+            skill
+                .actions
+                .iter()
+                .filter_map(|action| match action.artifact_ref.as_ref() {
+                    Some(ArtifactRef::Tool { name }) => Some(name.clone()),
+                    _ => None,
+                }),
+        )
+        .collect()
 }
 
 async fn load_dependency_revision(
@@ -468,9 +524,16 @@ fn sorted_unique<T: ToString>(values: &[T]) -> Vec<String> {
     values
 }
 
+/// Builds the exact tool set this agent revision locks.
+///
+/// `skill_tools` are the tools the agent's pinned skills declare. They are
+/// locked alongside the agent's own tools but stay subject to the agent's
+/// `denied_tools`: a skill cannot grant itself a tool the agent explicitly
+/// refused, or a skill dependency would become a way around the agent's policy.
 fn locked_tools_from_definition(
     definition: &AgentDefinition,
     refs: &[(String, ArtifactRef)],
+    skill_tools: &[String],
 ) -> Vec<LockedToolRef> {
     let denied_tools = definition
         .tool_policy
@@ -495,8 +558,14 @@ fn locked_tools_from_definition(
                     ArtifactRef::Tool { .. } => None,
                 }),
         )
+        .chain(
+            skill_tools
+                .iter()
+                .filter(|name| !denied_tools.contains(*name))
+                .cloned(),
+        )
         .map(|name| LockedToolRef {
-            schema_hash: stable_tool_hash(&name, "builtin"),
+            identity_hash: stable_tool_identity_hash(&name, "builtin"),
             name,
             provider: Some("builtin".to_string()),
         })
@@ -506,7 +575,12 @@ fn locked_tools_from_definition(
     tools
 }
 
-fn stable_tool_hash(name: &str, provider: &str) -> String {
+/// Hashes one locked dependency's identity: its name and provider namespace.
+///
+/// Deliberately not a schema hash — see [`LockedToolRef::identity_hash`], which
+/// documents what this does and does not pin. The name says so, so a reader
+/// cannot mistake it for a contract check.
+fn stable_tool_identity_hash(name: &str, provider: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"moa.tool-lock.v2");
     hasher.update((provider.len() as u64).to_be_bytes());
@@ -534,6 +608,7 @@ fn policy_hash_for(
         action_policy: &'a AgentActionPolicy,
         tool_policy: &'a AgentToolPolicy,
         guardrail_policy: &'a AgentGuardrailPolicy,
+        sandbox_policy: &'a AgentSandboxPolicy,
     }
 
     let digest = canonical_hash(&HashInput {
@@ -547,6 +622,7 @@ fn policy_hash_for(
         action_policy: policy.action_policy,
         tool_policy: policy.tool_policy,
         guardrail_policy: policy.guardrail_policy,
+        sandbox_policy: policy.sandbox_policy,
     })
     .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     Ok(hex::encode(digest))
@@ -580,6 +656,7 @@ struct ResolvedHashPolicy<'a> {
     action_policy: &'a AgentActionPolicy,
     tool_policy: &'a AgentToolPolicy,
     guardrail_policy: &'a AgentGuardrailPolicy,
+    sandbox_policy: &'a AgentSandboxPolicy,
 }
 
 fn validate_revision_lock(
@@ -755,15 +832,44 @@ mod tests {
         };
         let refs = definition.reference_paths();
 
-        let locked = locked_tools_from_definition(&definition, &refs);
+        let locked = locked_tools_from_definition(&definition, &refs, &[]);
 
         assert_eq!(locked.len(), 1);
         assert_eq!(locked[0].name, "file_read");
         assert_eq!(locked[0].provider.as_deref(), Some("builtin"));
         assert_eq!(
-            locked[0].schema_hash,
-            stable_tool_hash("file_read", "builtin")
+            locked[0].identity_hash,
+            stable_tool_identity_hash("file_read", "builtin")
         );
+    }
+
+    #[test]
+    fn locked_tools_include_skill_declared_tools_but_never_a_denied_one() {
+        // Pins: a pinned skill's declared tools enter the agent's dependency
+        // lock, so a loadout forced to fit a schema cap keeps them; and a skill
+        // cannot use that path to reintroduce a tool the agent denied, which
+        // would make a skill dependency a way around agent policy.
+        let definition = AgentDefinition {
+            tool_policy: ToolPolicy {
+                mode: ToolPolicyMode::Allowlist,
+                tools: vec!["file_read".to_string()],
+                denied_tools: vec!["shell".to_string()],
+            },
+            ..agent_definition()
+        };
+        let refs = definition.reference_paths();
+
+        let locked = locked_tools_from_definition(
+            &definition,
+            &refs,
+            &["mcp__crm__lookup".to_string(), "shell".to_string()],
+        );
+
+        let names = locked
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["file_read", "mcp__crm__lookup"]);
     }
 
     fn agent_definition() -> AgentDefinition {
@@ -777,6 +883,7 @@ mod tests {
             action_policy: Default::default(),
             tool_policy: Default::default(),
             guardrail_policy: Default::default(),
+            sandbox_policy: Default::default(),
             revision_note: None,
             metadata: serde_json::json!({}),
         }

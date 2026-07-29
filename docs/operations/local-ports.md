@@ -21,7 +21,7 @@ bound on the developer machine.
 | Data | 10040 | `postgres` | Postgres for MOA and OpenFGA logical databases | `postgres:5432` |
 | Privacy | 10050 | `moa-pii-service` (`pii` profile) | PII classifier sidecar API | `moa-pii-service:8080` |
 | Runtime cache | 10051 | `valkey` | Runtime cache store (Redis protocol) | `valkey:6379` |
-| Analytics | 10061 | `clickhouse` | ClickHouse HTTP interface for lineage analytics | `clickhouse:8123` |
+| Analytics | 10061 | `clickhouse` | ClickHouse HTTP interface for exported analytics read models | `clickhouse:8123` |
 | Object storage | 9000 | `rustfs` | S3-compatible API for session attachments | `rustfs:9000` |
 | Object storage | 9001 | `rustfs` | RustFS web console | `rustfs:9001` |
 

@@ -7,16 +7,16 @@ use moa_artifacts::simulation::{
 };
 use moa_core::{
     types::agent::AgentSessionSelection, types::execution_planning::PinnedExecutionTemplateRef,
-    types::identifiers::ModelId,
+    types::experiments::ExperimentScorecard, types::identifiers::ModelId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::evaluator::validate_scorecard;
 use crate::model::{
-    ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentVariant,
-    NewExperimentTrial,
+    ExperimentSimulatorConfig, ExperimentTarget, ExperimentVariant, NewExperimentTrial,
 };
 
 /// Default target-agent turn cap for plan-expanded simulator trials.
@@ -33,6 +33,15 @@ pub enum PlanExpansionError {
     MissingPlanDimension {
         /// Empty matrix dimension.
         dimension: &'static str,
+    },
+    /// A plan declared no evidence requirements.
+    #[error("experiment plan must declare a scorecard")]
+    MissingScorecard,
+    /// A plan declared a scorecard this build cannot run.
+    #[error("experiment plan scorecard is not runnable: {message}")]
+    UnrunnableScorecard {
+        /// Registry validation error message.
+        message: String,
     },
     /// Agent-loop variants require a target model.
     #[error("agent-loop experiment plans require target_model")]
@@ -139,13 +148,30 @@ pub fn project_plan_run(
     Ok(PlanRunProjection {
         target,
         variant,
-        scorecard: ExperimentScorecard {
-            score_names: Vec::new(),
-            evaluator_metadata: definition.scorecard.clone(),
-        },
+        scorecard: plan_scorecard(definition)?,
         artifact_revision_uids,
         plan_revision_uid,
     })
+}
+
+/// Returns the plan's scorecard after checking this build can run every requirement.
+///
+/// # Errors
+///
+/// Returns [`PlanExpansionError::MissingScorecard`] when the plan declared none
+/// and [`PlanExpansionError::UnrunnableScorecard`] when it names an evaluator,
+/// version, output, effect, or configuration this build cannot honour.
+pub fn plan_scorecard(
+    definition: &ExperimentPlanDefinition,
+) -> Result<ExperimentScorecard, PlanExpansionError> {
+    let scorecard = definition
+        .scorecard
+        .clone()
+        .ok_or(PlanExpansionError::MissingScorecard)?;
+    validate_scorecard(&scorecard).map_err(|error| PlanExpansionError::UnrunnableScorecard {
+        message: error.to_string(),
+    })?;
+    Ok(scorecard)
 }
 
 /// Expands a plan into deterministic trial rows and target payloads.
@@ -530,6 +556,51 @@ mod tests {
         ExperimentBudget, ExperimentLearningProposalSettings, ExperimentSimulationDefinition,
         SimulationDataSource, SimulationDataSourceKind,
     };
+    use moa_core::types::experiments::{ScorecardEffect, ScorecardRequirement};
+
+    #[test]
+    fn plan_expansion_refuses_a_plan_that_declares_no_scorecard_offline() {
+        // Pins the second half of the `Option<ExperimentScorecard>` closure.
+        // Validation reports a missing scorecard, but a report is advisory —
+        // expansion is the path that actually mints trials, so it must refuse
+        // independently. A plan that reached this point without a scorecard
+        // would otherwise expand into trials that can never prove anything.
+        let mut definition = fixture_plan();
+        definition.scorecard = None;
+
+        let error = project_plan_run(&definition, fixture_uuid(1), "plan", "run")
+            .expect_err("a plan with no scorecard must not project a run");
+
+        assert!(
+            matches!(error, PlanExpansionError::MissingScorecard),
+            "unexpected expansion error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn plan_expansion_refuses_a_scorecard_this_build_cannot_run_offline() {
+        // Pins that a syntactically valid scorecard naming an evaluator this build
+        // does not have is refused at expansion rather than producing trials that
+        // wait forever for a row nothing will ever write.
+        let mut definition = fixture_plan();
+        definition.scorecard = Some(
+            ExperimentScorecard::new(vec![ScorecardRequirement {
+                evaluator_id: "evaluator_from_the_future".to_string(),
+                evaluator_version: "v1".to_string(),
+                config: json!({}),
+                effect: ScorecardEffect::Blocking,
+            }])
+            .expect("structurally valid"),
+        );
+
+        let error = project_plan_run(&definition, fixture_uuid(1), "plan", "run")
+            .expect_err("an unrunnable scorecard must not project a run");
+
+        assert!(
+            matches!(error, PlanExpansionError::UnrunnableScorecard { .. }),
+            "unexpected expansion error: {error:?}"
+        );
+    }
 
     #[test]
     fn expand_plan_trials_uses_ids_without_copying_simulation_blocks_offline() {
@@ -866,7 +937,15 @@ mod tests {
                 max_total_tokens: Some(10_000),
                 max_trial_tokens: Some(1_000),
             },
-            scorecard: json!({}),
+            scorecard: Some(
+                ExperimentScorecard::new(vec![ScorecardRequirement {
+                    evaluator_id: "target_completed".to_string(),
+                    evaluator_version: "v1".to_string(),
+                    config: json!({}),
+                    effect: ScorecardEffect::Blocking,
+                }])
+                .expect("fixture scorecard is valid"),
+            ),
             learning_proposals: ExperimentLearningProposalSettings::default(),
             ui: json!({}),
         }

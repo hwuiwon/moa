@@ -37,8 +37,10 @@ pub struct MissingTaskEmbedding {
 /// experience is a near-duplicate of work already awaiting review: it compares
 /// the new experience's task embedding against each open candidate's source
 /// experiences' embeddings via [`PostgresSessionStore::nearest_experience_task_embeddings`].
-/// `source_experience_ids` is the candidate row's origin list (its defining task),
-/// not the payload's accumulated-sibling list.
+/// The experiences come from the candidate's normalized provenance rows, which
+/// now include siblings accumulated after filing. That is a deliberate widening:
+/// dedup should recognize a recurring task against every experience the proposal
+/// has absorbed, not only the one that opened it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenProposalSource {
     /// Open candidate identifier.
@@ -46,8 +48,8 @@ pub struct OpenProposalSource {
     /// When the candidate was first filed. Used as the deterministic tie-break
     /// (oldest wins) when one experience maps to more than one open candidate.
     pub created_at: DateTime<Utc>,
-    /// Origin experiences that defined this candidate's task.
-    pub source_experience_ids: Vec<Uuid>,
+    /// Experiences this candidate is derived from.
+    pub experience_ids: Vec<Uuid>,
 }
 
 /// A nearest task-embedding neighbor within one tenant.
@@ -310,10 +312,21 @@ impl PostgresSessionStore {
         tenant_id: &TenantId,
     ) -> Result<Vec<OpenProposalSource>> {
         let learning_candidates = self.table_name("learning_candidates");
+        let learning_candidate_source = self.table_name("learning_candidate_source");
         let rows = sqlx::query(&format!(
-            "SELECT id, created_at, source_experience_ids FROM {learning_candidates} \
-             WHERE tenant_id = $1 AND candidate_type = $2 AND status = $3 \
-             ORDER BY created_at DESC, id ASC"
+            "SELECT candidate.id, candidate.created_at, \
+                    COALESCE(ARRAY_AGG(source.experience_id ORDER BY source.experience_id) \
+                             FILTER (WHERE source.experience_id IS NOT NULL), \
+                             '{{}}'::UUID[]) AS experience_ids \
+             FROM {learning_candidates} AS candidate \
+             LEFT JOIN {learning_candidate_source} AS source \
+                    ON source.candidate_id = candidate.id \
+                   AND source.source_kind = 'experience' \
+             WHERE candidate.tenant_id = $1 \
+               AND candidate.candidate_type = $2 \
+               AND candidate.status = $3 \
+             GROUP BY candidate.id, candidate.created_at \
+             ORDER BY candidate.created_at DESC, candidate.id ASC"
         ))
         .bind(tenant_id.to_string())
         .bind(LearningCandidateType::Skill.as_str())
@@ -326,9 +339,7 @@ impl PostgresSessionStore {
                 Ok(OpenProposalSource {
                     candidate_id: row.try_get("id").map_err(map_sqlx_error)?,
                     created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
-                    source_experience_ids: row
-                        .try_get("source_experience_ids")
-                        .map_err(map_sqlx_error)?,
+                    experience_ids: row.try_get("experience_ids").map_err(map_sqlx_error)?,
                 })
             })
             .collect()

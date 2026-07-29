@@ -4,20 +4,28 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
-use moa_artifacts::simulation::experiment_plan_response_schema;
+use moa_artifacts::simulation::{ExperimentTargetKind, experiment_plan_response_schema};
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::traits::Identity;
 use moa_core::{
-    error::MoaError, types::action_policy::ActionRuleScope, types::completion::CompletionRequest,
-    types::completion::JsonResponseFormat, types::context::ContextMessage,
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
-    types::identifiers::ModelId, types::identifiers::TenantId,
+    error::MoaError,
+    types::action_policy::ActionRuleScope,
+    types::completion::CompletionRequest,
+    types::completion::JsonResponseFormat,
+    types::context::ContextMessage,
+    types::experience::LearningCandidate,
+    types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateType,
+    types::experience::LearningProposalKind,
+    types::experience::LearningRiskClass,
+    types::experiments::{ExperimentCancelSignal, ExperimentScorecard},
+    types::identifiers::ModelId,
+    types::identifiers::TenantId,
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
-    Error, ScoreCompareRef, ScoreCompareRow, ScoreRunRef, ScoreSummary, ScoreSummaryRow,
-    compare_score_runs_for_tenant, score_summaries_for_tenant,
+    Error, ExperimentRunScoreRowsRef, ExperimentScoreRow, ScoreCompareRef, ScoreCompareRow,
+    ScoreSummaryRow, compare_score_runs_for_tenant, exact_experiment_run_score_rows_for_tenant,
 };
 use moa_wire::experiments::{
     AgentRevisionSimulationVariant, ExperimentCancelRequest, ExperimentCancelResponse,
@@ -33,13 +41,19 @@ use moa_wire::experiments::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::eligibility::{
+    ScorecardAssessment, ScorecardEligibility, ScorecardExpectation, ScorecardFinding,
+    ScorecardGroupRollup, assess_trial_scorecard, require_runnable_scorecard, roll_up_group,
+};
+use crate::evidence::TrialScoreTarget;
 use crate::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentTarget,
-    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant, NewExperimentRun,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTrialRecord,
+    ExperimentTrialStatus, ExperimentVariant, NewExperimentRun,
 };
 use crate::plan::project_plan_run;
 use crate::scores::{
@@ -323,6 +337,7 @@ pub async fn trial_status(
 pub async fn cancel_run(
     pool: sqlx::PgPool,
     request: ExperimentCancelRequest,
+    identity: Identity,
 ) -> Result<ExperimentCancelResponse> {
     let scope = tenant_scope(request.tenant_id);
     let reason = request
@@ -350,7 +365,14 @@ pub async fn cancel_run(
     // Cancel the run and reconcile its active trials atomically in one
     // transaction so the parent projection and trial rows can never diverge.
     let (run, _cancelled_trials) = store
-        .cancel_run_and_active_trials(&scope, request.run_uid, reason.clone())
+        .cancel_run_and_active_trials(
+            &scope,
+            request.run_uid,
+            ExperimentCancelSignal {
+                reason: reason.clone(),
+                identity,
+            },
+        )
         .await?;
     let run = run.ok_or_else(|| run_not_found(request.run_uid))?;
     record_experiment_run(run.status.as_str(), run.target_kind.as_str());
@@ -389,19 +411,6 @@ pub async fn propose_improvement_candidate(
             "experiment learning proposals require at least one completed trial",
         ));
     }
-    let run_score_summary = score_summaries_for_tenant(
-        &pool,
-        ScoreRunRef {
-            tenant_id: request.tenant_id,
-            run_id: run.score_run_id,
-        },
-    )
-    .await?;
-    if run_score_summary.rows.is_empty() {
-        return Err(bad_request(
-            "experiment learning proposals require score rows for the run score run",
-        ));
-    }
     let trial_breakdown = experiment_score_breakdown_for_tenant(
         &pool,
         ExperimentRunScoreRef {
@@ -410,14 +419,20 @@ pub async fn propose_improvement_candidate(
         },
     )
     .await?;
-    require_trial_score_rows(&completed_trials, &trial_breakdown.trials)?;
+    // Trial score runs are authoritative for plan-backed Behavior Lab. The
+    // previous gate also demanded rows on the RUN score run, which no trial path
+    // ever writes, so the only way to satisfy it was to seed rows out of band —
+    // exactly the "seeded rows prove query mechanics, not evidence" problem.
+    let scorecards =
+        experiment_run_scorecards(&pool, request.tenant_id, &run, &completed_trials).await?;
+    require_eligible_trial_scorecards(&scorecards)?;
 
     let draft_artifact_revision_uids = Vec::new();
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
         tenant_id: request.tenant_id,
         run: &run,
         completed_trials: &completed_trials,
-        run_score_summary: &run_score_summary,
+        scorecards: &scorecards,
         trial_rollup_rows: &trial_breakdown.trial_rollup_rows,
         trial_score_summaries: &trial_breakdown.trials,
         scenario_score_summaries: &trial_breakdown.scenarios,
@@ -445,17 +460,11 @@ pub async fn scores(
     request: ExperimentScoresRequest,
 ) -> Result<ExperimentScoresResponse> {
     let scope = tenant_scope(request.tenant_id);
-    let run =
-        load_required_run(&ExperimentStore::new(pool.clone()), &scope, request.run_uid).await?;
-    let score_response = score_summaries_for_tenant(
-        &pool,
-        ScoreRunRef {
-            tenant_id: request.tenant_id,
-            run_id: run.score_run_id,
-        },
-    )
-    .await?;
-    record_experiment_score_rows("scores", score_response.rows.len() as u64);
+    let store = ExperimentStore::new(pool.clone());
+    let run = load_required_run(&store, &scope, request.run_uid).await?;
+    let trials = store
+        .list_trials(&scope, run.run_uid, None, 100_000)
+        .await?;
     let trial_breakdown = experiment_score_breakdown_for_tenant(
         &pool,
         ExperimentRunScoreRef {
@@ -485,30 +494,38 @@ pub async fn scores(
             .sum(),
     );
 
+    let scorecards = experiment_run_scorecards(&pool, request.tenant_id, &run, &trials).await?;
+    // Keyed by trial so EVERY trial appears below, scored or not. Building the
+    // list from the score join alone silently omitted trials with zero evidence,
+    // which is exactly the trial a reader most needs to see.
+    let rows_by_trial = trial_breakdown
+        .trials
+        .into_iter()
+        .map(|summary| (summary.trial_uid, summary))
+        .collect::<BTreeMap<_, _>>();
+
     Ok(ExperimentScoresResponse {
         tenant_id: request.tenant_id,
         run_uid: run.run_uid,
         score_run_id: run.score_run_id,
-        rows: score_response
-            .rows
-            .into_iter()
-            .map(experiment_score_summary_row)
-            .collect(),
         trial_rollup_rows: trial_breakdown
             .trial_rollup_rows
             .into_iter()
             .map(experiment_score_summary_row)
             .collect(),
-        trials: trial_breakdown
+        trials: scorecards
             .trials
-            .into_iter()
-            .map(experiment_trial_score_summary)
+            .iter()
+            .map(|entry| experiment_trial_score_summary(entry, rows_by_trial.get(&entry.trial_uid)))
             .collect(),
         scenarios: trial_breakdown
             .scenarios
             .into_iter()
             .map(experiment_scenario_score_summary)
             .collect(),
+        run_scorecard: scorecards.run,
+        scenario_scorecards: scorecards.scenarios,
+        variant_scorecards: scorecards.variants,
     })
 }
 
@@ -581,8 +598,8 @@ pub struct ExperimentLearningProposalEvidence<'a> {
     pub run: &'a ExperimentRunRecord,
     /// Completed trials attached to the experiment run.
     pub completed_trials: &'a [ExperimentTrialRecord],
-    /// Score summary for the experiment run score run.
-    pub run_score_summary: &'a ScoreSummary,
+    /// Run, scenario, variant, and per-trial scorecards computed from trial rows.
+    pub scorecards: &'a ExperimentRunScorecards,
     /// Aggregate score rows across trial score runs.
     pub trial_rollup_rows: &'a [ScoreSummaryRow],
     /// Per-trial score summaries.
@@ -597,6 +614,40 @@ pub struct ExperimentLearningProposalEvidence<'a> {
     pub idempotency_key: Option<&'a str>,
     /// Candidate creation timestamp.
     pub now: chrono::DateTime<Utc>,
+}
+
+/// Builds the typed provenance for one experiment-derived proposal.
+///
+/// Every level the plan requires is emitted as a row: the run, each completed
+/// trial, the run's score run, the run's session when it had one, and each draft
+/// artifact revision the proposal points at. All of these already appeared in
+/// the candidate payload as uuid strings; the difference is that these can be
+/// joined, tenant-checked, and reached in reverse by an erasure.
+fn experiment_candidate_sources(
+    evidence: &ExperimentLearningProposalEvidence<'_>,
+) -> Vec<LearningCandidateSourceRef> {
+    let mut sources = vec![
+        LearningCandidateSourceRef::ExperimentRun {
+            run_uid: evidence.run.run_uid,
+        },
+        LearningCandidateSourceRef::ScoreRun {
+            run_id: evidence.run.score_run_id,
+        },
+    ];
+    if let Some(session_id) = evidence.run.session_id {
+        sources.push(LearningCandidateSourceRef::Session { session_id });
+    }
+    for trial in evidence.completed_trials {
+        sources.push(LearningCandidateSourceRef::ExperimentTrial {
+            trial_uid: trial.trial_uid,
+        });
+    }
+    for revision_uid in evidence.draft_artifact_revision_uids {
+        sources.push(LearningCandidateSourceRef::ArtifactRevision {
+            revision_uid: *revision_uid,
+        });
+    }
+    sources
 }
 
 /// Builds a proposed learning candidate from completed experiment evidence.
@@ -616,14 +667,24 @@ pub fn build_experiment_learning_candidate(
         tenant_id: evidence.tenant_id,
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
-        status: LearningCandidateStatus::Proposed,
+        // An experiment proposal names draft revisions but has no accept path
+        // that publishes one: `no_automatic_artifact_publish` is its own
+        // promotion requirement. It is therefore authoring work a human picks
+        // up, not a reviewable draft, and writing it as `Proposed` is what put
+        // it on the same queue as candidates that can actually be accepted.
+        proposal_kind: LearningProposalKind::SkillAuthoring,
+        status: LearningProposalKind::SkillAuthoring.initial_status(),
         target_id: Some(format!("experiment_run:{}", evidence.run.run_uid)),
         target_label: Some(format!("Experiment proposal for {}", evidence.run.name)),
         task_fingerprint: None,
         task_facets: None,
         payload,
         evaluation_payload: None,
-        source_experience_ids: Vec::new(),
+        // Run, trials, score run, session, and every draft revision this
+        // proposal points at, as rows. This candidate previously stood on
+        // nothing at all: an empty provenance array beside a payload full of
+        // uuids that no join could follow.
+        sources: experiment_candidate_sources(&evidence),
         confidence: None,
         risk_class: LearningRiskClass::Medium,
         promotion_requirements: vec![
@@ -672,7 +733,7 @@ struct ExperimentRunInputs {
 fn single_target_run_inputs(
     target: Option<Value>,
     variant: Option<Value>,
-    scorecard: Value,
+    scorecard: Option<ExperimentScorecard>,
 ) -> Result<ExperimentRunInputs> {
     let target = parse_payload::<ExperimentTarget>(
         "target",
@@ -682,7 +743,13 @@ fn single_target_run_inputs(
         "variant",
         variant.ok_or_else(|| bad_request("experiment variant is required without a plan"))?,
     )?;
-    let scorecard = parse_payload::<ExperimentScorecard>("scorecard", scorecard)?;
+    let scorecard =
+        scorecard.ok_or_else(|| bad_request("experiment scorecard is required without a plan"))?;
+    require_runnable_scorecard(&scorecard).map_err(|error| {
+        bad_request(format!(
+            "experiment scorecard is not runnable in this build: {error}"
+        ))
+    })?;
     let mut artifact_revision_uids = variant.artifact_revision_uids.clone();
     validate_target_variant(&target, &variant, &mut artifact_revision_uids)?;
     Ok(ExperimentRunInputs {
@@ -884,22 +951,164 @@ async fn experiment_plan_revision_uid(
     ))
 }
 
-fn require_trial_score_rows(
-    completed_trials: &[ExperimentTrialRecord],
-    score_trials: &[TrialScoreSummary],
-) -> Result<()> {
-    let scored_trial_ids = score_trials
+/// One trial's scorecard assessment with the plan coordinates that group it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialScorecardAssessment {
+    /// Trial the assessment belongs to.
+    pub trial_uid: Uuid,
+    /// Score run the trial writes into.
+    pub score_run_id: Uuid,
+    /// Deterministic trial key.
+    pub trial_key: String,
+    /// Variant key the trial ran.
+    pub variant_key: String,
+    /// Scenario the trial ran, when the plan named one.
+    pub scenario_id: Option<String>,
+    /// Assessment computed from this trial's exact score rows.
+    pub assessment: ScorecardAssessment,
+}
+
+/// Run, scenario, variant, and per-trial scorecards for one experiment run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExperimentRunScorecards {
+    /// Run-level rollup across every trial.
+    pub run: ScorecardGroupRollup,
+    /// Per-scenario rollups, ordered by scenario ID.
+    pub scenarios: Vec<ScorecardGroupRollup>,
+    /// Per-variant rollups, ordered by variant key.
+    pub variants: Vec<ScorecardGroupRollup>,
+    /// Per-trial assessments in trial order.
+    pub trials: Vec<TrialScorecardAssessment>,
+}
+
+/// Computes run, scenario, and variant scorecards from exact trial score rows.
+///
+/// Every level is derived from the same per-trial assessments, so a scenario can
+/// never look healthier than the trials inside it, and the run can never look
+/// healthier than its worst scenario.
+async fn experiment_run_scorecards(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    run: &ExperimentRunRecord,
+    trials: &[ExperimentTrialRecord],
+) -> Result<ExperimentRunScorecards> {
+    let rows = exact_experiment_run_score_rows_for_tenant(
+        pool,
+        ExperimentRunScoreRowsRef {
+            tenant_id,
+            experiment_run_uid: run.run_uid,
+        },
+    )
+    .await?;
+    let mut by_trial: BTreeMap<Uuid, Vec<ExperimentScoreRow>> = BTreeMap::new();
+    for row in rows {
+        by_trial.entry(row.trial_uid).or_default().push(row);
+    }
+
+    let mut assessments = Vec::with_capacity(trials.len());
+    for trial in trials {
+        let Some(target) = trial_score_target(trial) else {
+            // A trial with neither a session nor an execution run never reached a
+            // target, so nothing could have observed it. That is Incomplete, not
+            // a reason to skip the trial and let the run look eligible.
+            assessments.push(TrialScorecardAssessment {
+                trial_uid: trial.trial_uid,
+                score_run_id: trial.score_run_id,
+                trial_key: trial.trial_key.clone(),
+                variant_key: trial.variant_key.clone(),
+                scenario_id: trial.scenario_id.clone(),
+                assessment: ScorecardAssessment {
+                    eligibility: ScorecardEligibility::Incomplete,
+                    findings: vec![ScorecardFinding {
+                        score_name: "*".to_string(),
+                        detail: "trial has no target session or execution run".to_string(),
+                    }],
+                },
+            });
+            continue;
+        };
+        let trial_rows = by_trial
+            .get(&trial.trial_uid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let expectation = ScorecardExpectation {
+            score_run_id: trial.score_run_id,
+            experiment_run_uid: run.run_uid,
+            // The trial row is the authority for which pinned plan revision it
+            // ran; V000361's composite foreign key already refuses provenance
+            // that disagrees, and this re-checks it on the read path.
+            plan_revision_uid: trial.plan_revision_uid,
+            trial_uid: trial.trial_uid,
+            target,
+            // This independent trial-ledger value prevents a score row from
+            // supplying both the evidence claim and the value used to verify it.
+            evidence_hash: trial.final_evidence_hash.clone().unwrap_or_default(),
+        };
+        assessments.push(TrialScorecardAssessment {
+            trial_uid: trial.trial_uid,
+            score_run_id: trial.score_run_id,
+            trial_key: trial.trial_key.clone(),
+            variant_key: trial.variant_key.clone(),
+            scenario_id: trial.scenario_id.clone(),
+            assessment: assess_trial_scorecard(&run.scorecard, &expectation, trial_rows),
+        });
+    }
+
+    let all = assessments
         .iter()
-        .filter(|trial| !trial.rows.is_empty())
-        .map(|trial| trial.trial_uid)
-        .collect::<std::collections::BTreeSet<_>>();
-    let missing = completed_trials
-        .iter()
-        .find(|trial| !scored_trial_ids.contains(&trial.trial_uid));
-    if let Some(trial) = missing {
+        .map(|entry| entry.assessment.eligibility)
+        .collect::<Vec<_>>();
+    Ok(ExperimentRunScorecards {
+        run: roll_up_group(run.run_uid.to_string(), &all),
+        scenarios: grouped_rollups(&assessments, |entry| {
+            entry
+                .scenario_id
+                .clone()
+                .unwrap_or_else(|| "<none>".to_string())
+        }),
+        variants: grouped_rollups(&assessments, |entry| entry.variant_key.clone()),
+        trials: assessments,
+    })
+}
+
+fn grouped_rollups(
+    assessments: &[TrialScorecardAssessment],
+    key: impl Fn(&TrialScorecardAssessment) -> String,
+) -> Vec<ScorecardGroupRollup> {
+    let mut grouped: BTreeMap<String, Vec<ScorecardEligibility>> = BTreeMap::new();
+    for assessment in assessments {
+        grouped
+            .entry(key(assessment))
+            .or_default()
+            .push(assessment.assessment.eligibility);
+    }
+    grouped
+        .into_iter()
+        .map(|(key, eligibilities)| roll_up_group(key, &eligibilities))
+        .collect()
+}
+
+fn trial_score_target(trial: &ExperimentTrialRecord) -> Option<TrialScoreTarget> {
+    match trial.target_kind {
+        ExperimentTargetKind::ExecutionTemplate => trial
+            .execution_run_uid
+            .map(|execution_run_uid| TrialScoreTarget::ExecutionRun { execution_run_uid }),
+        ExperimentTargetKind::AgentLoop => trial
+            .session_id
+            .map(|session_id| TrialScoreTarget::Session { session_id }),
+    }
+}
+
+/// Refuses a proposal whose trials did not produce complete, passing evidence.
+///
+/// This replaces an any-row-per-trial check. One arbitrary score row attached to
+/// a trial used to satisfy that check; now every blocking requirement in the
+/// pinned scorecard needs exactly one correct, passing, provenance-backed row.
+fn require_eligible_trial_scorecards(scorecards: &ExperimentRunScorecards) -> Result<()> {
+    if scorecards.run.eligibility != ScorecardEligibility::Eligible {
         return Err(bad_request(format!(
-            "experiment trial {} has no score rows",
-            trial.trial_uid
+            "experiment learning proposals require an eligible scorecard; run scorecard is {}",
+            scorecards.run.eligibility.as_str()
         )));
     }
     Ok(())
@@ -942,7 +1151,12 @@ fn experiment_learning_candidate_payload(
         },
         "trials": evidence.completed_trials.iter().map(trial_evidence_payload).collect::<Vec<_>>(),
         "scores": {
-            "run": evidence.run_score_summary.rows.iter().map(score_row_payload).collect::<Vec<_>>(),
+            "scorecard": {
+                "run": scorecard_rollup_payload(&evidence.scorecards.run),
+                "scenarios": evidence.scorecards.scenarios.iter().map(scorecard_rollup_payload).collect::<Vec<_>>(),
+                "variants": evidence.scorecards.variants.iter().map(scorecard_rollup_payload).collect::<Vec<_>>(),
+                "trials": evidence.scorecards.trials.iter().map(trial_scorecard_payload).collect::<Vec<_>>(),
+            },
             "trial_rollup": evidence.trial_rollup_rows.iter().map(score_row_payload).collect::<Vec<_>>(),
             "trials": evidence.trial_score_summaries.iter().map(trial_score_payload).collect::<Vec<_>>(),
             "scenarios": evidence.scenario_score_summaries.iter().map(scenario_score_payload).collect::<Vec<_>>(),
@@ -991,6 +1205,27 @@ fn trial_evidence_payload(trial: &ExperimentTrialRecord) -> Value {
         "turn_count": trial.turn_count,
         "stop_reason": trial.stop_reason.map(|reason| reason.as_str()),
         "trace_id": trial.trace_id.clone(),
+    })
+}
+
+fn scorecard_rollup_payload(rollup: &ScorecardGroupRollup) -> Value {
+    serde_json::json!({
+        "key": rollup.key,
+        "eligibility": rollup.eligibility.as_str(),
+        "trials": rollup.trials,
+    })
+}
+
+fn trial_scorecard_payload(assessment: &TrialScorecardAssessment) -> Value {
+    serde_json::json!({
+        "trial_uid": assessment.trial_uid,
+        "trial_key": assessment.trial_key,
+        "variant_key": assessment.variant_key,
+        "scenario_id": assessment.scenario_id,
+        "eligibility": assessment.assessment.eligibility.as_str(),
+        "findings": assessment.assessment.findings.iter().map(|finding| {
+            serde_json::json!({ "score_name": finding.score_name, "detail": finding.detail })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -1202,18 +1437,28 @@ fn experiment_score_summary_row(row: ScoreSummaryRow) -> ExperimentScoreSummaryR
     }
 }
 
-fn experiment_trial_score_summary(row: TrialScoreSummary) -> ExperimentTrialScoreSummary {
+fn experiment_trial_score_summary(
+    assessment: &TrialScorecardAssessment,
+    summary: Option<&TrialScoreSummary>,
+) -> ExperimentTrialScoreSummary {
     ExperimentTrialScoreSummary {
-        trial_uid: row.trial_uid,
-        trial_key: row.trial_key,
-        score_run_id: row.score_run_id,
-        variant_key: row.variant_key,
-        scenario_id: row.scenario_id,
-        rows: row
-            .rows
-            .into_iter()
-            .map(experiment_score_summary_row)
-            .collect(),
+        trial_uid: assessment.trial_uid,
+        trial_key: assessment.trial_key.clone(),
+        score_run_id: assessment.score_run_id,
+        variant_key: assessment.variant_key.clone(),
+        scenario_id: assessment.scenario_id.clone(),
+        rows: summary
+            .map(|summary| {
+                summary
+                    .rows
+                    .iter()
+                    .cloned()
+                    .map(experiment_score_summary_row)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        eligibility: assessment.assessment.eligibility,
+        eligibility_findings: assessment.assessment.findings.clone(),
     }
 }
 
@@ -1285,8 +1530,11 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use moa_artifacts::simulation::ExperimentTargetKind;
     use moa_core::{
-        types::action_policy::ActionRuleScope, types::context::MessageRole,
-        types::identifiers::ModelId, types::identifiers::SessionId,
+        types::action_policy::ActionRuleScope,
+        types::context::MessageRole,
+        types::experiments::{ScorecardEffect, ScorecardRequirement, ScorecardValueType},
+        types::identifiers::ModelId,
+        types::identifiers::SessionId,
     };
     use serde_json::json;
 
@@ -1399,14 +1647,26 @@ mod tests {
         let tenant_id = tenant_id_from_str("tenant-a");
         let run = completed_run_record(tenant_id);
         let trials = vec![completed_trial_record(run.run_uid)];
-        let score_summary = ScoreSummary {
-            tenant_id,
-            run_id: run.score_run_id,
-            rows: vec![ScoreSummaryRow {
-                name: "quality".to_string(),
-                value_type: "numeric".to_string(),
-                n: 1,
-                mean_or_rate: Some(0.92),
+        let summary_rows = vec![ScoreSummaryRow {
+            name: "target_completed".to_string(),
+            value_type: ScorecardValueType::Boolean,
+            n: 1,
+            mean_or_rate: Some(1.0),
+        }];
+        let scorecards = ExperimentRunScorecards {
+            run: roll_up_group(run.run_uid.to_string(), &[ScorecardEligibility::Eligible]),
+            scenarios: Vec::new(),
+            variants: Vec::new(),
+            trials: vec![TrialScorecardAssessment {
+                trial_uid: trials[0].trial_uid,
+                score_run_id: trials[0].score_run_id,
+                trial_key: trials[0].trial_key.clone(),
+                variant_key: trials[0].variant_key.clone(),
+                scenario_id: trials[0].scenario_id.clone(),
+                assessment: ScorecardAssessment {
+                    eligibility: ScorecardEligibility::Eligible,
+                    findings: Vec::new(),
+                },
             }],
         };
         let trial_score_summary = TrialScoreSummary {
@@ -1415,19 +1675,19 @@ mod tests {
             score_run_id: trials[0].score_run_id,
             variant_key: trials[0].variant_key.clone(),
             scenario_id: trials[0].scenario_id.clone(),
-            rows: score_summary.rows.clone(),
+            rows: summary_rows.clone(),
         };
         let scenario_score_summary = ScenarioScoreSummary {
             scenario_id: trials[0].scenario_id.clone(),
-            rows: score_summary.rows.clone(),
+            rows: summary_rows.clone(),
         };
 
         let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
             tenant_id,
             run: &run,
             completed_trials: &trials,
-            run_score_summary: &score_summary,
-            trial_rollup_rows: &score_summary.rows,
+            scorecards: &scorecards,
+            trial_rollup_rows: &summary_rows,
             trial_score_summaries: std::slice::from_ref(&trial_score_summary),
             scenario_score_summaries: std::slice::from_ref(&scenario_score_summary),
             plan_revision_uid: fixture_uuid(20),
@@ -1436,7 +1696,16 @@ mod tests {
             now: fixture_time(),
         });
 
-        assert_eq!(candidate.status, LearningCandidateStatus::Proposed);
+        // Behavior Lab proposals are authoring items: they describe work a human
+        // would have to do, and there is no materializer that could accept one.
+        assert_eq!(
+            candidate.status,
+            moa_core::types::experience::LearningCandidateStatus::NeedsAuthoring
+        );
+        assert!(
+            !candidate.proposal_kind.is_reviewable(),
+            "an experiment proposal must not offer an accept path it cannot honour"
+        );
         assert_eq!(candidate.candidate_type, LearningCandidateType::Skill);
         assert_eq!(candidate.payload["kind"], "experiment_learning_proposal");
         assert_eq!(
@@ -1483,10 +1752,13 @@ mod tests {
                 execution_template: None,
                 metadata: json!({"plan_revision_uid": fixture_uuid(20)}),
             },
-            scorecard: ExperimentScorecard {
-                score_names: vec!["quality".to_string()],
-                evaluator_metadata: json!({}),
-            },
+            scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+                evaluator_id: "target_completed".to_string(),
+                evaluator_version: "v1".to_string(),
+                config: json!({}),
+                effect: ScorecardEffect::Blocking,
+            }])
+            .expect("fixture scorecard is valid"),
             score_run_id: fixture_uuid(4),
             session_id: Some(SessionId(fixture_uuid(2))),
             execution_run_uid: Some(fixture_uuid(5)),
@@ -1530,6 +1802,7 @@ mod tests {
             session_id: Some(SessionId(fixture_uuid(31))),
             execution_run_uid: Some(fixture_uuid(32)),
             score_run_id: fixture_uuid(33),
+            final_evidence_hash: Some(vec![7; 32]),
             turn_count: 3,
             stop_reason: Some(ExperimentTrialStopReason::Success),
             error: None,

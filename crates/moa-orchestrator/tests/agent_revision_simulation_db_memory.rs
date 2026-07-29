@@ -6,6 +6,7 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifact
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     types::action_policy::ActionRuleScope, types::identifiers::ModelId,
@@ -13,9 +14,8 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use moa_experiments::model::{
-    ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
-    ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun as NewExperiment,
-    NewExperimentTrial,
+    ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus, ExperimentTrialStopReason,
+    ExperimentVariant, NewExperimentRun as NewExperiment, NewExperimentTrial,
 };
 use moa_experiments::store::ExperimentStore;
 use moa_orchestrator::services::experiments::{
@@ -304,10 +304,13 @@ fn new_experiment(
             execution_template: None,
             metadata: json!({ "agent_revision_variants": variants }),
         },
-        scorecard: ExperimentScorecard {
-            score_names: vec!["task_success".to_string()],
-            evaluator_metadata: json!({ "judge": "offline" }),
-        },
+        scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("fixture scorecard is valid"),
         score_run_id: Uuid::now_v7(),
         session_id: None,
         execution_run_uid: None,

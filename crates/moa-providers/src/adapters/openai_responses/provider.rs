@@ -15,7 +15,9 @@ use tracing::Instrument;
 
 use crate::adapters::openai_responses::{build_responses_request, stream_responses_with_retry};
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
-use crate::core::concurrency_factory::{CallKind, ProviderConcurrency};
+use moa_config::ProviderPacingConfig;
+
+use crate::core::concurrency_factory::{CallKind, ProviderCoordination};
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::models::{self, PROVIDER_OPENAI};
 use crate::core::pacer::{PacerConfig, RatePacer};
@@ -96,7 +98,7 @@ impl OpenAIProvider {
             // Direct construction uses the flat per-provider default; the config
             // path overrides it per credential (0 opts back into unbounded).
             limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
-            guard: RateGuard::new(),
+            guard: RateGuard::new(ProviderPacingConfig::default()),
             stream_timeouts: ProviderStreamTimeoutConfig::default(),
         })
     }
@@ -111,6 +113,15 @@ impl OpenAIProvider {
         config: &MoaConfig,
         default_model: impl Into<String>,
     ) -> Result<Self> {
+        let coordination = ProviderCoordination::from_config(config, None)?;
+        Self::from_config_with_model_and_coordination(config, default_model, &coordination)
+    }
+
+    pub(crate) fn from_config_with_model_and_coordination(
+        config: &MoaConfig,
+        default_model: impl Into<String>,
+        coordination: &ProviderCoordination,
+    ) -> Result<Self> {
         let api_key = moa_config::required_config_secret(
             "MOA_OPENAI_API_KEY",
             &config.providers.openai.api_key,
@@ -122,10 +133,17 @@ impl OpenAIProvider {
             config.general.reasoning_effort.clone(),
         )?
         .with_web_search_enabled(config.general.web_search_enabled);
-        if let Some(max) = config.providers.openai.max_requests_per_min {
-            provider = provider.with_rate_limits(PacerConfig::requests_per_min(max));
-        }
-        provider.limiter = ProviderConcurrency::from_config(config).limiter(
+        // One coordination handle builds every distributed control for this
+        // credential, so concurrency, pacing, cooldown, and retry budget cannot
+        // disagree about whether they are fleet-wide.
+        let pacing = config
+            .providers
+            .openai
+            .max_requests_per_min
+            .map_or_else(PacerConfig::disabled, PacerConfig::requests_per_min);
+        provider.pacer = coordination.pacer(pacing, "openai", &api_key);
+        provider.guard = coordination.rate_guard(CallKind::Chat, "openai", &api_key);
+        provider.limiter = coordination.limiter(
             CallKind::Chat,
             "openai",
             &api_key,
@@ -180,13 +198,6 @@ impl LLMProvider for OpenAIProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        // Cooperative 429 short-circuit: while paused, return a typed rate-limit
-        // error immediately without an HTTP round trip so callers can fail over.
-        if let Some(remaining) = self.guard.pause_remaining() {
-            return Err(rate_guard::rate_limited_paused(remaining));
-        }
-        self.guard.note_request();
-
         let requested_model = request
             .model
             .as_ref()
@@ -194,6 +205,15 @@ impl LLMProvider for OpenAIProvider {
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
+        // Cooldown and retry budget are scoped to the resolved model, so a 429 on
+        // one model does not stall calls to another model on the same credential.
+        let guard = self.guard.clone();
+        // Cooperative 429 short-circuit: while paused, return a typed rate-limit
+        // error immediately without an HTTP round trip so callers can fail over.
+        if let Some(remaining) = guard.pause_remaining().await? {
+            return Err(rate_guard::rate_limited_paused(remaining));
+        }
+        guard.note_request().await?;
         let model_capabilities = capabilities_for_model(&resolved_model)?;
         let canonical_response_schema = request
             .response_format
@@ -237,14 +257,11 @@ impl LLMProvider for OpenAIProvider {
                 return Err(error);
             }
         };
-        // Chat completions are request-rate limited; pace after taking the
-        // in-flight slot so queued callers do not consume rate budget early.
-        self.pacer.acquire(1, 0).await;
+        let pacer = self.pacer.clone();
         let client = self.http_client.clone();
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
         let retry_policy = self.retry_policy.clone();
-        let guard = self.guard.clone();
         let stream_timeouts = self.stream_timeouts;
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
@@ -260,10 +277,12 @@ impl LLMProvider for OpenAIProvider {
                     &api_key,
                     &request,
                     tx,
-                    ModelId::new(resolved_model),
+                    ModelId::new(resolved_model.clone()),
                     started_at,
                     retry_policy,
                     &guard,
+                    &pacer,
+                    &resolved_model,
                     span_recorder,
                     stream_timeouts,
                     canonical_response_schema,

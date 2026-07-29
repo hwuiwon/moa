@@ -8,9 +8,9 @@ mod support;
 use moa_skills::improver::{ImprovementResult, improve_skill_from_experience_with_learning};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, RENAMED_SKILL, SESSION_WITH_8_TOOL_CALLS,
-    active_semantic_version, artifact_revision_count, experience_input, learning_store,
-    load_session_fixture, scripted_router, seed_skill, session_storage_partition_id, setup_test_db,
-    skill_row_count, tenant_scope, test_config,
+    active_semantic_version, artifact_revision_count, learning_store, load_session_fixture,
+    scripted_router, seed_skill, seeded_experience_input, session_storage_partition_id,
+    setup_test_db, skill_row_count, tenant_scope, test_config,
 };
 
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn improver_that_renames_skill_is_rejected() {
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
-    let input = experience_input(&loaded, "improve the auth flow skill");
+    let input = seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
 
     let result = improve_skill_from_experience_with_learning(
         &loaded.session,
@@ -62,7 +62,7 @@ async fn improver_with_changed_body_bumps_minor_version() {
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
-    let input = experience_input(&loaded, "improve the auth flow skill");
+    let input = seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
 
     let result = improve_skill_from_experience_with_learning(
         &loaded.session,
@@ -102,7 +102,7 @@ async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
-    let input = experience_input(&loaded, "improve the auth flow skill");
+    let input = seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
 
     let result = improve_skill_from_experience_with_learning(
         &loaded.session,
@@ -133,7 +133,7 @@ async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version()
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
-    let input = experience_input(&loaded, "improve the auth flow skill");
+    let input = seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
 
     let result = improve_skill_from_experience_with_learning(
         &loaded.session,
@@ -163,7 +163,7 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
-    let input = experience_input(&loaded, "improve the auth flow skill");
+    let input = seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
     let router = scripted_router([
         IMPROVED_SKILL,
         IMPROVED_SKILL,
@@ -241,7 +241,7 @@ async fn improver_emits_review_candidate_with_lineage_payload() {
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
-    let input = experience_input(&loaded, "improve the auth flow skill");
+    let input = seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
     let store = learning_store(&test_db);
 
     let result = improve_skill_from_experience_with_learning(

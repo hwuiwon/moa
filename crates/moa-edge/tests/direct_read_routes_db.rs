@@ -32,6 +32,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+#[path = "direct_read_routes_db/graceful_shutdown_db.rs"]
+mod graceful_shutdown_db;
 #[path = "direct_read_routes_db/mcp_db.rs"]
 mod mcp_db;
 #[path = "direct_read_routes_db/session_messages_db.rs"]
@@ -208,7 +210,12 @@ async fn start_edge_with_auth_and_upstream(
             .await
             .expect("bootstrap edge OAuth server"),
     );
+    let audit = moa_ocsf::AuditRuntime::start(pool.as_ref().clone())
+        .expect("edge test audit runtime should start");
     let state = AppState {
+        // The audit writer is owned by this test for its lifetime; dropping the
+        // runtime aborts it, which is the same ownership the binary has.
+        audit: audit.emitter(),
         config: Arc::new(config),
         auth,
         oauth_server,
@@ -1464,5 +1471,120 @@ async fn lineage_query_uses_typed_filters_and_rejects_legacy_sql_db() {
     delete_lineage_rows(store.pool(), &[tenant_a, tenant_b]).await;
     stop_server(edge.server).await;
     stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn the_github_secret_scanning_placeholder_route_is_not_registered_db() {
+    // Pins: the edge ladder advertises no GitHub secret-scanning partner
+    // endpoint. It used to register one that answered every request with 501,
+    // which is worse than absence: a caller could not tell "we registered this
+    // and never built it" from "you have the wrong URL", and the path appeared
+    // in the public ladder as though it were part of the API. The regex half of
+    // the partner contract is unaffected and stays pinned by
+    // `github_secret_scanning_regex_is_public_contract` in moa-auth/providers.
+    //
+    // The `/healthz` leg is a negative control: without it, a 404 from a router
+    // that failed to start would read exactly like a route that was removed.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::Operator, tenant_id),
+        None,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let live = client
+        .get(format!("{}/healthz", edge.base_url))
+        .send()
+        .await
+        .expect("send edge health probe");
+    assert_eq!(
+        live.status(),
+        StatusCode::OK,
+        "the edge router must be serving before an absent-route assertion means anything"
+    );
+
+    let response = client
+        .post(format!(
+            "{}/v1/security/secret-scanning/github",
+            edge.base_url
+        ))
+        .json(&json!({"token": "moa_live_placeholder"}))
+        .send()
+        .await
+        .expect("send retired secret-scanning request");
+
+    let status = response.status();
+    let reason = response
+        .headers()
+        .get("x-moa-reason")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the retired secret-scanning path must answer like any unknown path; \
+         observed status {status} with x-moa-reason {reason:?}"
+    );
+    assert!(
+        reason.is_none(),
+        "a retired route must not still be announcing why it is unimplemented; observed {reason:?}"
+    );
+
+    stop_server(edge.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "auth0",
+    ignore = "asserts the auth0-disabled arm; the feature is on in this build"
+)]
+async fn the_auth0_webhook_stays_registered_and_refuses_when_the_feature_is_off_db() {
+    // Pins: the one remaining 501 at the edge is a deliberate compile-time
+    // feature gate, not an unbuilt contract. Deleting this route because "it
+    // returns 501 too" would silently turn a build-configuration refusal into
+    // an indistinguishable 404, and an operator who forgot `--features auth0`
+    // would read that as a bad URL instead of a missing feature.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::Operator, tenant_id),
+        None,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1/webhooks/auth0/connection-linked",
+            edge.base_url
+        ))
+        .json(&json!({"user_id": Uuid::now_v7()}))
+        .send()
+        .await
+        .expect("send auth0 connection-linked webhook");
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "a feature-disabled webhook must refuse explicitly rather than look absent; \
+         observed status {status} with body {body:?}"
+    );
+    assert!(
+        body.contains("auth0 feature"),
+        "the refusal must name the feature an operator has to enable; observed body {body:?}"
+    );
+
+    stop_server(edge.server).await;
     cleanup_test_store(store, database_url, schema_name).await;
 }

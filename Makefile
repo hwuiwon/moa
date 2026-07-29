@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-clickhouse test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
 
 codegraph:
 	@./scripts/codegraph init
@@ -81,6 +81,16 @@ test-db-memory:
 test-authz-pentest:
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
 	cargo nextest run --locked --profile authz-pentest
+
+test-clickhouse:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	@echo "starting the optional ClickHouse analytics service..."
+	docker compose --profile clickhouse up -d clickhouse
+	MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 \
+	MOA_CLICKHOUSE_URL=$${MOA_CLICKHOUSE_URL:-http://localhost:10061} \
+	MOA_CLICKHOUSE_USER=$${MOA_CLICKHOUSE_USER:-moa} \
+	MOA_CLICKHOUSE_PASSWORD=$${MOA_CLICKHOUSE_PASSWORD:-dev} \
+	cargo nextest run --locked --profile clickhouse-docker --run-ignored all
 
 test-service-e2e: e2e-clean-live
 

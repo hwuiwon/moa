@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "Upstream CustomResourceDefinitions this repository validates against, pinned by",
+    "release tag AND content checksum. The tag alone is not a pin: a tag can be moved,",
+    "and a schema that silently changes turns manifest validation into a formality.",
+    "k8s/schemas/refresh.sh verifies every checksum before it regenerates anything and",
+    "refuses on a mismatch. Bumping a pin means changing the version AND the sha256 in",
+    "the same edit, which is what makes the change reviewable.",
+    "Recorded 2026-07-28."
+  ],
+  "crds": [
+    {
+      "name": "restateclusters",
+      "upstream": "restatedev/restate-operator",
+      "version": "v2.8.1",
+      "url": "https://raw.githubusercontent.com/restatedev/restate-operator/v2.8.1/crd/restateclusters.yaml",
+      "sha256": "f8fa6a9f6cb0233b90e7a8860f62fd6c6cd6b0633776b9a269496ffe9d1fb5a5",
+      "expect_group": "restate.dev",
+      "expect_kind": "RestateCluster",
+      "expect_versions": ["v1"]
+    },
+    {
+      "name": "restatedeployments",
+      "upstream": "restatedev/restate-operator",
+      "version": "v2.8.1",
+      "url": "https://raw.githubusercontent.com/restatedev/restate-operator/v2.8.1/crd/restatedeployments.yaml",
+      "sha256": "a8de718e448c99856303553403dce047ed884b26dd0312cd36d9c5a1dda45dfa",
+      "expect_group": "restate.dev",
+      "expect_kind": "RestateDeployment",
+      "expect_versions": ["v1beta1"]
+    },
+    {
+      "name": "prometheusrules",
+      "upstream": "prometheus-operator/prometheus-operator",
+      "version": "v0.92.1",
+      "url": "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.92.1/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml",
+      "sha256": "d596a7ed0618fc29c36bb76ecd2ff11affa3595c683d413765097e43a339eb31",
+      "expect_group": "monitoring.coreos.com",
+      "expect_kind": "PrometheusRule",
+      "expect_versions": ["v1"]
+    }
+  ]
+}

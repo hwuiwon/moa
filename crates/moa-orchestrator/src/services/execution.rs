@@ -2928,10 +2928,20 @@ fn registered_tool_capability(
             "moa.execution.capability.hand",
             json!({"kind": "hand"}),
         ),
-        ToolExecution::Mcp { server_name, .. } => (
+        ToolExecution::Mcp {
+            server_name,
+            remote_tool_name,
+            schema_hash,
+            ..
+        } => (
+            // `definition.name` is the server-qualified reference; the source
+            // records the name the server itself publishes, so provenance stays
+            // answerable in the connector's own terms.
             CapabilitySource::McpTool {
                 server: server_name.clone(),
-                name: definition.name.clone(),
+                tool_name: definition.name.clone(),
+                remote_name: remote_tool_name.clone(),
+                schema_revision: schema_hash.clone(),
             },
             ExecutionClass::External,
             "moa.execution.capability.mcp",
@@ -3975,6 +3985,27 @@ mod tests {
         )
         .expect("capability catalog should build");
 
+        // The pin this bug needed. Every catalogued capability must resolve, via
+        // the SAME function durable execution uses, to a name the router
+        // actually knows. This is a whole-catalog property rather than a
+        // per-source assertion precisely because the failure it catches is a
+        // source variant contributing a name from the wrong namespace — which
+        // type-checks, and fails only when a live run dispatches it.
+        for capability in &response.catalog.capabilities {
+            let Ok(dispatch_name) =
+                crate::workflows::execution_task::capability_tool_name(capability)
+            else {
+                continue;
+            };
+            assert!(
+                registry.get(&dispatch_name).is_some(),
+                "capability {} resolves to `{dispatch_name}`, which the router does not know; \
+                 source {:?}",
+                capability.reference.name,
+                capability.source
+            );
+        }
+
         let action = response
             .catalog
             .capabilities
@@ -4002,11 +4033,18 @@ mod tests {
         assert_eq!(action.estimate.tool_calls, 1);
         assert_eq!(action.estimate.tasks, 1);
 
+        // The catalog reference is server-qualified while the source records the
+        // name the connector itself publishes: one identifies the capability
+        // unambiguously across connectors, the other keeps provenance answerable
+        // in the connector's own terms.
         let mcp = response
             .catalog
             .capabilities
             .iter()
-            .find(|entry| entry.reference.name == "github_issue_create")
+            .find(|entry| {
+                entry.reference.name
+                    == moa_hands::mcp_tool_reference("github", "github_issue_create")
+            })
             .expect("connected MCP tool should be catalogued");
         assert_eq!(mcp.execution_class, ExecutionClass::External);
         assert_eq!(
@@ -4019,8 +4057,11 @@ mod tests {
         );
         assert!(matches!(
             &mcp.source,
-            CapabilitySource::McpTool { server, name }
-                if server == "github" && name == "github_issue_create"
+            CapabilitySource::McpTool { server, tool_name, remote_name, schema_revision }
+                if server == "github"
+                    && tool_name == &moa_hands::mcp_tool_reference("github", "github_issue_create")
+                    && remote_name == "github_issue_create"
+                    && !schema_revision.is_empty()
         ));
         assert!(!mcp.reference.version.is_empty());
 

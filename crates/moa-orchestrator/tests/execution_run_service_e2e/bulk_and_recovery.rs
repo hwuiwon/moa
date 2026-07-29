@@ -207,8 +207,22 @@ async fn run_bulk_scenario(
 
     let session_id = test.create_session(label).await?;
     let session = test.client().get_session(session_id).await?;
-    seed_allow_policy(fixture, test.client(), session.tenant_id, MAP_TOOL_NAME).await?;
-    seed_allow_policy(fixture, test.client(), session.tenant_id, REDUCE_TOOL_NAME).await?;
+    // Action-policy rules key on the registered name, which for a connector
+    // tool is its server-qualified reference.
+    seed_allow_policy(
+        fixture,
+        test.client(),
+        session.tenant_id,
+        &moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, MAP_TOOL_NAME),
+    )
+    .await?;
+    seed_allow_policy(
+        fixture,
+        test.client(),
+        session.tenant_id,
+        &moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, REDUCE_TOOL_NAME),
+    )
+    .await?;
     let started = start_turn_in_session(test, session_id, OBJECTIVE, None).await?;
     let outcome = await_turn_outcome(test.client(), &started).await?;
     let TurnOutcomeKind::Accepted { execution_run_uid } = outcome.kind else {
@@ -679,6 +693,9 @@ fn bulk_candidate(
 }
 
 fn fixture_capability_reference(tool: &FixtureCapabilityTool) -> Result<CapabilityReference> {
+    // Connector tools are catalogued under their server-qualified reference, so
+    // both the hashed identity and the reference itself use the qualified name.
+    let qualified = moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, &tool.name);
     let policy = ToolPolicySpec {
         risk_level: RiskLevel::High,
         default_effect: ActionPolicyEffect::AdminReview,
@@ -689,16 +706,16 @@ fn fixture_capability_reference(tool: &FixtureCapabilityTool) -> Result<Capabili
     let version = capability_version(
         "moa.execution.capability.mcp",
         &json!({
-            "name": tool.name,
+            "name": qualified,
             "input_schema": tool.input_schema,
             "policy": policy,
             "idempotency_class": IdempotencyClass::Idempotent,
-            "max_output_tokens": ToolBudgetConfig::default().for_tool(&tool.name),
+            "max_output_tokens": ToolBudgetConfig::default().for_tool(&qualified),
             "owner": {"kind": "mcp", "server": FIXTURE_MCP_SERVER_NAME},
         }),
     )?;
     Ok(CapabilityReference {
-        name: tool.name.clone(),
+        name: qualified,
         version,
     })
 }
@@ -792,7 +809,15 @@ fn planner_capabilities(
             capability
                 .pointer("/reference/name")
                 .and_then(Value::as_str)
-                .is_some_and(|name| name.starts_with("fixture_"))
+                // Connector capabilities are catalogued under their
+                // server-qualified reference, so the fixture's own `fixture_`
+                // prefix now sits behind the `mcp__fixture-capability__` one.
+                .is_some_and(|name| {
+                    name.starts_with(&moa_hands::mcp_tool_reference(
+                        FIXTURE_MCP_SERVER_NAME,
+                        "fixture_",
+                    ))
+                })
         })
         .cloned()
         .collect())

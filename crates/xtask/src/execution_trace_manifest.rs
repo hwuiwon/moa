@@ -720,6 +720,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/session_store/handlers.rs",
+        "start_session_retention",
+        TRACE_HELPER,
+        "SessionRetentionClient",
+        "run"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",
         "append_session_event",
         TRACE_HELPER,
@@ -863,7 +870,21 @@ const SENDERS: &[SenderManifestEntry] = &[
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
         "forward_child_cancellation",
-        TRACE_HELPER,
+        IDENTITY_TRACE_HELPER,
+        "ExecutionClient",
+        "cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
+        "forward_pending_child_cancellation",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "request_cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
+        "forward_pending_child_cancellation",
+        IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "cancel"
     ),
@@ -1502,6 +1523,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "SessionClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/objects/session/handlers.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "SessionRetentionClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/workflows/session_retention.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },

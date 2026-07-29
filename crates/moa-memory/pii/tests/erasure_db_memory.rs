@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
+    types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
     types::contact::ContactId,
     types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
@@ -17,6 +18,9 @@ use moa_memory_pii::erasure::{
     EraseCandidate, GraphErasureAudit, begin_app_scoped_tx, crypto_shred_erased_subject,
     delete_subject_digests, delete_subject_retrieval_lineage, enumerate_erase_candidates,
     hard_purge_erase_candidates,
+};
+use moa_memory_pii::learning_erasure::{
+    ErasureRecordKind, ErasureSubjects, enumerate_learning_closure, erase_learning_closure,
 };
 use moa_memory_pii::legal_hold::{
     LegalHoldError, lock_tenant_and_subjects, place_hold, release_hold, start_destruction,
@@ -123,6 +127,292 @@ async fn legal_hold_and_subject_destruction_are_linearizable_across_pools_db_mem
     assert!(matches!(refused, LegalHoldError::DestructionStarted));
 
     second_pool.close().await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents_db_memory() {
+    // Pins: erasure removes experience/attribution rows and walks both
+    // promotion-candidate and artifact-revision dependencies before restrictive
+    // foreign keys can roll back the transaction.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let tenant_id = TenantId::new();
+    let tenant_key = tenant_id.to_string();
+    let subject_user_id = Uuid::now_v7().to_string();
+    let session_id = Uuid::now_v7();
+    let segment_id = Uuid::now_v7();
+    let experience_id = Uuid::now_v7();
+    let attribution_id = Uuid::now_v7();
+    let source_candidate_id = Uuid::now_v7();
+    let rollback_candidate_id = Uuid::now_v7();
+    let revision_candidate_id = Uuid::now_v7();
+    let candidate_ids = vec![
+        source_candidate_id,
+        rollback_candidate_id,
+        revision_candidate_id,
+    ];
+    let artifact_uid = Uuid::now_v7();
+    let revision_uid = Uuid::now_v7();
+
+    let mut session_tx = pool.begin().await.expect("begin session fixture");
+    sqlx::query(
+        "INSERT INTO sessions
+            (id, storage_partition_id, user_id, tenant_id, model, status)
+         VALUES ($1, $2, $3, $4, 'test-model', 'completed')",
+    )
+    .bind(session_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .bind(tenant_id.0)
+    .execute(session_tx.as_mut())
+    .await
+    .expect("seed subject session");
+    sqlx::query(
+        "INSERT INTO session_agent_context
+            (session_id, storage_partition_id, user_id, tenant_id,
+             agent_definition_ref, agent_revision_uid, policy_hash,
+             display_name, policy_snapshot)
+         VALUES ($1, $2, $3, $4, 'agent://privacy-fixture', $5,
+                 'privacy-fixture-hash', 'Privacy fixture', '{}'::JSONB)",
+    )
+    .bind(session_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .bind(tenant_id.0)
+    .bind(SYSTEM_DEFAULT_AGENT_REVISION_UID)
+    .execute(session_tx.as_mut())
+    .await
+    .expect("seed session agent context");
+    session_tx.commit().await.expect("commit session fixture");
+    sqlx::query(
+        "INSERT INTO task_segments
+            (id, session_id, storage_partition_id, user_id, tenant_id,
+             segment_index, started_at, ended_at, outcome, tools_used,
+             skills_activated, turn_count, token_cost)
+         VALUES ($1, $2, $3, $4, $3, 0, now(), now(), 'resolved',
+                 '{}', '{}', 1, 0)",
+    )
+    .bind(segment_id)
+    .bind(session_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(pool)
+    .await
+    .expect("seed task segment");
+    sqlx::query(
+        "INSERT INTO experience_records
+            (id, segment_id, session_id, storage_partition_id, user_id, tenant_id,
+             task_summary, task_fingerprint, task_fingerprint_payload, task_facets,
+             outcome, confidence, assessment_policy_version, extraction_policy_version)
+         VALUES ($1, $2, $3, $4, $5, $4, 'redacted subject task', 'task-fingerprint',
+                 '{}'::JSONB, '{}'::JSONB, 'resolved', 0.9, 'assessment-v1', 'extract-v1')",
+    )
+    .bind(experience_id)
+    .bind(segment_id)
+    .bind(session_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(pool)
+    .await
+    .expect("seed experience");
+    sqlx::query(
+        "INSERT INTO experience_attributions
+            (id, experience_id, tenant_id, storage_partition_id, user_id,
+             subject_type, subject_id, effect, confidence)
+         VALUES ($1, $2, $3, $3, $4, 'skill', 'subject-skill', 'helpful', 0.9)",
+    )
+    .bind(attribution_id)
+    .bind(experience_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(pool)
+    .await
+    .expect("seed experience attribution");
+    sqlx::query(
+        "INSERT INTO moa.artifact
+            (artifact_uid, tenant_id, storage_partition_id, user_id, kind, name, description)
+         VALUES ($1, $2, $3, $4, 'skill', $5, 'privacy erasure fixture')",
+    )
+    .bind(artifact_uid)
+    .bind(tenant_id.0)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .bind(format!("privacy-erasure-{artifact_uid}"))
+    .execute(pool)
+    .await
+    .expect("seed artifact");
+    sqlx::query(
+        "INSERT INTO moa.artifact_revision
+            (revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id,
+             definition, canonical_hash, source_format, source_text, status,
+             validation_report, version, published_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'published',
+                 '{}'::JSONB, 1, now())",
+    )
+    .bind(revision_uid)
+    .bind(artifact_uid)
+    .bind(tenant_id.0)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .bind(json!({"kind": "skill", "name": "attributable"}))
+    .bind(vec![7_u8; 32])
+    .bind(br#"{"kind":"skill","name":"attributable"}"#.to_vec())
+    .execute(pool)
+    .await
+    .expect("seed artifact revision");
+
+    let mut tx = pool.begin().await.expect("begin learning fixture");
+    sqlx::query(
+        "INSERT INTO learning_candidates
+            (id, tenant_id, storage_partition_id, user_id, candidate_type,
+             proposal_kind, status, payload, risk_class)
+         SELECT id, $2, $2, $3, 'skill', proposal_kind, 'proposed', '{}'::JSONB, 'low'
+         FROM UNNEST($1::UUID[], ARRAY['skill_draft', 'skill_rollback', 'skill_draft'])
+              AS candidate(id, proposal_kind)",
+    )
+    .bind(&candidate_ids)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(tx.as_mut())
+    .await
+    .expect("seed learning candidates");
+    sqlx::query(
+        "INSERT INTO learning_candidate_source
+            (id, candidate_id, tenant_id, storage_partition_id, user_id, source_kind,
+             attribution_id, promotion_candidate_id, artifact_revision_uid)
+         VALUES
+            ($1, $2, $8, $8, $9, 'attribution', $3, NULL, NULL),
+            ($4, $5, $8, $8, $9, 'promotion_candidate', NULL, $2, NULL),
+            ($6, $7, $8, $8, $9, 'artifact_revision', NULL, NULL, $10)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(source_candidate_id)
+    .bind(attribution_id)
+    .bind(Uuid::now_v7())
+    .bind(rollback_candidate_id)
+    .bind(Uuid::now_v7())
+    .bind(revision_candidate_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .bind(revision_uid)
+    .execute(tx.as_mut())
+    .await
+    .expect("seed recursive candidate sources");
+    sqlx::query(
+        "INSERT INTO moa.artifact_revision_contribution
+            (contribution_uid, storage_partition_id, user_id, revision_uid,
+             candidate_id, tenant_id, contribution_kind)
+         VALUES ($1, $2, $3, $4, $5, $2, 'generated_definition')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .bind(revision_uid)
+    .bind(source_candidate_id)
+    .execute(tx.as_mut())
+    .await
+    .expect("seed revision contribution");
+    tx.commit().await.expect("commit learning fixture");
+
+    let closure = enumerate_learning_closure(
+        pool,
+        tenant_id,
+        &ErasureSubjects {
+            user_ids: vec![subject_user_id.clone()],
+            contact_ids: Vec::new(),
+        },
+    )
+    .await
+    .expect("enumerate recursive learning closure");
+    assert_eq!(closure.experience_ids, vec![experience_id]);
+    assert_eq!(closure.attribution_ids, vec![attribution_id]);
+    assert_eq!(
+        closure
+            .candidate_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        candidate_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    assert_eq!(closure.revision_uids, vec![revision_uid]);
+
+    let decisions = erase_learning_closure(
+        pool,
+        tenant_id,
+        &subject_user_id,
+        "attempt-applied",
+        &closure,
+    )
+    .await
+    .expect("erase recursive learning closure");
+    assert_eq!(decisions.len(), 6);
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|decision| decision.kind == ErasureRecordKind::ExperienceRecord)
+            .count(),
+        1
+    );
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|decision| decision.kind == ErasureRecordKind::ExperienceAttribution)
+            .count(),
+        1
+    );
+
+    let remaining = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT
+            (SELECT COUNT(*) FROM experience_records WHERE id = $1),
+            (SELECT COUNT(*) FROM experience_attributions WHERE id = $2),
+            (SELECT COUNT(*) FROM learning_candidates WHERE id = ANY($3))",
+    )
+    .bind(experience_id)
+    .bind(attribution_id)
+    .bind(&candidate_ids)
+    .fetch_one(pool)
+    .await
+    .expect("count erased learning rows");
+    assert_eq!(remaining, (0, 0, 0));
+    let revision = sqlx::query_as::<_, (String, serde_json::Value, Vec<u8>)>(
+        "SELECT status, definition, source_text
+         FROM moa.artifact_revision WHERE revision_uid = $1",
+    )
+    .bind(revision_uid)
+    .fetch_one(pool)
+    .await
+    .expect("read invalidated revision identity");
+    assert_eq!(revision, ("archived".to_string(), json!({}), Vec::new()));
+    let recorded_kinds = sqlx::query_as::<_, (String, i64)>(
+        "SELECT record_kind, COUNT(*)
+         FROM moa.privacy_erasure_record_decision
+         WHERE tenant_id = $1 AND subject_user_id = $2 AND attempt_id = 'attempt-applied'
+         GROUP BY record_kind ORDER BY record_kind",
+    )
+    .bind(tenant_id.0)
+    .bind(&subject_user_id)
+    .fetch_all(pool)
+    .await
+    .expect("read recorded decision kinds");
+    assert_eq!(
+        recorded_kinds,
+        vec![
+            ("artifact_revision".to_string(), 1),
+            ("experience_attribution".to_string(), 1),
+            ("experience_record".to_string(), 1),
+            ("learning_candidate".to_string(), 3),
+        ]
+    );
+
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

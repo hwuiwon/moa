@@ -13,7 +13,5 @@ pub mod parser;
 pub mod providers;
 pub mod rechunk;
 pub mod repository;
-pub mod semantic_graph;
-pub mod semantic_graph_model;
 
 pub use error::{Error, Result};

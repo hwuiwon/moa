@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use moa_core::traits::EmbeddingProvider;
+use moa_core::traits::{EmbeddingProvider, RuntimeCacheStore};
 use moa_core::{
     events::Event, traits::SessionStore as CoreSessionStore, types::events_stream::EventRecord,
     types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
@@ -26,12 +26,13 @@ use moa_wire::session_store::{
     ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
     RecordSegmentSkillActivationRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
     RecordSegmentTurnUsageRequest, SearchEventsRequest, TenantCostSinceRequest,
-    UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
+    UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 
 use crate::objects::session::SessionClient;
+use crate::workflows::session_retention::{SessionRetentionDispatch, SessionRetentionRequest};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
@@ -154,10 +155,10 @@ pub trait RestateSessionStore {
         request: Json<ListLearningCandidatesRequest>,
     ) -> Result<Json<Vec<LearningCandidate>>, HandlerError>;
 
-    /// Applies a learning-candidate status transition.
-    async fn update_learning_candidate_status(
-        request: Json<UpdateLearningCandidateStatusRequest>,
-    ) -> Result<(), HandlerError>;
+    /// Starts a durable terminal-session retention pass for one tenant.
+    async fn start_session_retention(
+        request: Json<SessionRetentionRequest>,
+    ) -> Result<Json<SessionRetentionDispatch>, HandlerError>;
 
     /// Refreshes materialized views derived from task segments.
     async fn refresh_segment_materialized_views(
@@ -223,8 +224,9 @@ impl SessionStoreImpl {
         store: Arc<PostgresSessionStore>,
         pool: PgPool,
         config: Arc<moa_config::MoaConfig>,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
     ) -> Self {
-        let embedder = build_learning_embedder(&config);
+        let embedder = build_learning_embedder(&config, runtime_cache);
         Self {
             store,
             pool,
@@ -241,9 +243,13 @@ impl SessionStoreImpl {
 /// space with memory. A disabled selector or a missing credential is not a
 /// startup error here: it disables the backfill and logs a warning, matching how
 /// semantic memory search degrades when the embedder is unavailable.
-fn build_learning_embedder(config: &moa_config::MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {
+fn build_learning_embedder(
+    config: &moa_config::MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
+) -> Option<Arc<dyn EmbeddingProvider>> {
     match moa_providers::embedding::build_embedder_from_config(
         config,
+        Some(runtime_cache),
         moa_providers::EmbedderConstructionRole::Ingestion,
     ) {
         Ok(embedder) => Some(embedder),

@@ -1,11 +1,9 @@
 //! Target execution paths for behavior-lab trial workflows.
 
-use super::status::{
-    attach_trial_execution_run, attach_trial_session, increment_trial_turn, stop_trial,
-};
+use super::finalize::failure_outcome;
+use super::status::{attach_trial_execution_run, attach_trial_session, increment_trial_turn};
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
 use super::*;
-use crate::ctx::OrchestratorCtx;
 use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
 use crate::services::execution::ExecutionClient;
 use crate::services::session_store::RestateSessionStoreClient;
@@ -15,6 +13,7 @@ use moa_artifacts::{
     execution_plan::{ExecutionGoalContract, GeneratedExecutionCandidate},
     reference::ArtifactRef,
 };
+use moa_config::MoaConfig;
 use moa_core::types::{
     agent::AgentContext,
     contact::{ClientMessageId, ContactId, ContactRef, ContactVerificationState},
@@ -36,6 +35,7 @@ use moa_execution::{
         ExecutionStartRequest, ExecutionStatusResponse,
     },
 };
+use moa_experiments::evidence::{TrialScoreTarget, TrialTerminalEvidence, TrialTerminalOutcome};
 use moa_wire::session_store::AppendEventRequest;
 use std::{str::FromStr, time::Instant};
 
@@ -44,6 +44,7 @@ const EXECUTION_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const EXPERIMENT_EXECUTION_SESSION_NAMESPACE: Uuid =
     Uuid::from_u128(0xc2a6_731c_2d80_5d4a_9d10_2d20_1283_c6ec);
 const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session";
+const K_TARGET_USAGE_START_SEQUENCE: &str = "target_usage_start_sequence";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TargetObservation {
@@ -55,6 +56,77 @@ struct TargetObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TargetUsageObservation {
     latest_sequence: u64,
+    tokens: u64,
+    cost_cents: u64,
+    latest_response: Option<String>,
+}
+
+/// What one target path observed, and how the trial should end because of it.
+///
+/// The target paths return this instead of persisting a terminal status, so the
+/// single finalizer owns the evaluate-then-confirm-then-complete order.
+pub(super) struct TrialTargetOutcome {
+    /// Typed terminal evidence the deterministic evaluators read.
+    pub(super) evidence: TrialTerminalEvidence,
+    /// Status the trial reaches once its evidence is durable and visible.
+    pub(super) terminal_status: ExperimentTrialStatus,
+    /// Durable stop reason recorded with the terminal status.
+    pub(super) stop_reason: ExperimentTrialStopReason,
+    /// Terminal error message for failed trials.
+    pub(super) error: Option<String>,
+}
+
+/// Running token, cost, turn, and visible-output observations for one trial.
+#[derive(Debug, Default, Clone)]
+struct TargetObservations {
+    total_tokens: u64,
+    total_cost_cents: u64,
+    turns: u32,
+    latest_output: Option<String>,
+    latest_sequence: u64,
+}
+
+impl TargetObservations {
+    fn absorb(&mut self, usage: &TargetUsageObservation) {
+        self.total_tokens = self.total_tokens.saturating_add(usage.tokens);
+        self.total_cost_cents = self.total_cost_cents.saturating_add(usage.cost_cents);
+        self.latest_sequence = self.latest_sequence.max(usage.latest_sequence);
+        if let Some(response) = usage.latest_response.clone() {
+            self.latest_output = Some(response);
+        }
+    }
+
+    fn into_outcome(
+        self,
+        target: TrialScoreTarget,
+        session_id: SessionId,
+        status: ExperimentTrialStatus,
+        stop_reason: ExperimentTrialStopReason,
+        error: Option<String>,
+    ) -> TrialTargetOutcome {
+        let outcome = match status {
+            ExperimentTrialStatus::Completed => TrialTerminalOutcome::Completed,
+            ExperimentTrialStatus::Cancelled => TrialTerminalOutcome::Cancelled,
+            _ => failure_outcome(error.as_deref()),
+        };
+        TrialTargetOutcome {
+            evidence: TrialTerminalEvidence {
+                target,
+                session_id,
+                outcome,
+                stop_reason,
+                turn_count: self.turns,
+                total_tokens: self.total_tokens,
+                total_cost_cents: self.total_cost_cents,
+                latest_sequence_num: self.latest_sequence,
+                visible_output: self.latest_output,
+                failure_code: error.as_ref().map(|_| outcome.as_str().to_string()),
+            },
+            terminal_status: status,
+            stop_reason,
+            error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +157,7 @@ pub(super) async fn run_agent_loop_trial(
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
     providers: &Arc<ProviderRegistry>,
-) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
+) -> Result<TrialTargetOutcome, HandlerError> {
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
     let (session_id, target_model) =
@@ -93,12 +165,35 @@ pub(super) async fn run_agent_loop_trial(
             .await?;
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
+    let score_target = TrialScoreTarget::Session { session_id };
 
     let initial_events =
         load_session_events(ctx, session_id, EventRange::all(), session_store).await?;
     let mut transcript = transcript_from_events(&initial_events);
     let mut transcript_sequence = latest_sequence(&initial_events);
     let mut target_usage_sequence = transcript_sequence;
+    let usage_start_sequence = target_usage_start_sequence(ctx, transcript_sequence).await?;
+    let (prior_tokens, prior_cost_cents) =
+        target_usage_from_events_after(&initial_events, usage_start_sequence);
+    // Token and cost observations were previously emitted as telemetry and then
+    // discarded. The budget evaluators read them, so they are accumulated here
+    // and travel with the evidence instead.
+    let mut observations = TargetObservations {
+        turns: trial.turn_count.max(0) as u32,
+        total_tokens: prior_tokens,
+        total_cost_cents: prior_cost_cents,
+        latest_output: latest_brain_response(&initial_events),
+        latest_sequence: transcript_sequence,
+    };
+    if forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
+        return Ok(observations.into_outcome(
+            score_target,
+            session_id,
+            ExperimentTrialStatus::Cancelled,
+            ExperimentTrialStopReason::Cancelled,
+            None,
+        ));
+    }
     for turn_index in trial.turn_count.max(0) as u32..simulator_context.max_turns {
         let observation = observe_session_after(
             ctx,
@@ -109,23 +204,22 @@ pub(super) async fn run_agent_loop_trial(
         )
         .await?;
         if let Some(stop) = stop_for_session_status(&observation.status) {
-            return stop_trial(
-                ctx,
-                trial.scope,
-                trial.trial_uid,
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
                 stop.0,
                 stop.1,
-                None,
-                pool,
-            )
-            .await;
+                terminal_status_error(stop.0, session_id),
+            ));
         }
         if let Some(response) = observation.latest_response {
+            observations.latest_output = Some(response.clone());
             transcript.push(ContextMessage::assistant(format!(
                 "Target response: {response}"
             )));
         }
         transcript_sequence = observation.latest_sequence;
+        observations.latest_sequence = observations.latest_sequence.max(transcript_sequence);
 
         let simulator_message = simulator_next_user_message(
             ctx,
@@ -137,16 +231,13 @@ pub(super) async fn run_agent_loop_trial(
         )
         .await?;
         if simulator_done(&simulator_message) {
-            return stop_trial(
-                ctx,
-                trial.scope,
-                trial.trial_uid,
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
                 ExperimentTrialStatus::Completed,
                 ExperimentTrialStopReason::SimulatorDone,
                 None,
-                pool,
-            )
-            .await;
+            ));
         }
 
         let response = with_identity_headers(
@@ -182,36 +273,54 @@ pub(super) async fn run_agent_loop_trial(
             .into());
         };
         increment_trial_turn(ctx, trial.scope, trial.trial_uid, pool).await?;
+        observations.turns = observations.turns.saturating_add(1);
         transcript.push(ContextMessage::user(simulator_message));
 
         let status =
             wait_for_target_after_turn(ctx, &request.identity, session_id, turn_id).await?;
-        record_target_usage_after(ctx, session_id, &mut target_usage_sequence, session_store)
-            .await?;
+        let usage =
+            record_target_usage_after(ctx, session_id, &mut target_usage_sequence, session_store)
+                .await?;
+        observations.absorb(&usage);
         if let Some(stop) = stop_for_session_status(&status) {
-            return stop_trial(
-                ctx,
-                trial.scope,
-                trial.trial_uid,
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
                 stop.0,
                 stop.1,
-                None,
-                pool,
-            )
-            .await;
+                terminal_status_error(stop.0, session_id),
+            ));
         }
     }
 
-    stop_trial(
-        ctx,
-        trial.scope,
-        trial.trial_uid,
+    Ok(observations.into_outcome(
+        score_target,
+        session_id,
         ExperimentTrialStatus::Completed,
         ExperimentTrialStopReason::MaxTurns,
         None,
-        pool,
-    )
-    .await
+    ))
+}
+
+async fn target_usage_start_sequence(
+    ctx: &WorkflowContext<'_>,
+    current_sequence: u64,
+) -> Result<u64, HandlerError> {
+    if let Some(sequence) = ctx
+        .get::<Json<u64>>(K_TARGET_USAGE_START_SEQUENCE)
+        .await?
+        .map(Json::into_inner)
+    {
+        return Ok(sequence);
+    }
+    ctx.set(K_TARGET_USAGE_START_SEQUENCE, Json(current_sequence));
+    Ok(current_sequence)
+}
+
+/// Returns a stable, PII-free error string for a non-clean target stop.
+fn terminal_status_error(status: ExperimentTrialStatus, session_id: SessionId) -> Option<String> {
+    matches!(status, ExperimentTrialStatus::Failed)
+        .then(|| format!("target session {session_id} reached a failed state"))
 }
 
 async fn ensure_agent_loop_session(
@@ -287,9 +396,10 @@ pub(super) async fn run_execution_template_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
     trial: ExperimentTrialRecord,
+    config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
-) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
+) -> Result<TrialTargetOutcome, HandlerError> {
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
     let ExperimentTarget::ExecutionTemplate {
@@ -330,6 +440,7 @@ pub(super) async fn run_execution_template_trial(
         &trial,
         &variant,
         target_session_id,
+        config,
         pool,
         session_store,
     )
@@ -350,6 +461,21 @@ pub(super) async fn run_execution_template_trial(
         pool,
     )
     .await?;
+    if forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
+        return Ok(TargetObservations {
+            turns: trial.turn_count.max(0) as u32,
+            ..TargetObservations::default()
+        }
+        .into_outcome(
+            TrialScoreTarget::Session {
+                session_id: effective.session_id,
+            },
+            effective.session_id,
+            ExperimentTrialStatus::Cancelled,
+            ExperimentTrialStopReason::Cancelled,
+            None,
+        ));
+    }
 
     let origin = append_experiment_objective(
         ctx,
@@ -379,6 +505,7 @@ pub(super) async fn run_execution_template_trial(
     let compiled = compile_experiment_template(ExperimentTemplateCompileRequest {
         context: &planning_context.snapshot,
         requested: &template,
+        config,
         objective,
         input,
         experiment_run_uid: trial.run_uid,
@@ -427,6 +554,7 @@ pub(super) async fn run_execution_template_trial(
     .name("experiment_trial_attach_execution_run")
     .await?;
     ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
+    forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await?;
     tracing::Span::current().set_attribute(
         "moa.experiment.execution_run_uid",
         execution_run_uid.to_string(),
@@ -441,24 +569,39 @@ pub(super) async fn run_execution_template_trial(
         execution_run_uid,
     )
     .await?;
-    stop_trial(
-        ctx,
-        trial.scope,
-        trial.trial_uid,
+    // The typed execution path never observed its own token or cost use; it only
+    // polled for a terminal status. The budget evaluators need real numbers, so
+    // the durable session log is read once here rather than left as a gap the
+    // evaluators would have to guess around.
+    let mut sequence = 0_u64;
+    let usage =
+        record_target_usage_after(ctx, effective.session_id, &mut sequence, session_store).await?;
+    let mut observations = TargetObservations {
+        turns: trial.turn_count.max(0) as u32,
+        ..TargetObservations::default()
+    };
+    observations.absorb(&usage);
+
+    Ok(observations.into_outcome(
+        TrialScoreTarget::ExecutionRun { execution_run_uid },
+        effective.session_id,
         stop.status,
         stop.stop_reason,
         error,
-        pool,
-    )
-    .await
+    ))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the workflow target keeps durable input and concrete stores explicit instead of hiding them in a dependency bag"
+)]
 async fn ensure_execution_session(
     ctx: &WorkflowContext<'_>,
     request: &ExperimentTrialRunWorkflowRequest,
     trial: &ExperimentTrialRecord,
     variant: &ExperimentVariant,
     target_session_id: Option<SessionId>,
+    config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<EffectiveExecutionSession, HandlerError> {
@@ -503,7 +646,6 @@ async fn ensure_execution_session(
         trial.score_run_id,
         Some(trial.trial_uid),
     )?;
-    let config = OrchestratorCtx::current_config();
     let model = trial
         .target_model
         .clone()
@@ -689,6 +831,7 @@ enum ExperimentCompileClassification {
 struct ExperimentTemplateCompileRequest<'a> {
     context: &'a moa_execution::wire::ExecutionPlanningContextSnapshot,
     requested: &'a PinnedExecutionTemplateRef,
+    config: &'a MoaConfig,
     objective: String,
     input: Value,
     experiment_run_uid: Uuid,
@@ -704,6 +847,7 @@ fn compile_experiment_template(
     let ExperimentTemplateCompileRequest {
         context,
         requested,
+        config,
         objective,
         input,
         experiment_run_uid,
@@ -757,7 +901,6 @@ fn compile_experiment_template(
         .map_err(|error| TerminalError::new(error.to_string()))?;
     let candidate_hash =
         execution_planning_hash("moa.execution.compile-candidate", &candidate_bytes);
-    let config = OrchestratorCtx::current_config();
     let started_at = Instant::now();
     let outcome = compile(CompileExecutionRequest {
         goal: candidate.goal,
@@ -1144,7 +1287,7 @@ async fn record_target_usage_after(
     session_id: SessionId,
     sequence_num: &mut u64,
     session_store: &Arc<PostgresSessionStore>,
-) -> Result<(), HandlerError> {
+) -> Result<TargetUsageObservation, HandlerError> {
     let store = session_store.clone();
     let range = event_range_after(*sequence_num);
     let previous_sequence = *sequence_num;
@@ -1159,18 +1302,33 @@ async fn record_target_usage_after(
             record_simulation_cost_cents("target", cost_cents);
             Ok::<_, HandlerError>(Json::from(TargetUsageObservation {
                 latest_sequence: latest_sequence(&events).max(previous_sequence),
+                tokens,
+                cost_cents,
+                latest_response: latest_brain_response(&events),
             }))
         })
         .name("experiment_trial_record_target_usage")
         .await?
         .into_inner();
     *sequence_num = observation.latest_sequence;
-    Ok(())
+    Ok(observation)
 }
 
 fn target_usage_from_events(events: &[EventRecord]) -> (u64, u64) {
     events
         .iter()
+        .fold((0_u64, 0_u64), |(tokens, cost_cents), record| {
+            (
+                tokens + (record.event.input_tokens() + record.event.output_tokens()) as u64,
+                cost_cents + u64::from(record.event.cost_cents()),
+            )
+        })
+}
+
+fn target_usage_from_events_after(events: &[EventRecord], boundary: u64) -> (u64, u64) {
+    events
+        .iter()
+        .filter(|record| record.sequence_num > boundary)
         .fold((0_u64, 0_u64), |(tokens, cost_cents), record| {
             (
                 tokens + (record.event.input_tokens() + record.event.output_tokens()) as u64,
@@ -1331,6 +1489,35 @@ mod tests {
             transcript[1].content,
             "Target response: first target response"
         );
+    }
+
+    #[test]
+    fn resumed_trial_usage_counts_only_events_after_its_durable_boundary_offline() {
+        // Pins: resuming a trial includes its earlier target usage without
+        // charging activity that predates the trial on a reused session.
+        let session_id = SessionId::new();
+        let response =
+            |text: &str, input_tokens_uncached, output_tokens, cost_cents| Event::BrainResponse {
+                text: text.to_string(),
+                thought_signature: None,
+                model: ModelId::new("gpt-5.1"),
+                model_tier: ModelTier::Main,
+                input_tokens_uncached,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens,
+                cost_cents,
+                duration_ms: 25,
+                llm_ttft_ms: None,
+            };
+        let events = vec![
+            event_record(session_id, 1, response("before trial", 100, 50, 9)),
+            event_record(session_id, 2, response("trial turn one", 10, 5, 1)),
+            event_record(session_id, 3, response("trial turn two", 20, 7, 2)),
+        ];
+
+        assert_eq!(target_usage_from_events_after(&events, 1), (42, 3));
+        assert_eq!(target_usage_from_events_after(&events, 3), (0, 0));
     }
 
     #[test]

@@ -17,17 +17,15 @@ pub(crate) fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
 
 /// Converts a [`MoaError`] into a Restate handler error with HTTP-style codes.
 ///
-/// Validation, serialization, and UUID errors map to `400`; unsupported and
-/// not-implemented errors map to `501`; remaining fatal errors become terminal
-/// failures and transient errors stay retryable.
+/// Validation, serialization, and UUID errors map to `400`; unsupported errors
+/// map to `501`; remaining fatal errors become terminal failures and transient
+/// errors stay retryable.
 pub(crate) fn moa_error_to_status_handler_error(error: MoaError) -> HandlerError {
     match error {
         MoaError::ValidationError(_) | MoaError::SerializationError(_) | MoaError::Uuid(_) => {
             TerminalError::new_with_code(400, error.to_string()).into()
         }
-        MoaError::Unsupported(_) | MoaError::NotImplemented(_) => {
-            TerminalError::new_with_code(501, error.to_string()).into()
-        }
+        MoaError::Unsupported(_) => TerminalError::new_with_code(501, error.to_string()).into(),
         other if other.is_fatal() => TerminalError::new(other.to_string()).into(),
         other => HandlerError::from(other),
     }

@@ -8,6 +8,7 @@ use super::tools::{
     response_stop_reason, response_text_from_output,
 };
 use super::*;
+use crate::core::pacer::RatePacer;
 use crate::core::provider_tools::{web_search_completed_block, web_search_started_block};
 use crate::core::rate_guard::RateGuard;
 use crate::core::schema::normalize_openai_strict_output;
@@ -45,6 +46,8 @@ pub(crate) async fn stream_responses_with_retry(
     started_at: Instant,
     retry_policy: RetryPolicy,
     guard: &RateGuard,
+    pacer: &RatePacer,
+    pacing_model: &str,
     mut span_recorder: LLMSpanRecorder,
     stream_timeouts: ProviderStreamTimeoutConfig,
     canonical_response_schema: Option<Value>,
@@ -61,6 +64,8 @@ pub(crate) async fn stream_responses_with_retry(
             started_at,
             retry_policy,
             guard,
+            pacer,
+            pacing_model,
             span_recorder,
             canonical_response_schema.as_ref(),
             &canonical_tool_schemas,
@@ -71,6 +76,7 @@ pub(crate) async fn stream_responses_with_retry(
     let mut attempt = 0usize;
 
     loop {
+        pacer.acquire(pacing_model, 1, 0).await?;
         span_recorder.set_phase("transport");
         match create_response_stream(client, api_base, api_key, request).await {
             Ok(stream) => {
@@ -91,30 +97,32 @@ pub(crate) async fn stream_responses_with_retry(
                         span_recorder.finish(&response);
                         return Ok(response);
                     }
-                    Err(error)
+                    Err(error) => {
+                        // The retry-budget check is async (it may consult the
+                        // fleet-wide budget), so it cannot live in a match guard.
                         if error.retryable
                             && !error.emitted_content
                             && attempt < retry_policy.max_retries
-                            && guard.allow_retry() =>
-                    {
-                        let delay = retry_policy.delay_for_attempt(attempt);
-                        tracing::warn!(
-                            attempt = attempt + 1,
-                            max_retries = retry_policy.max_retries,
-                            delay_ms = delay.as_millis(),
-                            "provider stream hit a rate limit before any content was emitted; retrying"
-                        );
-                        record_responses_retry_attempt(&span_recorder, attempt, "rate_limited");
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
-                    }
-                    Err(error) => {
+                            && guard.allow_retry().await
+                        {
+                            let delay = retry_policy.delay_for_attempt(attempt);
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                max_retries = retry_policy.max_retries,
+                                delay_ms = delay.as_millis(),
+                                "provider stream hit a rate limit before any content was emitted; retrying"
+                            );
+                            record_responses_retry_attempt(&span_recorder, attempt, "rate_limited");
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                            continue;
+                        }
                         span_recorder.fail_at_stage("stream", &error.error);
                         if error.rate_limited {
                             // Match the shared RetryPolicy: an exhausted rate
                             // limit is a typed RateLimited, never a generic
                             // ProviderError or HttpStatus{429}.
-                            guard.record_rate_limited(None);
+                            guard.record_rate_limited(None).await;
                             let message = match error.error {
                                 MoaError::RateLimited { message, .. }
                                 | MoaError::ProviderError(message) => message,
@@ -129,27 +137,29 @@ pub(crate) async fn stream_responses_with_retry(
                     }
                 }
             }
-            Err(error)
+            Err(error) => {
+                // The retry-budget check is async (it may consult the fleet-wide
+                // budget), so it cannot live in a match guard.
                 if error.retryable
                     && !error.emitted_content
                     && attempt < retry_policy.max_retries
-                    && guard.allow_retry() =>
-            {
-                let delay = retry_policy.delay_for_attempt(attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = retry_policy.max_retries,
-                    delay_ms = delay.as_millis(),
-                    "provider request hit a retryable transport error; retrying"
-                );
-                record_responses_retry_attempt(&span_recorder, attempt, "transport_error");
-                tokio::time::sleep(delay).await;
-                attempt += 1;
-            }
-            Err(error) => {
+                    && guard.allow_retry().await
+                {
+                    let delay = retry_policy.delay_for_attempt(attempt);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_retries = retry_policy.max_retries,
+                        delay_ms = delay.as_millis(),
+                        "provider request hit a retryable transport error; retrying"
+                    );
+                    record_responses_retry_attempt(&span_recorder, attempt, "transport_error");
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
                 span_recorder.fail_at_stage("transport", &error.error);
                 if error.rate_limited {
-                    guard.record_rate_limited(None);
+                    guard.record_rate_limited(None).await;
                     let message = match error.error {
                         MoaError::RateLimited { message, .. }
                         | MoaError::ProviderError(message) => message,
@@ -177,6 +187,8 @@ async fn create_response_with_retry(
     started_at: Instant,
     retry_policy: RetryPolicy,
     guard: &RateGuard,
+    pacer: &RatePacer,
+    pacing_model: &str,
     mut span_recorder: LLMSpanRecorder,
     canonical_response_schema: Option<&Value>,
     canonical_tool_schemas: &std::collections::HashMap<String, Value>,
@@ -186,6 +198,7 @@ async fn create_response_with_retry(
     let mut attempt = 0usize;
 
     loop {
+        pacer.acquire(pacing_model, 1, 0).await?;
         span_recorder.set_phase("transport");
         match create_response(client, api_base, api_key, &request).await {
             Ok(response) => {
@@ -201,7 +214,7 @@ async fn create_response_with_retry(
                 if response.text.trim().is_empty()
                     && response.content.is_empty()
                     && attempt < retry_policy.max_retries
-                    && guard.allow_retry()
+                    && guard.allow_retry().await
                 {
                     let delay = retry_policy.delay_for_attempt(attempt);
                     tracing::warn!(
@@ -224,27 +237,29 @@ async fn create_response_with_retry(
                 span_recorder.finish(&response);
                 return Ok(response);
             }
-            Err(error)
+            Err(error) => {
+                // The retry-budget check is async (it may consult the fleet-wide
+                // budget), so it cannot live in a match guard.
                 if error.retryable
                     && !error.emitted_content
                     && attempt < retry_policy.max_retries
-                    && guard.allow_retry() =>
-            {
-                let delay = retry_policy.delay_for_attempt(attempt);
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_retries = retry_policy.max_retries,
-                    delay_ms = delay.as_millis(),
-                    "provider structured response hit a retryable transport error; retrying"
-                );
-                record_responses_retry_attempt(&span_recorder, attempt, "transport_error");
-                tokio::time::sleep(delay).await;
-                attempt += 1;
-            }
-            Err(error) => {
+                    && guard.allow_retry().await
+                {
+                    let delay = retry_policy.delay_for_attempt(attempt);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_retries = retry_policy.max_retries,
+                        delay_ms = delay.as_millis(),
+                        "provider structured response hit a retryable transport error; retrying"
+                    );
+                    record_responses_retry_attempt(&span_recorder, attempt, "transport_error");
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
                 span_recorder.fail_at_stage("transport", &error.error);
                 if error.rate_limited {
-                    guard.record_rate_limited(None);
+                    guard.record_rate_limited(None).await;
                     let message = match error.error {
                         MoaError::RateLimited { message, .. }
                         | MoaError::ProviderError(message) => message,

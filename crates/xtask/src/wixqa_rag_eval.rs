@@ -109,10 +109,10 @@ async fn run_async(options: Options) -> Result<RunSummary> {
         .context("connect to MOA Postgres")?;
     let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
     let ingestion_embedder =
-        build_embedder_from_config(&config, EmbedderConstructionRole::Ingestion)
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Ingestion)
             .with_context(|| format!("build {} ingestion embedder", options.embedder_name))?;
     let retrieval_embedder =
-        build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
             .with_context(|| format!("build {} retrieval embedder", options.embedder_name))?;
     let tenant_id = TenantId::from(stable_uid(&selected.cache_key));
     let connection_uid = stable_uid(&format!("wixqa-connection:{}", selected.cache_key));

@@ -355,7 +355,7 @@ impl RrfPlusJudgeDetector {
 }
 
 fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
-    build_reranker_from_config(config).unwrap_or_else(|error| {
+    build_reranker_from_config(config, None).unwrap_or_else(|error| {
         tracing::warn!(
             error = %error,
             "contradiction reranking disabled because reranker configuration is invalid"

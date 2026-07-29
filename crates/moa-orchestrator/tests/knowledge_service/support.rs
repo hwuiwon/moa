@@ -1059,8 +1059,17 @@ fn assert_sync_status_counters(
     assert_eq!(status.records_failed, 0);
     assert_eq!(status.objects_parsed, expected_records);
     assert_eq!(status.chunks_embedded, expected_records);
-    assert_eq!(status.graph_nodes_upserted, expected_graph_nodes);
-    assert_eq!(status.graph_edges_upserted, expected_graph_edges);
+    // Print both graph counters so a topology change is visible in one failure.
+    assert_eq!(
+        status.graph_nodes_upserted, expected_graph_nodes,
+        "graph nodes upserted changed: observed {} nodes / {} edges",
+        status.graph_nodes_upserted, status.graph_edges_upserted
+    );
+    assert_eq!(
+        status.graph_edges_upserted, expected_graph_edges,
+        "graph edges upserted changed: observed {} nodes / {} edges",
+        status.graph_nodes_upserted, status.graph_edges_upserted
+    );
 }
 
 fn object_ingestion_steps() -> Vec<&'static str> {
@@ -1075,7 +1084,6 @@ fn object_ingestion_steps() -> Vec<&'static str> {
         "parse_completed",
         "normalized",
         "blocks_diffed",
-        "semantic_graph_extracted",
         "chunks_diffed",
         "embedded",
         "graph_upserted",

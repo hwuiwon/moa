@@ -417,7 +417,7 @@ fn agent_context_with_skill_revision(
         artifact_dependencies: vec![dependency.clone()],
         tool_dependencies: vec![LockedToolRef {
             name: "file_read".to_string(),
-            schema_hash: "file-read-schema".to_string(),
+            identity_hash: "file-read-schema".to_string(),
             provider: None,
         }],
         canonical_policy_hash: "locked-skill-policy".to_string(),
@@ -448,7 +448,7 @@ fn agent_context_with_skill_revision(
         artifact_dependencies: vec![dependency],
         tool_dependencies: vec![LockedToolRef {
             name: "file_read".to_string(),
-            schema_hash: "file-read-schema".to_string(),
+            identity_hash: "file-read-schema".to_string(),
             provider: None,
         }],
         policy_snapshot: serde_json::to_value(snapshot).expect("serialize policy snapshot"),

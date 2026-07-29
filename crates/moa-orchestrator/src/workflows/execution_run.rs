@@ -757,10 +757,14 @@ fn narrow_amendment_context(
         .capabilities
         .iter()
         .filter(|capability| match &capability.source {
-            CapabilitySource::BuiltInTool { name }
-            | CapabilitySource::HandTool { name }
-            | CapabilitySource::McpTool { name, .. } => available_tool_names.contains(name),
-            CapabilitySource::ActionArtifact { tool_name, .. }
+            CapabilitySource::BuiltInTool { name } | CapabilitySource::HandTool { name } => {
+                available_tool_names.contains(name)
+            }
+            // `tool_name`, not `remote_name`: availability is membership in the
+            // router's registered names, and a connector tool is registered
+            // under its server-qualified reference.
+            CapabilitySource::McpTool { tool_name, .. }
+            | CapabilitySource::ActionArtifact { tool_name, .. }
             | CapabilitySource::ConnectorAction { tool_name, .. }
             | CapabilitySource::SkillAction { tool_name, .. }
             | CapabilitySource::Memory { tool_name, .. } => {

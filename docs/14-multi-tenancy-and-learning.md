@@ -64,18 +64,26 @@ This keeps routing flexible while preserving auditable, tenant-scoped adaptation
 | `target_label` | human-readable label |
 | `payload` | structured full detail |
 | `confidence` | score when available |
-| `source_refs` | contributing sessions or segments |
 | `actor` | system, admin, or brain/session identity |
 | `valid_from` / `valid_to` | bitemporal validity |
 | `batch_id` | groups related learning entries |
 | `version` | target version |
 
+Contributing sources live in the separate `learning_log_source` table, one typed
+column per referent kind with a composite key carrying the partition, rather than
+an untyped `UUID[]` on the row. That is what lets a privacy erasure reach an
+entry from the subject's session or experience instead of guessing which table a
+bare uuid belonged to.
+
 Current learning types include:
 
 - `skill_created`
 - `skill_improved`
-- `memory_updated`
+- `skill_rollback`
 - `segment_assessed`
+
+Consolidation deliberately emits none: a tenant-wide entry with no per-subject
+provenance could be neither erased nor explained, and no reader consumed it.
 
 ## Resolution-Weighted Skills
 
@@ -96,7 +104,7 @@ as `evaluating -> promoted` and is not inferred from a single segment outcome.
 
 ## Memory Learning
 
-Memory consolidation records `memory_updated` with counts for graph updates such as superseded facts, expired nodes, merged duplicates, and resolved contradictions. Graph memory describes current knowledge; the learning log records provenance and validity.
+Memory consolidation records its counts — superseded facts, expired nodes, merged duplicates, resolved contradictions — on the consolidation report and in metrics, not in `learning_log`. A tenant-wide entry with no per-subject provenance could be neither erased nor explained. Graph memory describes current knowledge; the learning log records provenance and validity for *derived* learning.
 
 ## Rollback
 

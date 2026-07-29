@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_config::SessionLimitsConfig;
-use moa_core::traits::SessionRepository;
+use moa_core::traits::SessionStore;
 use moa_core::{
     error::MoaError, events::Event, types::action_policy::ActionReviewContinuation,
     types::action_policy::ActionReviewReceipt, types::action_policy::ActionReviewRegistration,
@@ -33,6 +33,7 @@ use moa_core::{
     types::worker::state::WorkerTerminalResult,
     types::worker::tool_schema::child_report_tool_schemas,
 };
+use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
 use moa_wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use restate_sdk::prelude::*;
@@ -211,26 +212,32 @@ pub struct CleanupRequest {
 
 /// Concrete `Worker` virtual object implementation.
 pub struct WorkerImpl {
-    session_store: Arc<dyn SessionRepository>,
+    session_store: Arc<dyn SessionStore>,
     session_limits: SessionLimitsConfig,
     providers: Arc<ProviderRegistry>,
-    tool_schemas: Arc<Vec<serde_json::Value>>,
+    /// Source of the live tool catalog a worker turn is compiled from.
+    ///
+    /// The router is held instead of a startup copy of its schemas so a worker
+    /// and the coordinator that delegated to it read the same catalog revision.
+    /// Two independently captured copies would drift apart the first time a
+    /// connector catalog refreshed.
+    tool_router: Arc<ToolRouter>,
 }
 
 impl WorkerImpl {
     /// Creates a worker object with its persistence, scheduling, and request dependencies.
     #[must_use]
     pub fn new(
-        session_store: Arc<dyn SessionRepository>,
+        session_store: Arc<dyn SessionStore>,
         session_limits: SessionLimitsConfig,
         providers: Arc<ProviderRegistry>,
-        tool_schemas: Arc<Vec<serde_json::Value>>,
+        tool_router: Arc<ToolRouter>,
     ) -> Self {
         Self {
             session_store,
             session_limits,
             providers,
-            tool_schemas,
+            tool_router,
         }
     }
 }

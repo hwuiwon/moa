@@ -14,7 +14,7 @@
 //!
 //! ```ignore
 //! let _permit = self.limiter.acquire().await; // 1. take an in-flight slot
-//! self.pacer.acquire(1, inputs).await;         // 2. then spend rate budget
+//! self.pacer.acquire(model, 1, inputs).await?; // 2. then spend rate budget
 //! // 3. run the request while both the permit and budget are held
 //! ```
 //!

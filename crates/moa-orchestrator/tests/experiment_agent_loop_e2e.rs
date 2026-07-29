@@ -2,6 +2,7 @@
 
 #![cfg(feature = "integration")]
 
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use std::time::Duration;
 use std::{
     fs,
@@ -225,10 +226,7 @@ async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
                 "execution_template": null,
                 "metadata": {}
             })),
-            scorecard: json!({
-                "score_names": [],
-                "evaluator_metadata": {}
-            }),
+            scorecard: Some(fixture_scorecard()),
             score_run_id: None,
             idempotency_key: Some(format!("unauthorized-agent-loop-{}", Uuid::now_v7())),
             agent_revision_variants: Vec::new(),
@@ -305,10 +303,7 @@ async fn run_agent_loop_experiment(
             "execution_template": null,
             "metadata": { "lane": "deterministic-e2e" }
         })),
-        scorecard: json!({
-            "score_names": ["support_resolution"],
-            "evaluator_metadata": { "mode": "manual-or-later" }
-        }),
+        scorecard: Some(fixture_scorecard()),
         score_run_id: None,
         idempotency_key: Some(format!("agent-loop-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
@@ -631,4 +626,15 @@ definition:
       tools:
         - file_read
 "#
+}
+
+/// The minimal runnable scorecard: one deterministic blocking requirement.
+fn fixture_scorecard() -> ExperimentScorecard {
+    ExperimentScorecard::new(vec![ScorecardRequirement {
+        evaluator_id: "target_completed".to_string(),
+        evaluator_version: "v1".to_string(),
+        config: json!({}),
+        effect: ScorecardEffect::Blocking,
+    }])
+    .expect("fixture scorecard is valid")
 }

@@ -86,10 +86,11 @@ impl MemoryRetrievalEvalOptions {
         let chat_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(3_200)));
         let embed_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(700)));
         let rerank_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(6_500)));
-        let raw_embedder = build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
-            .map_err(|error| {
-                EvalError::InvalidConfig(format!("failed to initialize live embedder: {error}"))
-            })?;
+        let raw_embedder =
+            build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
+                .map_err(|error| {
+                    EvalError::InvalidConfig(format!("failed to initialize live embedder: {error}"))
+                })?;
         let embedding_model = raw_embedder.model_id().to_string();
         let embedding_model_version = raw_embedder.model_version();
         let embedder = Arc::new(ThrottledEmbedder::new(
@@ -114,7 +115,7 @@ impl MemoryRetrievalEvalOptions {
             chat_throttle,
         )) as Arc<dyn EntityMergeVerifier>;
         let configured_reranker = if self.reranker_enabled {
-            let configured = build_reranker_from_config(&config).map_err(|error| {
+            let configured = build_reranker_from_config(&config, None).map_err(|error| {
                 EvalError::InvalidConfig(format!("failed to initialize live reranker: {error}"))
             })?;
             if configured.provider == "noop" {

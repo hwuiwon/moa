@@ -16,8 +16,12 @@ workspace-hack = { workspace = true }
 [dev-dependencies]
 # Migration backfill coverage seeds and reads real UUID-keyed graph rows, so the
 # test build needs sqlx's UUID mapping on top of the runtime feature set.
-sqlx = { workspace = true, features = ["postgres", "uuid"] }
+sqlx = { workspace = true, features = ["postgres", "uuid", "chrono"] }
 uuid = { workspace = true }
+# The lineage acceptance queue derives claim eligibility from its lease pair in a
+# GENERATED column. Reading those timestamps back is the only way to prove the
+# derivation is the database's job and not a claimant's.
+chrono = { workspace = true }
 # The source-ACL upgrade proof runs the PRODUCTION admission predicate against the
 # migrated schema as the non-BYPASSRLS app role. Re-typing the predicate here would
 # let the migration and the runtime drift apart silently, which is the one failure

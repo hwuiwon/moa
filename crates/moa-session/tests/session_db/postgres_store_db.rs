@@ -9,15 +9,16 @@ use moa_core::{
     types::experience::AttributionEffect, types::experience::AttributionKind,
     types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
     types::experience::ExperienceRecord, types::experience::LearningCandidate,
-    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
-    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::experience::LearningCandidateSourceRef, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::experience::LearningProposalKind, types::experience::LearningRiskClass,
     types::experience::TaskFacetSet, types::experience::TaskFingerprint,
     types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::identifiers::ToolCallId, types::identifiers::UserId, types::learning::LearningEntry,
-    types::provider::ModelTier, types::segment_assessment::AssessmentPhase,
-    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
-    types::segment_assessment::SegmentEvidenceKind,
+    types::learning::LearningLogSourceRef, types::provider::ModelTier,
+    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::segments::SegmentCompletion, types::segments::TaskSegment,
     types::segments::deterministic_segment_id, types::session::SessionMeta,
@@ -152,6 +153,22 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
     let now = moa_test_support::fixtures::pg_now();
     let contact_candidate_id = Uuid::now_v7();
     let tenant_candidate_id = Uuid::now_v7();
+    // Provenance is a real foreign key, so each fixture candidate needs a source
+    // row that actually exists in its own tenant partition. The third candidate
+    // deliberately gets a source in the OTHER tenant, which is what makes the
+    // tenant-isolation assertion below meaningful rather than incidental.
+    let contact_session_id = store
+        .create_session(test_session_meta("candidate-summary", "test-model"))
+        .await
+        .expect("seed contact candidate source session");
+    let tenant_session_id = store
+        .create_session(test_session_meta("candidate-summary", "test-model"))
+        .await
+        .expect("seed tenant candidate source session");
+    let other_tenant_session_id = store
+        .create_session(test_session_meta("candidate-summary-other", "test-model"))
+        .await
+        .expect("seed other-tenant candidate source session");
 
     for candidate in [
         LearningCandidate {
@@ -159,6 +176,7 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
             tenant_id: tenant,
             user_id: Some(UserId::new(contact_id.to_string())),
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status: LearningCandidateStatus::Proposed,
             target_id: Some("skill:contact-summary".to_string()),
             target_label: Some("contact summary".to_string()),
@@ -169,7 +187,9 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
                 "api_key": "raw-dashboard-secret"
             }),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            sources: vec![LearningCandidateSourceRef::Session {
+                session_id: contact_session_id,
+            }],
             confidence: Some(0.9),
             risk_class: LearningRiskClass::Low,
             promotion_requirements: vec!["human_review".to_string()],
@@ -183,14 +203,17 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
             tenant_id: tenant,
             user_id: Some(UserId::new(format!("tenant:{tenant}"))),
             candidate_type: LearningCandidateType::Prompt,
-            status: LearningCandidateStatus::Proposed,
+            proposal_kind: LearningProposalKind::PromptAuthoring,
+            status: LearningCandidateStatus::NeedsAuthoring,
             target_id: None,
             target_label: Some("tenant summary".to_string()),
             task_fingerprint: None,
             task_facets: None,
             payload: serde_json::json!({"description": "tenant safe preview"}),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            sources: vec![LearningCandidateSourceRef::Session {
+                session_id: tenant_session_id,
+            }],
             confidence: None,
             risk_class: LearningRiskClass::Medium,
             promotion_requirements: Vec::new(),
@@ -204,14 +227,17 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
             tenant_id: other_tenant,
             user_id: None,
             candidate_type: LearningCandidateType::Eval,
-            status: LearningCandidateStatus::Proposed,
+            proposal_kind: LearningProposalKind::EvalAuthoring,
+            status: LearningCandidateStatus::NeedsAuthoring,
             target_id: None,
             target_label: Some("other tenant".to_string()),
             task_fingerprint: None,
             task_facets: None,
             payload: serde_json::json!({"description": "must stay hidden"}),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            sources: vec![LearningCandidateSourceRef::Session {
+                session_id: other_tenant_session_id,
+            }],
             confidence: None,
             risk_class: LearningRiskClass::Low,
             promotion_requirements: Vec::new(),
@@ -257,6 +283,10 @@ async fn learning_log_round_trips_skill_entry() {
     with_test_store(|store| async move {
         let batch_id = Uuid::now_v7();
         let tenant_id = tenant_id("tenant-learning");
+        let learning_session_id = store
+            .create_session(test_session_meta("tenant-learning", "test-model"))
+            .await
+            .expect("seed learning-log source session");
         let entry = LearningEntry {
             id: Uuid::now_v7(),
             tenant_id,
@@ -265,7 +295,9 @@ async fn learning_log_round_trips_skill_entry() {
             target_label: Some("moa-rust".to_string()),
             payload: serde_json::json!({ "version": 1, "source": "distillation" }),
             confidence: Some(0.8),
-            source_refs: vec![Uuid::now_v7()],
+            sources: vec![LearningLogSourceRef::Session {
+                session_id: learning_session_id,
+            }],
             actor: "system".to_string(),
             valid_from: moa_test_support::fixtures::pg_now(),
             valid_to: None,
@@ -1507,6 +1539,7 @@ async fn experience_records_and_candidates_round_trip() {
         tenant_id,
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
+        proposal_kind: LearningProposalKind::SkillDraft,
         status: LearningCandidateStatus::Proposed,
         target_id: Some("skills/moa-rust/SKILL.md".to_string()),
         target_label: Some("moa-rust".to_string()),
@@ -1514,7 +1547,9 @@ async fn experience_records_and_candidates_round_trip() {
         task_facets: Some(facets),
         payload: serde_json::json!({"skill_markdown": "# moa-rust"}),
         evaluation_payload: None,
-        source_experience_ids: vec![experience.id],
+        sources: vec![LearningCandidateSourceRef::Experience {
+            experience_id: experience.id,
+        }],
         confidence: Some(0.9),
         risk_class: LearningRiskClass::Medium,
         promotion_requirements: vec!["regression_comparison".to_string()],
@@ -1528,13 +1563,16 @@ async fn experience_records_and_candidates_round_trip() {
         .await
         .expect("append candidate");
     store
-        .update_learning_candidate_status(&LearningCandidateStatusUpdate {
-            candidate_id: candidate.id,
-            status: LearningCandidateStatus::Evaluating,
-            status_reason: Some("running regression".to_string()),
-            evaluation_payload: Some(serde_json::json!({"suite": "generated"})),
-            updated_at: moa_test_support::fixtures::pg_now(),
-        })
+        .update_learning_candidate_status_from(
+            &LearningCandidateStatusUpdate {
+                candidate_id: candidate.id,
+                status: LearningCandidateStatus::Evaluating,
+                status_reason: Some("running regression".to_string()),
+                evaluation_payload: Some(serde_json::json!({"suite": "generated"})),
+                updated_at: moa_test_support::fixtures::pg_now(),
+            },
+            LearningCandidateStatus::Proposed,
+        )
         .await
         .expect("candidate status update");
     let mut duplicate_candidate = candidate.clone();
@@ -1628,7 +1666,13 @@ async fn postgres_store_learning_candidate_review_lookup() {
     with_test_store(|store| async move {
         let review_tenant_id = tenant_id("pg-review");
         let other_tenant_id = tenant_id("pg-review-other");
-        let source_experience_id = Uuid::now_v7();
+        // A candidate's sources are real foreign keys now, so the fixture has to
+        // seed the row it points at. A fabricated uuid is rejected by the
+        // database, which is the whole point of normalizing provenance.
+        let source_session_id = store
+            .create_session(test_session_meta("pg-review", "test-model"))
+            .await
+            .expect("seed review source session");
         let artifact_uid = Uuid::now_v7();
         let draft_revision_uid = Uuid::now_v7();
         let payload = serde_json::json!({
@@ -1651,6 +1695,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
             tenant_id: review_tenant_id,
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status: LearningCandidateStatus::Proposed,
             target_id: Some("skills/reviewable-skill".to_string()),
             target_label: Some("reviewable-skill".to_string()),
@@ -1658,7 +1703,9 @@ async fn postgres_store_learning_candidate_review_lookup() {
             task_facets: None,
             payload: payload.clone(),
             evaluation_payload: None,
-            source_experience_ids: vec![source_experience_id],
+            sources: vec![LearningCandidateSourceRef::Session {
+                session_id: source_session_id,
+            }],
             confidence: Some(0.82),
             risk_class: LearningRiskClass::Low,
             promotion_requirements: vec!["human_review".to_string()],
@@ -1685,7 +1732,13 @@ async fn postgres_store_learning_candidate_review_lookup() {
         assert_eq!(loaded.status, LearningCandidateStatus::Proposed);
         assert_eq!(loaded.target_label.as_deref(), Some("reviewable-skill"));
         assert_eq!(loaded.payload, payload);
-        assert_eq!(loaded.source_experience_ids, vec![source_experience_id]);
+        assert_eq!(
+            loaded.sources,
+            vec![LearningCandidateSourceRef::Session {
+                session_id: source_session_id
+            }]
+        );
+        assert_eq!(loaded.proposal_kind, LearningProposalKind::SkillDraft);
         assert_eq!(loaded.risk_class, LearningRiskClass::Low);
 
         let stale_update = LearningCandidateStatusUpdate {
@@ -1724,16 +1777,38 @@ async fn postgres_store_learning_candidate_review_lookup() {
             "reviewer_subject": "user:reviewer",
             "decision": "reject"
         });
-        store
-            .update_learning_candidate_status(&LearningCandidateStatusUpdate {
-                candidate_id: candidate.id,
-                status: LearningCandidateStatus::Rejected,
-                status_reason: Some("needs clearer evidence".to_string()),
-                evaluation_payload: Some(evaluation_payload.clone()),
-                updated_at: moa_test_support::fixtures::pg_now(),
-            })
-            .await
-            .expect("reject candidate");
+        // A skill draft is rejected from the claimed state, never straight from
+        // `Proposed`: the claim is what stops two reviewers from both deciding.
+        assert!(
+            store
+                .update_learning_candidate_status_from(
+                    &LearningCandidateStatusUpdate {
+                        candidate_id: candidate.id,
+                        status: LearningCandidateStatus::Evaluating,
+                        status_reason: Some("claimed for review".to_string()),
+                        evaluation_payload: None,
+                        updated_at: moa_test_support::fixtures::pg_now(),
+                    },
+                    LearningCandidateStatus::Proposed,
+                )
+                .await
+                .expect("claim candidate for review")
+        );
+        assert!(
+            store
+                .update_learning_candidate_status_from(
+                    &LearningCandidateStatusUpdate {
+                        candidate_id: candidate.id,
+                        status: LearningCandidateStatus::Rejected,
+                        status_reason: Some("needs clearer evidence".to_string()),
+                        evaluation_payload: Some(evaluation_payload.clone()),
+                        updated_at: moa_test_support::fixtures::pg_now(),
+                    },
+                    LearningCandidateStatus::Evaluating,
+                )
+                .await
+                .expect("reject candidate")
+        );
 
         let rejected = store
             .get_learning_candidate(&candidate.tenant_id, candidate.id)

@@ -32,7 +32,7 @@ use crate::objects::session::SessionClient;
 use crate::objects::worker::WorkerClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::{ExecutionTaskToolCallRequest, ToolExecutorClient};
-use moa_core::traits::SessionRepository;
+use moa_core::traits::SessionEventLookupStore;
 use moa_execution::wire::ExecutionActionReviewResolution;
 
 /// Summary returned for one tenant action review.
@@ -134,7 +134,7 @@ pub trait ActionReviews {
 #[derive(Clone)]
 pub struct ActionReviewsImpl {
     pool: sqlx::PgPool,
-    session_store: Arc<dyn SessionRepository>,
+    session_events: Arc<dyn SessionEventLookupStore>,
     review_timeout_secs: i64,
 }
 
@@ -146,12 +146,12 @@ impl ActionReviewsImpl {
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
-        session_store: Arc<dyn SessionRepository>,
+        session_events: Arc<dyn SessionEventLookupStore>,
         review_timeout_secs: i64,
     ) -> Self {
         Self {
             pool,
-            session_store,
+            session_events,
             review_timeout_secs,
         }
     }
@@ -204,7 +204,7 @@ impl ActionReviews for ActionReviewsImpl {
                 session_id,
                 EventType::ActionReviewRequested,
                 stored.summary.id,
-                &self.session_store,
+                &self.session_events,
             )
             .await?;
             if !event_exists {
@@ -367,7 +367,7 @@ impl ActionReviews for ActionReviewsImpl {
                 decided.owner.session_id(),
                 EventType::ActionReviewDecided,
                 decided.review_id,
-                &self.session_store,
+                &self.session_events,
             )
             .await?;
             if !event_exists {
@@ -428,7 +428,7 @@ impl ActionReviews for ActionReviewsImpl {
                 &ctx,
                 &decided,
                 tool_request.tool_call_id,
-                &self.session_store,
+                &self.session_events,
             )
             .await?
             .is_none()
@@ -450,7 +450,7 @@ impl ActionReviews for ActionReviewsImpl {
                             &ctx,
                             &decided,
                             tool_request.tool_call_id,
-                            &self.session_store,
+                            &self.session_events,
                         )
                         .await?
                         .is_none()
@@ -479,7 +479,7 @@ impl ActionReviews for ActionReviewsImpl {
                 &ctx,
                 &decided,
                 executed_output.as_ref(),
-                &self.session_store,
+                &self.session_events,
             )
             .await?
         {
@@ -562,7 +562,7 @@ async fn conversational_receipt(
     ctx: &Context<'_>,
     decided: &action_review_app::DecidedReview,
     executed_output: Option<&SecuredToolOutput>,
-    session_store: &Arc<dyn SessionRepository>,
+    session_events: &Arc<dyn SessionEventLookupStore>,
 ) -> Result<Option<ActionReviewReceipt>, HandlerError> {
     let mut terminal_events = vec![ActionReviewTerminalEvent::Decided];
     let outcome = match decided.status {
@@ -587,7 +587,7 @@ async fn conversational_receipt(
                         ctx,
                         decided,
                         executed_tool_call_id,
-                        session_store,
+                        session_events,
                     )
                     .await?
                     else {
@@ -601,7 +601,7 @@ async fn conversational_receipt(
                         ctx,
                         decided,
                         executed_tool_call_id,
-                        session_store,
+                        session_events,
                     )
                     .await?;
                     recovered_outcome(terminal, recorded)
@@ -700,9 +700,9 @@ async fn durable_tool_security_metadata(
     ctx: &Context<'_>,
     decided: &action_review_app::DecidedReview,
     tool_call_id: ToolCallId,
-    session_store: &Arc<dyn SessionRepository>,
+    session_events: &Arc<dyn SessionEventLookupStore>,
 ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>, HandlerError> {
-    let store = session_store.clone();
+    let store = session_events.clone();
     let storage_partition_id = decided.storage_partition_id.clone();
     let session_id = decided.owner.session_id();
     Ok(ctx
@@ -737,13 +737,13 @@ async fn prior_tool_terminal_event_exists(
     ctx: &Context<'_>,
     decided: &action_review_app::DecidedReview,
     tool_call_id: ToolCallId,
-    session_store: &Arc<dyn SessionRepository>,
+    session_events: &Arc<dyn SessionEventLookupStore>,
 ) -> Result<Option<ActionReviewTerminalEvent>, HandlerError> {
     for (event_type, terminal) in [
         (EventType::ToolResult, ActionReviewTerminalEvent::ToolResult),
         (EventType::ToolError, ActionReviewTerminalEvent::ToolError),
     ] {
-        let store = session_store.clone();
+        let store = session_events.clone();
         let storage_partition_id = decided.storage_partition_id.clone();
         let session_id = decided.owner.session_id();
         let exists = ctx
@@ -773,9 +773,9 @@ async fn prior_action_review_event_exists(
     session_id: moa_core::types::identifiers::SessionId,
     event_type: EventType,
     review_id: Uuid,
-    session_store: &Arc<dyn SessionRepository>,
+    session_events: &Arc<dyn SessionEventLookupStore>,
 ) -> Result<bool, HandlerError> {
-    let store = session_store.clone();
+    let store = session_events.clone();
     let storage_partition_id = storage_partition_id.clone();
     Ok(ctx
         .run(|| async move {

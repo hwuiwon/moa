@@ -2,6 +2,10 @@
 
 use crate::artifacts::ArtifactSummary;
 use moa_core::types::action_policy::ActionRuleScope;
+use moa_core::types::experiments::{
+    ExperimentScorecard, ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup,
+    ScorecardValueType,
+};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,9 +28,13 @@ pub struct ExperimentRunRequest {
     /// Variant payload under experiment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<Value>,
-    /// Scorecard payload requested for the experiment.
-    #[serde(default)]
-    pub scorecard: Value,
+    /// Typed scorecard requested for a single-target experiment run.
+    ///
+    /// Plan-backed runs take their scorecard from the pinned plan revision and
+    /// leave this unset; a single-target run must declare one, because a run with
+    /// no evidence requirements can never produce deployment evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorecard: Option<ExperimentScorecard>,
     /// Optional score run identifier used to join against analytics scores.
     pub score_run_id: Option<Uuid>,
     /// Optional idempotency key for scoped run admission.
@@ -341,7 +349,7 @@ pub struct ExperimentScoreSummaryRow {
     /// Score name.
     pub name: String,
     /// Score value type.
-    pub value_type: String,
+    pub value_type: ScorecardValueType,
     /// Number of rows summarized.
     pub n: u64,
     /// Numeric mean or boolean true-rate, or `None` when every summarized value is NULL.
@@ -364,6 +372,11 @@ pub struct ExperimentTrialScoreSummary {
     /// Score summary rows ordered for API display.
     #[serde(default)]
     pub rows: Vec<ExperimentScoreSummaryRow>,
+    /// Scorecard eligibility computed from this trial's exact score rows.
+    pub eligibility: ScorecardEligibility,
+    /// Reasons this trial is not eligible, in requirement order.
+    #[serde(default)]
+    pub eligibility_findings: Vec<ScorecardFinding>,
 }
 
 /// Per-scenario score summary for one experiment run.
@@ -385,9 +398,6 @@ pub struct ExperimentScoresResponse {
     pub run_uid: Uuid,
     /// Resolved score run identifier summarized by the response.
     pub score_run_id: Uuid,
-    /// Score summary rows ordered for API display.
-    #[serde(default)]
-    pub rows: Vec<ExperimentScoreSummaryRow>,
     /// Aggregate score rows computed across trial-level score runs.
     #[serde(default)]
     pub trial_rollup_rows: Vec<ExperimentScoreSummaryRow>,
@@ -397,6 +407,14 @@ pub struct ExperimentScoresResponse {
     /// Per-scenario score summaries.
     #[serde(default)]
     pub scenarios: Vec<ExperimentScenarioScoreSummary>,
+    /// Run-level scorecard eligibility, computed from trial rows only.
+    pub run_scorecard: ScorecardGroupRollup,
+    /// Per-scenario scorecard eligibility.
+    #[serde(default)]
+    pub scenario_scorecards: Vec<ScorecardGroupRollup>,
+    /// Per-variant scorecard eligibility.
+    #[serde(default)]
+    pub variant_scorecards: Vec<ScorecardGroupRollup>,
 }
 
 /// Request payload for comparing two experiment score runs.
@@ -624,10 +642,15 @@ pub struct AgentArtifactDependencyDelta {
 pub struct AgentToolDependencyDelta {
     /// Stable tool name being compared.
     pub name: String,
-    /// Baseline schema/catalog hash, when present.
-    pub base_schema_hash: Option<String>,
-    /// Candidate schema/catalog hash, when present.
-    pub new_schema_hash: Option<String>,
+    /// Baseline tool identity hash, when present.
+    ///
+    /// Identity, not contract: this changes when the tool's name or provider
+    /// namespace changes, and does NOT change when a tool's input schema does.
+    /// A comparison showing no delta here is not evidence that two revisions
+    /// agree on what the tool accepts.
+    pub base_identity_hash: Option<String>,
+    /// Candidate tool identity hash, when present.
+    pub new_identity_hash: Option<String>,
     /// Change category.
     pub change: AgentDependencyChange,
 }

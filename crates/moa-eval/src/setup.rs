@@ -120,7 +120,7 @@ pub async fn build_agent_environment(
     agent_config: &AgentConfig,
     temp_dir: &Path,
 ) -> Result<AgentEnvironment> {
-    let provider_registry = ProviderRegistry::from_config(base_config);
+    let provider_registry = ProviderRegistry::from_config(base_config, None)?;
     let requested_model = agent_config
         .model
         .as_deref()
@@ -222,7 +222,7 @@ pub(crate) async fn build_agent_environment_with_provider(
                 graph_pool: database_pool.clone(),
                 kms,
                 llm_provider: llm_provider.clone(),
-                provider_registry: ProviderRegistry::from_config(base_config),
+                provider_registry: ProviderRegistry::from_config(base_config, None)?,
                 lineage: lineage.clone(),
             },
             tool_router.as_ref(),

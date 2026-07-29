@@ -3,21 +3,20 @@
 use std::sync::Arc;
 
 use moa_core::{
-    error::Result, events::Event, types::action_policy::ActionRuleScope,
-    types::completion::CompletionRequest, types::events_stream::EventRecord,
+    error::Result, types::action_policy::ActionRuleScope, types::completion::CompletionRequest,
     types::memory::SkillMetadata, types::provider::ModelTask, types::session::SessionMeta,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 
 use crate::distiller::ExperienceDistillationInput;
+use crate::evidence::{EvidenceSource, SanitizedLearningEvidence};
 use crate::format::{
     SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
 use crate::package::{SKILL_MD_PATH, SkillPackage, SkillPackageFile, ValidatedSkillPackageFile};
 use crate::proposals::{
-    SiblingResynthesis, SkillDraftProposal, SkillProposalOperation, SkillProposalSource,
-    store_skill_draft_proposal,
+    SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
 };
 use crate::registry::SkillRegistry;
 use crate::regression::generate_skill_test_suite_source;
@@ -34,14 +33,13 @@ pub enum ImprovementResult {
         /// Proposed semantic skill version.
         version: String,
     },
-    /// A recurring sibling experience deduped onto an already-open improvement
-    /// proposal. No new draft was filed; `resynthesis` records whether the
-    /// sibling's generalization pass rewrote the open draft.
+    /// A recurring sibling experience deduped onto an already-open improvement proposal.
+    ///
+    /// No new draft was filed. The sibling contributes only held-out regression
+    /// material, so it cannot influence the candidate it later evaluates.
     Deduped {
         /// The open proposal the sibling deduped onto.
         proposal: SkillDraftProposal,
-        /// Whether the sibling's generalization pass rewrote the open draft.
-        resynthesis: SiblingResynthesis,
     },
     /// The LLM concluded the current skill already covers the successful run.
     Unchanged {
@@ -84,7 +82,7 @@ pub async fn improve_skill_from_experience_with_learning(
     improve_skill_with_learning_for_sources(
         session,
         existing,
-        &input.events,
+        &input.evidence,
         model_router,
         learning_store,
         source,
@@ -95,7 +93,7 @@ pub async fn improve_skill_from_experience_with_learning(
 pub(crate) async fn improve_skill_with_learning_for_sources(
     session: &SessionMeta,
     existing: &SkillMetadata,
-    events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
     source: SkillProposalSource,
@@ -117,33 +115,26 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     )
     .await?
     {
-        let resynthesis =
-            if let Some(source_experience_id) = source.source_experience_ids.first().copied() {
-                let sibling_suite = crate::regression::generate_skill_test_suite_source_for_name(
-                    session.tenant_id,
-                    &open.metadata.name,
-                    events,
-                )?;
-                crate::proposals::accumulate_sibling_and_resynthesize(
-                    store.as_ref(),
-                    model_router.as_ref(),
-                    session.tenant_id,
-                    &open,
-                    crate::proposals::SiblingContribution {
-                        suite: sibling_suite,
-                        events,
-                        source_experience_id,
-                        source_session_id: session.id,
-                    },
-                )
-                .await?
-            } else {
-                SiblingResynthesis::DraftUnchanged
-            };
-        return Ok(ImprovementResult::Deduped {
-            proposal: open,
-            resynthesis,
-        });
+        if let Some(source_experience_id) = crate::candidates::experience_ids(&source.sources)
+            .first()
+            .copied()
+        {
+            let sibling_suite = crate::regression::generate_skill_test_suite_source_for_name(
+                session.tenant_id,
+                &open.metadata.name,
+                evidence,
+            )?;
+            crate::proposals::accumulate_sibling_suite(
+                store.as_ref(),
+                session.tenant_id,
+                &open,
+                sibling_suite,
+                source_experience_id,
+                session.id,
+            )
+            .await?;
+        }
+        return Ok(ImprovementResult::Deduped { proposal: open });
     }
     let registry = SkillRegistry::new(store.pool().clone());
     let scope = ActionRuleScope::Tenant {
@@ -160,7 +151,7 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let current_markdown = render_skill_markdown(&current)?;
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
     let response = llm
-        .complete(build_improvement_request(&current_markdown, events))
+        .complete(build_improvement_request(&current_markdown, evidence))
         .await?
         .collect()
         .await?;
@@ -187,7 +178,7 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
     let candidate_package =
         package_with_replaced_skill_md(&stored_package.files, candidate_markdown).validate()?;
-    let generated_suite = generate_skill_test_suite_source(session.tenant_id, &improved, events)?;
+    let generated_suite = generate_skill_test_suite_source(session.tenant_id, &improved, evidence)?;
     let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,
@@ -296,58 +287,62 @@ Keep spec-compatible top-level frontmatter fields and only use MOA metadata for 
 `moa-tags`, and `moa-estimated-tokens`.
 If the existing skill is still correct, output exactly UNCHANGED.";
 
-fn build_improvement_request(current_skill: &str, events: &[EventRecord]) -> CompletionRequest {
+fn build_improvement_request(
+    current_skill: &str,
+    evidence: &SanitizedLearningEvidence,
+) -> CompletionRequest {
     crate::util::completion_request(
         SKILL_IMPROVEMENT_SYSTEM_PROMPT,
-        build_improvement_user_prompt(current_skill, events),
+        build_improvement_user_prompt(current_skill, evidence),
     )
 }
 
-fn build_improvement_user_prompt(current_skill: &str, events: &[EventRecord]) -> String {
+fn build_improvement_user_prompt(
+    current_skill: &str,
+    evidence: &SanitizedLearningEvidence,
+) -> String {
     format!(
         "Current skill:\n{current_skill}\n\n\
          Actual execution:\n{}",
-        format_events_for_learning(events)
+        format_evidence_for_learning(evidence)
     )
 }
 
-/// Per-event character cap for learning prompts; tool output can be megabytes.
+/// Per-entry character cap for learning prompts; tool output can be megabytes.
 const LEARNING_EVENT_TEXT_CAP: usize = 2_000;
-/// Total character budget for the formatted event section of a learning prompt.
+/// Total character budget for the formatted evidence section of a learning prompt.
 const LEARNING_EVENTS_TOTAL_CAP: usize = 60_000;
 
-pub(crate) fn format_events_for_learning(events: &[EventRecord]) -> String {
+/// Renders sanitized evidence into the transcript block sent to a learning model.
+///
+/// This is the single formatter every learning provider call goes through, so it
+/// takes sanitized evidence rather than events by construction: there is no
+/// second, raw formatting path a caller could reach for instead.
+pub(crate) fn format_evidence_for_learning(evidence: &SanitizedLearningEvidence) -> String {
     let mut lines = Vec::new();
     let mut total = 0usize;
-    for record in events {
-        let line = match &record.event {
-            Event::UserMessage { text, .. } => {
-                Some(format!("user: {}", truncate_for_learning(text)))
-            }
-            Event::QueuedMessage { text, .. } => {
-                Some(format!("queued: {}", truncate_for_learning(text)))
-            }
-            Event::ToolCall {
-                tool_name, input, ..
-            } => Some(format!(
-                "tool_call {tool_name}: {}",
-                truncate_for_learning(&input.to_string())
-            )),
-            Event::ToolResult {
-                output, success, ..
-            } => Some(format!(
-                "tool_result success={success}: {}",
-                truncate_for_learning(&output.to_text())
-            )),
-            Event::ToolError { error, .. } => {
-                Some(format!("tool_error: {}", truncate_for_learning(error)))
-            }
-            Event::BrainResponse { text, .. } => {
-                Some(format!("assistant: {}", truncate_for_learning(text)))
-            }
-            _ => None,
+    for entry in evidence.entries() {
+        let text = truncate_for_learning(entry.text());
+        let line = match entry.source() {
+            EvidenceSource::UserMessage => format!("user: {text}"),
+            EvidenceSource::QueuedMessage => format!("queued: {text}"),
+            EvidenceSource::AssistantMessage => format!("assistant: {text}"),
+            EvidenceSource::ToolInput => format!(
+                "tool_call {}: {text}",
+                entry.tool_name().unwrap_or("unknown")
+            ),
+            EvidenceSource::ToolResult => format!(
+                "tool_result success={}: {text}",
+                entry.success().unwrap_or(false)
+            ),
+            EvidenceSource::ToolError => format!("tool_error: {text}"),
+            EvidenceSource::AssistantThinking
+            | EvidenceSource::MemoryPath
+            | EvidenceSource::MemoryIngestSource
+            | EvidenceSource::MemoryIngestPage
+            | EvidenceSource::TaskSummary
+            | EvidenceSource::AssessmentEvidence => continue,
         };
-        let Some(line) = line else { continue };
         total += line.len();
         if total > LEARNING_EVENTS_TOTAL_CAP {
             lines.push("[remaining events omitted: learning prompt budget reached]".to_string());
@@ -372,10 +367,11 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn skill_improvement_request_keeps_current_skill_out_of_system_prompt() {
+    #[tokio::test]
+    async fn skill_improvement_request_keeps_current_skill_out_of_system_prompt() {
         // Pins: skill-improvement evidence is dynamic so the stable judge instructions remain cacheable.
-        let request = build_improvement_request("# Existing Skill\n", &[]);
+        let evidence = crate::evidence::sanitize_for_tests(&[]).await;
+        let request = build_improvement_request("# Existing Skill\n", &evidence);
 
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, MessageRole::System);

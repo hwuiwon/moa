@@ -68,6 +68,15 @@ pub struct ActionPolicyCheck {
     pub source: ActionPolicyDecisionSource,
 }
 
+/// One configured permission pattern that governs no registered tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnmatchedPermissionPattern {
+    /// Configuration field the pattern was authored in.
+    pub field: &'static str,
+    /// The pattern exactly as the operator wrote it.
+    pub pattern: String,
+}
+
 /// Policy engine for tool action decisions.
 ///
 /// Config globs are compiled into [`GlobMatcher`]s once at construction so a
@@ -94,6 +103,38 @@ impl ActionPolicies {
                 &config.permissions.always_deny,
             )?,
         })
+    }
+
+    /// Returns the configured permission patterns that match none of the
+    /// registered tool names.
+    ///
+    /// Matched with the same compiled [`GlobMatcher`]s [`Self::check`] uses, not
+    /// a second implementation, so this cannot report a pattern as dead while
+    /// enforcement still honours it — or the reverse.
+    ///
+    /// A pattern matching nothing is almost always an operator mistake, and the
+    /// direction it fails matters: an `always_deny` pattern that stops matching
+    /// leaves a tool permitted, and an `admin_review` pattern that stops
+    /// matching leaves a tool running unattended that an operator meant to gate.
+    /// Both fail OPEN, silently, which is why this is worth surfacing rather
+    /// than leaving for someone to notice in an audit.
+    #[must_use]
+    pub fn unmatched_patterns(&self, tool_names: &[String]) -> Vec<UnmatchedPermissionPattern> {
+        let mut unmatched = Vec::new();
+        for (field, globs) in [
+            ("permissions.always_deny", &self.always_deny),
+            ("permissions.admin_review", &self.admin_review),
+        ] {
+            for glob in globs {
+                if !tool_names.iter().any(|name| glob.is_match(name)) {
+                    unmatched.push(UnmatchedPermissionPattern {
+                        field,
+                        pattern: glob.glob().glob().to_string(),
+                    });
+                }
+            }
+        }
+        unmatched
     }
 
     /// Evaluates a tool invocation using persistent rules, config defaults, and tool metadata.

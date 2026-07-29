@@ -3,8 +3,9 @@
 //! Two emission modes exist. The `emit_*` helpers are synchronous and fail
 //! closed: a signing or insert failure returns an error so callers can roll back
 //! the action that would otherwise be missing an audit record. The `spawn_*`
-//! helpers hand the event to a background batch writer ([`init_background_audit`])
-//! that never blocks or fails the caller; they are used on hot request paths
+//! helpers hand the event to an instance-owned background batch writer
+//! ([`AuditRuntime`]) through an [`AuditEmitter`]; they never block or fail the
+//! caller, and they are used on hot request paths
 //! (authentication, authorization denials) where an audit write must not gate
 //! the response. Transaction-scoped `emit_*_tx` helpers stay synchronous because
 //! they are part of a durable state mutation.
@@ -16,7 +17,7 @@ pub mod enums;
 pub mod jcs;
 pub mod signing;
 
-pub use audit_sink::init_background_audit;
+pub use audit_sink::{AuditEmitter, AuditRuntime, AuditRuntimeError};
 pub use emit::{
     ActorInput, EmitError, FindingWrite, MemoryDataAccess, MemoryDataAccessDetails,
     PromptInjectionFinding, emit_agent_deactivated_tx, emit_agent_registered_tx,

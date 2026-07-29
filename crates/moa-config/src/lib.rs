@@ -57,9 +57,8 @@ pub use kms::{KmsConfig, KmsProviderKind};
 pub use knowledge::{
     KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
-    KnowledgeSemanticConfig, KnowledgeSemanticModelConfig, KnowledgeSyncConfig,
-    LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig, NangoKnowledgeProviderConfig,
-    ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
+    KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig,
+    NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
 };
 pub use learning::{
     EmbeddingBackfillConfig, LearningConfig, RecurrenceConfig, RegressionMonitorConfig,
@@ -75,20 +74,24 @@ pub use memory::{
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{
-    ConcurrencyScope, DeploymentProviderPolicyConfig, GeneralConfig, ModelsConfig,
-    ProviderCapabilitiesConfig, ProviderConcurrencyConfig, ProviderCredentialConfig,
-    ProviderStreamTimeoutConfig, ProvidersConfig,
+    ConcurrencyScope, CoordinationFailurePolicy, DeploymentProviderPolicyConfig, GeneralConfig,
+    ModelsConfig, ProviderCapabilitiesConfig, ProviderConcurrencyConfig, ProviderCredentialConfig,
+    ProviderPacingConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
 };
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
-    CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
-    McpServerCredentialScope, McpTransportConfig,
+    CloudConfig, CloudHandsConfig, LOCAL_DEVELOPMENT_SANDBOX_REVISION, LocalConfig,
+    McpCredentialConfig, McpDiscoveryMode, McpServerConfig, McpServerCredentialScope,
+    McpTransportConfig, SandboxPolicyConfig, SandboxProfileConfig,
 };
 pub use security::{PermissionsConfig, SecurityProfile};
 pub use session::{
     SessionAttachmentBackend, SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig,
 };
-pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
+pub use telemetry::{
+    MetricsConfig, MetricsExporter, ObservabilityConfig, OtlpProtocol, OtlpSignal,
+    otlp_signal_endpoint,
+};
 pub use token_vault::{OAuthRefreshConfig, TokenVaultConfig, TokenVaultKind};
 
 use serde::{Deserialize, Serialize};
@@ -128,6 +131,9 @@ pub struct MoaConfig {
     pub llm_dlp: LlmDlpConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
+    /// Deployment-level sandbox resource and egress policy, the outermost of
+    /// the four layers intersected into every sandbox's effective profile.
+    pub sandbox_policy: SandboxPolicyConfig,
     /// Memory bootstrap and maintenance settings.
     pub memory: MemoryConfig,
     /// Tenant knowledge-base ingestion settings.
@@ -266,6 +272,8 @@ impl MoaConfig {
 
         self.session.validate()?;
         self.providers.validate()?;
+        self.metrics.validate()?;
+        self.observability.lineage.validate()?;
         self.token_vault.validate()?;
 
         if self.kms.provider == KmsProviderKind::Postgres {

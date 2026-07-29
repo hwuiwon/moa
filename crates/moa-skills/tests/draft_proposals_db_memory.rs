@@ -6,25 +6,20 @@
 mod support;
 
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::ArtifactRegistry;
+use moa_artifacts::registry::{ArtifactRegistry, SuiteContributionKind};
 use moa_core::{
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
 };
-use std::sync::atomic::Ordering;
-
 use moa_skills::distiller::{
     DispatchEvidence, DistillationOutcome, distill_skill_from_experience_with_learning,
 };
 use moa_skills::improver::{ImprovementResult, improve_skill_from_experience_with_learning};
-use moa_skills::proposals::{
-    RecurrenceSiblingSuite, SiblingResynthesis, accumulate_recurrence_siblings,
-};
+use moa_skills::proposals::{RecurrenceSiblingSuite, accumulate_recurrence_siblings};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, SESSION_WITH_8_TOOL_CALLS, active_semantic_version,
-    artifact_revision_count, experience_input, learning_store, load_optional_active_skill,
-    load_session_fixture, race_mutating_router, scripted_router, seed_skill,
-    session_storage_partition_id, setup_test_db, skill_markdown, skill_row_count, tenant_scope,
-    test_config,
+    artifact_revision_count, learning_store, load_optional_active_skill, load_session_fixture,
+    scripted_router, seed_skill, seeded_experience_input, session_storage_partition_id,
+    setup_test_db, skill_markdown, skill_row_count, tenant_scope, test_config,
 };
 
 #[tokio::test]
@@ -44,7 +39,7 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
     let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        experience_input(&loaded, "capture the oauth refresh workflow"),
+        seeded_experience_input(&test_db, &loaded, "capture the oauth refresh workflow").await,
         scripted_router([proposed]),
         Some(store.clone()),
         None,
@@ -79,15 +74,46 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
         candidate.payload["draft_artifact_revision_uid"],
         proposal.draft_artifact_revision_uid.to_string()
     );
+    // The generated suite is attributable text, so it lives in an owned row that
+    // names its source session and experience — not in candidate JSON, where no
+    // erasure could join to it or delete it for one subject.
+    assert!(
+        candidate
+            .payload
+            .get("generated_regression_suite")
+            .is_none(),
+        "suite bytes must not survive in the candidate payload"
+    );
+    let registry = ArtifactRegistry::new(test_db.store().pool().clone());
+    let contributions = registry
+        .list_suite_contributions(&scope, candidate.id)
+        .await
+        .expect("load suite contributions");
+    let generated = contributions
+        .iter()
+        .find(|contribution| contribution.kind == SuiteContributionKind::Generated)
+        .expect("the proposal's own generated suite is stored");
+    assert!(generated.suite_source.contains("[[cases]]"));
     assert_eq!(
-        candidate.payload["generated_regression_suite"]["source_format"],
-        "toml"
+        generated.source_session_id,
+        Some(loaded.session.id.0),
+        "the suite names the session whose transcript produced it"
     );
     assert!(
-        candidate.payload["generated_regression_suite"]["source_text"]
-            .as_str()
-            .expect("suite source is string")
-            .contains("[[cases]]")
+        generated.source_experience_id.is_some(),
+        "the suite names the experience whose transcript produced it"
+    );
+    // Pins: suite reads apply the caller's tenant scope even when the candidate
+    // UUID is known, so a cross-tenant lookup cannot recover attributable bytes.
+    let other_scope = moa_core::types::action_policy::ActionRuleScope::Tenant {
+        tenant_id: moa_core::types::identifiers::TenantId::new(),
+    };
+    assert!(
+        registry
+            .list_suite_contributions(&other_scope, candidate.id)
+            .await
+            .expect("cross-tenant suite lookup is a valid empty read")
+            .is_empty()
     );
     let evidence = &candidate.payload["evidence"];
     assert_eq!(evidence["outcome"], "resolved");
@@ -123,6 +149,41 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
             .any(|file| file.path == "tests/regression-suite.toml"),
         "the generated suite must ride the draft package as held-out material for later revisions"
     );
+
+    // Every attributable byte of the revision names the candidate that produced
+    // it: the model-written definition, and each package file separately.
+    //
+    // The definition row is what a privacy erasure walks to decide whether a
+    // serving revision must be deleted or invalidated — `enumerate_learning_closure`
+    // derives both `revision_uids` and `sole_source_revision_uids` from this table
+    // and nothing else. Without these rows an erasure enumerates zero revisions
+    // forever: it never deletes a sole-source revision, never invalidates a shared
+    // one, and every count stays truthfully zero while the skill keeps serving.
+    let contributions: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT contribution_kind, file_uid FROM moa.artifact_revision_contribution \
+         WHERE revision_uid = $1 AND candidate_id = $2",
+    )
+    .bind(proposal.draft_artifact_revision_uid)
+    .bind(candidate.id)
+    .fetch_all(test_db.store().pool())
+    .await
+    .expect("load revision contributions");
+    assert_eq!(
+        contributions
+            .iter()
+            .filter(|(kind, file_uid)| kind == "generated_definition" && file_uid.is_none())
+            .count(),
+        1,
+        "the revision's fused model output is attributed exactly once"
+    );
+    assert_eq!(
+        contributions
+            .iter()
+            .filter(|(kind, file_uid)| kind == "generated_file" && file_uid.is_some())
+            .count(),
+        files.len(),
+        "every package file is separately attributed, so a subtractable file can be erased alone"
+    );
 }
 
 #[tokio::test]
@@ -135,7 +196,8 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
     let store = learning_store(&test_db);
-    let improvement_input = experience_input(&loaded, "improve the auth flow skill");
+    let improvement_input =
+        seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
 
     let result = improve_skill_from_experience_with_learning(
         &loaded.session,
@@ -199,7 +261,8 @@ async fn skill_proposal_retry_reuses_candidate_id() {
     );
     let store = learning_store(&test_db);
 
-    let retried_input = experience_input(&loaded, "capture the oauth refresh workflow");
+    let retried_input =
+        seeded_experience_input(&test_db, &loaded, "capture the oauth refresh workflow").await;
 
     let first = distill_skill_from_experience_with_learning(
         &config,
@@ -230,15 +293,10 @@ async fn skill_proposal_retry_reuses_candidate_id() {
         panic!("expected first proposal");
     };
     // A replay of the proposal's own experience dedupes onto the open candidate and
-    // accepts no new sibling, so nothing is re-synthesized.
-    let DistillationOutcome::DedupedOntoOpenProposal {
-        proposal: second,
-        resynthesis,
-    } = second
-    else {
+    // accepts no new sibling, so nothing changes.
+    let DistillationOutcome::DedupedOntoOpenProposal { proposal: second } = second else {
         panic!("expected retry to dedupe onto the open proposal");
     };
-    assert_eq!(resynthesis, SiblingResynthesis::DraftUnchanged);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     assert_eq!(first.candidate_id, second.candidate_id);
     assert_eq!(
@@ -254,11 +312,18 @@ async fn skill_proposal_retry_reuses_candidate_id() {
         .await
         .expect("reload retried candidate")
         .expect("candidate exists");
-    assert!(
-        candidate
-            .payload
-            .get("accumulated_regression_suites")
-            .is_none(),
+    let accumulated = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(
+            &tenant_scope(&session_storage_partition_id(&loaded.session)),
+            candidate.id,
+        )
+        .await
+        .expect("load suite contributions")
+        .into_iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .count();
+    assert_eq!(
+        accumulated, 0,
         "a replay of the proposal's own experience is not a sibling suite"
     );
 }
@@ -285,7 +350,7 @@ async fn open_proposal_for_same_skill_name_dedupes_across_sessions_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &loaded_a.session,
-        experience_input(&loaded_a, "sync tickets"),
+        seeded_experience_input(&test_db, &loaded_a, "sync tickets").await,
         scripted_router([proposed.clone()]),
         Some(store.clone()),
         None,
@@ -296,7 +361,7 @@ async fn open_proposal_for_same_skill_name_dedupes_across_sessions_db() {
     let second = distill_skill_from_experience_with_learning(
         &config,
         &loaded_b.session,
-        experience_input(&loaded_b, "sync tickets again"),
+        seeded_experience_input(&test_db, &loaded_b, "sync tickets again").await,
         scripted_router([proposed]),
         Some(store.clone()),
         None,
@@ -356,7 +421,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     let first = distill_skill_from_experience_with_learning(
         &config,
         &loaded_a.session,
-        experience_input(&loaded_a, "deploy service to staging"),
+        seeded_experience_input(&test_db, &loaded_a, "deploy service to staging").await,
         scripted_router([first_name]),
         Some(store.clone()),
         None,
@@ -367,7 +432,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     // Empty scripted router: the fingerprint preflight must dedupe before any
     // LLM call, so an attempted generation would error the test.
     let _unused_second_name = second_name;
-    let input_b = experience_input(&loaded_b, "deploy service to staging");
+    let input_b = seeded_experience_input(&test_db, &loaded_b, "deploy service to staging").await;
     let sibling_experience_id = input_b.experience.id;
     let second = distill_skill_from_experience_with_learning(
         &config,
@@ -384,17 +449,11 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     let DistillationOutcome::NewSkillProposed { proposal: first } = first else {
         panic!("expected first proposal");
     };
-    // The differently-named sibling dedupes on the shared fingerprint. Its empty
-    // scripted router makes the generalization pass error out, which is swallowed,
-    // so the draft is left unchanged.
-    let DistillationOutcome::DedupedOntoOpenProposal {
-        proposal: second,
-        resynthesis,
-    } = second
-    else {
+    // The differently-named sibling dedupes on the shared fingerprint and
+    // contributes only a held-out suite, so the empty router is never called.
+    let DistillationOutcome::DedupedOntoOpenProposal { proposal: second } = second else {
         panic!("expected second proposal to dedupe onto the open candidate");
     };
-    assert_eq!(resynthesis, SiblingResynthesis::DraftUnchanged);
     let storage_partition_id = session_storage_partition_id(&loaded_a.session);
     assert_eq!(
         first.candidate_id, second.candidate_id,
@@ -414,21 +473,32 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
         .await
         .expect("reload deduped candidate")
         .expect("candidate exists");
-    let siblings = candidate.payload["accumulated_regression_suites"]
-        .as_array()
-        .expect("deduped session accumulates a sibling suite");
-    assert_eq!(siblings.len(), 1);
+    let siblings = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(
+            &tenant_scope(&session_storage_partition_id(&loaded_a.session)),
+            candidate.id,
+        )
+        .await
+        .expect("load suite contributions")
+        .into_iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .collect::<Vec<_>>();
     assert_eq!(
-        siblings[0]["source_experience_id"],
-        sibling_experience_id.to_string(),
+        siblings.len(),
+        1,
+        "deduped session accumulates a sibling suite"
+    );
+    assert_eq!(
+        siblings[0].source_experience_id,
+        Some(sibling_experience_id),
         "sibling suite records which experience contributed it"
     );
-    assert!(
-        siblings[0]["source_text"]
-            .as_str()
-            .expect("sibling suite carries TOML")
-            .contains("[[cases]]")
+    assert_eq!(
+        siblings[0].source_session_id,
+        Some(loaded_b.session.id.0),
+        "sibling suite records the session an erasure would enter through"
     );
+    assert!(siblings[0].suite_source.contains("[[cases]]"));
 }
 
 #[tokio::test]
@@ -444,7 +514,8 @@ async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
         "1.0",
     );
     let store = learning_store(&test_db);
-    let shared_input = experience_input(&loaded, "capture the oauth refresh workflow");
+    let shared_input =
+        seeded_experience_input(&test_db, &loaded, "capture the oauth refresh workflow").await;
 
     let (first, second) = tokio::join!(
         distill_skill_from_experience_with_learning(
@@ -489,66 +560,31 @@ async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
     );
 }
 
-/// Runs one sibling experience against an open proposal for the same task, returning the deduped
-/// candidate id and whether the generalization pass rewrote the open draft. Each sibling gets a
-/// fresh session under the origin tenant so the fingerprint dedupe lands on the open candidate.
-async fn distill_sibling(
-    config: &moa_config::MoaConfig,
-    store: &std::sync::Arc<moa_session::PostgresSessionStore>,
-    origin: &support::LoadedSession,
-    task_summary: &str,
-    generalization: impl Into<String>,
-) -> (uuid::Uuid, SiblingResynthesis) {
-    let mut sibling = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    sibling.session.id = moa_core::types::identifiers::SessionId::new();
-    sibling.session.tenant_id = origin.session.tenant_id;
-    let outcome = distill_skill_from_experience_with_learning(
-        config,
-        &sibling.session,
-        experience_input(&sibling, task_summary),
-        scripted_router([generalization.into()]),
-        Some(store.clone()),
-        None,
-        &DispatchEvidence::SingleSession,
-    )
-    .await
-    .expect("sibling proposal");
-    let DistillationOutcome::DedupedOntoOpenProposal {
-        proposal,
-        resynthesis,
-    } = outcome
-    else {
-        panic!("sibling must dedupe onto the open creation candidate");
-    };
-    (proposal.candidate_id, resynthesis)
-}
-
 #[tokio::test]
-async fn sibling_experience_resynthesizes_the_open_draft_db() {
-    // Pins: a second qualifying experience for the same task dedupes onto the open Proposed
-    // candidate and runs exactly one generalization pass that rewrites the draft skill_markdown,
-    // stores a new draft revision, and records a resynthesis evidence entry with a stability score.
+async fn accumulated_sibling_suites_stop_at_the_cap_db() {
+    // Pins: sibling evidence stays held out and the accumulated suite pool is capped.
+    //
+    // Each accepted sibling stores a full regression suite. Unbounded, one popular
+    // recurring task would pool suites without limit, and the review gate prices and
+    // executes every pooled suite — so an uncapped pool grows the gate's cost estimate
+    // until promotion is blocked by budget, on a candidate that did nothing wrong.
+    // The bound now lives in a row count rather than a JSON array length, which is
+    // exactly why it needs asserting again.
     let test_db = setup_test_db().await;
     let origin = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
+    let store = learning_store(&test_db);
     let created = skill_markdown(
-        "resynth-flow",
-        "Capture the recurring workflow",
+        "recurrence-capped",
+        "Capture recurring work",
         "Original single-instance body.",
         "1.0",
     );
-    let generalized = skill_markdown(
-        "resynth-flow",
-        "Capture the recurring workflow",
-        "Parameterized body with an explicit {ticket} slot and invariant steps.",
-        "1.0",
-    );
-    let store = learning_store(&test_db);
 
     let first = distill_skill_from_experience_with_learning(
         &config,
         &origin.session,
-        experience_input(&origin, "sync tickets"),
+        seeded_experience_input(&test_db, &origin, "cap the pool").await,
         scripted_router([created]),
         Some(store.clone()),
         None,
@@ -556,418 +592,43 @@ async fn sibling_experience_resynthesizes_the_open_draft_db() {
     )
     .await
     .expect("first proposal");
-    let DistillationOutcome::NewSkillProposed { proposal: first } = first else {
+    let DistillationOutcome::NewSkillProposed { proposal: open } = first else {
         panic!("expected creation proposal");
     };
 
-    let (sibling_candidate, resynthesis) =
-        distill_sibling(&config, &store, &origin, "sync tickets", generalized).await;
-    assert_eq!(
-        sibling_candidate, first.candidate_id,
-        "sibling must reuse the open candidate"
-    );
-    assert_eq!(
-        resynthesis,
-        SiblingResynthesis::DraftRewritten,
-        "a changed generalization pass reports a re-synthesized draft"
-    );
-
-    let candidate = store
-        .get_learning_candidate(&origin.session.tenant_id, first.candidate_id)
-        .await
-        .expect("load candidate")
-        .expect("candidate exists");
-    assert!(
-        candidate.payload["skill_markdown"]
-            .as_str()
-            .expect("draft markdown")
-            .contains("Parameterized body"),
-        "the draft skill_markdown must be re-synthesized to the generalized body"
-    );
-    assert_ne!(
-        candidate.payload["draft_artifact_revision_uid"]
-            .as_str()
-            .expect("draft revision uid"),
-        first.draft_artifact_revision_uid.to_string(),
-        "re-synthesis must store a new draft revision"
-    );
-    let passes = candidate.payload["resynthesis"]
-        .as_array()
-        .expect("resynthesis evidence array");
-    assert_eq!(passes.len(), 1, "exactly one generalization pass ran");
-    assert_eq!(passes[0]["changed"], true);
-    assert!(
-        passes[0]["trajectory_stability"].is_number(),
-        "each pass records a trajectory stability score"
-    );
-
-    let storage_partition_id = session_storage_partition_id(&origin.session);
-    assert_eq!(
-        artifact_revision_count(&test_db, &storage_partition_id, "resynth-flow").await,
-        2,
-        "original draft plus the re-synthesized draft revision"
-    );
-}
-
-#[tokio::test]
-async fn sibling_resynthesis_unchanged_keeps_draft_but_records_evidence_db() {
-    // Pins: when the generalization model returns UNCHANGED, the open draft revision and its
-    // markdown are left as-is, but the pass is still recorded (changed=false) with its stability
-    // score so the review gate sees the recurrence was considered.
-    let test_db = setup_test_db().await;
-    let origin = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
-    let created = skill_markdown(
-        "resynth-stable",
-        "Capture the recurring workflow",
-        "Original single-instance body.",
-        "1.0",
-    );
-    let store = learning_store(&test_db);
-
-    let first = distill_skill_from_experience_with_learning(
-        &config,
-        &origin.session,
-        experience_input(&origin, "sync tickets"),
-        scripted_router([created]),
-        Some(store.clone()),
-        None,
-        &DispatchEvidence::SingleSession,
-    )
-    .await
-    .expect("first proposal");
-    let DistillationOutcome::NewSkillProposed { proposal: first } = first else {
-        panic!("expected creation proposal");
-    };
-
-    let (_, resynthesis) =
-        distill_sibling(&config, &store, &origin, "sync tickets", "UNCHANGED").await;
-    assert_eq!(
-        resynthesis,
-        SiblingResynthesis::DraftUnchanged,
-        "an UNCHANGED generalization pass filed no re-synthesized draft"
-    );
-
-    let candidate = store
-        .get_learning_candidate(&origin.session.tenant_id, first.candidate_id)
-        .await
-        .expect("load candidate")
-        .expect("candidate exists");
-    assert!(
-        candidate.payload["skill_markdown"]
-            .as_str()
-            .expect("draft markdown")
-            .contains("Original single-instance body"),
-        "an UNCHANGED pass must not rewrite the draft markdown"
-    );
-    assert_eq!(
-        candidate.payload["draft_artifact_revision_uid"],
-        first.draft_artifact_revision_uid.to_string(),
-        "an UNCHANGED pass must not store a new draft revision"
-    );
-    let passes = candidate.payload["resynthesis"]
-        .as_array()
-        .expect("resynthesis evidence array");
-    assert_eq!(passes.len(), 1);
-    assert_eq!(passes[0]["changed"], false);
-    assert!(passes[0]["trajectory_stability"].is_number());
-
-    let storage_partition_id = session_storage_partition_id(&origin.session);
-    assert_eq!(
-        artifact_revision_count(&test_db, &storage_partition_id, "resynth-stable").await,
-        1,
-        "UNCHANGED leaves the single draft revision in place"
-    );
-}
-
-#[tokio::test]
-async fn sibling_resynthesis_stops_at_the_pass_cap_db() {
-    // Pins: generalization passes are capped like sibling-suite accumulation. After the cap is
-    // reached a further sibling accumulates nothing and spends no model call (its empty scripted
-    // router is never touched), leaving the recorded pass count pinned at the cap.
-    let test_db = setup_test_db().await;
-    let origin = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
-    let created = skill_markdown(
-        "resynth-capped",
-        "Capture the recurring workflow",
-        "Original single-instance body.",
-        "1.0",
-    );
-    let generalized = skill_markdown(
-        "resynth-capped",
-        "Capture the recurring workflow",
-        "Parameterized body with an explicit {ticket} slot and invariant steps.",
-        "1.0",
-    );
-    let store = learning_store(&test_db);
-
-    let first = distill_skill_from_experience_with_learning(
-        &config,
-        &origin.session,
-        experience_input(&origin, "sync tickets"),
-        scripted_router([created]),
-        Some(store.clone()),
-        None,
-        &DispatchEvidence::SingleSession,
-    )
-    .await
-    .expect("first proposal");
-    let DistillationOutcome::NewSkillProposed { proposal: first } = first else {
-        panic!("expected creation proposal");
-    };
-
-    // Three accepted siblings fill both the sibling-suite and resynthesis caps.
-    for _ in 0..3 {
-        let (_, resynthesis) = distill_sibling(
-            &config,
-            &store,
-            &origin,
-            "sync tickets",
-            generalized.clone(),
-        )
-        .await;
-        assert_eq!(resynthesis, SiblingResynthesis::DraftRewritten);
+    // Four distinct siblings, one more than the cap.
+    let mut inputs = Vec::new();
+    for index in 0..4 {
+        inputs.push(
+            seeded_experience_input(&test_db, &origin, &format!("cap the pool {index}")).await,
+        );
     }
-    let candidate = store
-        .get_learning_candidate(&origin.session.tenant_id, first.candidate_id)
-        .await
-        .expect("load candidate")
-        .expect("candidate exists");
-    assert_eq!(
-        candidate.payload["resynthesis"]
-            .as_array()
-            .expect("resynthesis evidence array")
-            .len(),
-        3,
-        "resynthesis passes are capped at the sibling-suite maximum"
-    );
-
-    // A fourth sibling passes an empty scripted router: if the capped candidate spent a model
-    // call it would draw from the exhausted provider. Accumulation short-circuits at the cap, so
-    // no call is made and the pass count stays pinned.
-    let mut over_cap = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    over_cap.session.id = moa_core::types::identifiers::SessionId::new();
-    over_cap.session.tenant_id = origin.session.tenant_id;
-    distill_skill_from_experience_with_learning(
-        &config,
-        &over_cap.session,
-        experience_input(&over_cap, "sync tickets"),
-        scripted_router(Vec::<String>::new()),
-        Some(store.clone()),
-        None,
-        &DispatchEvidence::SingleSession,
-    )
-    .await
-    .expect("over-cap sibling proposal");
-
-    let candidate = store
-        .get_learning_candidate(&origin.session.tenant_id, first.candidate_id)
-        .await
-        .expect("reload candidate")
-        .expect("candidate exists");
-    assert_eq!(
-        candidate.payload["resynthesis"]
-            .as_array()
-            .expect("resynthesis evidence array")
-            .len(),
-        3,
-        "a sibling past the cap must not add another generalization pass"
-    );
-}
-
-#[tokio::test]
-async fn recurrence_siblings_generalize_in_one_combined_pass_db() {
-    // Pins Simplification A: the recurrence path accumulates every sibling's suite,
-    // then runs EXACTLY ONE generalization model call covering all of them, rather
-    // than one paid call per sibling. The router is primed with a single response,
-    // so a per-sibling loop would need a second call and fail — the run only
-    // succeeds because there is a single combined pass.
-    let test_db = setup_test_db().await;
-    let origin = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
-    let store = learning_store(&test_db);
-    let created = skill_markdown(
-        "recurrence-combined",
-        "Capture recurring work",
-        "Original single-instance body.",
-        "1.0",
-    );
-    let generalized = skill_markdown(
-        "recurrence-combined",
-        "Capture recurring work",
-        "Parameterized body with an explicit {slot} for every instance.",
-        "1.0",
-    );
-
-    let first = distill_skill_from_experience_with_learning(
-        &config,
-        &origin.session,
-        experience_input(&origin, "combine siblings"),
-        scripted_router([created]),
-        Some(store.clone()),
-        None,
-        &DispatchEvidence::SingleSession,
-    )
-    .await
-    .expect("first proposal");
-    let DistillationOutcome::NewSkillProposed { proposal: open } = first else {
-        panic!("expected creation proposal");
-    };
-
-    let sibling_a = uuid::Uuid::now_v7();
-    let sibling_b = uuid::Uuid::now_v7();
-    let siblings = vec![
-        RecurrenceSiblingSuite {
-            events: &origin.events,
-            source_experience_id: sibling_a,
-            source_session_id: origin.session.id,
-        },
-        RecurrenceSiblingSuite {
-            events: &origin.events,
-            source_experience_id: sibling_b,
-            source_session_id: origin.session.id,
-        },
-    ];
-    // Exactly one scripted response: a second model call would exhaust it and error.
-    let router = scripted_router([generalized]);
-    let resynthesis =
-        accumulate_recurrence_siblings(&store, &router, origin.session.tenant_id, &open, &siblings)
-            .await
-            .expect("combined accumulation");
-    assert_eq!(
-        resynthesis,
-        SiblingResynthesis::DraftRewritten,
-        "the single combined pass rewrote the draft"
-    );
-
-    let candidate = store
-        .get_learning_candidate(&origin.session.tenant_id, open.candidate_id)
-        .await
-        .expect("load candidate")
-        .expect("candidate exists");
-    assert_eq!(
-        candidate.payload["accumulated_regression_suites"]
-            .as_array()
-            .expect("sibling suites")
-            .len(),
-        2,
-        "both siblings' suites pool as held-out material"
-    );
-    let passes = candidate.payload["resynthesis"]
-        .as_array()
-        .expect("resynthesis evidence array");
-    assert_eq!(
-        passes.len(),
-        1,
-        "N siblings collapse into a single combined generalization pass"
-    );
-    let recorded: std::collections::HashSet<&str> = passes[0]["source_experience_ids"]
-        .as_array()
-        .expect("combined source ids")
+    let siblings = inputs
         .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect();
-    assert!(
-        recorded.contains(sibling_a.to_string().as_str())
-            && recorded.contains(sibling_b.to_string().as_str()),
-        "the combined pass records every contributing sibling"
-    );
-    assert!(
-        candidate.payload["skill_markdown"]
-            .as_str()
-            .expect("draft markdown")
-            .contains("Parameterized body"),
-        "the draft is generalized once for both siblings"
-    );
-}
-
-#[tokio::test]
-async fn concurrent_resynthesis_retries_instead_of_clobbering_db() {
-    // Pins F8: when the draft revision changes under a generalization pass (a rival
-    // pass landed while the model call was in flight), the under-lock write detects
-    // the changed revision, retries against the latest draft, and does not clobber
-    // the rival. The mutating provider advances the draft revision on its first call
-    // only, so the first apply conflicts and the retry lands: two model calls, one
-    // recorded pass. Without the optimistic check the first apply would clobber the
-    // rival and only one model call would run.
-    let test_db = setup_test_db().await;
-    let origin = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
-    let store = learning_store(&test_db);
-    let created = skill_markdown(
-        "resynth-race",
-        "Capture recurring work",
-        "Original single-instance body.",
-        "1.0",
-    );
-    let generalized = skill_markdown(
-        "resynth-race",
-        "Capture recurring work",
-        "Parameterized body with an explicit {slot}.",
-        "1.0",
-    );
-
-    let first = distill_skill_from_experience_with_learning(
-        &config,
-        &origin.session,
-        experience_input(&origin, "race the draft"),
-        scripted_router([created]),
-        Some(store.clone()),
-        None,
-        &DispatchEvidence::SingleSession,
-    )
-    .await
-    .expect("first proposal");
-    let DistillationOutcome::NewSkillProposed { proposal: open } = first else {
-        panic!("expected creation proposal");
-    };
-
-    let (router, calls) = race_mutating_router(
-        store.clone(),
-        origin.session.tenant_id,
-        open.candidate_id,
-        generalized,
-    );
-    let sibling = uuid::Uuid::now_v7();
-    let siblings = vec![RecurrenceSiblingSuite {
-        events: &origin.events,
-        source_experience_id: sibling,
-        source_session_id: origin.session.id,
-    }];
-    let resynthesis =
-        accumulate_recurrence_siblings(&store, &router, origin.session.tenant_id, &open, &siblings)
+        .map(|input| RecurrenceSiblingSuite {
+            evidence: &input.evidence,
+            source_experience_id: input.experience.id,
+            source_session_id: origin.session.id,
+        })
+        .collect::<Vec<_>>();
+    let accepted =
+        accumulate_recurrence_siblings(&store, origin.session.tenant_id, &open, &siblings)
             .await
-            .expect("accumulation");
+            .expect("accumulate four siblings");
+    assert_eq!(accepted, 3);
 
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "the pass detected the concurrent rewrite and retried once"
-    );
-    assert_eq!(
-        resynthesis,
-        SiblingResynthesis::DraftRewritten,
-        "the retry generalized the rival's draft"
-    );
-    let candidate = store
-        .get_learning_candidate(&origin.session.tenant_id, open.candidate_id)
+    let accumulated = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(
+            &tenant_scope(&session_storage_partition_id(&origin.session)),
+            open.candidate_id,
+        )
         .await
-        .expect("load candidate")
-        .expect("candidate exists");
+        .expect("load suite contributions")
+        .into_iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .count();
     assert_eq!(
-        candidate.payload["resynthesis"]
-            .as_array()
-            .expect("resynthesis evidence array")
-            .len(),
-        1,
-        "the conflicting attempt recorded no pass; only the applied retry did"
-    );
-    assert!(
-        candidate.payload["skill_markdown"]
-            .as_str()
-            .expect("draft markdown")
-            .contains("Parameterized body"),
-        "the applied retry generalized the draft"
+        accumulated, 3,
+        "the fourth sibling is refused; the pool is bounded by MAX_ACCUMULATED_SIBLING_SUITES"
     );
 }

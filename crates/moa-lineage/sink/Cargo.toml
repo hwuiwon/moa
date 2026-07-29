@@ -5,18 +5,15 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-backon.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 clickhouse.workspace = true
-fjall = "3"
 metrics.workspace = true
 moa-core = { workspace = true }
 moa-wire = { workspace = true }
 moa-config = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-memory-types = { workspace = true }
-moa-migrations = { workspace = true }
 opentelemetry.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -30,7 +27,10 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
-clickhouse = { workspace = true, features = ["test-util"] }
+moa-migrations = { workspace = true }
+# Renders real Prometheus output through a LOCAL recorder, so the writer-state
+# gauge can be asserted as an operator's alert would read it rather than through
+# a hand-rolled stand-in that cannot show a latched series.
+metrics-exporter-prometheus.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
-tempfile.workspace = true
 tracing-subscriber = { workspace = true }

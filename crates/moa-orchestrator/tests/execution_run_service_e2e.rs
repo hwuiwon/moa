@@ -324,7 +324,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
         max_retrieved_bytes: Some(1_000),
         deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
     };
-    let compiled = compile(CompileExecutionRequest {
+    let compile_outcome = compile(CompileExecutionRequest {
         goal: ExecutionGoalContract {
             objective: "preserve cancellation queue history".to_string(),
             requirements: vec![ExecutionRequirement {
@@ -334,7 +334,13 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
             deliverables: Vec::new(),
             coverage: Vec::new(),
             constraints: Vec::new(),
-            completion_checks: Vec::new(),
+            completion_checks: vec![CompletionCheck {
+                id: "output-schema".to_string(),
+                description: "terminal output matches its schema".to_string(),
+                requirement_ids: vec!["result".to_string()],
+                constraint_ids: Vec::new(),
+                kind: CompletionCheckKind::OutputSchema,
+            }],
         },
         plan: ExecutionPlanDefinition {
             schema_version: 1,
@@ -364,9 +370,13 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
         approved_budget: approved_budget.clone(),
         config: ExecutionConfig::default(),
         now: moa_test_support::fixtures::pg_now(),
-    })
-    .compiled
-    .context("cancellation queue-history plan should compile")?;
+    });
+    let compiled = compile_outcome.compiled.with_context(|| {
+        format!(
+            "cancellation queue-history plan should compile: {:?}",
+            compile_outcome.report.issues
+        )
+    })?;
     let repository = ExecutionRepository::new(
         sqlx::PgPool::connect(&fixture.postgres_url)
             .await
@@ -1174,7 +1184,13 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
             deliverables: Vec::new(),
             coverage: Vec::new(),
             constraints: Vec::new(),
-            completion_checks: Vec::new(),
+            completion_checks: vec![CompletionCheck {
+                id: "output-schema".to_string(),
+                description: "terminal output matches its schema".to_string(),
+                requirement_ids: vec!["result".to_string()],
+                constraint_ids: Vec::new(),
+                kind: CompletionCheckKind::OutputSchema,
+            }],
         },
         plan: ExecutionPlanDefinition {
             schema_version: 1,

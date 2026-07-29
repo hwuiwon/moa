@@ -160,7 +160,7 @@ pub fn select_proposal_dedupe_hit(
     let mut experience_to_candidate: HashMap<Uuid, (chrono::DateTime<chrono::Utc>, Uuid)> =
         HashMap::new();
     for source in open_sources {
-        for experience_id in &source.source_experience_ids {
+        for experience_id in &source.experience_ids {
             experience_to_candidate
                 .entry(*experience_id)
                 .and_modify(|current| {
@@ -262,12 +262,12 @@ mod tests {
             OpenProposalSource {
                 candidate_id: candidate_far,
                 created_at: now,
-                source_experience_ids: vec![far_exp],
+                experience_ids: vec![far_exp],
             },
             OpenProposalSource {
                 candidate_id: candidate_near,
                 created_at: now,
-                source_experience_ids: vec![near_exp],
+                experience_ids: vec![near_exp],
             },
         ];
         // ceiling for 0.85 similarity is 0.15.
@@ -287,7 +287,7 @@ mod tests {
         let open = vec![OpenProposalSource {
             candidate_id: candidate,
             created_at: Utc::now(),
-            source_experience_ids: vec![exp],
+            experience_ids: vec![exp],
         }];
         // 0.3 distance = 0.7 similarity, below the 0.85 floor (ceiling 0.15).
         let neighbors = vec![neighbor(exp, 0.30)];
@@ -307,12 +307,12 @@ mod tests {
             OpenProposalSource {
                 candidate_id: newer,
                 created_at: newer_time,
-                source_experience_ids: vec![exp],
+                experience_ids: vec![exp],
             },
             OpenProposalSource {
                 candidate_id: older,
                 created_at: older_time,
-                source_experience_ids: vec![exp],
+                experience_ids: vec![exp],
             },
         ];
         let neighbors = vec![neighbor(exp, 0.05)];

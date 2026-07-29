@@ -575,7 +575,7 @@ generate random attachment IDs, delete a replayed attachment during rejection cl
 treat an ambiguous reply as an ordinary turn, and let reconnect fabricate a fresh
 response. Each targeted assertion must fail before restoration and pass afterward.
 
-### Task 1.3 — Continue conversational owners after action review [P0] [ ]
+### Task 1.3 — Continue conversational owners after action review [P0] [x]
 
 **Depends on:** Tasks 1.1 and 1.2
 **Why:** an approved tool can finish after the nonblocking model loop ends, leaving the
@@ -837,7 +837,7 @@ matched-rule decision, allow Cloud local/no-backend construction, allow Cloud wi
 rule owner, and remove one rendered production key. Each focused assertion must fail
 before restoration and pass afterward.
 
-### Task 2.2 — Add a typed prompt-injection security circuit [P0] [ ]
+### Task 2.2 — Add a typed prompt-injection security circuit [P0] [x]
 
 **Depends on:** Tasks 0.2 and 1.3
 **Why:** generic caps do not reliably stop varied malicious attempts, disable the
@@ -1329,7 +1329,7 @@ must perform the exact idempotent trigger before finalization, and removing that
 must fail the assertion. Prove missing and wrong tenant RLS context denies both audit and
 claim-table access through production DB paths.
 
-### Task 2.4 — Scope MCP credentials to tenant-owned connections [P0] [ ]
+### Task 2.4 — Scope MCP credentials to tenant-owned connections [P0] [x]
 
 **Depends on:** Tasks 2.1 and 2.3
 **Why:** one deployment credential can currently serve every tenant invoking an MCP
@@ -1507,7 +1507,7 @@ identity/deletion/hydration/migration assertions must fail before each restorati
 pass afterward. Use fresh isolated databases; do not wipe the Compose database without
 explicit approval.
 
-### Task 3.2 — Enforce provider-native source/document ACL admission [P0/P1] [ ]
+### Task 3.2 — Enforce provider-native source/document ACL admission [P0/P1] [x]
 
 **Depends on:** Task 3.1
 **Why:** permission-bearing connectors can otherwise disclose content between users
@@ -1655,7 +1655,7 @@ LEVEL SECURITY`. The exact provider-normalization, ACL-only update, pre-rank, gr
 neighbor, cache, lineage/citation, and app-role tests must fail before each restoration
 and pass afterward. Use fresh isolated databases; do not wipe Compose without approval.
 
-### Task 3.3 — Add durable re-embed/rechunk rebuild workflows [P1] [ ]
+### Task 3.3 — Add durable re-embed/rechunk rebuild workflows [P1] [x]
 
 **Depends on:** Task 3.2
 **Scheduling:** wait until Task 4.2 freezes `runtime/endpoint.rs`, service registration,
@@ -2142,7 +2142,7 @@ also has no logical dependency on the knowledge rebuild, but both Tasks 5.4 and 
 `graph_memory_maint.rs`; do not execute those write sets concurrently. Task 5.5 waits for
 correct occurrence and ACL admission, not for rebuild or Behavior Lab work.
 
-### Task 5.1 — Require typed sanitized evidence before learning calls [P0/P1] [ ]
+### Task 5.1 — Require typed sanitized evidence before learning calls [P0/P1] [x]
 
 **Depends on:** Task 0.2
 **Why:** raw messages, tool inputs/results/errors, and assistant content can reach a
@@ -2250,7 +2250,7 @@ instead of its redacted value, and build a suite from raw events. The correspond
 zero-provider, request/persistence scan, and suite-row assertions must fail before each
 restoration and pass afterward.
 
-### Task 5.2 — Close privacy provenance and simplify candidate status [P1] [ ]
+### Task 5.2 — Close privacy provenance and simplify candidate status [P1] [x]
 
 **Depends on:** Tasks 5.1, 2.3, 3.3, and 4.3. Task 4.3 must land V000352 before
 this task creates or applies V000353.
@@ -2449,7 +2449,7 @@ assertion must fail before restoration and pass afterward. Verify V000353 agains
 fresh isolated database after V000346-V000352; do not wipe the Compose database without
 explicit approval.
 
-### Task 5.3 — Produce complete evaluator-linked Behavior Lab scorecards [P1] [ ]
+### Task 5.3 — Produce complete evaluator-linked Behavior Lab scorecards [P1] [x]
 
 **Depends on:** Tasks 5.1 and 5.2
 **Why:** seeded score rows prove query mechanics, not that trials produced every required
@@ -2691,7 +2691,7 @@ prune before completion/after failure, alter the cron target/version, split xtas
 semantics, and remove accepted/drop metrics. Each exact assertion must fail before
 restoration and pass afterward.
 
-### Task 5.5 — Measure and choose one semantic-graph policy [P2] [ ]
+### Task 5.5 — Measure and choose one semantic-graph policy [P2] [x]
 
 **Depends on:** Task 3.2
 **Why:** semantic graph data is written while main tenant retrieval disables graph
@@ -2732,7 +2732,7 @@ Tasks 6.1, 6.3, 6.4, and 6.5 are parallel-safe once their stated prerequisites a
 complete and their listed write sets stay disjoint. Task 6.2 follows 6.1. Task 6.6
 converges the runtime-owner changes from 2.3, 6.1, 6.4, and 6.5.
 
-### Task 6.1 — Make observability and durable lineage production-correct [P1] [ ]
+### Task 6.1 — Make observability and durable lineage production-correct [P1] [x]
 
 **Depends on:** Tasks 0.2, 2.1, 3.3, 5.2, and 5.3
 **Scheduling:** run after Task 5.3 because both own lineage-writer storage. Task 1.3
@@ -2950,7 +2950,7 @@ custom-resource field; break one rule/Alloy reference; replace live assertions w
 prints; and time out drain while deleting accepted rows. Each deterministic assertion or
 explicit live smoke must fail before restoration and pass afterward.
 
-### Task 6.2 — Add terminal-session archival and retention [P1/P2] [ ]
+### Task 6.2 — Add terminal-session archival and retention [P1/P2] [x]
 
 **Depends on:** Tasks 1.1 and 6.1
 **Why:** append-only session history has no normal lifecycle boundary, causing unbounded
@@ -2988,7 +2988,7 @@ cargo nextest run -p moa-orchestrator --locked --test orchestrator_db
 MOA_RUN_LIVE_E2E=1 cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --run-ignored ignored-only --test tenant_purge_service_e2e
 ```
 
-### Task 6.3 — Make MCP catalogs and large tool loadouts deterministic [P2] [ ]
+### Task 6.3 — Make MCP catalogs and large tool loadouts deterministic [P2] [x]
 
 **Depends on:** Task 2.4
 **Why:** one connector error/name collision can block router construction, while tools
@@ -3027,7 +3027,7 @@ cargo nextest run -p moa-hands --locked --test hands_offline
 cargo test -p moa-brain --locked tool_definitions
 ```
 
-### Task 6.4 — Coordinate provider pacing/cooldown without replacing concurrency [P2] [ ]
+### Task 6.4 — Coordinate provider pacing/cooldown without replacing concurrency [P2] [x]
 
 **Depends on:** Task 0.2
 **Why:** one provider key's pacing, 429 cooldown, and retry budget can be multiplied by
@@ -3073,7 +3073,7 @@ cargo nextest run -p moa-providers --locked --test providers_offline
 cargo test -p moa-providers --locked global_concurrency
 ```
 
-### Task 6.5 — Enforce one canonical effective sandbox profile in every HandProvider [P1/P2] [ ]
+### Task 6.5 — Enforce one canonical effective sandbox profile in every HandProvider [P1/P2] [x]
 
 **Depends on:** Tasks 0.2, 1.3, 2.1, and 3.2. V000357 remains reserved but cannot
 merge/deploy/apply until V000348–V000356 are present in order.
@@ -3228,7 +3228,7 @@ destroy failure; backfill reusable unrestricted legacy rows; drop migration cons
 and restore Docker's silent early return. Exact serialization/resolution/adapter/lease/
 reaper/startup/migration/Docker assertions must fail before restoration and pass after.
 
-### Task 6.6 — Remove concrete dependency and placeholder debt [P2] [ ]
+### Task 6.6 — Remove concrete dependency and placeholder debt [P2] [x]
 
 **Depends on:** Tasks 2.3, 6.1, 6.4, and 6.5
 **Why:** correctness-sensitive globals and an eight-trait aggregate hide dependencies;
@@ -3273,7 +3273,7 @@ cargo nextest run -p moa-edge --locked
 cargo run -p xtask --locked -- check-architecture-boundaries
 ```
 
-### Task 6.7 — Resolve optional subsystem decisions with evidence [P2 decision gate] [ ]
+### Task 6.7 — Resolve optional subsystem decisions with evidence [P2 decision gate] [x]
 
 **Depends on:** Tasks 5.5 and 6.1
 **Why:** undeployed machinery has maintenance cost, but deleting implemented capability

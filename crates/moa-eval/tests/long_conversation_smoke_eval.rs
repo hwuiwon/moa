@@ -740,8 +740,8 @@ fn assert_learning_matrix_case_value(
         matrix_case.id
     );
     assert_eq!(
-        report.learning.proposed_candidate_count, 2,
-        "matrix case {} should propose memory and policy candidates",
+        report.learning.candidate_count, 2,
+        "matrix case {} should create memory and policy candidates",
         matrix_case.id
     );
     assert_eq!(
@@ -1147,8 +1147,8 @@ fn assert_experience_learning_value(report: &moa_eval::long_conversation::LongRu
         "experience should attribute the selected skill, file_write tool, and verification signal"
     );
     assert_eq!(
-        report.learning.proposed_candidate_count, 2,
-        "resolved verified experience should propose memory and policy learning candidates"
+        report.learning.candidate_count, 2,
+        "resolved verified experience should create memory and policy learning candidates"
     );
     assert_eq!(
         report.learning.task_strategy_skill_subjects,

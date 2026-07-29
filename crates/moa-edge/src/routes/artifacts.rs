@@ -92,6 +92,34 @@ pub(super) fn translate(
                 ("reviewer_subject", serde_json::json!("edge")),
             ],
         ),
+        // Rollback acceptance is its own route, not an `action` on the accept
+        // route: it archives a serving revision, so routing it by a field in a
+        // caller-supplied body would put a destructive operation one typo away
+        // from a draft promotion. The service still re-checks the proposal kind.
+        "/v1/learning-candidates/accept-rollback" => translate_json_object_with_fields(
+            body,
+            "/LearningReview/accept_rollback",
+            "bad tenant route body",
+            "tenant route body must be object",
+            "serialize tenant route body failed",
+            [
+                tenant_id_field(tenant_id),
+                ("action", serde_json::json!("accept")),
+                ("reviewer_subject", serde_json::json!("edge")),
+            ],
+        ),
+        "/v1/learning-candidates/dismiss" => translate_json_object_with_fields(
+            body,
+            "/LearningReview/dismiss",
+            "bad tenant route body",
+            "tenant route body must be object",
+            "serialize tenant route body failed",
+            [
+                tenant_id_field(tenant_id),
+                ("action", serde_json::json!("dismiss")),
+                ("reviewer_subject", serde_json::json!("edge")),
+            ],
+        ),
         _ => return None,
     };
     Some(translation)
@@ -398,6 +426,29 @@ mod tests {
                     "tenant_id": test_tenant_json(),
                     "candidate_id": "11111111-1111-1111-1111-111111111111",
                     "action": "reject",
+                    "reviewer_subject": "edge"
+                }),
+            ),
+            // Rollback and dismiss reach their OWN handlers. If either collapsed
+            // onto accept_skill, accepting a rollback would run the draft-publish
+            // path against a revision nobody proposed publishing.
+            (
+                "/v1/learning-candidates/accept-rollback",
+                "/LearningReview/accept_rollback",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "candidate_id": "11111111-1111-1111-1111-111111111111",
+                    "action": "accept",
+                    "reviewer_subject": "edge"
+                }),
+            ),
+            (
+                "/v1/learning-candidates/dismiss",
+                "/LearningReview/dismiss",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "candidate_id": "11111111-1111-1111-1111-111111111111",
+                    "action": "dismiss",
                     "reviewer_subject": "edge"
                 }),
             ),

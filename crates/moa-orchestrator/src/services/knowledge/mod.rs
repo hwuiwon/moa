@@ -22,7 +22,7 @@ use moa_core::types::credentials::{
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     error::MoaError,
-    traits::{CredentialVault, Identity},
+    traits::{CredentialVault, Identity, RuntimeCacheStore},
     types::identifiers::TenantId,
 };
 use moa_knowledge::{
@@ -550,6 +550,7 @@ impl KnowledgeService {
         kms: Arc<dyn moa_crypto::KeyManagementProvider>,
         credential_vault: Arc<dyn CredentialVault>,
         config: &MoaConfig,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
     ) -> Self {
         Self::from_postgres_pool(
             pool.clone(),
@@ -559,6 +560,7 @@ impl KnowledgeService {
                 pool,
                 kms,
                 config.clone(),
+                runtime_cache,
             )),
             config.knowledge.observability.max_object_preview_chars,
         )

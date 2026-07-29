@@ -22,7 +22,7 @@ impl ModelRouter {
 
     /// Builds a router from the configured main and auxiliary model settings.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        ProviderRegistry::from_config(config).model_router_for_config(config)
+        ProviderRegistry::from_config(config, None)?.model_router_for_config(config)
     }
 
     /// Returns the provider instance that should execute one logical model task.

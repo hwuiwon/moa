@@ -11,6 +11,9 @@ use moa_crypto::{EncryptionContext, KeyManagementProvider, LocalKmsProvider};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
+use moa_memory_pii::learning_erasure::{
+    ErasureDisposition, ErasureRecordKind, RecordDecision, record_decisions,
+};
 use moa_memory_vector::PgvectorStore;
 use moa_orchestrator::services::dual_control::{self, DualControlError};
 use moa_orchestrator::services::privacy::repository::collect_privacy_export_data_sections;
@@ -1309,6 +1312,127 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
     assert!(
         rows.iter()
             .any(|row| row["privacy_subject_provenance"] == "linked_contact")
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_export_erasure_decisions_are_subject_scoped_and_attempt_complete_db_memory() {
+    // Pins: one subject's export cannot reveal another subject's erasure
+    // decisions, and an earlier dry run cannot mask a later applied attempt for
+    // the same record.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let tenant_id = TenantId::from(tenant_id);
+    let subject = Uuid::now_v7();
+    let other_subject = Uuid::now_v7();
+    let subject_user_id = subject.to_string();
+    let other_subject_user_id = other_subject.to_string();
+    let record_id = Uuid::now_v7().to_string();
+
+    let planned = RecordDecision {
+        kind: ErasureRecordKind::ExperienceRecord,
+        record_id: record_id.clone(),
+        disposition: ErasureDisposition::Erased,
+        applied: false,
+        reason: Some("dry run".to_string()),
+    };
+    let applied = RecordDecision {
+        applied: true,
+        reason: Some("applied erase".to_string()),
+        ..planned.clone()
+    };
+    assert_eq!(
+        record_decisions(
+            store.pool(),
+            tenant_id,
+            &subject_user_id,
+            "approval-jti:dry_run",
+            std::slice::from_ref(&planned),
+        )
+        .await
+        .expect("record subject dry-run decision"),
+        1
+    );
+    assert_eq!(
+        record_decisions(
+            store.pool(),
+            tenant_id,
+            &subject_user_id,
+            "approval-jti:dry_run",
+            std::slice::from_ref(&planned),
+        )
+        .await
+        .expect("replay subject dry-run decision"),
+        0
+    );
+    assert_eq!(
+        record_decisions(
+            store.pool(),
+            tenant_id,
+            &subject_user_id,
+            "approval-jti:applied",
+            std::slice::from_ref(&applied),
+        )
+        .await
+        .expect("record later applied decision"),
+        1
+    );
+    record_decisions(
+        store.pool(),
+        tenant_id,
+        &other_subject_user_id,
+        "attempt-other-subject",
+        &[applied],
+    )
+    .await
+    .expect("record other subject decision");
+
+    let export_dir = tempdir().expect("tempdir");
+    let ctx = PrivacyExportContext {
+        pool: store.pool().clone(),
+        tenant_id,
+        storage_partition: Some(storage_partition_id),
+        subject_user: subject,
+        subject_user_id: subject_user_id.clone(),
+        subjects: vec![PrivacySubject::primary(subject_user_id.clone(), subject)],
+        reason: "subject access request".to_string(),
+        claims: valid_claims_for_user_id(&subject_user_id, tenant_id.0, "export"),
+    };
+    let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
+        .await
+        .expect("collect subject-scoped export");
+    let rows = tokio::fs::read_to_string(export_dir.path().join("erasure_decisions.jsonl"))
+        .await
+        .expect("read erasure decisions")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse decision row"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(counts["erasure_decisions"], 2);
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row["subject_user_id"] == subject_user_id)
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["attempt_id"].as_str().expect("attempt id"))
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["approval-jti:applied", "approval-jti:dry_run"])
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["applied"].as_bool().expect("applied flag"))
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([false, true])
     );
 
     drop(store);

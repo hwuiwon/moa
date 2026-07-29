@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Alert rules as PrometheusRule resources.
+#
+# They are rendered into the deployment by k8s/observability, which also deploys
+# the Alloy collector whose `mimir.rules.kubernetes` component synchronizes them
+# into Mimir. Adding a rule file here without adding it below deploys nothing:
+# kustomize does not glob.
+resources:
+  - moa-durability.yaml
+  - moa-lineage.yaml

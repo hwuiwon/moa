@@ -133,10 +133,10 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<PreparedActionInvocation> {
-        let tool_definition = self
-            .registry
+        let registry = self.registry();
+        let tool_definition = registry
             .get(&invocation.name)
-            .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
+            .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
         validate_tool_invocation(tool_definition, invocation)?;
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
@@ -318,7 +318,11 @@ mod tests {
     async fn provider_execution_lifecycle_names_are_not_synthetic_policy_tools() {
         // Pins: execution lifecycle is entered through typed orchestration, so a model-facing
         // lifecycle name absent from the registry remains unknown and fails closed.
-        let router = ToolRouter::new(ToolRegistry::new(), HashMap::new());
+        let router = ToolRouter::new(
+            ToolRegistry::new(),
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
         let session = session();
 
         let unknown = router
@@ -355,7 +359,11 @@ mod tests {
             admin_review_json_policy(),
             IdempotencyClass::NonIdempotent,
         );
-        let router = ToolRouter::new(registry, HashMap::new());
+        let router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
 
         let error = router
             .check_policy(
@@ -391,7 +399,11 @@ mod tests {
             admin_review_json_policy(),
             IdempotencyClass::NonIdempotent,
         );
-        let router = ToolRouter::new(registry, HashMap::new());
+        let router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
 
         let error = router
             .check_policy(

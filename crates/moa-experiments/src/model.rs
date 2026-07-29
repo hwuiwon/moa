@@ -5,7 +5,8 @@ use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{
     types::action_policy::ActionRuleScope, types::agent::AgentSessionSelection,
     types::channel::Attachment, types::execution_planning::PinnedExecutionTemplateRef,
-    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::experiments::ExperimentScorecard, types::identifiers::ModelId,
+    types::identifiers::SessionId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -229,15 +230,6 @@ pub struct ExperimentVariant {
     pub metadata: Value,
 }
 
-/// Scorecard definition attached to an experiment run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentScorecard {
-    /// Score names expected for this experiment.
-    pub score_names: Vec<String>,
-    /// Metadata about evaluators that produce the scores.
-    pub evaluator_metadata: Value,
-}
-
 /// Simulator settings used when expanding an experiment plan into trials.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentSimulatorConfig {
@@ -416,6 +408,8 @@ pub struct ExperimentTrialRecord {
     pub execution_run_uid: Option<Uuid>,
     /// Score run identifier used for trial-level scores.
     pub score_run_id: Uuid,
+    /// Independent digest of the terminal evidence finalized for this trial.
+    pub final_evidence_hash: Option<Vec<u8>>,
     /// Number of simulator-target turns persisted for this trial.
     pub turn_count: i32,
     /// Durable reason why the trial stopped.

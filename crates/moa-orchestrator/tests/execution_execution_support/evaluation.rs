@@ -200,7 +200,13 @@ fn capability_observations(
                 .catalog
                 .capabilities
                 .iter()
-                .find(|capability| capability.reference.name == attempt.capability)
+                // `attempt.capability` is the name the fixture SERVER was asked
+                // for; the catalog keys connector tools under their
+                // server-qualified reference.
+                .find(|capability| {
+                    capability.reference.name
+                        == moa_hands::mcp_tool_reference("fixture-capability", &attempt.capability)
+                })
                 .map(|capability| capability.reference.clone())
                 .with_context(|| {
                     format!(

@@ -31,6 +31,8 @@ const ARTIFACTS_PUBLISH: ServicePath = ServicePath::new("/Artifacts/publish");
 const LEARNING_GET: ServicePath = ServicePath::new("/LearningReview/get");
 const LEARNING_ACCEPT: ServicePath = ServicePath::new("/LearningReview/accept_skill");
 const LEARNING_REJECT: ServicePath = ServicePath::new("/LearningReview/reject");
+const LEARNING_ACCEPT_ROLLBACK: ServicePath = ServicePath::new("/LearningReview/accept_rollback");
+const LEARNING_DISMISS: ServicePath = ServicePath::new("/LearningReview/dismiss");
 
 /// Build the artifact and learning-review tool router.
 pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
@@ -321,6 +323,50 @@ impl Server {
             input,
             LearningCandidateReviewAction::Accept,
             LEARNING_ACCEPT,
+        )
+        .await
+    }
+
+    /// Accept a rollback proposal, archiving the regressed published revision.
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = false,
+        open_world_hint = true
+    ))]
+    async fn learning_candidate_accept_rollback(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<LearningReviewInput>,
+    ) -> CallToolResult {
+        self.review_candidate(
+            context,
+            input,
+            LearningCandidateReviewAction::Accept,
+            LEARNING_ACCEPT_ROLLBACK,
+        )
+        .await
+    }
+
+    /// Dismiss an informational learning candidate that no code can apply.
+    ///
+    /// Not destructive: dismissal closes a review item and publishes nothing.
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = false
+    ))]
+    async fn learning_candidate_dismiss(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<LearningReviewInput>,
+    ) -> CallToolResult {
+        self.review_candidate(
+            context,
+            input,
+            LearningCandidateReviewAction::Dismiss,
+            LEARNING_DISMISS,
         )
         .await
     }

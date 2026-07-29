@@ -5,9 +5,9 @@ use std::time::Duration;
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
     traits::Identity, types::completion::ToolInvocation, types::hands::HandHandle,
-    types::hands::SandboxTier, types::identifiers::ToolCallId, types::security::ToolCapabilityId,
-    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::SecuredToolOutput,
-    types::tools::ToolDefinition, types::tools::ToolOutput,
+    types::identifiers::ToolCallId, types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::tools::IdempotencyClass, types::tools::SecuredToolOutput, types::tools::ToolDefinition,
+    types::tools::ToolOutput,
 };
 use moa_observability::{record_tool_failure, record_tool_reprovision, record_tool_retry};
 use tracing::Instrument;
@@ -24,8 +24,7 @@ struct HandFailureContext<'a> {
     worker_id: Option<&'a str>,
     invocation: &'a ToolInvocation,
     tool_definition: &'a ToolDefinition,
-    provider: &'a str,
-    tier: &'a SandboxTier,
+    route: &'a HandRoute,
     hand: &'a HandHandle,
     active_canary: Option<&'a str>,
 }
@@ -54,7 +53,8 @@ impl ToolRouter {
         tool_call_id: ToolCallId,
         active_canary: Option<&str>,
     ) -> Result<SecuredToolOutput> {
-        let Some(registered_tool) = self.registry.tools.get(&invocation.name) else {
+        let registry = self.registry();
+        let Some(registered_tool) = registry.tools.get(&invocation.name) else {
             // An unknown tool has no registry entry to resolve a capability from,
             // so the identity is the requested name under the built-in namespace.
             // This output is still classified: it is text the model will read.
@@ -105,7 +105,11 @@ impl ToolRouter {
                 )
                 .await
             }
-            ToolExecution::Mcp { server_name, .. } => {
+            ToolExecution::Mcp {
+                server_name,
+                remote_tool_name,
+                ..
+            } => {
                 self.execute_mcp_with_recovery(
                     session,
                     invocation,
@@ -113,6 +117,7 @@ impl ToolRouter {
                     McpDispatch {
                         caller_identity,
                         server_name,
+                        remote_tool_name,
                         credential_scope,
                         tool_call_id,
                     },
@@ -143,15 +148,11 @@ impl ToolRouter {
         loop {
             let route = routes[route_index].clone();
             let provider = route.provider.as_str();
-            let tier = &route.tier;
             let provider_impl = self.providers.get(provider).cloned().ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
             let next_route = routes.get(route_index + 1);
-            let hand = match self
-                .get_or_provision_hand(provider, tier.clone(), session, worker_id)
-                .await
-            {
+            let hand = match self.get_or_provision_hand(&route, session, worker_id).await {
                 Ok(hand) => hand,
                 Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
                 Err(error) => {
@@ -217,8 +218,7 @@ impl ToolRouter {
                                 worker_id,
                                 invocation,
                                 tool_definition,
-                                provider,
-                                tier,
+                                route: &route,
                                 hand: &hand,
                                 active_canary,
                             },
@@ -281,8 +281,7 @@ impl ToolRouter {
                                 worker_id,
                                 invocation,
                                 tool_definition,
-                                provider,
-                                tier,
+                                route: &route,
                                 hand: &hand,
                                 active_canary,
                             },
@@ -377,8 +376,7 @@ impl ToolRouter {
                                 worker_id,
                                 invocation,
                                 tool_definition,
-                                provider,
-                                tier,
+                                route: &route,
                                 hand: &hand,
                                 active_canary,
                             },
@@ -576,9 +574,9 @@ impl ToolRouter {
         retry_attempts: u32,
         reprovisions: u32,
     ) -> Result<Option<SecuredToolOutput>> {
-        record_tool_failure(ctx.provider, &ctx.invocation.name, class.label());
+        record_tool_failure(&ctx.route.provider, &ctx.invocation.name, class.label());
         tracing::warn!(
-            provider = ctx.provider,
+            provider = %ctx.route.provider,
             tool = %ctx.invocation.name,
             class = class.label(),
             retry_attempts,
@@ -608,7 +606,7 @@ impl ToolRouter {
                 if retry_attempts + 1 < MAX_TOOL_RETRIES =>
             {
                 self.retry_tool(
-                    ctx.provider,
+                    &ctx.route.provider,
                     &ctx.invocation.name,
                     retry_attempts + 1,
                     backoff_hint,
@@ -618,12 +616,12 @@ impl ToolRouter {
             }
             ToolFailureClass::ReProvision { .. } if reprovisions < MAX_TOOL_REPROVISIONS => {
                 if let Err(error) = self
-                    .reprovision_hand(ctx.session, ctx.worker_id, ctx.provider, ctx.tier)
+                    .reprovision_hand(ctx.session, ctx.worker_id, ctx.route)
                     .await
                 {
                     return Ok(secured(classify_tool_error(&error, 0)));
                 }
-                self.record_reprovision(ctx.provider, &ctx.invocation.name, class.reason())
+                self.record_reprovision(&ctx.route.provider, &ctx.invocation.name, class.reason())
                     .await;
                 Ok(None)
             }

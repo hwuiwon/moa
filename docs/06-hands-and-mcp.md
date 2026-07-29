@@ -16,6 +16,61 @@ Credentials must not be visible to generated code. Git, MCP, and external API
 credentials are fetched or injected by trusted host-side code, not placed in
 tool-call arguments.
 
+## The Effective Sandbox Profile
+
+Every provisioned hand carries exactly one `EffectiveSandboxProfile`, resolved
+before the lease is claimed and honored or refused by the provider. It states
+six dimensions, each required and typed: CPU millicores, memory mebibytes,
+ephemeral disk mebibytes, an egress posture, an idle timeout, and a hard
+maximum lifetime. Each resource and deadline is a nonzero bound or an explicit
+`Unbounded`; there is no zero-means-unlimited, no `Option`, and no
+`serde(default)`. Egress is `DenyAll`, `AllowList { destinations }`, or
+`Unrestricted`. Revision identity belongs to the surrounding
+`SandboxPolicySnapshot`; an allowlist does not carry a second revision.
+
+Four layers contribute a `SandboxPolicySnapshot { revision, profile }`:
+
+| Layer | Source | Unauthored revision |
+|---|---|---|
+| Deployment | `[sandbox_policy.deployment]` / `MOA_SANDBOX_POLICY_JSON` | `local-development-unbounded` (refused under `security_profile = cloud`) |
+| Tenant | `moa.tenant_sandbox_policy` | `tenant-sandbox-unset` |
+| Agent | `AgentDefinition.sandbox_policy`, pinned on the session | `agent-sandbox-unset` |
+| Route | `[sandbox_policy.routes.<provider>]` | `route-sandbox-unset` |
+
+Resolution is a restrictive intersection: the lowest bounded limit wins,
+`Unbounded` is the identity element, `DenyAll` egress dominates, two allowlists
+intersect, and an empty intersection becomes `DenyAll`. No layer can widen what
+another bounded, which is why an unauthored layer contributes the identity
+element rather than being absent — but it still contributes a *named* revision,
+because all four revisions plus the serving provider's capability revision are
+covered by the profile's stable SHA-256 identity hash. A layer that starts
+declaring limits therefore changes the hash, and no sandbox provisioned under
+the old identity can be reused.
+
+## Provider Capabilities
+
+`HandProvider::capabilities()` is required and has no default body. It declares,
+**per sandbox tier**, the resource ranges and granularity the provider can
+enforce, the egress modes it can enforce, and who owns each deadline
+(`Provider`, `DurableReaper`, or `None`). Admission compares the resolved
+profile against this declaration and refuses before any lease claim and before
+any provider API call. A bounded deadline whose owner is `DurableReaper` is
+admissible only when that reaper is actually running.
+
+Per-tier declarations exist because enforcement is a property of the tier: the
+local provider can bound CPU and deny egress inside a Docker container and can
+do neither for a bare host process.
+
+| Provider / tier | Enforces | Refuses |
+|---|---|---|
+| Local, host tiers (`local`, `none`) | nothing; only `Unbounded` and `Unrestricted` | every bounded resource, every non-unrestricted egress |
+| Local, `container` | `--cpus`, `--memory`, `--network none` / `bridge` | bounded ephemeral disk (`--storage-opt size=` is a no-op on overlay2), egress allowlists (no per-destination filter exists) |
+| E2B, `microvm` | `timeout` (hard lifetime), `allow_internet_access` | bounded CPU/memory/disk (template-fixed), egress allowlists, an *unbounded* hard lifetime (E2B has no "no timeout" value) |
+| Daytona, `container` / `none` | `autoStopInterval` (idle, whole minutes) | bounded CPU/memory/disk, non-unrestricted egress, a non-whole-minute idle timeout |
+
+Refusals are the point of the table. A provider that accepted a dimension and
+dropped it would turn policy into decoration.
+
 ## Provider Map
 
 | Provider | Use | Notes |
@@ -107,6 +162,16 @@ class, default action-policy effect, and output budget. The context pipeline
 injects only the currently active subset to protect prompt budget and cache
 stability.
 
+The registry's default loadout is an **ordered** list — built-ins, then the
+sandbox descriptors in their authored order, then discovered connector tools in
+catalog order. That order is the deployment's declared capability priority. When
+a loadout exceeds the per-turn schema cap, the context pipeline reduces along
+that order after first keeping the loop's control tools and any tool the pinned
+agent or its skills explicitly declared; it canonicalizes by name only *after*
+selecting, so the cached prompt prefix stays byte-stable. Reducing by name
+instead would drop tools for how they are spelled, which says nothing about
+whether the turn needs them.
+
 The execution capability catalog is the planner/compiler source of truth over
 these governed operations. Each entry has a stable reference and version,
 description, input/output schemas, action/risk and idempotency classes,
@@ -122,6 +187,12 @@ interpreter never calls a hand, MCP server, datasource, or memory store directly
 Capability availability and authorization restrict what may run; resource
 budgets restrict only how much may run.
 
+The router publishes the executable registry and its model-visible schemas as
+one immutable snapshot. A refresh cannot expose a new executor with stale
+prompt schemas, or the reverse. Durable execution pins each MCP tool's schema
+revision in the compiled capability catalog and refuses dispatch when the live
+router revision no longer matches.
+
 ## Lifecycle
 
 Active hands are keyed by owning session/run scope and provider. Conversational
@@ -135,6 +206,34 @@ terminal session status, cancellation, failure, or panic cleanup, the
 orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
 leases for every worker scope rather than only handles cached in the current
 process.
+
+A lease persists the exact profile, its identity hash, all four source
+revisions, the capability revision, a renewable `idle_expires_at`, and an
+immutable `hard_expires_at`. `NULL` on either deadline means that dimension was
+explicitly `Unbounded`. Renewal moves only the idle deadline and is capped at
+the hard deadline (`LEAST(requested, hard_expires_at)`), and a lease already
+past its hard deadline cannot be renewed at all — so a continuously busy sandbox
+still dies on schedule. Reuse and recovery recompute today's policy and compare
+identity hashes; any mismatch fences the lease stale and reprovisions.
+Provisioning uses the same resolved profile that was persisted on the claim.
+When replacing a stale binding, the claimant destroys and clears the old
+durable handle before provisioning a replacement.
+
+### The durable reaper
+
+A hard maximum lifetime is only policy if something destroys the sandbox when it
+fires, and the sandboxes that most need destroying belong to sessions that will
+never send another request. `HandLeaseReaper` is that owner. It is started by
+`runtime::jobs::start_hand_lease_reaper` before the orchestrator accepts
+traffic — startup fails outright if no hand provider is registered — and sweeps
+independently of traffic. It claims bounded batches with `FOR UPDATE ... SKIP
+LOCKED` so competing replicas take disjoint work. Each claim has a UUID owner
+token and expiry, so another replica can reclaim it after a crash. Destruction
+runs with bounded concurrency (four by default); finalize and retry updates
+must match both the claimed generation and owner token. A failed destroy
+releases the generation back to `stale` behind exponential backoff, never to
+`active`: a sandbox the reaper decided to destroy is not one anyone should get
+back.
 
 ### Isolated Sandbox Ownership
 
@@ -218,6 +317,67 @@ SSE and streamable HTTP. Startup discovers tool definitions through MCP, then
 the router exposes the selected tools exactly like built-ins and hand tools.
 MCP servers must be reachable over HTTP/SSE so any Kubernetes replica can handle
 a request without depending on a pod-local process.
+
+### Server-qualified tool references
+
+A discovered connector tool registers under
+`mcp__{server_byte_len}_{server}__{remote_tool}` — not under the name the server
+publishes. Including the server byte length makes the encoding injective even
+when server and tool names contain separators. Duplicate qualified insertion is
+rejected. That qualified reference is the tool's identity
+everywhere on MOA's side of the connector boundary: the model-visible schema,
+the registry key, action-policy rules, the persisted `ToolCall` event, and the
+execution capability catalog. Only the outbound `tools/call` and a tenant
+connection binding's `allowed_operations` use the server's own name, because
+those are the two places the connector's vocabulary is the correct one.
+
+Qualification exists so one connector cannot affect another. Before it, a server
+publishing a tool called `bash` failed router construction outright, taking down
+every unrelated tool in the deployment; two servers publishing the same tool
+name could not coexist at all.
+
+**Operator-visible consequences.** Both bite on upgrade, and neither is cosmetic:
+
+- Any persisted action-policy rule or `permissions.*` pattern that targets a
+  connector tool by its unqualified name stops matching. For an
+  `admin_review` pattern this fails **open** — a tool that was review-gated
+  becomes ungated. The router reports every configured permission pattern that
+  matches no registered tool at startup (and after each catalog refresh), so a
+  pattern left behind by this rename is visible rather than silent, but the
+  patterns still have to be rewritten. One `mcp__*` pattern now gates every
+  connector tool regardless of what any server names its tools, which no
+  pattern could express before.
+- Model-visible tool names change, so the cached prompt prefix changes for any
+  deployment running MCP servers. Expect one cache-cold period per session
+  after upgrade.
+
+### Connector health and catalog refresh
+
+Each configured server is `required` or optional (the default), and either
+`eager` or `lazy` for discovery. An optional server that fails discovery removes
+only its own tools and is recorded as typed health; a required one that fails
+discovery is a startup failure carrying that health, because a deployment that
+silently drops a required integration is indistinguishable from one that never
+configured it. `required` plus `lazy` is rejected at startup: "required" means
+verified at startup, and a lazily discovered server has not been contacted.
+
+Health is per connector — `Pending`, `Ready`, `Degraded`, `Unavailable` — never
+an aggregate, because an aggregate cannot express "this optional integration is
+down and every other tool is fine", which is the state the router has to serve.
+A background refresh re-discovers every connector on an interval. A connector
+that fails a refresh after a previous success keeps serving its last-known-good
+tools and reports `Degraded`, so one transient error cannot silently shrink the
+model's loadout. The catalog is published as a whole snapshot, so no prompt
+compilation, capability listing, or dispatch ever observes a half-refreshed
+connector.
+
+Each discovered tool carries a schema revision hash. It is the provenance
+recorded on the capability's catalog source, and because the capability version
+covers the input schema, a connector that changes a tool's schema invalidates a
+pinned execution run's authorization envelope instead of letting the run invoke
+a changed contract. **Conversational turns have no equivalent pin** — see
+`LockedToolRef::identity_hash`, which documents the gap and the two ways to
+close it.
 
 ### Credential ownership
 

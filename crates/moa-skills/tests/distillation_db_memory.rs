@@ -21,8 +21,8 @@ use moa_skills::recurrence::{
 use support::{
     SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_8_TOOL_CALLS, experience_input, learning_probe_vector,
     learning_store, load_optional_active_skill, load_session_fixture, scripted_embedder,
-    scripted_router, seed_embedded_experience, seed_skill, session_storage_partition_id,
-    setup_test_db, skill_markdown, tenant_scope, test_config,
+    scripted_router, seed_embedded_experience, seed_skill, seeded_experience_input,
+    session_storage_partition_id, setup_test_db, skill_markdown, tenant_scope, test_config,
 };
 
 /// Returns the fixture's task text so experience summaries match the session events.
@@ -51,7 +51,7 @@ async fn resolved_experience_with_8_tool_calls_triggers_distillation() {
     let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        experience_input(&loaded, &fixture_task(&loaded)),
+        seeded_experience_input(&test_db, &loaded, &fixture_task(&loaded)).await,
         scripted_router([proposed]),
         Some(learning_store(&test_db)),
         None,
@@ -81,7 +81,7 @@ async fn experience_with_4_tool_calls_does_not_trigger_distillation() {
     let outcome = distill_skill_from_experience_with_learning(
         &MoaConfig::default(),
         &loaded.session,
-        experience_input(&loaded, &fixture_task(&loaded)),
+        experience_input(&loaded, &fixture_task(&loaded)).await,
         scripted_router(Vec::<String>::new()),
         None,
         None,
@@ -103,7 +103,7 @@ async fn failed_experience_does_not_trigger_distillation_even_above_threshold() 
     // Pins: an experience with a failed assessed outcome cannot seed a reusable skill,
     // regardless of how many tool calls the segment contains.
     let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    let mut input = experience_input(&loaded, &fixture_task(&loaded));
+    let mut input = experience_input(&loaded, &fixture_task(&loaded)).await;
     input.experience.outcome = SegmentOutcome::Failed;
 
     let outcome = distill_skill_from_experience_with_learning(
@@ -150,7 +150,7 @@ async fn distillation_above_similarity_threshold_routes_to_improver() {
     let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        experience_input(&loaded, &fixture_task(&loaded)),
+        seeded_experience_input(&test_db, &loaded, &fixture_task(&loaded)).await,
         scripted_router([improved]),
         Some(learning_store(&test_db)),
         None,
@@ -197,7 +197,7 @@ async fn distillation_below_similarity_threshold_creates_new_skill() {
     let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        experience_input(&loaded, &fixture_task(&loaded)),
+        seeded_experience_input(&test_db, &loaded, &fixture_task(&loaded)).await,
         scripted_router([proposed]),
         Some(learning_store(&test_db)),
         None,
@@ -225,7 +225,7 @@ async fn distillation_candidate_includes_lineage_pointers_to_session_and_experie
         "Keep the reusable auth workflow steps concise.",
         "1.0",
     );
-    let input = experience_input(&loaded, &fixture_task(&loaded));
+    let input = seeded_experience_input(&test_db, &loaded, &fixture_task(&loaded)).await;
     let experience_id = input.experience.id;
 
     let outcome = distill_skill_from_experience_with_learning(
@@ -256,7 +256,12 @@ async fn distillation_candidate_includes_lineage_pointers_to_session_and_experie
             .expect("source_session_id is string"),
         session_id
     );
-    assert_eq!(candidate.source_experience_ids, vec![experience_id]);
+    assert!(
+        candidate.sources.contains(
+            &moa_core::types::experience::LearningCandidateSourceRef::Experience { experience_id }
+        ),
+        "candidate must carry its source experience as a typed provenance row, not an array entry"
+    );
 }
 
 #[tokio::test]
@@ -274,7 +279,8 @@ async fn semantic_dedup_accumulates_sibling_instead_of_filing_a_near_duplicate()
     let (embedder, embed_calls) = scripted_embedder();
 
     // Pass 1: file a fresh proposal for experience A.
-    let input_a = experience_input(&loaded, "rotate the alpha deploy token safely");
+    let input_a =
+        seeded_experience_input(&test_db, &loaded, "rotate the alpha deploy token safely").await;
     let experience_a = input_a.experience.id;
     let created = skill_markdown(
         "deploy-token-rotate",
@@ -313,7 +319,8 @@ async fn semantic_dedup_accumulates_sibling_instead_of_filing_a_near_duplicate()
     // Pass 2: a differently-worded (distinct-fingerprint) experience. It routes to
     // create, then the semantic dedup finds experience A behind the open proposal
     // and accumulates a sibling instead of filing.
-    let input_b = experience_input(&loaded, "cycle the production signing key now");
+    let input_b =
+        seeded_experience_input(&test_db, &loaded, "cycle the production signing key now").await;
     let second = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
@@ -356,7 +363,8 @@ async fn absent_embedder_skips_semantic_dedup_and_files_a_new_proposal() {
     let (config, _temp_dir) = test_config(&test_db);
     let store = learning_store(&test_db);
 
-    let input_a = experience_input(&loaded, "rotate the alpha deploy token safely");
+    let input_a =
+        seeded_experience_input(&test_db, &loaded, "rotate the alpha deploy token safely").await;
     let experience_a = input_a.experience.id;
     let created = skill_markdown(
         "deploy-token-rotate",
@@ -386,7 +394,8 @@ async fn absent_embedder_skips_semantic_dedup_and_files_a_new_proposal() {
     )
     .await;
 
-    let input_b = experience_input(&loaded, "cycle the production signing key now");
+    let input_b =
+        seeded_experience_input(&test_db, &loaded, "cycle the production signing key now").await;
     let unrelated = skill_markdown(
         "signing-key-cycle",
         "Cycle the production signing key",

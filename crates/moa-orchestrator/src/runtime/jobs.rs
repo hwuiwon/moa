@@ -6,6 +6,7 @@ use anyhow::{Context as AnyhowContext, Result, bail};
 use moa_authz::{AwakeableResolver, FgaClient};
 use moa_config::AsyncAuthzKind;
 use moa_config::MoaConfig;
+use moa_hands::{HandLeaseReaper, HandLeaseReaperConfig, PostgresExpiredHandLeaseClaims};
 use reqwest::Client;
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
@@ -24,6 +25,8 @@ const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const CRON_RECONCILE_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 /// Upper bound on the exponential backoff between cron reconcile passes.
 const CRON_RECONCILE_MAX_BACKOFF: Duration = Duration::from_secs(300);
+/// How often configured MCP connectors are re-discovered.
+const MCP_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Starts the OpenFGA outbox poller that drains queued authorization tuple changes.
 pub fn start_authz_outbox_poller(pool: &PgPool, fga_client: FgaClient) -> moa_authz::PollerHandle {
@@ -57,6 +60,64 @@ pub fn start_action_review_reaper(
         ActionReviewReaper::with_restate_ingress(pool.clone(), restate_ingress_url).spawn();
     tracing::info!("action review reaper started");
     handle
+}
+
+/// Starts the durable hand-lease reaper that destroys expired sandboxes.
+///
+/// This is the destruction owner for every bounded idle timeout and hard
+/// maximum lifetime the router admits. It runs independently of request
+/// traffic, because the sandboxes that most need destroying belong to sessions
+/// that will never send another request. Startup fails when no hand provider is
+/// registered: a deployment that provisions sandboxes with no way to destroy
+/// them is not a deployment MOA should serve.
+pub fn start_hand_lease_reaper(
+    pool: &PgPool,
+    providers: Vec<Arc<dyn moa_core::traits::HandProvider>>,
+) -> Result<JoinHandle<()>> {
+    if providers.is_empty() {
+        bail!(
+            "durable hand-lease reaper requires at least one registered hand provider; \
+             without one, expired sandboxes would never be destroyed"
+        );
+    }
+    let provider_names = providers
+        .iter()
+        .map(|provider| provider.provider_name().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let handle = HandLeaseReaper::new(
+        Arc::new(PostgresExpiredHandLeaseClaims::new(pool.clone())),
+        providers,
+        HandLeaseReaperConfig::default(),
+    )
+    .spawn();
+    tracing::info!(providers = %provider_names, "durable hand lease reaper started");
+    Ok(handle)
+}
+
+/// Starts periodic MCP connector catalog refresh, when any connector is configured.
+///
+/// Returns `None` for a deployment with no connectors: there is nothing to
+/// rediscover, and a timer that wakes only to find an empty configuration is
+/// noise. When it does run, it is what lets an optional connector that was down
+/// at startup start serving without a restart, and what re-pins a connector
+/// whose published schemas changed.
+pub fn start_mcp_catalog_refresh(
+    config: &MoaConfig,
+    tool_router: Arc<moa_hands::ToolRouter>,
+) -> Option<JoinHandle<()>> {
+    if config.mcp_servers.is_empty() {
+        return None;
+    }
+    tracing::info!(
+        connectors = config.mcp_servers.len(),
+        interval_secs = MCP_CATALOG_REFRESH_INTERVAL.as_secs(),
+        "MCP connector catalog refresh started"
+    );
+    Some(moa_hands::spawn_mcp_catalog_refresh(
+        tool_router,
+        MCP_CATALOG_REFRESH_INTERVAL,
+    ))
 }
 
 /// Spawns default cron-job bootstrap after Restate service registration appears.

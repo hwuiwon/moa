@@ -1,10 +1,6 @@
-use std::collections::HashMap;
-use std::time::Duration;
+include!("local_tools_support/sandbox_profile.rs");
 
-use moa_core::{
-    traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
-    types::hands::SandboxTier,
-};
+use moa_core::{traits::HandProvider, types::hands::SandboxTier};
 use moa_hands::LocalHandProvider;
 use tempfile::tempdir;
 
@@ -12,26 +8,25 @@ use tempfile::tempdir;
 async fn docker_container_runs_with_hardening() {
     let dir = tempdir().unwrap();
     let provider = LocalHandProvider::new(dir.path()).await.unwrap();
-    if !provider.docker_available() {
-        return;
-    }
+    assert!(
+        provider.docker_available(),
+        "this test is Docker-selected by its `_docker` suffix; a run without Docker \
+         must fail loudly rather than silently pass"
+    );
 
     let handle = provider
-        .provision(HandSpec {
-            sandbox_tier: SandboxTier::Container,
-            image: None,
-            resources: HandResources::default(),
-            env: HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        })
+        .provision(hand_spec_with_profile(
+            SandboxTier::Container,
+            deny_all_egress_profile(),
+            "test-capabilities-v1",
+        ))
         .await
         .unwrap();
 
-    if !matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }) {
-        return;
-    }
+    assert!(
+        matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }),
+        "the container tier must produce a Docker handle, not a silently downgraded one"
+    );
 
     let _result = async {
         let output = provider
@@ -70,4 +65,21 @@ async fn docker_container_runs_with_hardening() {
     .await;
 
     let _ = provider.destroy(&handle).await;
+}
+
+/// The hardened container profile: no outbound network at all, everything else
+/// deliberately unbounded so this test isolates the egress translation.
+fn deny_all_egress_profile() -> moa_core::types::hands::SandboxProfile {
+    use moa_core::types::hands::{
+        CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit, SandboxProfile,
+    };
+    SandboxProfile::new(
+        CpuLimit::Unbounded,
+        MemoryLimit::Unbounded,
+        DiskLimit::Unbounded,
+        EgressPolicy::DenyAll,
+        LifetimeLimit::Unbounded,
+        LifetimeLimit::Unbounded,
+    )
+    .expect("deny-all profile should validate")
 }

@@ -248,10 +248,14 @@ with the invariant sweep from `moa_test_support::invariants`.
 
 ## Metrics wiring
 
-- Orchestrator and edge expose Prometheus at `:9090` (compose hosts
-  `10023` and `10001`; enabled via `MOA_METRICS_ENABLED`, default on in
-  compose). k8s wires the orchestrator port in
-  `k8s/base/20-orchestrator-deployment.yaml`.
+- Local compose runs the development scrape exporter
+  (`MOA_METRICS_EXPORTER=prometheus`, `MOA_METRICS_PROMETHEUS_LISTEN=0.0.0.0:9090`,
+  hosts `10023` and `10001`), which is what makes a load run readable with
+  `curl`. Kubernetes runs `MOA_METRICS_EXPORTER=otlp` and exposes no metrics port
+  at all: a scrape through a non-sticky Service lands on an arbitrary replica
+  each interval and blends unrelated processes into one series. Load numbers
+  taken from a scraped k8s Service were never trustworthy, which is why that
+  surface is gone rather than merely discouraged.
 - Turn-step attribution: `moa_turn_step_duration_seconds{step=...}` with
   sub-10ms buckets (see `moa-observability/src/runtime_metrics.rs`).
 - Event append phase attribution:

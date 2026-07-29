@@ -46,6 +46,12 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            # Stable for this process lifetime and unique across replicas. The
+            # shared telemetry resource maps it to service.instance.id.
+            - name: MOA_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: MOA_EDGE_BIND
               value: 0.0.0.0:8080
             - name: MOA_EDGE_UPSTREAM

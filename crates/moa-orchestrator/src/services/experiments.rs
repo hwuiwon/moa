@@ -44,6 +44,7 @@ use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
+use moa_core::types::experiments::ExperimentCancelSignal;
 
 /// Restate service surface for live behavior experiment runs.
 #[restate_sdk::service]
@@ -304,12 +305,17 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = self.pool.clone();
         let run_uid = request.run_uid;
+        let persist_identity = identity.clone();
 
         let response = ctx
-            .run(|| async move { cancel_inner(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                cancel_inner(pool, request, persist_identity)
+                    .await
+                    .map(Json::from)
+            })
             .name("experiments_cancel")
             .await?
             .into_inner();
@@ -321,7 +327,10 @@ impl Experiments for ExperimentsImpl {
         if response.status == ExperimentRunStatus::Cancelled.as_str() {
             crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<ExperimentRunClient>(run_uid.to_string())
-                    .request_cancel(Json::from(response.reason.clone())),
+                    .request_cancel(Json::from(ExperimentCancelSignal {
+                        reason: response.reason.clone(),
+                        identity,
+                    })),
             )
             .send();
         }
@@ -583,8 +592,9 @@ async fn trial_status_inner(
 async fn cancel_inner(
     pool: sqlx::PgPool,
     request: ExperimentCancelRequest,
+    identity: Identity,
 ) -> Result<ExperimentCancelResponse, HandlerError> {
-    cancel_run(pool, request)
+    cancel_run(pool, request, identity)
         .await
         .map_err(experiment_app_error_to_handler_error)
 }
@@ -675,7 +685,9 @@ pub async fn run_agent_revision_simulation_inner(
             plan_revision_uid: Some(request.plan_revision_uid),
             target: None,
             variant: None,
-            scorecard: serde_json::json!({}),
+            // Plan-backed: the pinned plan revision owns the scorecard, so this
+            // path must not supply one that would compete with it.
+            scorecard: None,
             score_run_id: None,
             idempotency_key: request.idempotency_key,
             agent_revision_variants: variants.clone(),
@@ -1075,22 +1087,22 @@ fn compare_tool_dependencies(
         tools
             .entry(dependency.name.clone())
             .or_insert((None, None))
-            .0 = Some(dependency.schema_hash.clone());
+            .0 = Some(dependency.identity_hash.clone());
     }
     for dependency in &new.tool_dependencies {
         tools
             .entry(dependency.name.clone())
             .or_insert((None, None))
-            .1 = Some(dependency.schema_hash.clone());
+            .1 = Some(dependency.identity_hash.clone());
     }
     tools
         .into_iter()
-        .filter_map(|(name, (base_schema_hash, new_schema_hash))| {
-            dependency_change(base_schema_hash.as_deref(), new_schema_hash.as_deref()).map(
+        .filter_map(|(name, (base_identity_hash, new_identity_hash))| {
+            dependency_change(base_identity_hash.as_deref(), new_identity_hash.as_deref()).map(
                 |change| AgentToolDependencyDelta {
                     name,
-                    base_schema_hash,
-                    new_schema_hash,
+                    base_identity_hash,
+                    new_identity_hash,
                     change,
                 },
             )
@@ -1124,7 +1136,7 @@ fn score_error_to_handler_error(error: Error) -> HandlerError {
         Error::IntegerTooLarge { .. } => {
             TerminalError::new_with_code(400, error.to_string()).into()
         }
-        Error::Sql(_) | Error::ScoreRunMismatch { .. } => {
+        Error::Sql(_) | Error::InvalidScoreValueType { .. } | Error::ScoreRunMismatch { .. } => {
             TerminalError::new(error.to_string()).into()
         }
     }
@@ -1174,8 +1186,8 @@ mod tests {
         let tool_deltas = compare_tool_dependencies(&base, &new);
         assert_eq!(tool_deltas.len(), 1);
         assert_eq!(tool_deltas[0].name, "file_read");
-        assert_eq!(tool_deltas[0].base_schema_hash.as_deref(), Some("hash-a"));
-        assert_eq!(tool_deltas[0].new_schema_hash.as_deref(), Some("hash-b"));
+        assert_eq!(tool_deltas[0].base_identity_hash.as_deref(), Some("hash-a"));
+        assert_eq!(tool_deltas[0].new_identity_hash.as_deref(), Some("hash-b"));
         assert_eq!(tool_deltas[0].change, AgentDependencyChange::Changed);
     }
 
@@ -1198,10 +1210,10 @@ mod tests {
         }
     }
 
-    fn tool_dependency(name: &str, schema_hash: &str) -> LockedToolRef {
+    fn tool_dependency(name: &str, identity_hash: &str) -> LockedToolRef {
         LockedToolRef {
             name: name.to_string(),
-            schema_hash: schema_hash.to_string(),
+            identity_hash: identity_hash.to_string(),
             provider: None,
         }
     }

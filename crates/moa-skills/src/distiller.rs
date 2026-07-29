@@ -7,11 +7,11 @@ use chrono::{DateTime, Utc};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_config::MoaConfig;
 use moa_core::{
-    error::Result, events::Event, traits::EmbeddingProvider, types::completion::CompletionRequest,
-    types::events_stream::EventRecord, types::experience::AttributionEffect,
-    types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
-    types::experience::ExperienceRecord, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::memory::SkillMetadata, types::provider::ModelTask,
+    error::Result, traits::EmbeddingProvider, types::completion::CompletionRequest,
+    types::experience::AttributionEffect, types::experience::AttributionSubjectType,
+    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::memory::SkillMetadata, types::provider::ModelTask,
     types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::session::SessionMeta,
@@ -19,16 +19,16 @@ use moa_core::{
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 
+use crate::evidence::{EvidenceSource, SanitizedLearningEvidence};
 use crate::semantic::{EmbeddingSkillMatch, route_improve_vs_create};
 
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
 };
-use crate::improver::{ImprovementResult, format_events_for_learning, normalize_llm_markdown};
+use crate::improver::{ImprovementResult, format_evidence_for_learning, normalize_llm_markdown};
 use crate::package::SkillPackage;
 use crate::proposals::{
-    SiblingResynthesis, SkillDraftProposal, SkillProposalOperation, SkillProposalSource,
-    store_skill_draft_proposal,
+    SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
 };
 use crate::registry::SkillRegistry;
 use crate::regression::{
@@ -135,17 +135,13 @@ pub enum DistillationOutcome {
     },
     /// A recurring sibling experience deduped onto an already-open proposal.
     ///
-    /// No new review candidate was filed: the sibling's evidence accumulated
-    /// onto the open candidate, and `resynthesis` records whether the
-    /// generalization pass rewrote the open draft. This is distinct from
+    /// No new review candidate was filed: the sibling's suite accumulated as
+    /// held-out evidence on the open candidate. This is distinct from
     /// [`DistillationOutcome::NewSkillProposed`]/[`DistillationOutcome::ImprovementProposed`]
-    /// so loop observability can count a changed re-synthesis apart from a fresh
-    /// filing.
+    /// because it filed nothing new.
     DedupedOntoOpenProposal {
         /// The open proposal the sibling deduped onto.
         proposal: SkillDraftProposal,
-        /// Whether the sibling's generalization pass rewrote the open draft.
-        resynthesis: SiblingResynthesis,
     },
     /// Distillation was intentionally skipped.
     Skipped {
@@ -202,8 +198,8 @@ pub struct ExperienceDistillationInput {
     pub experience: ExperienceRecord,
     /// Attribution records generated for the experience.
     pub attributions: Vec<ExperienceAttribution>,
-    /// Bounded segment events used as learning evidence.
-    pub events: Vec<EventRecord>,
+    /// Sanitized bounded segment evidence used for learning.
+    pub evidence: SanitizedLearningEvidence,
 }
 
 /// Distills an assessed experience into a skill candidate and promotes it when gates pass.
@@ -233,7 +229,7 @@ pub async fn distill_skill_from_experience_with_learning(
             reason: DistillationSkipReason::UnlearnableOutcome,
         });
     }
-    if count_tool_calls(&input.events)
+    if input.evidence.tool_call_count()
         < evidence.effective_min_tool_calls(config.learning.skills.min_tool_calls)
     {
         return Ok(DistillationOutcome::Skipped {
@@ -262,25 +258,18 @@ pub async fn distill_skill_from_experience_with_learning(
         let sibling_suite = generate_skill_test_suite_source_for_name(
             session.tenant_id,
             &open.metadata.name,
-            &input.events,
+            &input.evidence,
         )?;
-        let resynthesis = crate::proposals::accumulate_sibling_and_resynthesize(
+        crate::proposals::accumulate_sibling_suite(
             store.as_ref(),
-            model_router.as_ref(),
             session.tenant_id,
             &open,
-            crate::proposals::SiblingContribution {
-                suite: sibling_suite,
-                events: &input.events,
-                source_experience_id: input.experience.id,
-                source_session_id: session.id,
-            },
+            sibling_suite,
+            input.experience.id,
+            session.id,
         )
         .await?;
-        return Ok(DistillationOutcome::DedupedOntoOpenProposal {
-            proposal: open,
-            resynthesis,
-        });
+        return Ok(DistillationOutcome::DedupedOntoOpenProposal { proposal: open });
     }
 
     let jaccard_text = experience_similarity_text(&input.experience);
@@ -293,7 +282,7 @@ pub async fn distill_skill_from_experience_with_learning(
     // failing embedder leaves `probe` None, and every semantic branch degrades to
     // today's lexical behavior.
     let probe = match &embedder {
-        Some(embedder) => embed_task_summary_probe(embedder.as_ref(), &input.experience).await,
+        Some(embedder) => embed_task_summary_probe(embedder.as_ref(), &input.evidence).await,
         None => None,
     };
     // Constrain both filing-time NN probes to the active embedder's own vector
@@ -342,20 +331,16 @@ pub async fn distill_skill_from_experience_with_learning(
         let result = crate::improver::improve_skill_with_learning_for_sources(
             session,
             existing,
-            &input.events,
+            &input.evidence,
             model_router,
             learning_store,
             source,
         )
         .await;
         return result.map(|result| match result {
-            ImprovementResult::Deduped {
-                proposal,
-                resynthesis,
-            } => DistillationOutcome::DedupedOntoOpenProposal {
-                proposal,
-                resynthesis,
-            },
+            ImprovementResult::Deduped { proposal } => {
+                DistillationOutcome::DedupedOntoOpenProposal { proposal }
+            }
             ImprovementResult::Improved { proposal, .. } => {
                 DistillationOutcome::ImprovementProposed {
                     existing_skill_id,
@@ -378,7 +363,6 @@ pub async fn distill_skill_from_experience_with_learning(
     if let Some(probe) = &probe
         && let Some(outcome) = semantic_dedupe_onto_open_proposal(
             store.as_ref(),
-            model_router.as_ref(),
             session,
             &input,
             probe,
@@ -403,7 +387,7 @@ pub async fn distill_skill_from_experience_with_learning(
     let metadata = skill_metadata_from_document(path.clone(), &skill);
     let package = SkillPackage::from_skill_markdown(markdown).validate()?;
     let generated_suite =
-        generate_skill_test_suite_source(session.tenant_id, &skill, &input.events)?;
+        generate_skill_test_suite_source(session.tenant_id, &skill, &input.evidence)?;
     let routing = serde_json::json!({
         "decision": "create_new",
         "similarity_method": decision.method.as_str(),
@@ -432,7 +416,12 @@ pub(crate) fn proposal_source_from_experience(
     evidence: &DispatchEvidence,
 ) -> SkillProposalSource {
     SkillProposalSource {
-        source_experience_ids: vec![input.experience.id],
+        // The complete closure the sanitized evidence actually saw: contact,
+        // session, segment, experience, and the source events. Taking it from
+        // the evidence rather than rebuilding it from the experience record
+        // keeps the proposal's provenance identical to the transcript the model
+        // was shown.
+        sources: input.evidence.candidate_sources(),
         task_fingerprint: Some(input.experience.task_fingerprint.clone()),
         task_facets: Some(input.experience.task_facets.clone()),
         confidence: Some(input.experience.confidence),
@@ -488,13 +477,6 @@ fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
     crate::format::render_skill_markdown(skill)
 }
 
-fn count_tool_calls(events: &[EventRecord]) -> usize {
-    events
-        .iter()
-        .filter(|record| matches!(record.event, Event::ToolCall { .. }))
-        .count()
-}
-
 const SKILL_DISTILLATION_SYSTEM_PROMPT: &str = "\
 Distill task evidence into a reusable Agent Skill.
 Output only a complete SKILL.md document using the Agent Skills format from agentskills.io.
@@ -537,7 +519,7 @@ fn build_experience_distillation_user_prompt(input: &ExperienceDistillationInput
         experience.skills_activated.join(", "),
         serde_json::to_string(&experience.evidence).unwrap_or_else(|_| "[]".to_string()),
         serde_json::to_string(&input.attributions).unwrap_or_else(|_| "[]".to_string()),
-        format_events_for_learning(&input.events)
+        format_evidence_for_learning(&input.evidence)
     )
 }
 
@@ -657,15 +639,20 @@ fn tokenize(text: &str) -> HashSet<String> {
 /// detached pass never sweeps the whole tenant.
 const PROPOSAL_DEDUP_NEIGHBOR_LIMIT: usize = 20;
 
-/// Embeds the experience's task summary into a reusable semantic probe.
+/// Embeds the experience's sanitized task summary into a reusable semantic probe.
+///
+/// The probe is a provider call, so it embeds the sanitized summary carried by
+/// the evidence rather than the raw stored one. The embedding backfill sanitizes
+/// the same way, so a probe and the stored vectors it is compared against are
+/// derived from identical text.
 ///
 /// Returns `None` (skipping the semantic layer) when the embedder's dimension
-/// disagrees with the stored `halfvec` width, when the summary is empty, or when
-/// the provider call fails — each logs and degrades to the lexical path rather
-/// than failing the distillation.
+/// disagrees with the stored `halfvec` width, when the evidence carries no task
+/// summary, or when the provider call fails — each logs and degrades to the
+/// lexical path rather than failing the distillation.
 async fn embed_task_summary_probe(
     embedder: &dyn EmbeddingProvider,
-    experience: &ExperienceRecord,
+    evidence: &SanitizedLearningEvidence,
 ) -> Option<Vec<f32>> {
     if embedder.dimensions() != crate::embeddings::EMBEDDING_DIM {
         tracing::warn!(
@@ -675,10 +662,11 @@ async fn embed_task_summary_probe(
         );
         return None;
     }
-    let text = experience
-        .task_summary
-        .clone()
-        .unwrap_or_else(|| experience.task_fingerprint.normalized_summary.clone());
+    let text = evidence
+        .entries_from(EvidenceSource::TaskSummary)
+        .next()
+        .map(|entry| entry.text().to_string())
+        .unwrap_or_default();
     if text.trim().is_empty() {
         return None;
     }
@@ -738,12 +726,11 @@ async fn nearest_skill_match(
 ///
 /// Probes the tenant's experience embeddings for near neighbors of the current
 /// experience, maps the nearest qualifying neighbor to the open proposal it backs,
-/// and routes the experience through the same sibling-accumulation/re-synthesis
-/// path the exact-fingerprint dedupe uses. The suite is generated for the open
-/// proposal's own skill name, since the match was by task similarity, not name.
+/// and routes the experience through the same held-out sibling-accumulation path
+/// the exact-fingerprint dedupe uses. The suite is generated for the open proposal's
+/// own skill name, since the match was by task similarity, not name.
 async fn semantic_dedupe_onto_open_proposal(
     store: &PostgresSessionStore,
-    model_router: &ModelRouter,
     session: &SessionMeta,
     input: &ExperienceDistillationInput,
     probe: &[f32],
@@ -780,24 +767,19 @@ async fn semantic_dedupe_onto_open_proposal(
     let suite = generate_skill_test_suite_source_for_name(
         session.tenant_id,
         &open.metadata.name,
-        &input.events,
+        &input.evidence,
     )?;
-    let resynthesis = crate::proposals::accumulate_sibling_and_resynthesize(
+    crate::proposals::accumulate_sibling_suite(
         store,
-        model_router,
         session.tenant_id,
         &open,
-        crate::proposals::SiblingContribution {
-            suite,
-            events: &input.events,
-            source_experience_id: input.experience.id,
-            source_session_id: session.id,
-        },
+        suite,
+        input.experience.id,
+        session.id,
     )
     .await?;
     Ok(Some(DistillationOutcome::DedupedOntoOpenProposal {
         proposal: open,
-        resynthesis,
     }))
 }
 
@@ -901,14 +883,14 @@ mod tests {
         assert!(experience_is_learnable(&experience, &attributions));
     }
 
-    #[test]
-    fn experience_distillation_request_keeps_segment_evidence_out_of_system_prompt() {
+    #[tokio::test]
+    async fn experience_distillation_request_keeps_segment_evidence_out_of_system_prompt() {
         // Pins: learned-skill generation reuses static instructions while segment evidence
         // stays dynamic, so the stable system prompt remains cacheable.
         let input = ExperienceDistillationInput {
             experience: experience(SegmentOutcome::Resolved, 0.9),
             attributions: Vec::new(),
-            events: Vec::new(),
+            evidence: crate::evidence::sanitize_for_tests(&[]).await,
         };
         let request = build_experience_distillation_request(&input);
 

@@ -1,14 +1,25 @@
-//! Postgres and ClickHouse batch storage plus COPY rendering.
+//! Postgres batch storage plus COPY rendering.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::Result;
-use crate::store::LineageStore;
 
 use super::compliance::apply_compliance_hashes;
-use super::rows::{LineageRow, PendingRow, ScoreRow};
+use super::rows::{ExperimentScoreProvenanceRow, LineageRow, PendingRow, ScoreRow};
 
-pub(super) async fn write_pending_rows(store: &LineageStore, rows: &[PendingRow]) -> Result<()> {
+/// Stores a claimed batch inside the caller's transaction.
+///
+/// The transaction belongs to the drain, which dequeues the same rows from the
+/// acceptance queue before committing. That is what makes "stored" and "no
+/// longer queued" a single fact rather than two facts a crash can separate.
+///
+pub(super) async fn write_pending_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    rows: &[PendingRow],
+) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -22,27 +33,67 @@ pub(super) async fn write_pending_rows(store: &LineageStore, rows: &[PendingRow]
         }
     }
 
-    match store {
-        LineageStore::Postgres(pool) => write_rows(pool, &lineage_rows).await?,
-        // Compliance tenants are refused at startup on the ClickHouse backend
-        // (see `LineageStore::guard_compliance_backend`), so ClickHouse writes
-        // never silently drop hash chaining here.
-        LineageStore::ClickHouse { clickhouse, .. } => {
-            clickhouse.insert_lineage_rows(&lineage_rows).await?;
-        }
-    }
-    write_score_rows(store.postgres(), &score_rows).await?;
+    lock_destruction_scopes(tx, rows).await?;
+    write_rows(tx, &lineage_rows).await?;
+    write_score_rows(tx, &score_rows).await?;
     Ok(())
 }
 
-async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
+/// Serializes writes with the canonical tenant/subject destruction fence.
+///
+/// If this transaction wins the lock, a later erasure waits and then deletes
+/// these rows. If erasure wins, its permanent fence is visible to the INSERT
+/// predicates below. Either ordering prevents an in-flight write from
+/// resurrecting destroyed data.
+async fn lock_destruction_scopes(
+    tx: &mut Transaction<'_, Postgres>,
+    rows: &[PendingRow],
+) -> Result<()> {
+    let mut scopes = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    for row in rows {
+        let Ok(tenant_id) = Uuid::parse_str(&row.storage_partition_id()) else {
+            continue;
+        };
+        let subjects = scopes.entry(tenant_id).or_default();
+        if let Some(user_id) = row.user_id()
+            && let Some(subject_id) = privacy_subject_uuid(&user_id)
+        {
+            subjects.insert(subject_id);
+        }
+    }
+
+    for (tenant_id, subjects) in scopes {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(\
+             hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+        )
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await?;
+        for subject_id in subjects {
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(\
+                 hashtextextended('moa:destruction:subject:' || $1::text, 0))",
+            )
+            .bind(subject_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn privacy_subject_uuid(user_id: &str) -> Option<Uuid> {
+    Uuid::parse_str(user_id.strip_prefix("contact:").unwrap_or(user_id)).ok()
+}
+
+async fn write_rows(tx: &mut Transaction<'_, Postgres>, rows: &[LineageRow]) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
 
     let mut rows = rows.to_vec();
-    let mut tx = pool.begin().await?;
-    apply_compliance_hashes(&mut tx, &mut rows).await?;
+    apply_compliance_hashes(tx, &mut rows).await?;
 
     // Reuse a persistent per-connection staging table instead of dropping and recreating one
     // per drain: `ON COMMIT DELETE ROWS` empties it at each commit, so there is no catalog churn
@@ -63,11 +114,11 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
         ) ON COMMIT DELETE ROWS;
         "#,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let copy_payload = render_copy_csv(&rows);
-    let mut copy = (*tx)
+    let mut copy = (**tx)
         .copy_in_raw(
             r#"
             COPY lineage_copy (
@@ -117,17 +168,29 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             payload,
             integrity_hash,
             prev_hash
-        FROM lineage_copy
+        FROM lineage_copy AS staged
+        -- Permanent destruction fence, checked after taking the same advisory
+        -- locks as erasure. A tenant fence suppresses every row; a subject fence
+        -- suppresses only that UUID-backed user/contact.
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM moa.destruction_operation_fence AS fence
+            WHERE fence.tenant_id::TEXT = staged.storage_partition_id
+              AND (
+                    fence.subject_id IS NULL
+                    OR staged.user_id = fence.subject_id::TEXT
+                    OR staged.user_id = 'contact:' || fence.subject_id::TEXT
+                  )
+        )
         ON CONFLICT (turn_id, record_kind, ts) DO UPDATE
         SET payload = EXCLUDED.payload,
             integrity_hash = EXCLUDED.integrity_hash,
             prev_hash = COALESCE(EXCLUDED.prev_hash, analytics.turn_lineage.prev_hash)
         "#,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -155,12 +218,11 @@ fn render_copy_csv(rows: &[LineageRow]) -> String {
     out
 }
 
-async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> {
+async fn write_score_rows(tx: &mut Transaction<'_, Postgres>, rows: &[ScoreRow]) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
 
-    let mut tx = pool.begin().await?;
     // Reuse a persistent per-connection staging table (see `write_rows`): `ON COMMIT DELETE ROWS`
     // clears it at commit, avoiding per-drain catalog churn and preserving statement caching.
     sqlx::query(
@@ -187,11 +249,11 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
         ) ON COMMIT DELETE ROWS;
         "#,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let copy_payload = render_score_copy_csv(rows);
-    let mut copy = (*tx)
+    let mut copy = (**tx)
         .copy_in_raw(
             r#"
             COPY lineage_scores_copy (
@@ -265,31 +327,246 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
             source,
             model_or_evaluator,
             comment
-        FROM lineage_scores_copy
-        ON CONFLICT (score_id, ts) DO UPDATE
-        SET storage_partition_id = EXCLUDED.storage_partition_id,
-            user_id = EXCLUDED.user_id,
-            target_kind = EXCLUDED.target_kind,
-            turn_id = EXCLUDED.turn_id,
-            session_id = EXCLUDED.session_id,
-            run_id = EXCLUDED.run_id,
-            item_id = EXCLUDED.item_id,
-            dataset_id = EXCLUDED.dataset_id,
-            name = EXCLUDED.name,
-            value_type = EXCLUDED.value_type,
-            value_numeric = EXCLUDED.value_numeric,
-            value_boolean = EXCLUDED.value_boolean,
-            value_categorical = EXCLUDED.value_categorical,
-            source = EXCLUDED.source,
-            model_or_evaluator = EXCLUDED.model_or_evaluator,
-            comment = EXCLUDED.comment
+        FROM lineage_scores_copy AS staged
+        -- Purge fence, for the same reason as the lineage insert above: a score
+        -- accepted before a purge must not be written after it. Without this the
+        -- provenance insert below would also fail its foreign key against the
+        -- already-purged trial, turning a purged tenant's in-flight scores into
+        -- dead letters instead of correctly discarding them.
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM moa.destruction_operation_fence AS fence
+            WHERE fence.tenant_id::TEXT = staged.storage_partition_id
+              AND (
+                    fence.subject_id IS NULL
+                    OR staged.user_id = fence.subject_id::TEXT
+                    OR staged.user_id = 'contact:' || fence.subject_id::TEXT
+                  )
+        )
+        -- Replay acceptance, not mutation. A score row is derived from the exact
+        -- evidence its provenance names, so a replay that produced the same
+        -- identity must have produced the same values; rewriting them here would
+        -- let a second pass silently restate history. A replay that produced
+        -- DIFFERENT values keeps its identity and is caught below, where the
+        -- provenance comparison refuses it loudly instead of absorbing it.
+        ON CONFLICT (score_id, ts) DO NOTHING
         "#,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
+    write_experiment_score_provenance(tx, rows).await?;
+
     Ok(())
+}
+
+/// Writes Behavior Lab provenance beside the score rows it explains.
+///
+/// Runs inside the score-write transaction, so a score row and its provenance
+/// become visible together. A score whose provenance write fails is not
+/// committed at all, which is what makes "only a provenance-backed score can
+/// satisfy a requirement" true rather than aspirational.
+async fn write_experiment_score_provenance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &[ScoreRow],
+) -> Result<()> {
+    let provenance = rows
+        .iter()
+        .filter_map(|row| row.provenance.as_ref())
+        .collect::<Vec<_>>();
+    if provenance.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE IF NOT EXISTS experiment_score_provenance_copy (
+            score_id                 UUID  NOT NULL,
+            score_ts                 TIMESTAMPTZ NOT NULL,
+            storage_partition_id     TEXT  NOT NULL,
+            user_id                  TEXT,
+            score_run_id             UUID  NOT NULL,
+            experiment_run_uid       UUID  NOT NULL,
+            plan_revision_uid        UUID  NOT NULL,
+            trial_uid                UUID  NOT NULL,
+            target_session_id        UUID,
+            target_execution_run_uid UUID,
+            evaluator_id             TEXT  NOT NULL,
+            evaluator_version        TEXT  NOT NULL,
+            score_name               TEXT  NOT NULL,
+            value_type               TEXT  NOT NULL,
+            evidence_ref             TEXT  NOT NULL,
+            evidence_hash            BYTEA NOT NULL
+        ) ON COMMIT DELETE ROWS;
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    let copy_payload = render_provenance_copy_csv(&provenance);
+    let mut copy = (**tx)
+        .copy_in_raw(
+            r#"
+            COPY experiment_score_provenance_copy (
+                score_id,
+                score_ts,
+                storage_partition_id,
+                user_id,
+                score_run_id,
+                experiment_run_uid,
+                plan_revision_uid,
+                trial_uid,
+                target_session_id,
+                target_execution_run_uid,
+                evaluator_id,
+                evaluator_version,
+                score_name,
+                value_type,
+                evidence_ref,
+                evidence_hash
+            )
+            FROM STDIN WITH (FORMAT csv, NULL '\N')
+            "#,
+        )
+        .await?;
+    if let Err(error) = copy.send(copy_payload.as_bytes()).await {
+        let _ = copy.abort("experiment score provenance copy failed").await;
+        return Err(error.into());
+    }
+    copy.finish().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.experiment_score_provenance (
+            score_id,
+            score_ts,
+            storage_partition_id,
+            user_id,
+            score_run_id,
+            experiment_run_uid,
+            plan_revision_uid,
+            trial_uid,
+            target_session_id,
+            target_execution_run_uid,
+            evaluator_id,
+            evaluator_version,
+            score_name,
+            value_type,
+            evidence_ref,
+            evidence_hash
+        )
+        SELECT
+            score_id,
+            score_ts,
+            storage_partition_id,
+            user_id,
+            score_run_id,
+            experiment_run_uid,
+            plan_revision_uid,
+            trial_uid,
+            target_session_id,
+            target_execution_run_uid,
+            evaluator_id,
+            evaluator_version,
+            score_name,
+            value_type,
+            evidence_ref,
+            evidence_hash
+        FROM experiment_score_provenance_copy AS staged
+        -- Purge fence, matching the score insert this explains. Provenance for a
+        -- score that was fenced out above would reference a trial the purge has
+        -- already removed, so writing it could only ever be a foreign-key
+        -- failure.
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM moa.destruction_operation_fence AS fence
+            WHERE fence.tenant_id::TEXT = staged.storage_partition_id
+              AND (
+                    fence.subject_id IS NULL
+                    OR staged.user_id = fence.subject_id::TEXT
+                    OR staged.user_id = 'contact:' || fence.subject_id::TEXT
+                  )
+        )
+        -- Provenance is immutable by database trigger, so DO UPDATE is not even
+        -- available here. DO NOTHING accepts an identical replay; the comparison
+        -- below is what refuses a non-identical one.
+        ON CONFLICT (score_id) DO NOTHING
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    let conflicts: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM experiment_score_provenance_copy AS staged
+        JOIN moa.experiment_score_provenance AS stored
+          ON stored.score_id = staged.score_id
+        WHERE (
+                  stored.storage_partition_id,
+                  stored.score_ts,
+                  stored.score_run_id,
+                  stored.experiment_run_uid,
+                  stored.plan_revision_uid,
+                  stored.trial_uid,
+                  stored.evaluator_id,
+                  stored.evaluator_version,
+                  stored.score_name,
+                  stored.value_type,
+                  stored.evidence_ref,
+                  stored.evidence_hash
+              ) IS DISTINCT FROM (
+                  staged.storage_partition_id,
+                  staged.score_ts,
+                  staged.score_run_id,
+                  staged.experiment_run_uid,
+                  staged.plan_revision_uid,
+                  staged.trial_uid,
+                  staged.evaluator_id,
+                  staged.evaluator_version,
+                  staged.score_name,
+                  staged.value_type,
+                  staged.evidence_ref,
+                  staged.evidence_hash
+              )
+           OR stored.target_session_id IS DISTINCT FROM staged.target_session_id
+           OR stored.target_execution_run_uid IS DISTINCT FROM staged.target_execution_run_uid
+           OR stored.user_id IS DISTINCT FROM staged.user_id
+        "#,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if conflicts != 0 {
+        return Err(crate::Error::ExperimentScoreProvenanceConflict { count: conflicts });
+    }
+    Ok(())
+}
+
+fn render_provenance_copy_csv(rows: &[&ExperimentScoreProvenanceRow]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        let fields = [
+            csv_field(&row.score_id.to_string()),
+            csv_field(&row.score_ts.to_rfc3339()),
+            csv_field(&row.storage_partition_id),
+            nullable_csv(row.user_id.as_deref()),
+            csv_field(&row.score_run_id.to_string()),
+            csv_field(&row.experiment_run_uid.to_string()),
+            csv_field(&row.plan_revision_uid.to_string()),
+            csv_field(&row.trial_uid.to_string()),
+            nullable_uuid_csv(row.target_session_id),
+            nullable_uuid_csv(row.target_execution_run_uid),
+            csv_field(&row.evaluator_id),
+            csv_field(&row.evaluator_version),
+            csv_field(&row.score_name),
+            csv_field(&row.value_type),
+            csv_field(&row.evidence_ref),
+            csv_field(&bytea_hex(&row.evidence_hash)),
+        ];
+        out.push_str(&fields.join(","));
+        out.push('\n');
+    }
+    out
 }
 
 fn render_score_copy_csv(rows: &[ScoreRow]) -> String {

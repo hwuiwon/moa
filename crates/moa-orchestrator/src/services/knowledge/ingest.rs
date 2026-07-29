@@ -5,7 +5,10 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::types::memory::{InformationBarrierId, RlsContext};
-use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
+use moa_core::{
+    traits::{EmbeddingProvider, RuntimeCacheStore},
+    types::identifiers::TenantId,
+};
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     chunking::ChunkingConfig,
@@ -20,14 +23,11 @@ use moa_knowledge::{
     },
     providers::RecordContentFetcher,
     repository::PostgresKnowledgeRepository,
-    semantic_graph_model::ModelSemanticGraphExtractor,
 };
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
-use moa_providers::{
-    EmbedderConstructionRole, build_embedder_from_config, build_provider_from_model,
-};
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::KnowledgeServiceError;
 
@@ -57,17 +57,24 @@ pub struct ProductionKnowledgeIngestionRunner {
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
     config: MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 }
 
 impl ProductionKnowledgeIngestionRunner {
     /// Creates a production ingestion runner from the shared graph pool and runtime config.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, kms: Arc<dyn KeyManagementProvider>, config: MoaConfig) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
+        config: MoaConfig,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
+    ) -> Self {
         Self {
             pool,
             kms,
             config,
+            runtime_cache,
             content_fetcher: None,
         }
     }
@@ -98,6 +105,7 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             self.kms.clone(),
             run.tenant_id,
             &self.config,
+            Arc::clone(&self.runtime_cache),
             provider.to_string(),
             parser_label,
             run.information_barrier.clone(),
@@ -124,6 +132,7 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             self.kms.clone(),
             run.tenant_id,
             &self.config,
+            Arc::clone(&self.runtime_cache),
             provider.to_string(),
             parser_label,
             run.information_barrier.clone(),
@@ -158,6 +167,7 @@ async fn build_ingestion_pipeline(
     kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     config: &MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     provider: String,
     parser_label: String,
     information_barrier: Option<InformationBarrierId>,
@@ -179,8 +189,12 @@ async fn build_ingestion_pipeline(
         KnowledgeSourceAclContext::for_capability(ProviderAclCapability::for_provider(&provider)?);
     let parser = Arc::new(build_document_parser(config, &parser_label)?);
     let embedder = Arc::new(SharedEmbeddingProvider::new(
-        build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)
-            .map_err(embedder_config_error)?,
+        build_embedder_from_config(
+            config,
+            Some(runtime_cache),
+            EmbedderConstructionRole::Ingestion,
+        )
+        .map_err(embedder_config_error)?,
     ));
     let vector_backend = VectorStoreFactory::from_config(config).transactional_graph_backend(
         pool.clone(),
@@ -209,38 +223,7 @@ async fn build_ingestion_pipeline(
         },
         source_acl,
     )
-    .with_semantic_generic_entities(config.knowledge.semantic.generic_entities)
-    .with_semantic_model_extractor(build_semantic_model_extractor(config))
     .with_content_fetcher(content_fetcher))
-}
-
-/// Builds the model-backed semantic graph extractor when it is enabled and a
-/// provider resolves.
-///
-/// A disabled config, an unresolvable provider, or an invalid extractor setting
-/// each returns `None`, leaving the deterministic keyword extractor in place. A
-/// misconfiguration is logged rather than failing pipeline construction, so
-/// enabling extraction can never break an otherwise-healthy sync run.
-fn build_semantic_model_extractor(config: &MoaConfig) -> Option<Arc<ModelSemanticGraphExtractor>> {
-    let settings = &config.knowledge.semantic.model_extraction;
-    if !settings.enabled {
-        return None;
-    }
-    let model = settings.model.trim();
-    let model_override = (!model.is_empty()).then_some(model);
-    match build_provider_from_model(config, model_override) {
-        Ok((provider, model_id)) => Some(Arc::new(ModelSemanticGraphExtractor::new(
-            provider, model_id,
-        ))),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "knowledge semantic model extraction enabled but provider did not resolve; \
-                 using deterministic extractor"
-            );
-            None
-        }
-    }
 }
 
 fn build_document_parser(

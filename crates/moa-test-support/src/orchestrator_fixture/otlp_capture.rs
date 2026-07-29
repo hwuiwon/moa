@@ -1,20 +1,38 @@
-//! Per-fixture OTLP/HTTP protobuf trace collector.
+//! Per-fixture OTLP/HTTP protobuf collector for traces and runtime metrics.
+//!
+//! The collector serves the two signal paths a real OTLP/HTTP receiver serves,
+//! `/v1/traces` and `/v1/metrics`, and [`OtlpCapture::endpoint`] hands out the
+//! collector BASE URL rather than either of them. That mirrors production
+//! exactly: `MOA_OTLP_ENDPOINT` names a collector, both signals derive their own
+//! path from it, and a value that already names one signal is refused at config
+//! load. A fixture that handed out `.../v1/traces` would be configuring the
+//! child with a value production rejects, and could never observe a metric at
+//! all.
+//!
+//! Every request to any other path is recorded instead of being silently
+//! dropped, because the failure this fixture exists to catch — an exporter
+//! posting a signal to the wrong path — is otherwise indistinguishable from an
+//! exporter that never ran.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+use opentelemetry_proto::tonic::metrics::v1::{ResourceMetrics, metric, number_data_point};
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, Span};
 use prost::Message;
 use tokio::net::TcpListener;
@@ -22,7 +40,7 @@ use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-const DEFAULT_SPAN_CAPACITY: usize = 8_192;
+const DEFAULT_SIGNAL_CAPACITY: usize = 8_192;
 const RUN_UID_ATTRIBUTE: &str = "moa.execution.run_uid";
 
 /// One exported OTLP span link.
@@ -97,6 +115,12 @@ impl CapturedOtlpSpan {
         self.resource_attributes.get(key).map(String::as_str)
     }
 
+    /// Returns every string-rendered resource attribute.
+    #[must_use]
+    pub fn resource_attributes(&self) -> &BTreeMap<String, String> {
+        &self.resource_attributes
+    }
+
     /// Returns the instrumentation scope name.
     #[must_use]
     pub fn scope_name(&self) -> &str {
@@ -116,9 +140,99 @@ impl CapturedOtlpSpan {
     }
 }
 
+/// One data point decoded from an exported OTLP metric.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapturedOtlpDataPoint {
+    attributes: BTreeMap<String, String>,
+    value: f64,
+    count: u64,
+    explicit_bounds: Vec<f64>,
+}
+
+impl CapturedOtlpDataPoint {
+    /// Returns one string-rendered data-point attribute.
+    #[must_use]
+    pub fn attribute(&self, key: &str) -> Option<&str> {
+        self.attributes.get(key).map(String::as_str)
+    }
+
+    /// Returns the point value: the number for sums and gauges, the sum for histograms.
+    #[must_use]
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// Returns the recorded observation count: always 1 for sums and gauges.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// Returns the exported histogram bucket boundaries, empty for sums and gauges.
+    ///
+    /// Boundaries are exported data, not an implementation detail: the OTLP
+    /// bridge installs explicit views so latency histograms keep their sub-10ms
+    /// buckets, and an exporter that silently fell back to the SDK default
+    /// layout would still produce a metric with a plausible value.
+    #[must_use]
+    pub fn explicit_bounds(&self) -> &[f64] {
+        &self.explicit_bounds
+    }
+}
+
+/// One metric decoded from an OTLP/HTTP protobuf export batch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapturedOtlpMetric {
+    name: String,
+    unit: String,
+    resource_attributes: BTreeMap<String, String>,
+    scope_name: String,
+    data_points: Vec<CapturedOtlpDataPoint>,
+}
+
+impl CapturedOtlpMetric {
+    /// Returns the exported metric name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the exported metric unit, empty when the instrument declares none.
+    #[must_use]
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// Returns one string-rendered resource attribute.
+    #[must_use]
+    pub fn resource_attribute(&self, key: &str) -> Option<&str> {
+        self.resource_attributes.get(key).map(String::as_str)
+    }
+
+    /// Returns every string-rendered resource attribute.
+    #[must_use]
+    pub fn resource_attributes(&self) -> &BTreeMap<String, String> {
+        &self.resource_attributes
+    }
+
+    /// Returns the instrumentation scope name.
+    #[must_use]
+    pub fn scope_name(&self) -> &str {
+        &self.scope_name
+    }
+
+    /// Returns every decoded data point.
+    #[must_use]
+    pub fn data_points(&self) -> &[CapturedOtlpDataPoint] {
+        &self.data_points
+    }
+}
+
 #[derive(Default)]
 struct CaptureStore {
     spans: Mutex<VecDeque<CapturedOtlpSpan>>,
+    metrics: Mutex<VecDeque<CapturedOtlpMetric>>,
+    unexpected_requests: Mutex<Vec<String>>,
     notify: Notify,
     capacity: usize,
 }
@@ -127,12 +241,14 @@ impl CaptureStore {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             spans: Mutex::new(VecDeque::with_capacity(capacity)),
+            metrics: Mutex::new(VecDeque::with_capacity(capacity)),
+            unexpected_requests: Mutex::new(Vec::new()),
             notify: Notify::new(),
             capacity,
         }
     }
 
-    async fn push_batch(&self, spans: impl IntoIterator<Item = CapturedOtlpSpan>) {
+    async fn push_spans(&self, spans: impl IntoIterator<Item = CapturedOtlpSpan>) {
         let mut stored = self.spans.lock().await;
         for span in spans {
             if stored.len() == self.capacity {
@@ -142,6 +258,54 @@ impl CaptureStore {
         }
         drop(stored);
         self.notify.notify_waiters();
+    }
+
+    async fn push_metrics(&self, metrics: impl IntoIterator<Item = CapturedOtlpMetric>) {
+        let mut stored = self.metrics.lock().await;
+        for metric in metrics {
+            if stored.len() == self.capacity {
+                stored.pop_front();
+            }
+            stored.push_back(metric);
+        }
+        drop(stored);
+        self.notify.notify_waiters();
+    }
+
+    async fn push_unexpected_request(&self, description: String) {
+        self.unexpected_requests.lock().await.push(description);
+        self.notify.notify_waiters();
+    }
+
+    /// Renders what the collector has actually received, for failure messages.
+    ///
+    /// A timeout waiting for a span or a metric has several causes that look
+    /// identical from the outside — nothing exported, the wrong signal exported,
+    /// or an export posted to a path the collector does not serve. Printing the
+    /// observed names and the misdirected paths separates them in one run.
+    async fn observed_summary(&self) -> String {
+        let span_names = self
+            .spans
+            .lock()
+            .await
+            .iter()
+            .map(|span| span.name.clone())
+            .collect::<Vec<_>>();
+        let metric_names = self
+            .metrics
+            .lock()
+            .await
+            .iter()
+            .map(|metric| metric.name.clone())
+            .collect::<Vec<_>>();
+        let unexpected = self.unexpected_requests.lock().await.clone();
+        format!(
+            "observed {} span(s) {span_names:?}, {} metric(s) {metric_names:?}, \
+             {} request(s) to unserved paths {unexpected:?}",
+            span_names.len(),
+            metric_names.len(),
+            unexpected.len(),
+        )
     }
 }
 
@@ -157,12 +321,12 @@ pub struct OtlpCapture {
 impl OtlpCapture {
     /// Starts a collector on one ephemeral loopback port.
     pub async fn start(resource_name: String) -> Result<Self> {
-        Self::start_with_capacity(resource_name, DEFAULT_SPAN_CAPACITY).await
+        Self::start_with_capacity(resource_name, DEFAULT_SIGNAL_CAPACITY).await
     }
 
     async fn start_with_capacity(resource_name: String, capacity: usize) -> Result<Self> {
         if capacity == 0 {
-            bail!("OTLP capture span capacity must be positive");
+            bail!("OTLP capture signal capacity must be positive");
         }
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -170,10 +334,12 @@ impl OtlpCapture {
         let address = listener
             .local_addr()
             .context("read fixture OTLP collector address")?;
-        let endpoint = format!("http://{address}/v1/traces");
+        let endpoint = format!("http://{address}");
         let store = Arc::new(CaptureStore::with_capacity(capacity));
         let app = Router::new()
             .route("/v1/traces", post(export_traces))
+            .route("/v1/metrics", post(export_metrics))
+            .fallback(record_unserved_request)
             .with_state(store.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -192,10 +358,27 @@ impl OtlpCapture {
         })
     }
 
-    /// Returns the exact OTLP traces endpoint injected into fixture children.
+    /// Returns the collector BASE URL injected into fixture children.
+    ///
+    /// This is deliberately not a signal endpoint. `MOA_OBSERVABILITY_OTLP_ENDPOINT`
+    /// is the collector base and config load refuses a value already naming
+    /// `/v1/traces`, `/v1/metrics` or `/v1/logs`, so handing out a signal path
+    /// here would configure the child with a value production rejects.
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Returns the exact URL this collector serves OTLP traces on.
+    #[must_use]
+    pub fn traces_endpoint(&self) -> String {
+        format!("{}/v1/traces", self.endpoint)
+    }
+
+    /// Returns the exact URL this collector serves OTLP metrics on.
+    #[must_use]
+    pub fn metrics_endpoint(&self) -> String {
+        format!("{}/v1/metrics", self.endpoint)
     }
 
     /// Returns the unique fixture service-resource name.
@@ -204,9 +387,11 @@ impl OtlpCapture {
         &self.resource_name
     }
 
-    /// Clears every currently captured span without replacing the collector.
+    /// Clears every captured signal without replacing the collector.
     pub async fn clear(&self) {
         self.store.spans.lock().await.clear();
+        self.store.metrics.lock().await.clear();
+        self.store.unexpected_requests.lock().await.clear();
     }
 
     /// Returns captured spans for one exact trace ID in export order.
@@ -231,6 +416,23 @@ impl OtlpCapture {
             .rev()
             .find(|span| span.attribute(RUN_UID_ATTRIBUTE) == Some(run_uid))
             .cloned()
+    }
+
+    /// Returns every captured export of one exact metric name, in export order.
+    pub async fn metrics_named(&self, name: &str) -> Vec<CapturedOtlpMetric> {
+        self.store
+            .metrics
+            .lock()
+            .await
+            .iter()
+            .filter(|metric| metric.name == name)
+            .cloned()
+            .collect()
+    }
+
+    /// Returns every request this collector received on a path it does not serve.
+    pub async fn unexpected_requests(&self) -> Vec<String> {
+        self.store.unexpected_requests.lock().await.clone()
     }
 
     /// Waits until one captured span matches `predicate`.
@@ -259,11 +461,57 @@ impl OtlpCapture {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                bail!("timed out waiting for matching OTLP span");
+                bail!(
+                    "timed out waiting for matching OTLP span; {}",
+                    self.store.observed_summary().await
+                );
             }
-            tokio::time::timeout(remaining, notified)
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                bail!(
+                    "timed out waiting for matching OTLP span; {}",
+                    self.store.observed_summary().await
+                );
+            }
+        }
+    }
+
+    /// Waits until one captured metric matches `predicate`.
+    pub async fn wait_for_metric<F>(
+        &self,
+        timeout: Duration,
+        predicate: F,
+    ) -> Result<CapturedOtlpMetric>
+    where
+        F: Fn(&CapturedOtlpMetric) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let notified = self.store.notify.notified();
+            if let Some(metric) = self
+                .store
+                .metrics
+                .lock()
                 .await
-                .map_err(|_| anyhow!("timed out waiting for matching OTLP span"))?;
+                .iter()
+                .rev()
+                .find(|metric| predicate(metric))
+                .cloned()
+            {
+                return Ok(metric);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                bail!(
+                    "timed out waiting for matching OTLP metric; {}",
+                    self.store.observed_summary().await
+                );
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                bail!(
+                    "timed out waiting for matching OTLP metric; {}",
+                    self.store.observed_summary().await
+                );
+            }
         }
     }
 
@@ -312,12 +560,57 @@ async fn export_traces(State(store): State<Arc<CaptureStore>>, body: Bytes) -> R
         .into_iter()
         .flat_map(captured_resource_spans)
         .collect::<Vec<_>>();
-    store.push_batch(spans).await;
+    store.push_spans(spans).await;
 
-    let body = ExportTraceServiceResponse {
-        partial_success: None,
-    }
-    .encode_to_vec();
+    protobuf_response(
+        ExportTraceServiceResponse {
+            partial_success: None,
+        }
+        .encode_to_vec(),
+    )
+}
+
+async fn export_metrics(State(store): State<Arc<CaptureStore>>, body: Bytes) -> Response {
+    let request = match ExportMetricsServiceRequest::decode(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid OTLP metric protobuf: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let metrics = request
+        .resource_metrics
+        .into_iter()
+        .flat_map(captured_resource_metrics)
+        .collect::<Vec<_>>();
+    store.push_metrics(metrics).await;
+
+    protobuf_response(
+        ExportMetricsServiceResponse {
+            partial_success: None,
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// Records, rather than discards, an export posted to an unserved path.
+async fn record_unserved_request(
+    State(store): State<Arc<CaptureStore>>,
+    request: Request,
+) -> Response {
+    let description = format!("{} {}", request.method(), request.uri().path());
+    store.push_unexpected_request(description).await;
+    (
+        StatusCode::NOT_FOUND,
+        "fixture OTLP collector serves only /v1/traces and /v1/metrics",
+    )
+        .into_response()
+}
+
+fn protobuf_response(body: Vec<u8>) -> Response {
     let mut response = (StatusCode::OK, body).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -350,6 +643,73 @@ fn captured_resource_spans(resource_spans: ResourceSpans) -> Vec<CapturedOtlpSpa
             })
         })
         .collect()
+}
+
+fn captured_resource_metrics(resource_metrics: ResourceMetrics) -> Vec<CapturedOtlpMetric> {
+    let resource_attributes = resource_metrics
+        .resource
+        .map(|resource| captured_attributes(&resource.attributes))
+        .unwrap_or_default();
+    resource_metrics
+        .scope_metrics
+        .into_iter()
+        .flat_map(|scope_metrics| {
+            let scope_name = scope_metrics
+                .scope
+                .map(|scope| scope.name)
+                .unwrap_or_default();
+            let resource_attributes = resource_attributes.clone();
+            scope_metrics
+                .metrics
+                .into_iter()
+                .map(move |metric| CapturedOtlpMetric {
+                    name: metric.name,
+                    unit: metric.unit,
+                    resource_attributes: resource_attributes.clone(),
+                    scope_name: scope_name.clone(),
+                    data_points: captured_data_points(metric.data.as_ref()),
+                })
+        })
+        .collect()
+}
+
+fn captured_data_points(data: Option<&metric::Data>) -> Vec<CapturedOtlpDataPoint> {
+    match data {
+        Some(metric::Data::Sum(sum)) => sum.data_points.iter().map(captured_number_point).collect(),
+        Some(metric::Data::Gauge(gauge)) => gauge
+            .data_points
+            .iter()
+            .map(captured_number_point)
+            .collect(),
+        Some(metric::Data::Histogram(histogram)) => histogram
+            .data_points
+            .iter()
+            .map(|point| CapturedOtlpDataPoint {
+                attributes: captured_attributes(&point.attributes),
+                value: point.sum.unwrap_or_default(),
+                count: point.count,
+                explicit_bounds: point.explicit_bounds.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn captured_number_point(
+    point: &opentelemetry_proto::tonic::metrics::v1::NumberDataPoint,
+) -> CapturedOtlpDataPoint {
+    let value = match point.value {
+        Some(number_data_point::Value::AsDouble(value)) => value,
+        #[allow(clippy::cast_precision_loss)]
+        Some(number_data_point::Value::AsInt(value)) => value as f64,
+        None => 0.0,
+    };
+    CapturedOtlpDataPoint {
+        attributes: captured_attributes(&point.attributes),
+        value,
+        count: 1,
+        explicit_bounds: Vec::new(),
+    }
 }
 
 fn captured_span(
@@ -432,6 +792,10 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
+        ScopeMetrics, Sum,
+    };
     use opentelemetry_proto::tonic::resource::v1::Resource;
     use opentelemetry_proto::tonic::trace::v1::{ScopeSpans, span};
 
@@ -441,20 +805,21 @@ mod tests {
     const PARENT_SPAN_ID: [u8; 8] = [0x22; 8];
     const CHILD_SPAN_ID: [u8; 8] = [0x33; 8];
     const LINK_SPAN_ID: [u8; 8] = [0x44; 8];
+    const RESOURCE_NAME: &str = "fixture-resource";
 
     #[tokio::test]
     async fn otlp_capture_survives_producer_restart_queries_parent_and_links_and_is_bounded() {
         // Pins: one fixture collector accepts real protobuf from two child-shaped
         // producer lifetimes, retains one query surface, exposes parent/link IDs,
         // bounds storage, clears explicitly, and closes its listener on teardown.
-        let mut capture = OtlpCapture::start_with_capacity("fixture-resource".to_string(), 2)
+        let mut capture = OtlpCapture::start_with_capacity(RESOURCE_NAME.to_string(), 2)
             .await
             .expect("start OTLP capture");
-        let endpoint = capture.endpoint().to_string();
+        let traces_endpoint = capture.traces_endpoint();
 
-        post_batch(
-            &endpoint,
-            batch(span_with_ids(
+        post_traces(
+            &traces_endpoint,
+            trace_batch(span_with_ids(
                 "producer-before-restart",
                 PARENT_SPAN_ID,
                 None,
@@ -463,9 +828,9 @@ mod tests {
         )
         .await;
         drop(reqwest::Client::new());
-        post_batch(
-            &endpoint,
-            batch(span_with_ids(
+        post_traces(
+            &traces_endpoint,
+            trace_batch(span_with_ids(
                 "producer-after-restart",
                 CHILD_SPAN_ID,
                 Some(PARENT_SPAN_ID),
@@ -509,14 +874,14 @@ mod tests {
         assert_eq!(after.links()[0].span_id(), link_span_id);
         assert_eq!(
             after.resource_attribute("service.name"),
-            Some("fixture-resource")
+            Some(RESOURCE_NAME)
         );
         assert_eq!(after.scope_name(), "fixture-producer");
         assert_eq!(after.scope_version(), "1.0");
 
-        post_batch(
-            &endpoint,
-            batch(span_with_ids(
+        post_traces(
+            &traces_endpoint,
+            trace_batch(span_with_ids(
                 "bounded-newest",
                 [0x55; 8],
                 Some(CHILD_SPAN_ID),
@@ -533,7 +898,7 @@ mod tests {
         assert!(capture.spans_for_trace(&trace_id).await.is_empty());
         capture.shutdown().await.expect("shutdown OTLP capture");
         let error = reqwest::Client::new()
-            .post(&endpoint)
+            .post(&traces_endpoint)
             .body(Vec::new())
             .send()
             .await
@@ -544,14 +909,147 @@ mod tests {
         );
     }
 
-    fn batch(span: Span) -> ExportTraceServiceRequest {
+    #[tokio::test]
+    async fn otlp_capture_decodes_runtime_metrics_alongside_traces_from_one_base_endpoint() {
+        // Pins: the collector base URL carries BOTH signals. A child configured
+        // with `endpoint()` exports traces to /v1/traces and metrics to
+        // /v1/metrics, and both decode into queryable values sharing one resource
+        // identity. Trace-only capture is what this replaces: with metrics
+        // undecodable, an exporter that never sent a metric and one whose metrics
+        // were dropped on the floor were the same observation.
+        let capture = OtlpCapture::start(RESOURCE_NAME.to_string())
+            .await
+            .expect("start OTLP capture");
+
+        // `endpoint()` must be the collector base, exactly as production config
+        // requires; deriving the signal paths from it is the child's job.
+        let base = capture.endpoint().to_string();
+        for signal in ["/v1/traces", "/v1/metrics", "/v1/logs"] {
+            assert!(
+                !base.ends_with(signal),
+                "fixture endpoint `{base}` names the {signal} signal; config load refuses \
+                 signal-specific OTLP endpoints, so a child given this value cannot start"
+            );
+        }
+        assert_eq!(capture.traces_endpoint(), format!("{base}/v1/traces"));
+        assert_eq!(capture.metrics_endpoint(), format!("{base}/v1/metrics"));
+
+        post_traces(
+            &capture.traces_endpoint(),
+            trace_batch(span_with_ids(
+                "turn.execute",
+                CHILD_SPAN_ID,
+                None,
+                Vec::new(),
+            )),
+        )
+        .await;
+        post_metrics(&capture.metrics_endpoint(), metric_batch()).await;
+
+        let span = capture
+            .wait_for_span(Duration::from_secs(5), |span| span.name() == "turn.execute")
+            .await
+            .expect("wait for exported span");
+        let counter = capture
+            .wait_for_metric(Duration::from_secs(5), |metric| {
+                metric.name() == "moa_turns_total"
+            })
+            .await
+            .expect("wait for exported runtime counter");
+
+        assert_eq!(counter.unit(), "1");
+        assert_eq!(counter.scope_name(), "moa");
+        assert_eq!(counter.data_points().len(), 1);
+        assert!(
+            (counter.data_points()[0].value() - 7.0).abs() < f64::EPSILON,
+            "unexpected counter value: {:?}",
+            counter.data_points()[0]
+        );
+        assert_eq!(counter.data_points()[0].attribute("outcome"), Some("ok"));
+
+        // The resource identity must be byte-identical across signals or no query
+        // can join a trace to the metrics describing the same process.
+        assert_eq!(
+            span.resource_attributes(),
+            counter.resource_attributes(),
+            "trace and metric resources disagree: {:?} vs {:?}",
+            span.resource_attributes(),
+            counter.resource_attributes()
+        );
+        assert_eq!(span.resource_attribute("service.name"), Some(RESOURCE_NAME));
+
+        // Histogram boundaries survive the round trip: the OTLP bridge installs
+        // explicit views, and a silent fall back to the SDK default layout still
+        // produces a plausible-looking metric.
+        let latency = capture.metrics_named("moa_turn_latency_seconds").await;
+        assert_eq!(
+            latency.len(),
+            1,
+            "unexpected histogram exports: {latency:?}"
+        );
+        assert_eq!(latency[0].data_points()[0].count(), 3);
+        assert_eq!(
+            latency[0].data_points()[0].explicit_bounds(),
+            &[0.005, 0.01, 0.025]
+        );
+
+        assert!(
+            capture.unexpected_requests().await.is_empty(),
+            "collector received requests on unserved paths: {:?}",
+            capture.unexpected_requests().await
+        );
+
+        // Clearing must reset both signals, or a fixture reusing the collector
+        // across phases reads a previous phase's metric as its own.
+        capture.clear().await;
+        assert!(capture.metrics_named("moa_turns_total").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn otlp_capture_records_an_export_posted_to_an_unserved_path() {
+        // Pins: a misdirected export is recorded and reported, not silently
+        // dropped. An exporter that posts traces to the collector root produces
+        // exactly the same "no matching span" timeout as an exporter that never
+        // ran, and this is the observation that separates them.
+        let capture = OtlpCapture::start(RESOURCE_NAME.to_string())
+            .await
+            .expect("start OTLP capture");
+
+        let response = reqwest::Client::new()
+            .post(capture.endpoint())
+            .header(header::CONTENT_TYPE, "application/x-protobuf")
+            .body(
+                trace_batch(span_with_ids(
+                    "misdirected",
+                    CHILD_SPAN_ID,
+                    None,
+                    Vec::new(),
+                ))
+                .encode_to_vec(),
+            )
+            .send()
+            .await
+            .expect("post to the collector root");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        assert_eq!(capture.unexpected_requests().await, vec!["POST /"]);
+        let error = capture
+            .wait_for_span(Duration::from_millis(200), |span| {
+                span.name() == "misdirected"
+            })
+            .await
+            .expect_err("a span posted to an unserved path must not be captured");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("unserved paths [\"POST /\"]"),
+            "timeout message must name the misdirected request; got: {rendered}"
+        );
+    }
+
+    fn trace_batch(span: Span) -> ExportTraceServiceRequest {
         ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
-                resource: Some(Resource {
-                    attributes: vec![string_attribute("service.name", "fixture-resource")],
-                    dropped_attributes_count: 0,
-                    entity_refs: Vec::new(),
-                }),
+                resource: Some(fixture_resource()),
                 scope_spans: vec![ScopeSpans {
                     scope: Some(InstrumentationScope {
                         name: "fixture-producer".to_string(),
@@ -564,6 +1062,78 @@ mod tests {
                 }],
                 schema_url: String::new(),
             }],
+        }
+    }
+
+    fn metric_batch() -> ExportMetricsServiceRequest {
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(fixture_resource()),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(InstrumentationScope {
+                        name: "moa".to_string(),
+                        version: String::new(),
+                        attributes: Vec::new(),
+                        dropped_attributes_count: 0,
+                    }),
+                    metrics: vec![
+                        Metric {
+                            name: "moa_turns_total".to_string(),
+                            description: "turns started".to_string(),
+                            unit: "1".to_string(),
+                            metadata: Vec::new(),
+                            data: Some(metric::Data::Sum(Sum {
+                                data_points: vec![NumberDataPoint {
+                                    attributes: vec![string_attribute("outcome", "ok")],
+                                    start_time_unix_nano: 1,
+                                    time_unix_nano: 2,
+                                    exemplars: Vec::new(),
+                                    flags: 0,
+                                    value: Some(number_data_point::Value::AsInt(7)),
+                                }],
+                                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                                is_monotonic: true,
+                            })),
+                        },
+                        Metric {
+                            name: "moa_turn_latency_seconds".to_string(),
+                            description: "turn latency".to_string(),
+                            unit: "s".to_string(),
+                            metadata: Vec::new(),
+                            data: Some(metric::Data::Histogram(Histogram {
+                                data_points: vec![HistogramDataPoint {
+                                    attributes: Vec::new(),
+                                    start_time_unix_nano: 1,
+                                    time_unix_nano: 2,
+                                    count: 3,
+                                    sum: Some(0.06),
+                                    bucket_counts: vec![1, 1, 1, 0],
+                                    explicit_bounds: vec![0.005, 0.01, 0.025],
+                                    exemplars: Vec::new(),
+                                    flags: 0,
+                                    min: Some(0.001),
+                                    max: Some(0.05),
+                                }],
+                                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                            })),
+                        },
+                    ],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        }
+    }
+
+    fn fixture_resource() -> Resource {
+        Resource {
+            attributes: vec![
+                string_attribute("service.name", RESOURCE_NAME),
+                string_attribute("deployment.environment", "fixture"),
+                string_attribute("service.version", "0.0.0-fixture"),
+            ],
+            dropped_attributes_count: 0,
+            entity_refs: Vec::new(),
         }
     }
 
@@ -602,18 +1172,29 @@ mod tests {
         }
     }
 
-    async fn post_batch(endpoint: &str, request: ExportTraceServiceRequest) {
+    async fn post_traces(endpoint: &str, request: ExportTraceServiceRequest) {
+        let body = post_protobuf(endpoint, request.encode_to_vec()).await;
+        let response =
+            ExportTraceServiceResponse::decode(body).expect("decode OTLP trace response");
+        assert_eq!(response.partial_success, None);
+    }
+
+    async fn post_metrics(endpoint: &str, request: ExportMetricsServiceRequest) {
+        let body = post_protobuf(endpoint, request.encode_to_vec()).await;
+        let response =
+            ExportMetricsServiceResponse::decode(body).expect("decode OTLP metric response");
+        assert_eq!(response.partial_success, None);
+    }
+
+    async fn post_protobuf(endpoint: &str, body: Vec<u8>) -> Bytes {
         let response = reqwest::Client::new()
             .post(endpoint)
             .header(header::CONTENT_TYPE, "application/x-protobuf")
-            .body(request.encode_to_vec())
+            .body(body)
             .send()
             .await
             .expect("post OTLP protobuf batch");
-        assert_eq!(response.status(), StatusCode::OK);
-        let response =
-            ExportTraceServiceResponse::decode(response.bytes().await.expect("read OTLP response"))
-                .expect("decode OTLP response");
-        assert_eq!(response.partial_success, None);
+        assert_eq!(response.status(), StatusCode::OK, "endpoint {endpoint}");
+        response.bytes().await.expect("read OTLP response")
     }
 }

@@ -36,10 +36,7 @@ use crate::{
         RecordPage, SyncRunStatus,
     },
     error::{Error, Result},
-    graph_delta::{
-        GraphEdgeUpsert, KnowledgeGraphDelta, document_chunk_delta_with_semantics,
-        semantic_chunk_link_count, stable_uid,
-    },
+    graph_delta::{GraphEdgeUpsert, KnowledgeGraphDelta, document_chunk_delta, stable_uid},
     normalize::{normalize_text, redact_provider_metadata},
     observability::{
         FailureClassification, StepLabels, StepOutcome, build_step_row, classify_failure,
@@ -48,8 +45,6 @@ use crate::{
     parser::DocumentParser,
     providers::RecordContentFetcher,
     repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
-    semantic_graph::{SemanticGraphExtraction, extract_chunk_semantics},
-    semantic_graph_model::{ModelSemanticGraphExtractor, SemanticExtractionCacheIdentity},
 };
 
 /// Maximum objects fetched and tombstoned per source-selection prune page.
@@ -85,8 +80,6 @@ pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     chunking: ChunkingConfig,
     provider: String,
     parser_label: String,
-    semantic_generic_entities: bool,
-    semantic_model_extractor: Option<Arc<ModelSemanticGraphExtractor>>,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
     source_acl: KnowledgeSourceAclContext,
 }
@@ -122,14 +115,4 @@ struct PersistedIngestion {
     delta: KnowledgeGraphDelta,
     embeddings_created: u64,
     ingested: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct SemanticGraphExtractionReport {
-    extractions: Vec<SemanticGraphExtraction>,
-    cache_hits: u64,
-    cache_misses: u64,
-    entities_extracted: u64,
-    relations_extracted: u64,
-    semantic_chunk_links: u64,
 }

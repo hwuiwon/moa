@@ -10,3 +10,12 @@ data:
   MOA_SECURITY_PROFILE: cloud
   MOA_PERMISSIONS_DEFAULT_EFFECT: deny
   MOA_CLOUD_HANDS_DEFAULT_PROVIDER: e2b
+  # E2B fixes resource sizing in its template, so those dimensions remain
+  # explicitly unbounded. It can enforce deny-all egress and the hard lifetime;
+  # MOA's durable reaper enforces the idle deadline.
+  MOA_SANDBOX_POLICY_JSON: >-
+    {"deployment":{"revision":"production-e2b-v1",
+    "cpu":{"mode":"unbounded"},"memory":{"mode":"unbounded"},
+    "ephemeral_disk":{"mode":"unbounded"},"egress":{"mode":"deny_all"},
+    "idle_timeout":{"mode":"bounded","seconds":900},
+    "max_lifetime":{"mode":"bounded","seconds":3600}}}

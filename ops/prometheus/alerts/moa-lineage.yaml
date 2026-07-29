@@ -1,23 +1,119 @@
-groups:
-  - name: moa-lineage
-    interval: 60s
-    rules:
-      - alert: MOALineageDropping
-        expr: rate(moa_lineage_dropped_total[5m]) > 0
-        for: 5m
-        annotations:
-          summary: Lineage events being dropped
-          description: "{{ $value }} events/sec dropped on {{ $labels.instance }}. Increase channel_capacity or investigate writer backpressure."
+# Lineage durability alerts.
+#
+# Authored as a PrometheusRule so Alloy's `mimir.rules.kubernetes` component is
+# the single path by which a rule reaches Mimir. The `moa.dev/rule-sync` label is
+# what that component selects on: a rule without it is deployed to the cluster
+# and evaluated by nothing.
+#
+# Every metric named below is emitted from crates/moa-lineage/sink. Nothing
+# type-checks that link, so k8s/scripts/validate-observability.sh re-derives it
+# from the source on every run.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: moa-lineage
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: moa-lineage-alerts
+    app.kubernetes.io/part-of: moa
+    moa.dev/rule-sync: mimir
+spec:
+  groups:
+    - name: moa-lineage
+      interval: 60s
+      rules:
+        # Acceptance failures. A lineage record that is refused at acceptance was
+        # never committed to the journal, so unlike a delivery failure there is
+        # nothing left to retry from - the provenance is gone at the moment this
+        # counter moves.
+        - alert: MOALineageDropping
+          expr: rate(moa_lineage_dropped_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Lineage events are being dropped
+            description: "{{ $value }} events/sec dropped on {{ $labels.instance }}. These records were never accepted into the Postgres journal, so no replica will complete them. Investigate writer backpressure and the acceptance path."
 
-      - alert: MOALineageWriterStuck
-        expr: rate(moa_lineage_enqueued_total[5m]) > 0 and rate(moa_lineage_flushed_total[5m]) == 0
-        for: 10m
-        annotations:
-          summary: Lineage writer is not flushing
-          description: "Capture is alive but the writer has not flushed in 10 minutes. Check Postgres connectivity and fjall disk space."
+        - alert: MOALineageRecordFailures
+          expr: sum(rate(moa_lineage_failed_total[5m])) by (mode, reason) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Lineage records are failing to persist
+            description: "{{ $value }} lineage events/sec failed (mode {{ $labels.mode }}, reason {{ $labels.reason }}). Durable-mode failures mean the caller was told the write did not commit; best-effort failures mean provenance was discarded. Check Postgres reachability and the acceptance timeout."
 
-# The grounding-rate, zero-recall, and cost-per-turn alerts previously in this file
-# read per-tenant-labeled brain metrics (moa_grounding_verified_rate,
-# moa_zero_recall_count, moa_turn_count, moa_cost_micros_per_turn) that were deleted
-# for unbounded cardinality. Those alerts now run as Grafana SQL rules over the
-# analytics tables — see dashboards/grafana/alerting/moa-quality-alerts.yaml.
+        # Backlog. The journal is the durability boundary, so a growing backlog is
+        # not data loss - it is the window in which a replica failure becomes
+        # visible as delay rather than as loss. It still bounds recovery time.
+        - alert: MOALineageJournalBacklogAge
+          expr: moa_lineage_journal_oldest_age_seconds > 900
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Lineage journal backlog is aging
+            description: "The oldest claimable lineage journal row is {{ $value }}s old on {{ $labels.instance }} (threshold 900s). Committed rows are safe, but delivery is falling behind capture; check writer throughput and Postgres connectivity. This is also the readiness signal, so a sustained breach will take replicas out of service."
+
+        - alert: MOALineageJournalDepthGrowing
+          expr: moa_lineage_journal_depth > 10000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Lineage journal is accumulating rows
+            description: "{{ $value }} rows are pending in the lineage journal on {{ $labels.instance }} (threshold 10000). Capture is outrunning delivery; if this climbs with a flat claim rate the writers are stalled rather than merely slow."
+
+        # Retry pressure. Deferred rows are recoverable failures whose leases were
+        # released for another attempt. A steady deferral rate with no dead-letters
+        # is a writer failing repeatedly on something that is not going to fix
+        # itself.
+        - alert: MOALineageJournalDeferralsElevated
+          expr: sum(rate(moa_lineage_journal_deferred_total[10m])) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Lineage journal rows are being deferred repeatedly
+            description: "{{ $value }} journal rows/sec are being returned for retry. Delivery is failing on a recoverable error often enough to matter; check Postgres error rates before the retry budget is exhausted and rows dead-letter."
+
+        # Permanent loss. Dead-lettering is the one lineage outcome that is not
+        # recoverable by waiting.
+        - alert: MOALineageDeadLettering
+          expr: rate(moa_lineage_dead_lettered_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Lineage rows are being dead-lettered
+            description: "The lineage writer exhausted retries and dead-lettered {{ $value }} rows/sec on {{ $labels.instance }}. Provenance for those rows is permanently out of the main table; inspect the dead-letter rows for the failing payload before deciding whether to redrive."
+
+        # Writer liveness. A dead writer does not stop the process, and it does not
+        # stop acceptance either - rows keep committing to the journal with nothing
+        # claiming them.
+        - alert: MOALineageWriterFailed
+          expr: moa_lineage_writer_state{state="failed"} > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Lineage writer has entered its fatal state
+            description: "The lineage writer on {{ $labels.instance }} reported a fatal error and stopped claiming work. Readiness fails for this replica, so traffic should drain away from it; committed journal rows remain safe and another replica will claim them. Investigate the fatal error in the pod logs."
+
+        - alert: MOALineageWriterDrainStuck
+          expr: moa_lineage_writer_state{state="draining"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Lineage writer has been draining for too long
+            description: "The lineage writer on {{ $labels.instance }} has been in its draining state for 15 minutes. A drain that does not finish blocks shutdown until the timeout, at which point the pod exits with journal rows left for another replica."
+
+        - alert: MOALineageDrainTimeout
+          expr: increase(moa_lineage_drain_timeout_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: Lineage writer shutdown timed out before draining
+            description: "A lineage writer on {{ $labels.instance }} hit its drain timeout during shutdown. Accepted rows are preserved in the journal for another replica to claim, so this is a delay rather than loss - but a rollout where every pod times out means the backlog only ever grows."

@@ -6,8 +6,12 @@ use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig, WithTonicConfig};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{Aggregation, Instrument, SdkMeterProvider, Stream};
 
-use moa_config::MetricsConfig;
+use crate::telemetry::build_grpc_metadata;
+use moa_config::{MetricsConfig, MetricsExporter, OtlpProtocol};
 use moa_core::{
     error::MoaError,
     error::Result,
@@ -579,112 +583,211 @@ impl SessionEventAppendPhase {
 
 static PROMETHEUS_ENDPOINT: OnceLock<SocketAddr> = OnceLock::new();
 
-/// Initializes the global Prometheus exporter when metrics are enabled.
-pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
-    if !config.enabled {
+/// Installs the configured metrics exporter, once per process.
+///
+/// Returns the OTLP meter provider when that exporter is selected, so the caller
+/// owns it and can flush it at shutdown. The provider is deliberately NOT stored
+/// in a global: a global could not be shut down in a defined order relative to
+/// the tracer, and flushing metrics is the step this process used to skip.
+pub fn init_metrics(
+    config: &MetricsConfig,
+    otlp_endpoint: Option<&str>,
+    otlp_protocol: OtlpProtocol,
+    otlp_headers: &std::collections::HashMap<String, String>,
+    resource: Resource,
+) -> Result<Option<SdkMeterProvider>> {
+    match config.exporter {
+        MetricsExporter::Disabled => Ok(None),
+        MetricsExporter::Otlp => {
+            install_otlp_metrics(otlp_endpoint, otlp_protocol, otlp_headers, resource).map(Some)
+        }
+        MetricsExporter::Prometheus => {
+            install_prometheus_metrics(config)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Installs the OTLP push exporter and bridges the `metrics` facade onto it.
+///
+/// The bridge preserves the exact histogram boundaries the Prometheus exporter
+/// used. Those buckets are not decoration: sub-10ms boundaries exist because
+/// turn steps sit in the 1-20ms range, and exporting the same histograms with
+/// default OTel boundaries would quantize every latency panel and SLO built on
+/// them to a useless floor while still reporting a number.
+fn install_otlp_metrics(
+    endpoint: Option<&str>,
+    protocol: OtlpProtocol,
+    headers: &std::collections::HashMap<String, String>,
+    resource: Resource,
+) -> Result<SdkMeterProvider> {
+    // The transport is the one the operator configured, not a hardcoded default.
+    // Reading `otlp_protocol` for traces and ignoring it here meant a fleet on
+    // gRPC posted HTTP/1.1 at a gRPC port and exported no metric at all, with
+    // nothing in-process saying so.
+    let resolved = endpoint
+        .map(|base| {
+            moa_config::otlp_signal_endpoint(base, protocol, moa_config::OtlpSignal::Metrics)
+        })
+        .transpose()?;
+    let exporter = match protocol {
+        OtlpProtocol::Grpc => {
+            let mut exporter = MetricExporter::builder().with_tonic();
+            if let Some(resolved) = resolved.as_deref() {
+                exporter = exporter.with_endpoint(resolved);
+            }
+            if !headers.is_empty() {
+                exporter = exporter.with_metadata(build_grpc_metadata(headers)?);
+            }
+            exporter.build()
+        }
+        OtlpProtocol::Http => {
+            let mut exporter = MetricExporter::builder().with_http();
+            if let Some(resolved) = resolved.as_deref() {
+                exporter = exporter.with_endpoint(resolved);
+            }
+            if !headers.is_empty() {
+                exporter = exporter.with_headers(headers.clone());
+            }
+            exporter.build()
+        }
+    };
+    let exporter = exporter.map_err(|error| MoaError::ProviderError(error.to_string()))?;
+    let mut builder = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(resource);
+    for (metric, boundaries) in HISTOGRAM_BOUNDARIES {
+        builder = builder.with_view(explicit_bucket_view(metric, boundaries));
+    }
+    let provider = builder.build();
+    if OTEL_METRICS_INSTALLED.set(()).is_ok() {
+        metrics::set_global_recorder(metrics_exporter_otel::OpenTelemetryRecorder::new(
+            opentelemetry::metrics::MeterProvider::meter(&provider, "moa"),
+        ))
+        .map_err(|error| {
+            MoaError::ProviderError(format!("metrics recorder already installed: {error}"))
+        })?;
+        register_metric_descriptions();
+    }
+    Ok(provider)
+}
+
+/// Builds a view that pins one metric's histogram boundaries.
+///
+/// Without these views the OTLP exporter would use the SDK's default bucket
+/// layout, and every latency percentile MOA reports would quantize to that
+/// layout while still producing a number. The sub-10ms boundaries in particular
+/// exist because turn steps sit in the 1-20ms range; losing them turns a working
+/// latency panel into a flat line at the default floor.
+fn explicit_bucket_view(
+    metric: &'static str,
+    boundaries: &'static [f64],
+) -> impl Fn(&Instrument) -> Option<Stream> + Send + Sync + 'static {
+    move |instrument: &Instrument| {
+        if instrument.name() != metric {
+            return None;
+        }
+        Stream::builder()
+            .with_aggregation(Aggregation::ExplicitBucketHistogram {
+                boundaries: boundaries.to_vec(),
+                record_min_max: true,
+            })
+            .build()
+            .ok()
+    }
+}
+
+/// Every histogram whose bucket layout is load-bearing, with its boundaries.
+///
+/// Single-sourced with the Prometheus exporter below: both exporters read this
+/// table, so the two cannot drift into reporting different distributions for the
+/// same metric.
+const HISTOGRAM_BOUNDARIES: &[(&str, &[f64])] = &[
+    ("moa_cache_hit_rate", CACHE_HIT_RATE_BUCKETS),
+    (
+        GENAI_CLIENT_OPERATION_DURATION_METRIC,
+        GENAI_CLIENT_DURATION_BUCKETS,
+    ),
+    (
+        GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC,
+        GENAI_CLIENT_DURATION_BUCKETS,
+    ),
+    (GENAI_CLIENT_TOKEN_USAGE_METRIC, GENAI_CLIENT_TOKEN_BUCKETS),
+    (
+        "moa_execution_compile_duration_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_route_classifier_duration_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_run_queue_to_start_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_task_duration_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_map_fanout_items",
+        EXECUTION_CARDINALITY_BUCKETS,
+    ),
+    (
+        "moa_execution_run_cost_microusd",
+        EXECUTION_COST_MICROUSD_BUCKETS,
+    ),
+    ("moa_execution_run_tokens", EXECUTION_TOKEN_BUCKETS),
+    ("moa_execution_run_tasks", EXECUTION_CARDINALITY_BUCKETS),
+    (
+        "moa_execution_run_tool_calls",
+        EXECUTION_CARDINALITY_BUCKETS,
+    ),
+    ("moa_execution_run_retrieved_bytes", EXECUTION_BYTE_BUCKETS),
+    ("moa_execution_run_coverage_ratio", EXECUTION_RATIO_BUCKETS),
+    ("moa_execution_reducer_depth", EXECUTION_CARDINALITY_BUCKETS),
+];
+
+/// Guards the one-time global recorder installation.
+static OTEL_METRICS_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// Installs the development-only Prometheus scrape exporter.
+fn install_prometheus_metrics(config: &MetricsConfig) -> Result<()> {
+    if PROMETHEUS_ENDPOINT.get().is_some() {
         return Ok(());
     }
 
-    if PROMETHEUS_ENDPOINT.get().is_none() {
-        let addr = parse_metrics_listen_addr(config)?;
-        let builder = PrometheusBuilder::new()
-            .with_http_listener(addr)
-            .set_buckets(LATENCY_BUCKETS)
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_cache_hit_rate".to_string()),
-                CACHE_HIT_RATE_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(GENAI_CLIENT_OPERATION_DURATION_METRIC.to_string()),
-                GENAI_CLIENT_DURATION_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC.to_string()),
-                GENAI_CLIENT_DURATION_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(GENAI_CLIENT_TOKEN_USAGE_METRIC.to_string()),
-                GENAI_CLIENT_TOKEN_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_compile_duration_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_route_classifier_duration_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_queue_to_start_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_task_duration_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_map_fanout_items".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_cost_microusd".to_string()),
-                EXECUTION_COST_MICROUSD_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_tokens".to_string()),
-                EXECUTION_TOKEN_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_tasks".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_tool_calls".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_retrieved_bytes".to_string()),
-                EXECUTION_BYTE_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_coverage_ratio".to_string()),
-                EXECUTION_RATIO_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_reducer_depth".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
+    let addr = parse_metrics_listen_addr(config)?;
+    let mut builder = PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .set_buckets(LATENCY_BUCKETS)
+        .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+    // The same table the OTLP views read, so a metric cannot have one bucket
+    // layout when pushed and another when scraped.
+    for (metric, boundaries) in HISTOGRAM_BOUNDARIES {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full((*metric).to_string()), boundaries)
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
-
-        builder
-            .install()
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-        register_metric_descriptions();
-        let _ = PROMETHEUS_ENDPOINT.set(addr);
     }
 
+    builder
+        .install()
+        .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+    register_metric_descriptions();
+    let _ = PROMETHEUS_ENDPOINT.set(addr);
     Ok(())
 }
 
-/// Returns the configured scrape URL when the metrics listen address parses successfully.
+/// Returns the scrape URL when the development Prometheus exporter is selected.
+///
+/// `None` under the OTLP and disabled exporters, because there is no endpoint to
+/// name. Reporting a URL for a port nothing binds is what let manifests and
+/// network policies grow scrape targets that never existed.
 #[must_use]
 pub fn metrics_endpoint_url(config: &MetricsConfig) -> Option<String> {
+    if config.exporter != MetricsExporter::Prometheus {
+        return None;
+    }
     parse_metrics_listen_addr(config)
         .ok()
         .map(format_metrics_endpoint_url)
@@ -1440,10 +1543,14 @@ pub fn record_builtin_approval_wait(wait: Duration) {
 }
 
 fn parse_metrics_listen_addr(config: &MetricsConfig) -> Result<SocketAddr> {
-    config.listen.parse::<SocketAddr>().map_err(|error| {
+    let listen = config.prometheus_listen.as_deref().ok_or_else(|| {
+        MoaError::ConfigError(
+            "metrics.prometheus_listen is required by the prometheus exporter".to_string(),
+        )
+    })?;
+    listen.parse::<SocketAddr>().map_err(|error| {
         MoaError::ConfigError(format!(
-            "invalid metrics.listen `{}`: {error}",
-            config.listen
+            "invalid metrics.prometheus_listen `{listen}`: {error}"
         ))
     })
 }
@@ -1948,9 +2055,6 @@ fn session_status_label(status: &SessionStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use tokio::net::TcpListener;
-    use tokio::time::{Instant, sleep};
-
     use super::*;
 
     #[test]
@@ -2010,147 +2114,84 @@ mod tests {
     #[test]
     fn metrics_endpoint_url_uses_localhost_for_unspecified_listener() {
         let url = metrics_endpoint_url(&MetricsConfig {
-            enabled: true,
-            listen: "0.0.0.0:9090".to_string(),
+            exporter: MetricsExporter::Prometheus,
+            prometheus_listen: Some("0.0.0.0:9090".to_string()),
         });
 
         assert_eq!(url.as_deref(), Some("http://localhost:9090/metrics"));
     }
 
-    #[tokio::test]
-    async fn prometheus_endpoint_exports_recorded_metric_families() {
-        let port = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind ephemeral test port")
-            .local_addr()
-            .expect("local addr")
-            .port();
-        let config = MetricsConfig {
-            enabled: true,
-            listen: format!("127.0.0.1:{port}"),
-        };
-        init_metrics(&config).expect("metrics exporter should initialize");
+    #[test]
+    fn no_scrape_url_is_reported_under_the_push_exporter() {
+        // Pins: the OTLP default advertises no scrape endpoint. Reporting one
+        // would put a URL in startup logs, manifests and network policies for a
+        // port nothing binds - which is exactly the fake 9090 surface production
+        // grew before this.
+        //
+        // The listen address is deliberately PRESENT. With it absent the address
+        // parse fails and returns None on its own, so the exporter check would
+        // never run and this test would pass with that check deleted - which is
+        // exactly what it did when first written. `validate()` refuses this
+        // combination, so it can only reach the function from a caller that
+        // skipped validation; the exporter check is the guard for precisely that
+        // caller, and this is the only shape that exercises it.
+        for exporter in [MetricsExporter::Otlp, MetricsExporter::Disabled] {
+            let config = MetricsConfig {
+                exporter,
+                prometheus_listen: Some("0.0.0.0:9090".to_string()),
+            };
+            assert!(
+                config.validate().is_err(),
+                "precondition: this combination must be one `validate()` refuses, or the \
+                 guard under test is unreachable in production and should be deleted instead"
+            );
 
-        record_genai_client_operation_duration(
-            "mock",
-            "gpt-5.4",
-            Some("gpt-5.4"),
+            let url = metrics_endpoint_url(&config);
+
+            assert_eq!(
+                url,
+                None,
+                "exporter {} must advertise no scrape URL even when a listen address is \
+                 present, got {url:?}",
+                exporter.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_listen_address_also_yields_no_scrape_url() {
+        // Negative control for the neighbour the test above deliberately avoids:
+        // an unparseable (here absent) address must also produce no URL, so the
+        // two guards are pinned separately rather than one standing in for both.
+        assert_eq!(
+            metrics_endpoint_url(&MetricsConfig {
+                exporter: MetricsExporter::Prometheus,
+                prometheus_listen: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn otlp_metrics_validate_configured_grpc_headers() {
+        // Pins: metrics consume the same configured OTLP auth/routing headers
+        // as traces. If the metric exporter ignores this map, an invalid header
+        // would incorrectly initialize instead of failing configuration.
+        let error = install_otlp_metrics(
             None,
-            Duration::from_millis(20),
-        );
-        record_genai_client_token_usage("mock", "gpt-5.4", "gpt-5.4", "input", 8);
-        record_genai_client_token_usage("mock", "gpt-5.4", "gpt-5.4", "output", 4);
-        record_genai_client_time_to_first_chunk(
-            "mock",
-            "gpt-5.4",
-            "gpt-5.4",
-            Duration::from_millis(5),
-        );
-        record_cache_hit_rate("mock", "gpt-5.4", 0.5);
-        record_turn_latency(Duration::from_millis(25));
-        record_turn_step_duration(TurnLatencyStep::PipelineCompile, Duration::from_millis(10));
-        record_session_event_append("ToolCall");
-        record_session_event_append_phase_duration(
-            SessionEventAppendPhase::AcquireConnection,
-            Duration::from_millis(2),
-        );
-        record_session_event_append_phase_duration(
-            SessionEventAppendPhase::BeginTransaction,
-            Duration::from_millis(1),
-        );
-        record_session_event_append_phase_duration(
-            SessionEventAppendPhase::LockSession,
-            Duration::from_millis(3),
-        );
-        record_session_event_load(2);
-        record_tool_idempotency_scan("ToolResult", 5);
-        record_api_key_validation_duration("failure", Duration::from_millis(6));
-        record_memory_operation("search", "ok", 4, Duration::from_millis(2));
-        record_experiment_run("accepted", "agent_loop");
-        record_experiment_trial("completed", Some("max_turns"), "agent_loop");
-        record_simulation_turn("agent_loop");
-        record_simulation_tokens("simulator", 16);
-        record_simulation_cost_cents("simulator", 1);
-        record_experiment_score_rows("scores", 3);
-        record_experiment_learning_candidates("proposed", 1);
-        record_skill_learning_candidates_filed("distilled", "created", 1);
-        record_skill_learning_review_decision("accept_skill", "promoted");
-        record_action_review_requested(ActionPolicyEffect::AdminReview, ActionClass::LocalWrite);
-        record_action_review_decision(ActionReviewStatus::Cleared, ActionClass::LocalWrite);
-        record_action_review_decision(ActionReviewStatus::Timeout, ActionClass::CommandExecution);
-        record_approval_wait(ActionClass::LocalWrite, Duration::from_secs(30));
-        record_action_review_pending_depth(&[("high".to_string(), 2), ("low".to_string(), 1)]);
-        record_action_review_oldest_pending_age(42.0);
-        record_builtin_approval_pending_depth(3);
-        record_builtin_approval_oldest_pending_age(7.0);
-        record_builtin_approval_decision("timeout");
-        record_builtin_approval_wait(Duration::from_secs(12));
+            OtlpProtocol::Grpc,
+            &std::collections::HashMap::from([(
+                "invalid header name".to_string(),
+                "value".to_string(),
+            )]),
+            Resource::builder().build(),
+        )
+        .expect_err("metrics must validate configured OTLP gRPC headers");
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .expect("http client");
-        let url = metrics_endpoint_url(&config).expect("metrics url");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let scrape = loop {
-            match client.get(&url).send().await {
-                Ok(response) if response.status().is_success() => {
-                    break response.text().await.expect("scrape body");
-                }
-                Ok(_) | Err(_) if Instant::now() < deadline => {
-                    sleep(Duration::from_millis(50)).await;
-                }
-                Ok(response) => panic!("unexpected scrape status: {}", response.status()),
-                Err(error) => panic!("metrics scrape failed: {error}"),
-            }
-        };
-
-        assert!(scrape.contains("gen_ai_client_operation_duration"));
-        assert!(scrape.contains("gen_ai_client_token_usage"));
-        assert!(scrape.contains("gen_ai_client_operation_time_to_first_chunk"));
-        assert!(scrape.contains("moa_cache_hit_rate"));
-        assert!(scrape.contains("moa_turn_latency_seconds"));
-        assert!(scrape.contains("moa_turn_step_duration_seconds"));
-        assert!(scrape.contains("moa_session_events_appended_total"));
-        assert!(scrape.contains("moa_session_event_append_phase_seconds"));
-        assert!(scrape.contains("phase=\"acquire_connection\""));
-        assert!(scrape.contains("phase=\"begin_transaction\""));
-        assert!(scrape.contains("moa_session_event_load_events_total"));
-        assert!(scrape.contains("moa_tool_idempotency_scan_events_total"));
-        assert!(scrape.contains("moa_memory_operation_results_total"));
-        assert!(scrape.contains("moa_api_key_validation_seconds"));
-        assert!(scrape.contains("moa_experiment_runs_total"));
-        assert!(scrape.contains("moa_experiment_trials_total"));
-        assert!(scrape.contains("moa_simulation_turns_total"));
-        assert!(scrape.contains("moa_simulation_tokens_total"));
-        assert!(scrape.contains("moa_simulation_cost_cents_total"));
-        assert!(scrape.contains("moa_experiment_score_rows_total"));
-        assert!(scrape.contains("moa_experiment_learning_candidates_total"));
-        assert!(scrape.contains("moa_skill_learning_candidates_filed_total"));
-        assert!(scrape.contains("moa_skill_learning_review_decisions_total"));
-        assert!(scrape.contains("moa_action_review_requests_total"));
-        assert!(scrape.contains("moa_action_review_decisions_total"));
-        assert!(scrape.contains("status=\"timeout\""));
-        assert!(scrape.contains("moa_approval_wait_seconds"));
-        assert!(scrape.contains("moa_action_review_pending"));
-        assert!(scrape.contains("risk_level=\"high\""));
-        // A drained risk class is still emitted (reset to zero) rather than
-        // dropped, so it never holds a stale backlog value.
-        assert!(scrape.contains("risk_level=\"medium\""));
-        assert!(scrape.contains("moa_action_review_oldest_pending_age_seconds"));
-        assert!(scrape.contains("moa_builtin_approval_pending"));
-        assert!(scrape.contains("moa_builtin_approval_oldest_pending_age_seconds"));
-        assert!(scrape.contains("moa_builtin_approval_decisions_total"));
-        assert!(scrape.contains("moa_builtin_approval_wait_seconds"));
-
-        // Duplicate/dead metric families removed by the observability pruning must
-        // not reappear in the exporter output.
-        assert!(!scrape.contains("moa_session_event_loads_total"));
-        assert!(!scrape.contains("moa_context_pipeline_construction_seconds"));
-        assert!(!scrape.contains("moa_retrieval_embedder_construction_seconds"));
-        assert!(!scrape.contains("moa_tool_idempotency_scan_seconds"));
-        assert!(!scrape.contains("moa_experiment_trial_duration_seconds"));
-        assert!(!scrape.contains("moa_skill_learning_time_in_review_seconds"));
+        assert!(
+            matches!(error, MoaError::ConfigError(_)),
+            "invalid metric-export headers must be a configuration error, got {error:?}"
+        );
     }
 
     #[test]

@@ -110,10 +110,6 @@ pub enum MoaError {
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 
-    /// The requested functionality has not been implemented yet.
-    #[error("not implemented: {0}")]
-    NotImplemented(String),
-
     /// The user's home directory could not be resolved.
     #[error("home directory not found")]
     HomeDirectoryNotFound,
@@ -194,7 +190,6 @@ impl MoaError {
             | Self::PermissionDenied(_)
             | Self::BudgetExhausted(_)
             | Self::Unsupported(_)
-            | Self::NotImplemented(_)
             | Self::Io(_) => true,
             // Single-payload/event-shaped problems — resumable.
             Self::ProviderQuirk(_)
@@ -307,9 +302,6 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
         },
         MoaError::Unsupported(message) => ToolFailureClass::Fatal {
             reason: message.clone(),
-        },
-        MoaError::NotImplemented(message) => ToolFailureClass::Fatal {
-            reason: format!("tool behavior is not implemented: {message}"),
         },
         MoaError::HomeDirectoryNotFound => ToolFailureClass::Fatal {
             reason: "home directory could not be resolved".to_string(),

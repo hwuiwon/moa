@@ -662,6 +662,24 @@ fn validate_experiment_plan(definition: &ExperimentPlanDefinition, report: &mut 
         report,
     );
     validate_budget(&definition.budget, report);
+    validate_plan_scorecard(definition, report);
+}
+
+/// Requires a plan to declare the evidence its trials must produce.
+///
+/// The scorecard type itself refuses empty requirement sets, duplicate score
+/// names, and all-informational sets at construction, so anything that parsed
+/// into an `ExperimentScorecard` is already structurally sound. What is checked
+/// here is that the plan declared one at all: a plan with no scorecard would
+/// expand into trials that can never prove anything.
+fn validate_plan_scorecard(definition: &ExperimentPlanDefinition, report: &mut ValidationReport) {
+    if definition.scorecard.is_none() {
+        report.push_error(
+            "definition.spec.scorecard".to_string(),
+            "experiment plan must declare a scorecard with at least one blocking requirement"
+                .to_string(),
+        );
+    }
 }
 
 fn validate_experiment_simulation(
@@ -1934,6 +1952,116 @@ mod tests {
         ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactMetadata, ArtifactStatus,
         ArtifactUi,
     };
+    use crate::simulation::{
+        ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition,
+        ExperimentTargetKind, ExperimentTargetVariant, SimulationPersonaDefinition,
+        SimulationProfileDefinition, SimulationScenarioDefinition,
+    };
+
+    #[test]
+    fn experiment_plan_without_a_scorecard_is_rejected_at_every_status() {
+        // Pins the entire `Option<ExperimentScorecard>` deviation. The field is
+        // optional only because there is no valid default scorecard to put in a
+        // `#[derive(Default)]` struct — `None` means "this draft has not declared
+        // one", never "this plan needs no evidence". That distinction is only true
+        // if it is closed, so this asserts the closure at EVERY artifact status:
+        // a plan with no scorecard is an error as a draft, as a published
+        // revision, and as an archived one. If any status ever let it through,
+        // that status would silently admit plans whose trials can prove nothing.
+        let document = ArtifactDocument {
+            api_version: "moa.artifact/v1".to_string(),
+            kind: ArtifactKind::ExperimentPlan,
+            metadata: ArtifactMetadata {
+                name: "plan-without-scorecard".to_string(),
+                description: String::new(),
+                tags: Vec::new(),
+                version: None,
+            },
+            status: ArtifactStatus::Draft,
+            definition: ArtifactDefinition::ExperimentPlan(experiment_plan_without_scorecard()),
+            ui: ArtifactUi::default(),
+            reference_resolutions: Vec::new(),
+        };
+
+        for status in [
+            ArtifactStatus::Draft,
+            ArtifactStatus::Published,
+            ArtifactStatus::Archived,
+        ] {
+            let report = validate_for_status(&document, status.clone());
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.path == "definition.spec.scorecard"
+                        && error.message.contains("must declare a scorecard")
+                }),
+                "a plan with no scorecard must be refused at status {status:?}: {report:?}"
+            );
+        }
+
+        // The same plan WITH a scorecard is accepted, so the assertion above is
+        // rejecting the missing scorecard rather than something else in the fixture.
+        let mut declared = experiment_plan_without_scorecard();
+        declared.scorecard = Some(
+            moa_core::types::experiments::ExperimentScorecard::new(vec![
+                moa_core::types::experiments::ScorecardRequirement {
+                    evaluator_id: "target_completed".to_string(),
+                    evaluator_version: "v1".to_string(),
+                    config: serde_json::json!({}),
+                    effect: moa_core::types::experiments::ScorecardEffect::Blocking,
+                },
+            ])
+            .expect("fixture scorecard is valid"),
+        );
+        let accepted = ArtifactDocument {
+            definition: ArtifactDefinition::ExperimentPlan(declared),
+            ..document
+        };
+        assert_no_errors(&validate_for_status(&accepted, ArtifactStatus::Published));
+    }
+
+    /// A structurally complete experiment plan that declares no scorecard.
+    fn experiment_plan_without_scorecard() -> ExperimentPlanDefinition {
+        ExperimentPlanDefinition {
+            simulation: ExperimentSimulationDefinition {
+                scenarios: vec![SimulationScenarioDefinition {
+                    id: "scenario-a".to_string(),
+                    initial_situation: "The user reports a problem.".to_string(),
+                    goals: vec!["Resolve it.".to_string()],
+                    success_criteria: vec!["A concrete next step is offered.".to_string()],
+                    max_turns: 3,
+                    ..SimulationScenarioDefinition::default()
+                }],
+                personas: vec![SimulationPersonaDefinition {
+                    id: "persona-a".to_string(),
+                    voice: "Concise.".to_string(),
+                    goals: vec!["Resolve it.".to_string()],
+                    stop_behavior: "Stop once resolved.".to_string(),
+                    ..SimulationPersonaDefinition::default()
+                }],
+                profiles: vec![SimulationProfileDefinition {
+                    id: "profile-a".to_string(),
+                    facts: serde_json::json!({ "account_tier": "loyal" }),
+                    ..SimulationProfileDefinition::default()
+                }],
+                ..ExperimentSimulationDefinition::default()
+            },
+            target_variants: vec![ExperimentTargetVariant {
+                key: "baseline".to_string(),
+                kind: ExperimentTargetKind::AgentLoop,
+                config: serde_json::json!({}),
+                ui: serde_json::json!({}),
+            }],
+            simulator_model: "gpt-5.1-mini".to_string(),
+            parallelism: 1,
+            trials_per_combination: 1,
+            budget: ExperimentBudget {
+                max_total_cents: 1000,
+                ..ExperimentBudget::default()
+            },
+            scorecard: None,
+            ..ExperimentPlanDefinition::default()
+        }
+    }
 
     #[test]
     fn agent_guardrail_policy_defaults_off_guardrail() {
@@ -2059,6 +2187,7 @@ mod tests {
             action_policy: Default::default(),
             tool_policy: Default::default(),
             guardrail_policy: Default::default(),
+            sandbox_policy: Default::default(),
             revision_note: None,
             metadata: serde_json::json!({}),
         }

@@ -13,14 +13,52 @@ pub struct LineageSinkRuntime {
     pub writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
 }
 
+impl LineageSinkRuntime {
+    /// Returns a score-capable handle, or `None` when this sink cannot store scores.
+    ///
+    /// Only a sink that owns a durable background writer can claim a Behavior Lab
+    /// score reached storage. The null sink drops events and the OTLP sink turns
+    /// them into span attributes; both would let a trial report complete evidence
+    /// with nothing in `analytics.scores` to read back. Capability is derived from
+    /// the writer's presence rather than declared by the handle, so a sink cannot
+    /// advertise durability it does not have.
+    #[must_use]
+    pub fn score_handle(&self) -> Option<ScoreLineageHandle> {
+        self.writer
+            .is_some()
+            .then(|| ScoreLineageHandle(self.handle.clone()))
+    }
+}
+
+/// A lineage handle proven to write scores into durable storage.
+///
+/// This type exists only so the trial finalizer cannot be constructed against a
+/// telemetry-only sink. It is deliberately not constructible from a bare
+/// [`LineageHandle`]: the only way to obtain one is
+/// [`LineageSinkRuntime::score_handle`], which checks the durable writer.
+#[derive(Clone)]
+pub struct ScoreLineageHandle(Arc<dyn LineageHandle>);
+
+impl ScoreLineageHandle {
+    /// Returns the underlying durable lineage handle.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<dyn LineageHandle> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ScoreLineageHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ScoreLineageHandle(durable)")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineageSinkMode {
     Null,
     Otel,
-    /// Durable DB sink; the row backend follows `[clickhouse]` config presence.
+    /// Durable DB sink writing lineage and scores transactionally to Postgres.
     Postgres,
-    /// Durable DB sink that requires `[clickhouse]` to be configured.
-    ClickHouse,
 }
 
 impl LineageSinkMode {
@@ -28,11 +66,10 @@ impl LineageSinkMode {
         let normalized = value.map(str::trim).filter(|value| !value.is_empty());
         match normalized.map(str::to_ascii_lowercase).as_deref() {
             Some("postgres") => Ok(Self::Postgres),
-            Some("clickhouse") => Ok(Self::ClickHouse),
             Some("otel") => Ok(Self::Otel),
             Some("null") | None => Ok(Self::Null),
             Some(other) => Err(MoaError::ConfigError(format!(
-                "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|clickhouse|null|otel"
+                "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|null|otel"
             ))),
         }
     }
@@ -58,33 +95,15 @@ pub async fn build_lineage_sink_from_env_value(
 ) -> Result<LineageSinkRuntime> {
     let mode = LineageSinkMode::from_env_value(env_value)?;
     match mode {
-        LineageSinkMode::Postgres | LineageSinkMode::ClickHouse => {
-            if mode == LineageSinkMode::ClickHouse && config.clickhouse.is_none() {
-                return Err(MoaError::ConfigError(
-                    "MOA_LINEAGE_SINK=clickhouse requires the [clickhouse] config section \
-                     (or MOA_CLICKHOUSE_URL)"
-                        .to_string(),
-                ));
-            }
-            let store =
-                moa_lineage_sink::LineageStore::from_config(config.clickhouse.as_ref(), pool);
-            let backend = store.backend_name();
-            store.ensure_schema().await.map_err(|error| {
-                MoaError::StorageError(format!("lineage schema setup failed: {error}"))
-            })?;
-            // Refuse to start on the ClickHouse backend when any compliance tenant is
-            // enabled: that backend cannot hash-chain compliance rows, and a silent
-            // downgrade of `moa lineage verify` is worse than a loud startup failure.
-            store.guard_compliance_backend().await.map_err(|error| {
-                MoaError::ConfigError(format!("lineage backend refused to start: {error}"))
-            })?;
+        LineageSinkMode::Postgres => {
+            let store = moa_lineage_sink::LineageStore::new(pool);
             let sink_config = moa_lineage_sink::MpscSinkConfig::from(&config.observability.lineage);
             let (sink, writer) = moa_lineage_sink::MpscSink::spawn(sink_config, store)
                 .await
                 .map_err(|error| {
                     MoaError::StorageError(format!("lineage writer startup failed: {error}"))
                 })?;
-            tracing::info!(backend, "lineage sink: durable (MpscSink)");
+            tracing::info!(backend = "postgres", "lineage sink: durable (MpscSink)");
             Ok(LineageSinkRuntime {
                 handle: Arc::new(sink),
                 writer: Some(Arc::new(writer)),
@@ -109,7 +128,25 @@ pub async fn build_lineage_sink_from_env_value(
 
 #[cfg(test)]
 mod tests {
-    use super::LineageSinkMode;
+    use super::{LineageSinkMode, LineageSinkRuntime};
+    use moa_core::traits::NullLineageHandle;
+    use std::sync::Arc;
+
+    #[test]
+    fn only_a_sink_with_a_durable_writer_yields_a_score_handle() {
+        // Pins: null and OTLP-only lineage cannot masquerade as the durable product
+        // score store. Without a background writer there is no score handle, so the
+        // trial finalizer cannot be built and cannot claim score completion.
+        let telemetry_only = LineageSinkRuntime {
+            handle: Arc::new(NullLineageHandle),
+            writer: None,
+        };
+
+        assert!(
+            telemetry_only.score_handle().is_none(),
+            "a writer-less sink must not be able to store product scores"
+        );
+    }
 
     #[test]
     fn lineage_sink_mode_defaults_unset_to_null_and_accepts_otel() {
@@ -142,15 +179,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "configuration error: unknown MOA_LINEAGE_SINK value: garbage; expected postgres|clickhouse|null|otel"
-        );
-    }
-
-    #[test]
-    fn lineage_sink_mode_accepts_clickhouse() {
-        assert_eq!(
-            LineageSinkMode::from_env_value(Some("clickhouse")).expect("clickhouse should parse"),
-            LineageSinkMode::ClickHouse
+            "configuration error: unknown MOA_LINEAGE_SINK value: garbage; expected postgres|null|otel"
         );
     }
 }

@@ -127,12 +127,24 @@ pub struct ExecutionCapabilityCatalog {
 
 impl ExecutionCapabilityCatalog {
     /// Builds a deterministic catalog from invocable capabilities.
+    ///
+    /// Two entries that share a capability reference are rejected here rather
+    /// than left for downstream validation. A reference is the identity a plan
+    /// cites and an authorization envelope pins, so a catalog holding the same
+    /// reference twice makes "which capability did this run invoke" answerable
+    /// only by construction order — and the answer would change with it.
     pub fn build(capabilities: Vec<ExecutionCapability>) -> Result<Self> {
         let mut keyed = capabilities
             .into_iter()
             .map(|capability| Ok((canonical_sort_key(&capability.reference)?, capability)))
             .collect::<Result<Vec<_>>>()?;
         keyed.sort_by(|left, right| left.0.cmp(&right.0));
+        if let Some(window) = keyed.windows(2).find(|window| window[0].0 == window[1].0) {
+            return Err(Error::DuplicateCapabilityReference {
+                reference: window[0].1.reference.name.clone(),
+                version: window[0].1.reference.version.clone(),
+            });
+        }
         let capabilities = keyed
             .into_iter()
             .map(|(_, capability)| capability)
@@ -249,8 +261,28 @@ pub enum CapabilitySource {
     McpTool {
         /// MCP server name.
         server: String,
-        /// MCP tool name.
-        name: String,
+        /// Registered tool name this capability dispatches through.
+        ///
+        /// Named `tool_name` like every other tool-backed variant, and for the
+        /// same reason: it is the name the router resolves. For a connector tool
+        /// that is the server-qualified reference, never the name the server
+        /// publishes. The distinction is not cosmetic — dispatching the
+        /// published name fails with `unknown tool`, and it fails only at
+        /// runtime, which is exactly how this field's predecessor broke.
+        tool_name: String,
+        /// Tool name as the connector itself publishes it.
+        ///
+        /// Provenance only. It is deliberately NOT called `name`, so a consumer
+        /// reaching for something to dispatch cannot pick it up by pattern
+        /// matching alongside the built-in and hand variants, which is the
+        /// mistake this shape exists to prevent.
+        remote_name: String,
+        /// Schema revision this tool was discovered at.
+        ///
+        /// Provenance, not identity: the capability version already covers the
+        /// input schema, so this records which discovery produced the entry
+        /// without making the version unreconstructable outside the router.
+        schema_revision: String,
     },
     /// Published standalone action artifact backed by a registered tool.
     ActionArtifact {
@@ -551,6 +583,44 @@ mod tests {
                 .capabilities
                 .iter()
                 .all(|entry| entry.estimate.tasks == 1 && entry.estimate.tool_calls == 1)
+        );
+    }
+
+    #[test]
+    fn capability_catalog_build_rejects_a_reference_claimed_twice() {
+        // Pins: a reference identifies exactly one capability. Two entries under
+        // one reference would make "which capability did this run invoke"
+        // answerable only by construction order, and a plan pinning that
+        // reference would resolve to whichever entry happened to sort first.
+        let error = ExecutionCapabilityCatalog::build(vec![
+            capability(
+                "search",
+                CapabilitySource::McpTool {
+                    server: "first".to_string(),
+                    tool_name: "mcp__first__search".to_string(),
+                    remote_name: "search".to_string(),
+                    schema_revision: "revision-a".to_string(),
+                },
+            ),
+            capability(
+                "search",
+                CapabilitySource::McpTool {
+                    server: "second".to_string(),
+                    tool_name: "mcp__second__search".to_string(),
+                    remote_name: "search".to_string(),
+                    schema_revision: "revision-b".to_string(),
+                },
+            ),
+        ])
+        .expect_err("a duplicated capability reference must be rejected");
+
+        assert!(
+            matches!(
+                error,
+                crate::Error::DuplicateCapabilityReference { ref reference, .. }
+                    if reference == "search"
+            ),
+            "unexpected error: {error:?}"
         );
     }
 }

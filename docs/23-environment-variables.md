@@ -67,7 +67,13 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of complete MCP server objects; replaces file-backed server configuration. Each object must carry `credential_scope` (`deployment_owned` or `tenant_owned`) — it has no default, and omitting it is a typed config error. A `deployment_owned` server's `credentials` must name an environment variable (`bearer`, `oauth`, `api_key`) or be absent; a `tenant_owned` server's `credentials` must be a header shape only (`tenant_bearer`, `tenant_api_key`) and its material is resolved per tenant from the credential vault. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. |
+| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of complete MCP server objects; replaces file-backed server configuration. Each object must carry `credential_scope` (`deployment_owned` or `tenant_owned`) — it has no default, and omitting it is a typed config error. A `deployment_owned` server's `credentials` must name an environment variable (`bearer`, `oauth`, `api_key`) or be absent; a `tenant_owned` server's `credentials` must be a header shape only (`tenant_bearer`, `tenant_api_key`) and its material is resolved per tenant from the credential vault. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. `required` defaults to `false`: an optional server that fails discovery removes only its own tools and is recorded as typed health, while a `required` server that fails discovery fails startup. `discovery` defaults to `eager`; `lazy` defers a server's tools to the first background catalog refresh so a slow or unused connector never delays startup. `required` combined with `lazy` is rejected — "required" means verified at startup. Duplicate server names are rejected rather than silently overwriting each other's configuration. |
+
+### `sandbox_policy`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_SANDBOX_POLICY_JSON` | `sandbox_policy` | built-in local development policy | JSON object with a required `deployment` layer and an optional `routes` map keyed by hand provider (`local`, `daytona`, `e2b`). Each layer states a `revision` plus all six dimensions — `cpu` (`{"mode":"bounded","millicores":N}` or `{"mode":"unbounded"}`), `memory` and `ephemeral_disk` (`mebibytes`), `egress` (`{"mode":"deny_all"}`, `{"mode":"unrestricted"}`, or `{"mode":"allow_list","destinations":["host","host:port"]}`), `idle_timeout`, and `max_lifetime` (`seconds`). There is no zero-means-unlimited: a bound must be nonzero and unlimited must be stated as `unbounded`. The default is the named `local-development-unbounded` revision, which `MOA_SECURITY_PROFILE=cloud` refuses to start on. The production overlay supplies `production-e2b-v1`: deny-all egress, 900-second idle timeout, 3600-second hard lifetime, and explicit unbounded CPU, memory, and disk. |
 
 ### `execution`
 
@@ -131,6 +137,15 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT` | `providers.concurrency.default_max_in_flight` | 16 | Fallback in-flight ceiling for any provider that sets no `max_concurrent_requests` of its own (`0` = unbounded) |
 | `MOA_PROVIDERS_CONCURRENCY_LEASE_TTL_MS` | `providers.concurrency.lease_ttl_ms` | 600000 | Global-scope lease time-to-live, in ms: the crash backstop for a held slot |
 | `MOA_PROVIDERS_CONCURRENCY_SCOPE` | `providers.concurrency.scope` | local | Whether the ceiling is enforced per process or shared across replicas |
+| `MOA_PROVIDERS_CONCURRENCY_ON_COORDINATION_FAILURE` | `providers.concurrency.on_coordination_failure` | bounded_degraded | What every distributed provider control does when the coordination store is unreachable or was never injected: `bounded_degraded` falls back to this replica's local bound (metric + fleet-ceiling warning), `fail_closed` rejects admission |
+| `MOA_PROVIDERS_PACING_DEFAULT_COOLDOWN_MS` | `providers.pacing.default_cooldown_ms` | 5000 | Cooldown applied to a rate-limit response that carries no `Retry-After`, in ms |
+| `MOA_PROVIDERS_PACING_MAX_COOLDOWN_MS` | `providers.pacing.max_cooldown_ms` | 300000 | Ceiling on any single 429 cooldown, in ms, so one provider-supplied `Retry-After` cannot pause a fleet's access to a credential indefinitely |
+| `MOA_PROVIDERS_PACING_MAX_PACING_WAIT_MS` | `providers.pacing.max_pacing_wait_ms` | 60000 | Upper bound on one pacing wait before the caller re-checks the shared bucket, in ms |
+| `MOA_PROVIDERS_PACING_RETRY_BUDGET_FLOOR` | `providers.pacing.retry_budget_floor` | 8 | Retries always allowed per window regardless of volume, so low-volume callers keep normal retry behavior |
+| `MOA_PROVIDERS_PACING_RETRY_BUDGET_PERCENT` | `providers.pacing.retry_budget_percent` | 20 | Percentage of window request volume that in-call retries may consume |
+| `MOA_PROVIDERS_PACING_RETRY_BUDGET_WINDOW_MS` | `providers.pacing.retry_budget_window_ms` | 60000 | Sliding window over which request and retry volume is measured, in ms |
+| `MOA_PROVIDERS_PACING_SCOPE` | `providers.pacing.scope` | local | Whether per-minute pacing, 429 cooldown, and retry budget are per process or shared across replicas |
+| `MOA_PROVIDERS_PACING_STATE_TTL_MS` | `providers.pacing.state_ttl_ms` | 300000 | How long an idle shared pacing/retry key survives in the coordination store, in ms |
 | `MOA_PROVIDERS_ROUTING_POLICY_ALLOWED_PROVIDERS` | `providers.routing_policy.allowed_providers` | _unset_ | Allowlist of provider ids; empty means no allowlist, non-empty restricts routing to exactly these providers |
 | `MOA_PROVIDERS_ROUTING_POLICY_DENIED_PROVIDERS` | `providers.routing_policy.denied_providers` | _unset_ | Denylist of provider ids that must never serve this deployment |
 | `MOA_PROVIDERS_ROUTING_POLICY_REQUIRE_PRIVATE_DEPLOYMENT` | `providers.routing_policy.require_private_deployment` | _unset_ | Require the selected provider to assert a private/self-hosted deployment |
@@ -143,6 +158,12 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS` | `providers.zeroentropy.max_concurrent_requests` | _unset_ | In-flight concurrency ceiling for this provider account — the natural place to express the credential's tier |
 | `MOA_ZEROENTROPY_MAX_INPUTS_PER_MIN` | `providers.zeroentropy.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
 | `MOA_ZEROENTROPY_MAX_REQUESTS_PER_MIN` | `providers.zeroentropy.max_requests_per_min` | _unset_ | Optional per-minute request-rate cap; `None` keeps the provider default |
+
+The production overlay sets both scopes to `global` and coordination failure to
+`fail_closed`. Shared cooldown and retry-budget keys are credential-wide, so
+changing models does not bypass provider-account backpressure. Runtime-cache
+operations have a fixed 250ms deadline; there is intentionally no separate
+operator knob for it.
 
 ### `database`
 
@@ -393,25 +414,31 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 |---|---|---|---|
 | `MOA_OBSERVABILITY_ENABLED` | `observability.enabled` | false | Whether OTLP export is enabled |
 | `MOA_OBSERVABILITY_ENVIRONMENT` | `observability.environment` | _none_ | Deployment environment resource attribute |
-| `MOA_OBSERVABILITY_LINEAGE_BATCH_MAX_AGE_SECS` | `observability.lineage.batch_max_age_secs` | 2 | Maximum age for a partial worker batch |
-| `MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE` | `observability.lineage.batch_size` | 512 | Maximum rows written per worker flush |
+| `MOA_OBSERVABILITY_LINEAGE_BATCH_MAX_AGE_SECS` | `observability.lineage.batch_max_age_secs` | 2 | Maximum age for a partial ingress batch, and the drain poll cadence |
+| `MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE` | `observability.lineage.batch_size` | 512 | Maximum ingress events committed to the acceptance queue per batch |
+| `MOA_OBSERVABILITY_LINEAGE_CLAIM_BATCH_SIZE` | `observability.lineage.claim_batch_size` | 512 | Maximum queue rows claimed by one drain |
+| `MOA_OBSERVABILITY_LINEAGE_DRAIN_TIMEOUT_SECS` | `observability.lineage.drain_timeout_secs` | 30 | Upper bound on the shutdown drain; exceeding it leaves committed rows for another replica |
+| `MOA_OBSERVABILITY_LINEAGE_LEASE_TTL_SECS` | `observability.lineage.lease_ttl_secs` | 60 | Claim lease lifetime, and so the worst-case recovery delay after an ungraceful pod termination |
+| `MOA_OBSERVABILITY_LINEAGE_MAX_PENDING_AGE_SECS` | `observability.lineage.max_pending_age_secs` | 300 | Oldest accepted-but-unstored row age tolerated before readiness fails |
 | `MOA_OBSERVABILITY_LINEAGE_CHANNEL_CAPACITY` | `observability.lineage.channel_capacity` | 8192 | Bounded hot-path channel capacity |
-| `MOA_OBSERVABILITY_LINEAGE_ENABLED` | `observability.lineage.enabled` | false | Whether durable lineage capture is enabled |
-| `MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH` | `observability.lineage.journal_path` | ~/.moa/lineage-journal | Durable fjall journal path |
 | `MOA_OBSERVABILITY_LINEAGE_SAMPLE_PGVECTOR_EXPLAIN` | `observability.lineage.sample_pgvector_explain` | 0.01 | Fraction of pgvector queries that run full EXPLAIN ANALYZE |
-| `MOA_OBSERVABILITY_OTLP_ENDPOINT` | `observability.otlp_endpoint` | _none_ | Optional OTLP endpoint override |
-| `MOA_OBSERVABILITY_OTLP_HEADERS` | `observability.otlp_headers` | {} | Additional OTLP headers for exporter auth and routing |
+| `MOA_OBSERVABILITY_OTLP_ENDPOINT` | `observability.otlp_endpoint` | _none_ | OTLP **collector base URL**. Traces and metrics are derived from it as `/v1/traces` and `/v1/metrics`; a value already naming a signal path is refused at startup |
+| `MOA_OBSERVABILITY_OTLP_HEADERS` | `observability.otlp_headers` | {} | Additional OTLP headers for trace and metric exporter auth and routing |
 | `MOA_OBSERVABILITY_OTLP_PROTOCOL` | `observability.otlp_protocol` | grpc | OTLP transport protocol |
 | `MOA_OBSERVABILITY_RELEASE` | `observability.release` | _none_ | Application release or version resource attribute |
 | `MOA_OBSERVABILITY_SAMPLE_RATE` | `observability.sample_rate` | 0.01 | Trace sampling ratio from 0.0 to 1.0 |
-| `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical service name for traces |
+| `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical OpenTelemetry service name for traces and metrics |
+
+Every lineage channel, batch, lease, age, and drain value must be greater than
+zero. Durable lineage enablement is selected only by `MOA_LINEAGE_SINK`; there
+is no second observability enable flag.
 
 ### `metrics`
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_METRICS_ENABLED` | `metrics.enabled` | false | Whether the Prometheus scrape endpoint should be exposed |
-| `MOA_METRICS_LISTEN` | `metrics.listen` | 0.0.0.0:9090 | Listener address for the Prometheus scrape endpoint |
+| `MOA_METRICS_EXPORTER` | `metrics.exporter` | otlp | `otlp` (push to the collector), `prometheus` (development scrape endpoint), or `disabled` |
+| `MOA_METRICS_PROMETHEUS_LISTEN` | `metrics.prometheus_listen` | _none_ | Scrape listener address. Required by, and only valid with, the `prometheus` exporter |
 
 ### `messaging`
 
@@ -541,7 +568,6 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_CLICKHOUSE_DATABASE` | `clickhouse.database` | moa | Target database; created at startup when missing |
 | `MOA_CLICKHOUSE_EXPORT_BATCH_ROWS` | `clickhouse.export_batch_rows` | 5000 | Maximum rows pulled from Postgres and inserted into ClickHouse per analytics-export batch |
 | `MOA_CLICKHOUSE_EXPORT_POLL_SECS` | `clickhouse.export_poll_secs` | 15 | Poll interval in seconds for the analytics exporter loop; also sets the cursor rewind overlap (`2 × export_poll_secs`) |
-| `MOA_CLICKHOUSE_LINEAGE_TTL_DAYS` | `clickhouse.lineage_ttl_days` | 30 | Row TTL in days for `turn_lineage`, mirroring the Postgres/Timescale 30-day retention drop |
 | `MOA_CLICKHOUSE_PASSWORD` | `clickhouse.password` | _none_ | Optional password for HTTP basic auth **(secret)** |
 | `MOA_CLICKHOUSE_URL` | `clickhouse.url` | _empty_ | HTTP interface endpoint, for example `http://localhost:8123` |
 | `MOA_CLICKHOUSE_USER` | `clickhouse.user` | _none_ | Optional user for HTTP basic auth |
@@ -601,13 +627,14 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_AUDIT_BUCKET` / `MOA_AUDIT_OBJECT_LOCK_MODE` / `MOA_AUDIT_RETENTION_YEARS` | Audit Object Lock bucket bootstrap script |
 | `MOA_AUTH_HEADER_TRUST` | Trusted auth-header mode toggle |
 | `MOA_AUTH0_CLIENT_ID` | Auth0 client id (compose/test) |
-| `MOA_LINEAGE_SINK` | Lineage sink selection |
+| `MOA_LINEAGE_SINK` | Lineage sink selection: unset/`null`, `otel`, or `postgres`; ClickHouse is analytics-only |
 | `MOA_PERSIST_TURN_METRICS` | Persist per-turn metrics rows |
 | `MOA_PROVIDERS_OVERRIDE` | Provider-catalog override (tests/tools) |
 | `MOA_SCIM_BASE_URL` | SCIM base URL |
 | `MOA_TOXIPROXY_URL` | Toxiproxy control URL (chaos tests) |
 | `MOA_TURBOPUFFER_LIVE_NEWS_FACTS` | Live Turbopuffer news-facts eval fixture |
 | `MOA_DOCKER_SECCOMP_PROFILE` | Docker seccomp profile path for sandbox runs |
+| `MOA_SERVICE_INSTANCE_ID` | Non-empty OpenTelemetry `service.instance.id`; Kubernetes injects the pod UID for edge and orchestrator |
 | `MOA_VENDOR_NAME` | Vendor label surfaced in metadata |
 
 ## Provider concurrency
@@ -637,12 +664,72 @@ and ingest all share this one pool. The default is dev-appropriate. Size it in
 production to the process's worker fan-out (roughly `50–100`), and keep the sum
 across replicas under the Postgres server's `max_connections`.
 
-### Metrics endpoint exposure
+### Metrics export: push by default, scrape only in development
 
-`metrics.listen` (`MOA_METRICS_LISTEN`) defaults to `0.0.0.0:9090`. That is
-correct for a Kubernetes scrape, but it binds all interfaces — restrict access
-with a NetworkPolicy (or bind a private interface) so the metrics port is not
-reachable from outside the cluster.
+`metrics.exporter` (`MOA_METRICS_EXPORTER`) defaults to `otlp`, which pushes
+runtime metrics to the collector named by `MOA_OBSERVABILITY_OTLP_ENDPOINT`.
+
+Scraping is not a supported production mode, and the reason is topology rather
+than preference. Production replicas sit behind a non-sticky Service with an
+autoscaled replica count, so a scrape through that Service lands on an arbitrary
+replica each interval: counters go backwards, gauges flip between processes, and
+no query over the resulting series means anything. MOA therefore exposes no
+metrics port in the Kubernetes manifests at all.
+
+`prometheus` is the development mode. It requires an explicit
+`MOA_METRICS_PROMETHEUS_LISTEN` — there is no default, because a default would
+put a scrape endpoint on any process that merely asked for Prometheus. Setting a
+listen address under any other exporter is refused at startup: an address that
+is never bound reads to an operator, a manifest, and a network policy as an
+endpoint that exists.
+
+The removed `MOA_METRICS_ENABLED` and `MOA_METRICS_LISTEN` keys are rejected
+rather than ignored; a config still carrying them fails to load.
+
+`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) is read by the OpenTelemetry SDK,
+not by MOA's overlay, and controls how often the OTLP exporter pushes. The SDK
+default is 60s, which is correct for production and far longer than any test's
+patience — the orchestrator fixture sets it to 2s so a metric assertion does not
+time out against a working exporter.
+
+### Observability script variables
+
+`k8s/scripts/observability-smoke.sh` and `validate-observability.sh` read
+`SMOKE_*` and `OBSERVABILITY_TOOLS_ALLOW_UNPINNED`. These deliberately carry no
+`MOA_` prefix: they are shell-script inputs that never reach the typed overlay,
+and prefixing them would put script-only names into the namespace the startup
+audit polices. The one exception is the gate itself,
+`MOA_RUN_LIVE_OBSERVABILITY_SMOKE`, which follows the established `MOA_RUN_*`
+convention for live-test gates.
+
+| Variable | Consumed by |
+|---|---|
+| `MOA_RUN_LIVE_OBSERVABILITY_SMOKE` | Gate for the cluster-mutating observability smoke; nothing runs without it |
+| `SMOKE_KUBE_CONTEXT` | Explicitly named kube context. Required: the smoke rotates workloads, and a current context is routinely some unrelated cluster |
+| `SMOKE_MIMIR_QUERY_URL` / `SMOKE_MIMIR_RULER_URL` | Mimir query and ruler endpoints the smoke asserts against |
+| `SMOKE_MIMIR_USER` / `SMOKE_MIMIR_KEY` | Mimir credentials, passed to `curl` through a `0600` config file and never on a command line |
+| `SMOKE_DATABASE_URL` | Postgres URL used to create temporary `0600` libpq service and pgpass files; only the service name appears in process arguments |
+| `SMOKE_MODEL` / `SMOKE_PROMPT` / `SMOKE_INGRESS_PORT` / `SMOKE_*_BUDGET_SECONDS` | Smoke traffic and timing budgets |
+| `OBSERVABILITY_TOOLS_ALLOW_UNPINNED` | Accepts a non-pinned `kubeconform`/`alloy`/`promtool`, acknowledging that a local pass may not predict CI |
+
+### Connector tool names changed to server-qualified references
+
+Discovered MCP tools now register as
+`mcp__{server_byte_len}_{server}__{remote_tool}` rather than under the name the
+server publishes. **Any persisted action-policy rule or
+`permissions.always_deny` / `permissions.admin_review` pattern targeting a
+connector tool by its unqualified name stops matching after upgrade**, and for
+an `admin_review` pattern that fails open: a tool that was review-gated becomes
+ungated. Rewrite those patterns against the qualified reference; `mcp__*` gates
+every connector tool at once.
+
+The router logs a warning at startup — and after every catalog refresh — for
+each configured permission pattern that matches no registered tool, which is how
+a pattern left stale by this rename surfaces instead of failing quietly. A
+pattern matching nothing is almost always a mistake regardless of cause.
+
+Model-visible tool names are part of the cached prompt prefix, so deployments
+running MCP servers should expect one cache-cold period per session on upgrade.
 
 ### MCP tool permission posture
 

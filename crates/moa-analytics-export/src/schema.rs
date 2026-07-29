@@ -1,16 +1,30 @@
 //! ClickHouse schema bootstrap for the analytics export target.
 //!
 //! Idempotent `CREATE TABLE IF NOT EXISTS` DDL plus an exact contract check for
-//! execution dimensions. `events_raw` is a `ReplacingMergeTree` append stream;
+//! every table. `events_raw` is a `ReplacingMergeTree` append stream;
 //! dimension and fact tables use
 //! `ReplacingMergeTree(export_version)` so readers collapse replayed pages with
 //! `FINAL`.
+//!
+//! `CREATE TABLE IF NOT EXISTS` is not a migration: against a table that already
+//! exists it is a silent no-op that reports success, so a column added to
+//! [`TABLE_DDL`] never reaches a database created before the edit and every
+//! later insert fails with `NO_SUCH_COLUMN_IN_TABLE`. The execution dimensions
+//! have always been validated against an exact contract for this reason; the
+//! other eight tables are validated here against expectations derived from their
+//! own DDL, so a drifted table is refused loudly at startup — naming the table
+//! and the column — instead of failing silently on every export pass.
+
+use std::collections::HashSet;
 
 use clickhouse::Row;
 use clickhouse::sql::Identifier;
 use serde::Deserialize;
 
-use super::{AnalyticsExporter, ExecutionClickHouseIdentities, ExportError};
+use super::{
+    AnalyticsExporter, EXECUTION_RUN_TABLE, EXECUTION_TASK_TABLE, ExecutionClickHouseIdentities,
+    ExportError,
+};
 
 impl AnalyticsExporter {
     /// Creates the database and every analytics table when missing.
@@ -21,6 +35,12 @@ impl AnalyticsExporter {
             .execute()
             .await?;
 
+        // Read before the DDL runs so the set means "predates this bootstrap".
+        // Reading it afterwards would be equally SAFE -- the loop only ever adds
+        // tables, so a later read is a superset and validates at least as much
+        // -- but it would also re-check tables this call just created, which is
+        // work whose result is known.
+        let preexisting = self.existing_table_names().await?;
         for ddl in TABLE_DDL {
             self.clickhouse
                 .query(ddl)
@@ -28,8 +48,52 @@ impl AnalyticsExporter {
                 .execute()
                 .await?;
         }
+        self.validate_declared_table_columns(&preexisting).await?;
         let identities = self.validate_execution_clickhouse_schema().await?;
         self.ensure_execution_dimension_upgrade(identities).await
+    }
+
+    /// Names the analytics tables that already exist in the target database.
+    async fn existing_table_names(&self) -> Result<HashSet<String>, ExportError> {
+        Ok(self
+            .clickhouse
+            .query("SELECT name FROM system.tables WHERE database = ?")
+            .bind(&self.database)
+            .fetch_all::<String>()
+            .await?
+            .into_iter()
+            .collect())
+    }
+
+    /// Checks each non-execution table that predates this bootstrap against the
+    /// columns its own DDL declares, so a table left behind by an earlier
+    /// schema is refused at startup rather than failing on every later insert.
+    ///
+    /// Only pre-existing tables are checked, because that is the precise
+    /// statement of the contract: a table this bootstrap just created matches
+    /// the DDL by construction, while `CREATE TABLE IF NOT EXISTS` silently
+    /// leaves an older one alone. On any restart of a healthy deployment every
+    /// table pre-exists and every table is therefore checked.
+    ///
+    /// The two execution dimensions are excluded because
+    /// [`Self::validate_execution_clickhouse_schema`] already holds them to a
+    /// stricter contract (engine, keys, and durable table identity) whose reset
+    /// guidance is more specific than this generic check.
+    async fn validate_declared_table_columns(
+        &self,
+        preexisting: &HashSet<String>,
+    ) -> Result<(), ExportError> {
+        for ddl in TABLE_DDL {
+            let (table, expected) = declared_table_columns(ddl)?;
+            if matches!(table, EXECUTION_RUN_TABLE | EXECUTION_TASK_TABLE)
+                || !preexisting.contains(table)
+            {
+                continue;
+            }
+            let actual = self.table_column_rows(table).await?;
+            validate_table_columns(table, &actual, &expected)?;
+        }
+        Ok(())
     }
 
     pub(super) async fn validate_execution_clickhouse_schema(
@@ -69,10 +133,7 @@ impl AnalyticsExporter {
         })
     }
 
-    async fn execution_column_rows(
-        &self,
-        table: &str,
-    ) -> Result<Vec<SystemColumnRow>, ExportError> {
+    async fn table_column_rows(&self, table: &str) -> Result<Vec<SystemColumnRow>, ExportError> {
         Ok(self
             .clickhouse
             .query(
@@ -91,7 +152,7 @@ impl AnalyticsExporter {
         expected: &[(&str, &str)],
         expected_key: &str,
     ) -> Result<uuid::Uuid, ExportError> {
-        let actual = self.execution_column_rows(table).await?;
+        let actual = self.table_column_rows(table).await?;
         let keys = self
             .clickhouse
             .query(
@@ -129,6 +190,131 @@ struct SystemTableContractRow {
     partition_key: String,
     sorting_key: String,
     primary_key: String,
+}
+
+/// A table name and the ordered `(column, type)` pairs its DDL declares.
+type DeclaredTable<'a> = (&'a str, Vec<(&'a str, &'a str)>);
+
+/// Extracts the table name and its ordered `(column, type)` pairs from one
+/// [`TABLE_DDL`] entry.
+///
+/// The DDL is the single declaration of every column, so deriving the
+/// expectation from it means a drift check can never fall behind the schema it
+/// checks. ClickHouse reports `system.columns.type` byte-identically to the
+/// type text used here (including the space in `DateTime64(6, 'UTC')`), so the
+/// comparison is exact and needs no normalization.
+fn declared_table_columns(ddl: &str) -> Result<DeclaredTable<'_>, ExportError> {
+    let malformed = |detail: &str| {
+        ExportError::Contract(format!(
+            "analytics table DDL is malformed ({detail}); the schema declaration cannot be \
+             checked against the live database"
+        ))
+    };
+
+    let after_marker = ddl
+        .find("?.")
+        .map(|index| &ddl[index + 2..])
+        .ok_or_else(|| malformed("no `?.<table>` name"))?;
+    let name_end = after_marker
+        .find(|character: char| character.is_whitespace() || character == '(')
+        .ok_or_else(|| malformed("table name is not terminated"))?;
+    let table = &after_marker[..name_end];
+
+    let body_start = after_marker
+        .find('(')
+        .ok_or_else(|| malformed("no column list"))?;
+    let mut depth = 0usize;
+    let mut body_end = None;
+    for (offset, character) in after_marker[body_start..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                // Saturating rather than wrapping: a malformed DDL must surface
+                // as the contract error below, never as a panic in startup.
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    body_end = Some(body_start + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body_end = body_end.ok_or_else(|| malformed("column list is not closed"))?;
+    let body = &after_marker[body_start + 1..body_end];
+
+    // Split on commas at paren depth zero: parameterized types such as
+    // `DateTime64(6, 'UTC')` carry their own commas and must stay intact.
+    let mut columns = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut spans = Vec::new();
+    for (offset, character) in body.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                spans.push(&body[start..offset]);
+                start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    spans.push(&body[start..]);
+
+    for span in spans {
+        let span = span.trim();
+        if span.is_empty() {
+            continue;
+        }
+        let split = span
+            .find(char::is_whitespace)
+            .ok_or_else(|| malformed(&format!("column declaration {span:?} has no type")))?;
+        columns.push((&span[..split], span[split..].trim()));
+    }
+    if columns.is_empty() {
+        return Err(malformed(&format!("table {table} declares no columns")));
+    }
+    Ok((table, columns))
+}
+
+/// Compares a live table's ordered columns against what its DDL declares.
+///
+/// The error names the table, the position, and both the expected and the
+/// observed column so an operator can act on it without re-deriving the
+/// difference by hand.
+fn validate_table_columns(
+    table: &str,
+    actual_columns: &[SystemColumnRow],
+    expected_columns: &[(&str, &str)],
+) -> Result<(), ExportError> {
+    let mismatch = actual_columns
+        .iter()
+        .map(|column| (column.name.as_str(), column.column_type.as_str()))
+        .zip(expected_columns.iter().copied())
+        .position(|(actual, expected)| actual != expected)
+        .or_else(|| {
+            (actual_columns.len() != expected_columns.len())
+                .then_some(actual_columns.len().min(expected_columns.len()))
+        });
+    let Some(index) = mismatch else {
+        return Ok(());
+    };
+    let expected = expected_columns.get(index).map_or_else(
+        || "<none>".to_string(),
+        |(name, kind)| format!("{name} {kind}"),
+    );
+    let actual = actual_columns.get(index).map_or_else(
+        || "<none>".to_string(),
+        |column| format!("{} {}", column.name, column.column_type),
+    );
+    Err(ExportError::Contract(format!(
+        "ClickHouse analytics table {table} has drifted from its declared schema at column {}: \
+         expected {expected}, found {actual}. `CREATE TABLE IF NOT EXISTS` cannot add a column to \
+         an existing table, so this database predates a schema change; migrate or drop and \
+         rebuild {table} before exporting",
+        index + 1
+    )))
 }
 
 fn validate_execution_table_contract(
@@ -225,7 +411,7 @@ fn reset_required_error(table: &str, mismatch: String) -> ExportError {
     ))
 }
 
-/// The eleven analytics table definitions, database name bound as `?`.
+/// The ten analytics table definitions, database name bound as `?`.
 const TABLE_DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS ?.events_raw (
         event_id UUID,
@@ -516,9 +702,12 @@ const EXECUTION_TASK_COLUMNS: &[(&str, &str)] = &[
 
 #[cfg(test)]
 mod tests {
+    use clickhouse::sql::Identifier;
+
     use super::{
         EXECUTION_RUN_COLUMNS, EXECUTION_TASK_COLUMNS, ExportError, SystemColumnRow,
-        SystemTableContractRow, TABLE_DDL, validate_execution_table_contract,
+        SystemTableContractRow, TABLE_DDL, declared_table_columns,
+        validate_execution_table_contract, validate_table_columns,
     };
 
     #[test]
@@ -810,6 +999,228 @@ mod tests {
             panic!("schema drift should return ExportError::Contract");
         };
         assert_eq!(message, expected);
+    }
+
+    #[test]
+    fn declared_columns_are_parsed_for_every_analytics_table_offline() {
+        // Pins: the drift check derives an expectation for all ten tables, so
+        // no table can silently opt out of validation by being unparseable.
+        let tables: Vec<&str> = TABLE_DDL
+            .iter()
+            .map(|ddl| {
+                let (table, columns) = declared_table_columns(ddl)
+                    .unwrap_or_else(|error| panic!("every table DDL must parse, got: {error}"));
+                assert!(
+                    !columns.is_empty(),
+                    "table {table} parsed to an empty column list"
+                );
+                table
+            })
+            .collect();
+
+        assert_eq!(
+            tables,
+            vec![
+                "events_raw",
+                "dim_sessions",
+                "dim_session_agent_context",
+                "dim_task_segments",
+                "dim_execution_runs",
+                "dim_execution_tasks",
+                "dim_learning_candidates",
+                "dim_experiment_run",
+                "turn_fact",
+                "tool_call_fact",
+            ],
+            "the set of declared analytics tables changed"
+        );
+    }
+
+    /// The live server is the permanent oracle for the DDL parser.
+    ///
+    /// The offline oracle below is the hand-written execution contract, which
+    /// covers only two tables and could in principle be removed. This one cannot
+    /// rot: both sides derive from the same DDL, so it stays correct across
+    /// schema changes by construction, and it covers every table. Its real job
+    /// is the failure the offline tests structurally cannot see -- a ClickHouse
+    /// version that changes how a type is rendered in `system.columns`, which
+    /// would otherwise turn every startup into a spurious drift refusal.
+    #[tokio::test]
+    #[ignore = "requires local ClickHouse (docker compose --profile clickhouse) and MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1"]
+    async fn declared_columns_equal_the_live_server_for_every_table_docker() {
+        if std::env::var("MOA_RUN_CLICKHOUSE_DOCKER_TESTS").as_deref() != Ok("1") {
+            panic!("MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 is required for this test");
+        }
+        let client = clickhouse::Client::default()
+            .with_url(
+                std::env::var("MOA_CLICKHOUSE_URL")
+                    .unwrap_or_else(|_| "http://localhost:10061".to_string()),
+            )
+            .with_user(std::env::var("MOA_CLICKHOUSE_USER").unwrap_or_else(|_| "moa".to_string()))
+            .with_password(
+                std::env::var("MOA_CLICKHOUSE_PASSWORD").unwrap_or_else(|_| "dev".to_string()),
+            );
+        let database = format!("moa_ddl_oracle_{}", uuid::Uuid::now_v7().simple());
+
+        client
+            .query("CREATE DATABASE ?")
+            .bind(Identifier(&database))
+            .execute()
+            .await
+            .expect("create the isolated oracle database");
+
+        let mut checked = 0usize;
+        for ddl in TABLE_DDL {
+            client
+                .query(ddl)
+                .bind(Identifier(&database))
+                .execute()
+                .await
+                .unwrap_or_else(|error| panic!("the server must accept every table DDL: {error}"));
+
+            let (table, declared) = declared_table_columns(ddl).expect("DDL must parse");
+            let actual: Vec<SystemColumnRow> = client
+                .query(
+                    "SELECT name, type AS column_type FROM system.columns \
+                     WHERE database = ? AND table = ? ORDER BY position",
+                )
+                .bind(&database)
+                .bind(table)
+                .fetch_all()
+                .await
+                .unwrap_or_else(|error| panic!("read system.columns for {table}: {error}"));
+
+            let observed: Vec<(&str, &str)> = actual
+                .iter()
+                .map(|column| (column.name.as_str(), column.column_type.as_str()))
+                .collect();
+            assert_eq!(
+                observed, declared,
+                "{table}: what the server stores must equal what the DDL parser derives"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            TABLE_DDL.len(),
+            "every declared table must be checked against the server"
+        );
+
+        client
+            .query("DROP DATABASE IF EXISTS ?")
+            .bind(Identifier(&database))
+            .execute()
+            .await
+            .expect("drop the isolated oracle database");
+    }
+
+    #[test]
+    fn declared_columns_match_the_hand_written_execution_contract_offline() {
+        // Pins: the DDL parser is correct, using the curated execution contract
+        // as its oracle. This is also the guard that keeps TABLE_DDL and the
+        // execution constants from drifting apart -- an edit to one without the
+        // other fails here.
+        for (table, expected) in [
+            ("dim_execution_runs", EXECUTION_RUN_COLUMNS),
+            ("dim_execution_tasks", EXECUTION_TASK_COLUMNS),
+        ] {
+            let ddl = TABLE_DDL
+                .iter()
+                .find(|ddl| ddl.contains(&format!("?.{table} (")))
+                .unwrap_or_else(|| panic!("{table} must have a DDL entry"));
+
+            let (parsed_table, parsed) =
+                declared_table_columns(ddl).expect("execution DDL must parse");
+
+            assert_eq!(parsed_table, table);
+            assert_eq!(
+                parsed,
+                expected.to_vec(),
+                "DDL-derived columns for {table} disagree with its hand-written contract"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_missing_a_declared_column_is_refused_with_both_values_offline() {
+        // Pins: the exact failure this check exists for -- a live table created
+        // before a TABLE_DDL column addition. `CREATE TABLE IF NOT EXISTS` is a
+        // silent no-op there, so without this the drift surfaces only as
+        // NO_SUCH_COLUMN_IN_TABLE on every later insert.
+        let ddl = TABLE_DDL
+            .iter()
+            .find(|ddl| ddl.contains("?.dim_learning_candidates ("))
+            .expect("dim_learning_candidates must have a DDL entry");
+        let (table, declared) = declared_table_columns(ddl).expect("DDL must parse");
+        let dropped = declared[3];
+        let stale: Vec<(&str, &str)> = declared
+            .iter()
+            .copied()
+            .filter(|column| *column != dropped)
+            .collect();
+        assert_eq!(
+            stale.len(),
+            declared.len() - 1,
+            "the stale fixture must be exactly one column short"
+        );
+
+        let error = validate_table_columns(table, &system_columns(&stale), &declared)
+            .expect_err("a table missing a declared column must be refused");
+
+        let ExportError::Contract(message) = error else {
+            panic!("drift must be a contract error");
+        };
+        assert!(
+            message.contains(table) && message.contains(dropped.0),
+            "the refusal must name the table and the drifted column, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_table_missing_its_last_declared_column_is_refused_offline() {
+        // Pins the length arm specifically: when the drift is the FINAL column,
+        // the ordered zip runs out before it disagrees, so only the length
+        // comparison can catch it. Appending a column is the common case, which
+        // makes this the likeliest real drift rather than a corner case.
+        let ddl = TABLE_DDL
+            .iter()
+            .find(|ddl| ddl.contains("?.dim_sessions ("))
+            .expect("dim_sessions must have a DDL entry");
+        let (table, declared) = declared_table_columns(ddl).expect("DDL must parse");
+        let (dropped, stale) = declared
+            .split_last()
+            .expect("the declaration must have columns");
+        assert!(
+            stale
+                .iter()
+                .zip(declared.iter())
+                .all(|(left, right)| left == right),
+            "the stale fixture must be a strict prefix of the declaration"
+        );
+
+        let error = validate_table_columns(table, &system_columns(stale), &declared)
+            .expect_err("a table missing its trailing column must be refused");
+
+        let ExportError::Contract(message) = error else {
+            panic!("drift must be a contract error");
+        };
+        assert!(
+            message.contains(table) && message.contains(dropped.0),
+            "the refusal must name the table and the trailing column, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_table_matching_its_declaration_is_accepted_offline() {
+        // Negative control: without this, the test above could be passing
+        // because the comparison rejects everything.
+        for ddl in TABLE_DDL {
+            let (table, declared) = declared_table_columns(ddl).expect("DDL must parse");
+
+            validate_table_columns(table, &system_columns(&declared), &declared).unwrap_or_else(
+                |error| panic!("a table matching its own DDL must be accepted, got: {error}"),
+            );
+        }
     }
 
     fn system_columns(contract: &[(&str, &str)]) -> Vec<SystemColumnRow> {

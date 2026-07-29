@@ -2,16 +2,39 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - 00-namespace.yaml
-  - 10-alloy-config.yaml
   - 15-alloy-rbac.yaml
   - 20-alloy-deployment.yaml
+  - 25-alloy-pvc.yaml
+  # The alert rules Alloy synchronizes into Mimir. They ship with the collector
+  # that owns them: a rule synchronizer deployed without its rules silently
+  # reconciles Mimir to an empty rule set.
+  - ../../ops/prometheus/alerts
 
-# Bundle the checked-in operator dashboards into a ConfigMap. The
-# `grafana_dashboard` label is the Grafana sidecar convention: a sidecar (or the
-# Grafana Cloud dashboard-sync job) watches ConfigMaps carrying it and imports
-# each JSON value as a dashboard. See dashboards/README.md for the import flow
-# when Grafana runs in Grafana Cloud rather than in-cluster.
 configMapGenerator:
+  # The collector configuration, generated from the standalone `.alloy` file so
+  # the language is checkable by `alloy fmt`/`alloy validate` rather than buried
+  # in a YAML block scalar.
+  #
+  # This generator keeps its name suffix hash precisely so a config change
+  # rewrites the ConfigMap name and the Deployment's volume reference with it.
+  # That is what rolls the pod. Without it, editing the collector config applies
+  # cleanly and never reaches the running process, and the cluster reports
+  # success for a change that did not take effect.
+  #
+  # The hash is opted out PER GENERATOR below rather than file-wide, because a
+  # file-wide `generatorOptions.disableNameSuffixHash: true` cannot be
+  # overridden by a generator: kustomize merges that flag with OR, so a global
+  # true wins everywhere and this ConfigMap would silently keep a stable name.
+  - name: alloy-config
+    namespace: observability
+    files:
+      - config.alloy
+
+  # Bundle the checked-in operator dashboards into a ConfigMap. The
+  # `grafana_dashboard` label is the Grafana sidecar convention: a sidecar (or the
+  # Grafana Cloud dashboard-sync job) watches ConfigMaps carrying it and imports
+  # each JSON value as a dashboard. See dashboards/README.md for the import flow
+  # when Grafana runs in Grafana Cloud rather than in-cluster.
   - name: moa-observability-dashboards
     namespace: observability
     files:
@@ -20,8 +43,9 @@ configMapGenerator:
       - dashboards/03-restate-internals.json
       - dashboards/04-sandbox-fleet.json
     options:
+      # The Grafana sidecar convention selects by this label, and the import flow
+      # in dashboards/README.md refers to the ConfigMap by name, so this one keeps
+      # a stable name.
+      disableNameSuffixHash: true
       labels:
         grafana_dashboard: "1"
-
-generatorOptions:
-  disableNameSuffixHash: true

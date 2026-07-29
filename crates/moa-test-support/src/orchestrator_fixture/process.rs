@@ -194,6 +194,9 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env_remove("MOA_OBSERVABILITY_SAMPLE_RATE")
         .env_remove("MOA_OBSERVABILITY_ENVIRONMENT")
         .env_remove("MOA_OBSERVABILITY_RELEASE")
+        .env_remove("MOA_METRICS_EXPORTER")
+        .env_remove("MOA_METRICS_PROMETHEUS_LISTEN")
+        .env_remove("OTEL_METRIC_EXPORT_INTERVAL")
         .arg("--port")
         .arg(config.port.to_string())
         .arg("--health-port")
@@ -243,8 +246,18 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
             "MOA_OBSERVABILITY_SERVICE_NAME",
             config.observability_service_name,
         )
+        // The collector BASE URL. The child derives `/v1/traces` and `/v1/metrics`
+        // from it exactly as production does, which is also why the ambient
+        // `MOA_METRICS_*` pair is cleared above: a developer shell carrying
+        // `.env.example`'s Prometheus defaults would otherwise make every fixture
+        // child try to bind the same scrape port and export no OTLP metrics at all.
         .env("MOA_OBSERVABILITY_OTLP_ENDPOINT", config.otlp_endpoint)
         .env("MOA_OBSERVABILITY_OTLP_PROTOCOL", "http")
+        .env("MOA_METRICS_EXPORTER", "otlp")
+        // Milliseconds. The SDK default is 60s, which is longer than any fixture
+        // test's patience, so a metric assertion would time out against a working
+        // exporter.
+        .env("OTEL_METRIC_EXPORT_INTERVAL", "2000")
         .env("MOA_OBSERVABILITY_SAMPLE_RATE", "1")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env(

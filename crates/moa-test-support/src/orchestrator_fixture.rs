@@ -951,7 +951,10 @@ mod tests {
                 timeout_ms: 1,
             },
             extra_env: Vec::new(),
-            otlp_endpoint: "http://127.0.0.1:1/v1/traces".to_string(),
+            // A collector base URL, never a signal path: config load refuses a
+            // value already naming `/v1/traces`, so a signal-shaped literal here
+            // would be a value no real child could start with.
+            otlp_endpoint: "http://127.0.0.1:1".to_string(),
             observability_service_name: "unused-fixture".to_string(),
         });
         (fixture, journal_path)

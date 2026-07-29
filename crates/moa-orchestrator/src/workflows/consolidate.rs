@@ -5,9 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use moa_config::MoaConfig;
-use moa_core::{
-    traits::EmbeddingProvider, types::identifiers::TenantId, types::learning::LearningEntry,
-};
+use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_crypto::KeyManagementProvider;
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats,
@@ -15,11 +13,9 @@ use moa_memory_lifecycle::{
 };
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::objects::tenant::TenantObjectClient;
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_session::PostgresSessionStore;
 
 /// Returns the durable workflow ID for a tenant/date consolidation pass.
 #[must_use]
@@ -187,7 +183,6 @@ pub struct ConsolidateImpl {
     kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    session_store: Arc<PostgresSessionStore>,
 }
 
 impl ConsolidateImpl {
@@ -198,14 +193,12 @@ impl ConsolidateImpl {
         kms: Arc<dyn KeyManagementProvider>,
         config: Arc<MoaConfig>,
         embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-        session_store: Arc<PostgresSessionStore>,
     ) -> Self {
         Self {
             pool,
             kms,
             config,
             embedding_provider,
-            session_store,
         }
     }
 }
@@ -226,7 +219,6 @@ impl Consolidate for ConsolidateImpl {
             kms: self.kms.clone(),
             config: self.config.clone(),
             embedding_provider: self.embedding_provider.clone(),
-            session_store: self.session_store.clone(),
         };
         let report = run_consolidate_workflow(&mut steps, request).await?;
 
@@ -301,12 +293,6 @@ pub trait ConsolidateSteps {
         outcome: ConsolidationOutcome,
     ) -> Result<ConsolidateReport, HandlerError>;
 
-    /// Persists any memory-learning entry derived from the report.
-    async fn record_memory_learning(
-        &mut self,
-        report: &ConsolidateReport,
-    ) -> Result<(), HandlerError>;
-
     /// Records that the owning tenant has completed the consolidation run.
     async fn consolidation_completed(
         &mut self,
@@ -355,7 +341,12 @@ pub async fn run_consolidate_workflow(
     let report = steps
         .build_consolidate_report(&request, ran_at, outcome)
         .await?;
-    steps.record_memory_learning(&report).await?;
+    // Consolidation deliberately writes no learning-log entry. It used to append
+    // a tenant-wide `memory_updated` row whose provenance was an empty array:
+    // nothing could say which subject's data the counts came from, so nothing
+    // could erase or export it, and no reader consumed the type either. Giving
+    // it invented tenant-wide provenance would have made it enumerable and still
+    // wrong; the counts already live on the returned report and in metrics.
     steps.consolidation_completed(&report).await?;
     steps
         .advance_consolidation_watermark(&request, observed_changelog_version)
@@ -369,7 +360,6 @@ struct RestateConsolidateSteps<'ctx, 'workflow> {
     kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    session_store: Arc<PostgresSessionStore>,
 }
 
 #[async_trait]
@@ -575,13 +565,6 @@ impl ConsolidateSteps for RestateConsolidateSteps<'_, '_> {
             .map_err(HandlerError::from)
     }
 
-    async fn record_memory_learning(
-        &mut self,
-        report: &ConsolidateReport,
-    ) -> Result<(), HandlerError> {
-        record_memory_learning(self.ctx, self.session_store.clone(), report).await
-    }
-
     async fn consolidation_completed(
         &mut self,
         report: &ConsolidateReport,
@@ -618,67 +601,6 @@ impl ConsolidateSteps for RestateConsolidateSteps<'_, '_> {
             .map(|_| ())
             .map_err(HandlerError::from)
     }
-}
-
-async fn record_memory_learning(
-    ctx: &WorkflowContext<'_>,
-    store: Arc<PostgresSessionStore>,
-    report: &ConsolidateReport,
-) -> Result<(), HandlerError> {
-    if !report.errors.is_empty() {
-        return Ok(());
-    }
-    if report.records_updated == 0
-        && report.records_deleted == 0
-        && report.relative_dates_normalized == 0
-        && report.contradictions_resolved == 0
-        && report.confidence_decayed == 0
-        && report.duplicates_merged == 0
-        && report.entity_embeddings_backfilled == 0
-        && report.aliases_promoted == 0
-        && report.digests_rebuilt == 0
-    {
-        return Ok(());
-    }
-    let report = report.clone();
-    ctx.run(|| async move {
-        store
-            .append_learning(&LearningEntry {
-                id: Uuid::now_v7(),
-                tenant_id: report.tenant_id,
-                learning_type: "memory_updated".to_string(),
-                target_id: report.tenant_id.to_string(),
-                target_label: Some("tenant_memory".to_string()),
-                payload: serde_json::json!({
-                    "target_date": report.target_date,
-                    "records_updated": report.records_updated,
-                    "records_deleted": report.records_deleted,
-                    "relative_dates_normalized": report.relative_dates_normalized,
-                    "contradictions_resolved": report.contradictions_resolved,
-                    "confidence_decayed": report.confidence_decayed,
-                    "duplicates_merged": report.duplicates_merged,
-                    "duplicates_remaining": report.duplicates_remaining,
-                    "confidence_at_floor": report.confidence_at_floor,
-                    "facts_expired": report.facts_expired,
-                    "entity_embeddings_backfilled": report.entity_embeddings_backfilled,
-                    "aliases_promoted": report.aliases_promoted,
-                    "digests_rebuilt": report.digests_rebuilt,
-                    "digests_skipped_fresh": report.digests_skipped_fresh,
-                }),
-                confidence: Some(1.0),
-                source_refs: Vec::new(),
-                actor: "system".to_string(),
-                valid_from: Utc::now(),
-                valid_to: None,
-                batch_id: None,
-                version: 1,
-            })
-            .await
-            .map_err(HandlerError::from)
-    })
-    .name("record_memory_learning")
-    .await?;
-    Ok(())
 }
 
 fn lifecycle_handler_error(error: moa_memory_lifecycle::consolidate::Error) -> HandlerError {

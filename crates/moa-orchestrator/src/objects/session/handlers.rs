@@ -646,6 +646,8 @@ impl Session for SessionImpl {
             &mut ctx,
             &mut state,
             self.session_store_backend.clone(),
+            &self.admission_pool,
+            self.config.as_ref(),
             &identity,
             request,
         )
@@ -1792,7 +1794,7 @@ async fn claim_check_child_output(
     state: &mut SessionVoState,
     session_id: SessionId,
     worker_id: &str,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<(), HandlerError> {
     let Some(full_output) = state.large_child_terminal_output(worker_id) else {
         return Ok(());
@@ -1819,7 +1821,7 @@ async fn hydrate_child_terminal_output(
     session_id: SessionId,
     terminal: &mut WorkerTerminalResult,
     claim_check: ClaimCheck,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<(), HandlerError> {
     let name = format!(
         "child_terminal_output_hydrate_{}",
@@ -2049,7 +2051,7 @@ async fn load_progress_events(
     ctx: &SharedObjectContext<'_>,
     session_id: SessionId,
     range: EventRange,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<Vec<EventRecord>, HandlerError> {
     let store = session_store.clone();
     Ok(ctx

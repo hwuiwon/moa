@@ -321,6 +321,17 @@ impl HybridRetriever {
             )
         };
         diagnostics.seed_counts = graph_seed_plan.seed_counts;
+        // Graph contribution telemetry. A graph leg that seeds nothing produces
+        // nothing, and until Task 5.5 measured it that condition was invisible in
+        // production: the rich per-request diagnostics existed only in the eval
+        // harness, so a permanently-inert graph leg looked identical to a working
+        // one. `seeded` vs `unseeded` is the cheapest signal that distinguishes them.
+        metrics::counter!(
+            "moa_retrieval_graph_expansion_total",
+            "policy" => graph_policy.as_str(),
+            "outcome" => if graph_seed_plan.strengths.is_empty() { "unseeded" } else { "seeded" }
+        )
+        .increment(1);
         let graph_output = if graph_seed_plan.strengths.is_empty() {
             Default::default()
         } else {
@@ -358,6 +369,14 @@ impl HybridRetriever {
             output
         };
         diagnostics.graph_latency_ms = graph_output.diagnostics.graph_latency_ms;
+        // Candidates the graph leg actually contributed, which is the quantity the
+        // policy decision turns on — not paths walked, which can be large while
+        // contributing nothing.
+        metrics::histogram!(
+            "moa_retrieval_graph_candidates",
+            "policy" => graph_policy.as_str()
+        )
+        .record(graph_output.candidates.len() as f64);
         provenance.timings.graph_ms = (graph_output
             .diagnostics
             .graph_latency_ms
@@ -787,7 +806,7 @@ fn rerank_document(hit: &RetrievalHit) -> String {
 }
 
 fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
-    build_reranker_from_config(config).unwrap_or_else(|error| {
+    build_reranker_from_config(config, None).unwrap_or_else(|error| {
         tracing::warn!(
             error = %error,
             "graph-memory reranking disabled because reranker configuration is invalid"

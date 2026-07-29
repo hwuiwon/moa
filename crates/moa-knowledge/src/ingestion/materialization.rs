@@ -182,43 +182,7 @@ where
         .await?;
 
         let chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
-        let semantic_report = match self
-            .semantic_graph_extractions(object.tenant_id, &object, &chunks)
-            .await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                self.record_failure_step(
-                    sync_run_uid,
-                    Some(object.object_uid),
-                    "semantic_graph_extracted",
-                    &error,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
-        self.record_step(
-            sync_run_uid,
-            Some(object.object_uid),
-            "semantic_graph_extracted",
-            StepOutcome::completed_with_counters(json!({
-                "chunks_total": chunks.len(),
-                "cache_hits": semantic_report.cache_hits,
-                "cache_misses": semantic_report.cache_misses,
-                "entities_extracted": semantic_report.entities_extracted,
-                "relations_extracted": semantic_report.relations_extracted,
-                "semantic_chunk_links": semantic_report.semantic_chunk_links,
-                "failures": 0,
-            })),
-        )
-        .await?;
-        let delta = document_chunk_delta_with_semantics(
-            &object,
-            &version,
-            &chunks,
-            &semantic_report.extractions,
-        );
+        let delta = document_chunk_delta(&object, &version, &chunks);
         // Fold the `active` retrieval marker into the rows before the batch
         // insert. Graph identity needs no folding: `chunk_uid` is the occurrence
         // node uid, and `replace_chunks` persists it into `graph_node_uid`.
@@ -495,104 +459,6 @@ where
             embeddings_created: embeddings.len() as u64,
             ingested: true,
         })
-    }
-
-    pub(super) async fn semantic_graph_extractions(
-        &self,
-        tenant_id: moa_core::types::identifiers::TenantId,
-        object: &KnowledgeObject,
-        chunks: &[KnowledgeChunk],
-    ) -> Result<SemanticGraphExtractionReport> {
-        let chunk_hashes = chunks
-            .iter()
-            .map(|chunk| chunk.chunk_hash.clone())
-            .collect::<Vec<_>>();
-        // The active extractor's cache identity determines which cached rows a
-        // lookup hits: the model-backed and deterministic extractors stamp
-        // distinct `(model, prompt_version)` values, so switching between them
-        // re-extracts instead of serving the other extractor's output.
-        let identity = match &self.semantic_model_extractor {
-            Some(extractor) => extractor.cache_identity(),
-            None => SemanticExtractionCacheIdentity::deterministic(),
-        };
-        let cached = self
-            .repository
-            .cached_semantic_graph_extractions(
-                tenant_id,
-                &chunk_hashes,
-                identity.schema_version,
-                identity.model,
-                identity.prompt_version,
-            )
-            .await?;
-        let mut cached_by_hash = cached
-            .into_iter()
-            .map(|extraction| (extraction.chunk_hash.clone(), extraction))
-            .collect::<HashMap<_, _>>();
-        let mut cache_hits = 0_u64;
-        let mut cache_misses = 0_u64;
-        let mut extracted = Vec::with_capacity(chunks.len());
-        let mut new_extractions = Vec::new();
-
-        for chunk in chunks {
-            if let Some(extraction) = cached_by_hash.remove(&chunk.chunk_hash) {
-                cache_hits = cache_hits.saturating_add(1);
-                extracted.push(extraction);
-            } else {
-                cache_misses = cache_misses.saturating_add(1);
-                let extraction = self.extract_chunk(object, chunk).await;
-                new_extractions.push(extraction.clone());
-                extracted.push(extraction);
-            }
-        }
-        self.repository
-            .upsert_semantic_graph_extractions(tenant_id, new_extractions)
-            .await?;
-
-        Ok(SemanticGraphExtractionReport {
-            cache_hits,
-            cache_misses,
-            entities_extracted: extracted
-                .iter()
-                .map(|extraction| extraction.entities.len() as u64)
-                .sum(),
-            relations_extracted: extracted
-                .iter()
-                .map(|extraction| extraction.relations.len() as u64)
-                .sum(),
-            semantic_chunk_links: semantic_chunk_link_count(chunks, &extracted) as u64,
-            extractions: extracted,
-        })
-    }
-
-    /// Extracts one chunk's semantics, preferring the model-backed extractor.
-    ///
-    /// When a model extractor is configured it is the production path; a model
-    /// call, timeout, or parse failure falls back to the deterministic keyword
-    /// extractor for this chunk (with a warning) so a single bad response never
-    /// fails the sync run. Each returned extraction carries its own honest
-    /// `model`/`prompt_version`, so a fallback is cached under the deterministic
-    /// identity and re-attempted by the model on the next re-ingestion.
-    async fn extract_chunk(
-        &self,
-        object: &KnowledgeObject,
-        chunk: &KnowledgeChunk,
-    ) -> SemanticGraphExtraction {
-        if let Some(extractor) = &self.semantic_model_extractor {
-            match extractor.extract(object, chunk).await {
-                Ok(extraction) => return extraction,
-                Err(error) => {
-                    tracing::warn!(
-                        tenant_id = %object.tenant_id,
-                        object_id = %object.object_uid,
-                        chunk_hash = %chunk.chunk_hash,
-                        error = %error,
-                        "semantic graph model extraction failed; falling back to deterministic extractor"
-                    );
-                }
-            }
-        }
-        extract_chunk_semantics(object, chunk, self.semantic_generic_entities)
     }
 }
 

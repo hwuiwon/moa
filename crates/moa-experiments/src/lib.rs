@@ -5,6 +5,9 @@
 //! `moa-orchestrator`.
 
 pub mod app;
+pub mod eligibility;
+pub mod evaluator;
+pub mod evidence;
 pub mod model;
 pub mod plan;
 pub mod scores;

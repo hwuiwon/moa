@@ -14,7 +14,8 @@
 //! and reads use the plain pool.
 
 use moa_core::{
-    types::action_policy::ActionRuleScope, types::contact::ContactId, types::identifiers::TenantId,
+    types::action_policy::ActionRuleScope, types::contact::ContactId,
+    types::experiments::ScorecardValueType, types::identifiers::TenantId,
 };
 use moa_scoring::{
     Error, SCORE_RUN_SOURCE_EVAL_REPLAY, ScoreCompareRef, ScoreRunRef,
@@ -110,13 +111,13 @@ async fn score_summaries_for_tenant_aggregates_and_excludes_other_tenant_rows_db
 
     let grounded = &summary.rows[0];
     assert_eq!(grounded.name, "grounded");
-    assert_eq!(grounded.value_type, "boolean");
+    assert_eq!(grounded.value_type, ScorecardValueType::Boolean);
     assert_eq!(grounded.n, 1);
     approx(grounded.mean_or_rate, 1.0);
 
     let quality = &summary.rows[1];
     assert_eq!(quality.name, "quality");
-    assert_eq!(quality.value_type, "numeric");
+    assert_eq!(quality.value_type, ScorecardValueType::Numeric);
     assert_eq!(
         quality.n, 2,
         "other tenant's row is excluded from the count"

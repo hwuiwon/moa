@@ -197,13 +197,14 @@ insta = { version = "1", features = ["json", "redactions"] }
 jsonwebtoken = "9.3"
 liteparse = { version = "2.2.1", default-features = false }
 metrics = "0.24"
+metrics-exporter-otel = "0.3"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 moka = { version = "0.12", features = ["future"] }
 object_store = { version = "0.11", features = ["aws", "gcp"] }
 opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
-opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
-opentelemetry_sdk = "0.31"
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "grpc-tonic", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "spec_unstable_metrics_views"] }
 httpmock = "0.7"
 parquet = { version = "53", features = ["async", "arrow"] }
 proptest = "1"

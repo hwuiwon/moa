@@ -59,8 +59,45 @@ impl MockHandProvider {
     }
 }
 
+/// Capabilities for the recovery mock: every tier, every dimension left to the
+/// policy layers, and the durable reaper named as the deadline owner. Recovery
+/// tests exercise route fallback rather than admission, so the double must be
+/// admissible on the tiers the routes name.
+fn mock_capabilities() -> moa_core::types::hands::HandProviderCapabilities {
+    use moa_core::types::hands::{
+        DeadlineEnforcement, EgressMode, HandProviderCapabilities, ResourceSupport,
+        SandboxTierCapabilities,
+    };
+
+    let tier = |tier| SandboxTierCapabilities {
+        tier,
+        cpu: ResourceSupport::unbounded_only(),
+        memory: ResourceSupport::unbounded_only(),
+        ephemeral_disk: ResourceSupport::unbounded_only(),
+        egress_modes: vec![
+            EgressMode::DenyAll,
+            EgressMode::AllowList,
+            EgressMode::Unrestricted,
+        ],
+        idle_enforcement: DeadlineEnforcement::DurableReaper,
+        max_lifetime_enforcement: DeadlineEnforcement::DurableReaper,
+    };
+    HandProviderCapabilities {
+        revision: "mock-hands-v1".to_string(),
+        tiers: vec![
+            tier(SandboxTier::Local),
+            tier(SandboxTier::None),
+            tier(SandboxTier::Container),
+            tier(SandboxTier::MicroVM),
+        ],
+    }
+}
+
 #[async_trait]
 impl HandProvider for MockHandProvider {
+    fn capabilities(&self) -> moa_core::types::hands::HandProviderCapabilities {
+        mock_capabilities()
+    }
     fn provider_name(&self) -> &str {
         self.name
     }
@@ -155,11 +192,18 @@ async fn router_with_provider_and_idempotency(
     registry.retarget_hand_tools(vec![HandRoute {
         provider: provider.provider_name().to_string(),
         tier: SandboxTier::Container,
+        policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+            moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+        ),
     }]);
     registry.retain_only(["bash"]);
     let mut providers = HashMap::new();
     providers.insert(provider.provider_name().to_string(), provider);
-    ToolRouter::new(registry, providers)
+    ToolRouter::new(
+        registry,
+        providers,
+        crate::core::profile::local_development_sandbox_policy(),
+    )
 }
 
 async fn router_with_providers_and_routes(
@@ -194,7 +238,11 @@ async fn router_with_providers_and_routes(
         let provider_trait: Arc<dyn HandProvider> = provider.clone();
         provider_map.insert(provider.provider_name().to_string(), provider_trait);
     }
-    ToolRouter::new(registry, provider_map)
+    ToolRouter::new(
+        registry,
+        provider_map,
+        crate::core::profile::local_development_sandbox_policy(),
+    )
 }
 
 fn session() -> SessionMeta {
@@ -573,10 +621,16 @@ async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
             HandRoute {
                 provider: primary.provider_name().to_string(),
                 tier: SandboxTier::Container,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
             HandRoute {
                 provider: fallback.provider_name().to_string(),
                 tier: SandboxTier::MicroVM,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
         ],
         IdempotencyClass::NonIdempotent,
@@ -640,10 +694,16 @@ async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
             HandRoute {
                 provider: primary.provider_name().to_string(),
                 tier: SandboxTier::Container,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
             HandRoute {
                 provider: fallback.provider_name().to_string(),
                 tier: SandboxTier::MicroVM,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
         ],
         IdempotencyClass::Idempotent,
@@ -702,10 +762,16 @@ async fn recovery_does_not_fallback_after_non_idempotent_execution_failure() {
             HandRoute {
                 provider: primary.provider_name().to_string(),
                 tier: SandboxTier::Container,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
             HandRoute {
                 provider: fallback.provider_name().to_string(),
                 tier: SandboxTier::MicroVM,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
         ],
         IdempotencyClass::NonIdempotent,
@@ -767,10 +833,16 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
             HandRoute {
                 provider: primary.provider_name().to_string(),
                 tier: SandboxTier::Container,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
             HandRoute {
                 provider: fallback.provider_name().to_string(),
                 tier: SandboxTier::MicroVM,
+                policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                    moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+                ),
             },
         ],
         IdempotencyClass::NonIdempotent,

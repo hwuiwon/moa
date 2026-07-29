@@ -177,14 +177,84 @@ impl PostgresSessionStore {
         rows.iter().map(experience_attribution_from_row).collect()
     }
 
-    /// Appends or idempotently refreshes one learning candidate.
+    /// Appends or idempotently refreshes one learning candidate and its sources.
     pub async fn append_learning_candidate(&self, candidate: &LearningCandidate) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(map_sqlx_error)?;
-        self.append_learning_candidate_with_conn(&mut conn, candidate)
-            .await
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        self.append_learning_candidate_with_conn(tx.as_mut(), candidate)
+            .await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Inserts one immutable learning candidate and its sources unless its ID already exists.
+    ///
+    /// Unlike [`Self::append_learning_candidate`], a conflict leaves both the
+    /// candidate row and its typed sources untouched. This is the filing seam for
+    /// deterministic mined candidates, whose later observations must not rewrite
+    /// evidence already presented for review.
+    pub async fn insert_learning_candidate_if_absent(
+        &self,
+        candidate: &LearningCandidate,
+    ) -> Result<bool> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let inserted = sqlx::query(&format!(
+            "INSERT INTO {learning_candidates} \
+             (id, tenant_id, storage_partition_id, user_id, candidate_type, proposal_kind, status, \
+              target_id, target_label, \
+              task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, \
+              confidence, risk_class, promotion_requirements, status_reason, \
+              batch_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+                     $18, $19, $20, $21) \
+             ON CONFLICT (id) DO NOTHING"
+        ))
+        .bind(candidate.id)
+        .bind(candidate.tenant_id.to_string())
+        .bind(storage_partition_id(candidate.tenant_id))
+        .bind(candidate.user_id.as_ref().map(ToString::to_string))
+        .bind(candidate.candidate_type.as_str())
+        .bind(candidate.proposal_kind.as_str())
+        .bind(candidate.status.as_str())
+        .bind(candidate.target_id.as_deref())
+        .bind(candidate.target_label.as_deref())
+        .bind(candidate.task_fingerprint.as_ref().map(|value| value.hash.as_str()))
+        .bind(candidate.task_fingerprint.clone().map(Json))
+        .bind(candidate.task_facets.clone().map(Json))
+        .bind(Json(candidate.payload.clone()))
+        .bind(candidate.evaluation_payload.clone().map(Json))
+        .bind(candidate.confidence)
+        .bind(candidate.risk_class.as_str())
+        .bind(&candidate.promotion_requirements)
+        .bind(candidate.status_reason.as_deref())
+        .bind(candidate.batch_id)
+        .bind(candidate.created_at)
+        .bind(candidate.updated_at)
+        .execute(tx.as_mut())
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected()
+            > 0;
+        if inserted {
+            self.append_learning_candidate_sources_in_tx(
+                tx.as_mut(),
+                candidate.id,
+                &candidate.sources,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(inserted)
     }
 
     /// Appends or idempotently refreshes one learning candidate using an existing connection.
+    ///
+    /// The candidate row and every normalized source it carries are written
+    /// together. That is not a convenience: a deferred database constraint
+    /// refuses to let the transaction commit if the candidate ends it with no
+    /// sources, so splitting these into two calls would produce a candidate that
+    /// cannot be committed at all rather than one that is silently
+    /// unattributable.
     pub async fn append_learning_candidate_with_conn(
         &self,
         conn: &mut PgConnection,
@@ -193,9 +263,10 @@ impl PostgresSessionStore {
         let learning_candidates = self.table_name("learning_candidates");
         sqlx::query(&format!(
             "INSERT INTO {learning_candidates} \
-             (id, tenant_id, storage_partition_id, user_id, candidate_type, status, target_id, target_label, \
+             (id, tenant_id, storage_partition_id, user_id, candidate_type, proposal_kind, status, \
+              target_id, target_label, \
               task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, \
-              source_experience_ids, confidence, risk_class, promotion_requirements, status_reason, \
+              confidence, risk_class, promotion_requirements, status_reason, \
               batch_id, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
                      $18, $19, $20, $21) \
@@ -215,6 +286,7 @@ impl PostgresSessionStore {
         .bind(storage_partition_id(candidate.tenant_id))
         .bind(candidate.user_id.as_ref().map(ToString::to_string))
         .bind(candidate.candidate_type.as_str())
+        .bind(candidate.proposal_kind.as_str())
         .bind(candidate.status.as_str())
         .bind(candidate.target_id.as_deref())
         .bind(candidate.target_label.as_deref())
@@ -223,7 +295,6 @@ impl PostgresSessionStore {
         .bind(candidate.task_facets.clone().map(Json))
         .bind(Json(candidate.payload.clone()))
         .bind(candidate.evaluation_payload.clone().map(Json))
-        .bind(&candidate.source_experience_ids)
         .bind(candidate.confidence)
         .bind(candidate.risk_class.as_str())
         .bind(&candidate.promotion_requirements)
@@ -234,7 +305,8 @@ impl PostgresSessionStore {
         .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
-        Ok(())
+        self.append_learning_candidate_sources_in_tx(conn, candidate.id, &candidate.sources)
+            .await
     }
 
     /// Lists learning candidates for a tenant and optional status.
@@ -261,7 +333,13 @@ impl PostgresSessionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        rows.iter().map(learning_candidate_from_row).collect()
+        let mut candidates = rows
+            .iter()
+            .map(learning_candidate_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        self.hydrate_learning_candidate_sources(&mut candidates)
+            .await?;
+        Ok(candidates)
     }
 
     /// Finds one open proposed candidate of a type targeting a label, using an existing connection.
@@ -289,7 +367,15 @@ impl PostgresSessionStore {
         .fetch_optional(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
-        row.as_ref().map(learning_candidate_from_row).transpose()
+        let mut candidate = row
+            .as_ref()
+            .map(learning_candidate_from_row)
+            .transpose()?
+            .map(|candidate| vec![candidate])
+            .unwrap_or_default();
+        self.hydrate_learning_candidate_sources(&mut candidate)
+            .await?;
+        Ok(candidate.into_iter().next())
     }
 
     /// Finds one open proposed candidate of a type with a task fingerprint, using an existing connection.
@@ -319,7 +405,15 @@ impl PostgresSessionStore {
         .fetch_optional(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
-        row.as_ref().map(learning_candidate_from_row).transpose()
+        let mut candidate = row
+            .as_ref()
+            .map(learning_candidate_from_row)
+            .transpose()?
+            .map(|candidate| vec![candidate])
+            .unwrap_or_default();
+        self.hydrate_learning_candidate_sources(&mut candidate)
+            .await?;
+        Ok(candidate.into_iter().next())
     }
 
     /// Loads one full learning candidate by tenant and candidate ID.
@@ -350,33 +444,29 @@ impl PostgresSessionStore {
         .fetch_optional(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
-        row.as_ref().map(learning_candidate_from_row).transpose()
-    }
-
-    /// Applies an explicit candidate status transition.
-    pub async fn update_learning_candidate_status(
-        &self,
-        update: &LearningCandidateStatusUpdate,
-    ) -> Result<()> {
-        let affected = self
-            .update_learning_candidate_status_with_expected(update, None)
+        let mut candidate = row
+            .as_ref()
+            .map(learning_candidate_from_row)
+            .transpose()?
+            .map(|candidate| vec![candidate])
+            .unwrap_or_default();
+        self.hydrate_learning_candidate_sources(&mut candidate)
             .await?;
-        if affected == 0 {
-            return Err(MoaError::StorageError(format!(
-                "learning candidate `{}` was not found",
-                update.candidate_id
-            )));
-        }
-        Ok(())
+        Ok(candidate.into_iter().next())
     }
 
     /// Applies a status transition only when the candidate is still in the expected status.
+    ///
+    /// This is the only status writer. The unconditional variant that used to
+    /// sit beside it took no expected status at all, so any caller could move
+    /// any candidate to any status, and two concurrent reviewers could both be
+    /// told they succeeded at contradictory transitions.
     pub async fn update_learning_candidate_status_from(
         &self,
         update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
     ) -> Result<bool> {
-        self.update_learning_candidate_status_with_expected(update, Some(expected_status))
+        self.update_learning_candidate_status_with_expected(update, expected_status)
             .await
             .map(|affected| affected > 0)
     }
@@ -494,47 +584,27 @@ impl PostgresSessionStore {
     async fn update_learning_candidate_status_with_expected(
         &self,
         update: &LearningCandidateStatusUpdate,
-        expected_status: Option<LearningCandidateStatus>,
+        expected_status: LearningCandidateStatus,
     ) -> Result<u64> {
         let learning_candidates = self.table_name("learning_candidates");
-        let affected = if let Some(expected_status) = expected_status {
-            sqlx::query(&format!(
-                "UPDATE {learning_candidates} SET \
-                     status = $1, \
-                     status_reason = $2, \
-                     evaluation_payload = COALESCE($3, evaluation_payload), \
-                     updated_at = $4 \
-                 WHERE id = $5 AND status = $6"
-            ))
-            .bind(update.status.as_str())
-            .bind(update.status_reason.as_deref())
-            .bind(update.evaluation_payload.clone().map(Json))
-            .bind(update.updated_at)
-            .bind(update.candidate_id)
-            .bind(expected_status.as_str())
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?
-            .rows_affected()
-        } else {
-            sqlx::query(&format!(
-                "UPDATE {learning_candidates} SET \
+        let affected = sqlx::query(&format!(
+            "UPDATE {learning_candidates} SET \
                  status = $1, \
                  status_reason = $2, \
                  evaluation_payload = COALESCE($3, evaluation_payload), \
                  updated_at = $4 \
-                 WHERE id = $5"
-            ))
-            .bind(update.status.as_str())
-            .bind(update.status_reason.as_deref())
-            .bind(update.evaluation_payload.clone().map(Json))
-            .bind(update.updated_at)
-            .bind(update.candidate_id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?
-            .rows_affected()
-        };
+             WHERE id = $5 AND status = $6"
+        ))
+        .bind(update.status.as_str())
+        .bind(update.status_reason.as_deref())
+        .bind(update.evaluation_payload.clone().map(Json))
+        .bind(update.updated_at)
+        .bind(update.candidate_id)
+        .bind(expected_status.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
         Ok(affected)
     }
 

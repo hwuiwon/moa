@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use moa_config::MoaConfig;
-use moa_core::traits::CredentialVault;
+use moa_core::traits::{CredentialVault, RuntimeCacheStore};
 use moa_core::types::credentials::{CredentialServiceActor, RedactedSecret};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
@@ -121,6 +121,7 @@ pub struct KnowledgeSyncIngestionImpl {
     kms: Arc<dyn KeyManagementProvider>,
     credentials: Arc<dyn KnowledgeCredentialStore>,
     config: Arc<MoaConfig>,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
 }
 
 impl KnowledgeSyncIngestionImpl {
@@ -135,12 +136,14 @@ impl KnowledgeSyncIngestionImpl {
         kms: Arc<dyn KeyManagementProvider>,
         credential_vault: Arc<dyn CredentialVault>,
         config: Arc<MoaConfig>,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
     ) -> Self {
         Self {
             pool,
             kms,
             credentials: Arc::new(VaultKnowledgeCredentialStore::new(credential_vault)),
             config,
+            runtime_cache,
         }
     }
 }
@@ -162,6 +165,7 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
             kms: self.kms.clone(),
             credentials: self.credentials.clone(),
             config: self.config.clone(),
+            runtime_cache: Arc::clone(&self.runtime_cache),
         };
         let report = run_knowledge_sync_ingestion_workflow(&mut steps, request).await?;
 
@@ -313,6 +317,7 @@ struct RestateKnowledgeSyncIngestionSteps<'ctx, 'workflow> {
     kms: Arc<dyn KeyManagementProvider>,
     credentials: Arc<dyn KnowledgeCredentialStore>,
     config: Arc<MoaConfig>,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
 }
 
 #[async_trait]
@@ -471,6 +476,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         let pool = self.pool.clone();
         let kms = self.kms.clone();
         let config = self.config.clone();
+        let runtime_cache = Arc::clone(&self.runtime_cache);
         let run = prepared.run.clone();
         let provider_label = prepared.provider.clone();
         let connection = prepared.connection.clone();
@@ -490,9 +496,13 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                         content_caller,
                     )),
                 );
-                let runner =
-                    ProductionKnowledgeIngestionRunner::new(pool, kms, config.as_ref().clone())
-                        .with_content_fetcher(content_fetcher);
+                let runner = ProductionKnowledgeIngestionRunner::new(
+                    pool,
+                    kms,
+                    config.as_ref().clone(),
+                    runtime_cache,
+                )
+                .with_content_fetcher(content_fetcher);
                 let report = runner
                     .ingest_record_page(&run, &page.provider, page.page)
                     .await
@@ -515,12 +525,17 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         let pool = self.pool.clone();
         let kms = self.kms.clone();
         let config = self.config.clone();
+        let runtime_cache = Arc::clone(&self.runtime_cache);
         let run = prepared.run.clone();
         let provider = prepared.provider.clone();
         self.ctx
             .run(|| async move {
-                let runner =
-                    ProductionKnowledgeIngestionRunner::new(pool, kms, config.as_ref().clone());
+                let runner = ProductionKnowledgeIngestionRunner::new(
+                    pool,
+                    kms,
+                    config.as_ref().clone(),
+                    runtime_cache,
+                );
                 let report = runner
                     .prune_unseen_objects(&run, &provider, &seen_source_ids)
                     .await

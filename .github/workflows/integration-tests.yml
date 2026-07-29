@@ -108,3 +108,162 @@ jobs:
       - name: Stop compose stack
         if: always()
         run: docker compose down -v
+
+  behavior-lab-scorecards:
+    runs-on: ubuntu-latest
+    # Deterministic and unbilled by construction: every evaluator in the initial
+    # product registry reads typed terminal evidence and calls no provider. The
+    # billed plan-to-trial-to-score smoke is NOT here — it stays `#[ignore]`d
+    # behind both MOA_RUN_LIVE_E2E and MOA_RUN_LIVE_PROVIDER_TESTS and runs only
+    # under workflow_dispatch with environment approval.
+    timeout-minutes: 30
+    env:
+      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:10040/moa
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Verify migration ownership
+        run: CARGO_TARGET_DIR=target/tools cargo run -p xtask --locked -- check-migrations
+
+      # Offline lanes first: they need no database and they are what fails when a
+      # scorecard, evaluator, or eligibility rule regresses.
+      - name: Scorecard, evaluator, and eligibility offline lanes
+        run: >-
+          cargo nextest run --locked
+          -p moa-core -p moa-artifacts -p moa-wire
+          -p moa-experiments -p moa-scoring
+          -p moa-lineage-core
+          -E 'test(/scorecard|evaluator|eligibility|experiment|provenance/)'
+
+      - name: Start Postgres
+        run: docker compose up -d --build postgres
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T postgres pg_isready -U moa_owner >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs postgres
+          exit 1
+
+      # The provenance table, its composite foreign keys, and its immutability
+      # trigger are database guarantees; asserting them anywhere but against a
+      # real Postgres would assert the fixture instead of the contract.
+      - name: Score provenance migration lane
+        run: >-
+          cargo nextest run -p moa-migrations --locked
+          --run-ignored ignored-only --test run_idempotency_db
+          -E 'test(/v000361/)'
+
+      - name: Score provenance writer lane
+        run: >-
+          cargo nextest run -p moa-lineage-sink --locked --test writer_db
+          -E 'test(/experiment.*score|score.*provenance|score.*replay/)'
+
+      - name: Scorecard eligibility read lane
+        run: >-
+          cargo nextest run -p moa-experiments --locked
+          --run-ignored ignored-only --test experiment_store_db
+          -E 'test(/scorecard|evaluator|eligibility|provenance/)'
+
+      - name: Dump Postgres logs
+        if: failure()
+        run: docker compose logs postgres
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose down -v
+
+  clickhouse-analytics:
+    runs-on: ubuntu-latest
+    # The named trigger for the ClickHouse analytics arm. That backend is wired
+    # from `[clickhouse]` config presence and covered in the db lanes against a
+    # mock server, but its two real-server contracts -- cross-backend parity with
+    # the Postgres read models, and the schema-drift refusal that `CREATE TABLE
+    # IF NOT EXISTS` cannot provide -- need an actual ClickHouse. Those tests are
+    # `#[ignore]`d and match no other lane's filter, so without this job nothing
+    # schedules them and they decay against schema changes made elsewhere. That
+    # is not hypothetical: the parity fixture was silently broken by an unrelated
+    # NOT NULL column addition before this job existed.
+    timeout-minutes: 30
+    env:
+      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:10040/moa
+      MOA_RUN_CLICKHOUSE_DOCKER_TESTS: "1"
+      MOA_CLICKHOUSE_URL: http://localhost:10061
+      MOA_CLICKHOUSE_USER: moa
+      MOA_CLICKHOUSE_PASSWORD: dev
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Start Postgres and ClickHouse
+        run: docker compose --profile clickhouse up -d --build postgres clickhouse
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T postgres pg_isready -U moa_owner >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs postgres
+          exit 1
+
+      - name: Wait for ClickHouse
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf "$MOA_CLICKHOUSE_URL/ping" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs clickhouse
+          exit 1
+
+      - name: ClickHouse analytics real-server lane
+        run: cargo nextest run --locked --profile clickhouse-docker --run-ignored all
+
+      - name: Dump service logs
+        if: failure()
+        run: docker compose logs postgres clickhouse
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose --profile clickhouse down -v

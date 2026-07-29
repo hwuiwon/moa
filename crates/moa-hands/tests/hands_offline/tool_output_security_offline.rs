@@ -149,6 +149,8 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     crate::mcp_router::opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![moa_config::McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "third-party".to_string(),
         transport: moa_config::McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -171,7 +173,10 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
         .execute_authorized(
             &session(),
             &identity(),
-            &invoke("lookup", json!({})),
+            &invoke(
+                &moa_hands::mcp_tool_reference("third-party", "lookup"),
+                json!({}),
+            ),
             ToolCallId::new(),
             None,
         )

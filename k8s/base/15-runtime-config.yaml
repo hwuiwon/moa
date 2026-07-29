@@ -10,6 +10,15 @@ data:
   MOA_SECURITY_PROFILE: local
   MOA_PERMISSIONS_DEFAULT_EFFECT: allow
   MOA_CLOUD_HANDS_DEFAULT_PROVIDER: local
+  # Deployment sandbox policy layer. This local-profile overlay states the
+  # deliberately unbounded development policy explicitly; a cloud overlay must
+  # replace it, because MOA_SECURITY_PROFILE=cloud refuses to start on the
+  # built-in `local-development-unbounded` revision.
+  MOA_SANDBOX_POLICY_JSON: >-
+    {"deployment":{"revision":"local-development-unbounded",
+    "cpu":{"mode":"unbounded"},"memory":{"mode":"unbounded"},
+    "ephemeral_disk":{"mode":"unbounded"},"egress":{"mode":"unrestricted"},
+    "idle_timeout":{"mode":"unbounded"},"max_lifetime":{"mode":"unbounded"}}}
   # Every KMS-capable replica shares Postgres state and the same immutable
   # generation-named keyring. Root-key material remains in a Secret volume.
   MOA_KMS_PROVIDER: postgres

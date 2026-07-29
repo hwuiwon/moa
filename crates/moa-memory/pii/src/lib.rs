@@ -3,9 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 pub mod erasure;
+pub mod learning_erasure;
 pub mod legal_hold;
 pub mod mock;
 pub mod openai_filter;
+pub mod sanitized;
 
 use moa_core::types::security::SensitivityClass;
 pub use mock::MockClassifier;

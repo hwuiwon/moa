@@ -649,8 +649,13 @@ fn validate_capability_source(
     let invalid = match &capability.source {
         CapabilitySource::BuiltInTool { name } => name.trim().is_empty(),
         CapabilitySource::HandTool { name } => name.trim().is_empty(),
-        CapabilitySource::McpTool { server, name } => {
-            server.trim().is_empty() || name.trim().is_empty()
+        CapabilitySource::McpTool {
+            server,
+            tool_name,
+            remote_name,
+            ..
+        } => {
+            server.trim().is_empty() || tool_name.trim().is_empty() || remote_name.trim().is_empty()
         }
         CapabilitySource::ActionArtifact { tool_name, .. } => tool_name.trim().is_empty(),
         CapabilitySource::ConnectorAction {

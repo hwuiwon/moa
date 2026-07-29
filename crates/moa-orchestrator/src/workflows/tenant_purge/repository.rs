@@ -520,7 +520,12 @@ async fn delete_tenant_rows(
         "DELETE FROM action_policy_rules WHERE tenant_id = $1",
         "DELETE FROM builtin_pending_approvals WHERE tenant_id = $1",
         "DELETE FROM auth0_ciba_approvals WHERE session_id IN (SELECT id FROM sessions WHERE tenant_id = $1) OR deciding_user_id IN (SELECT id FROM users WHERE tenant_id = $1)",
+        // Keyed on `tenant_id` rather than the storage partition: the erasure
+        // decision ledger records dispositions for a tenant's subjects and has no
+        // partition column.
+        "DELETE FROM moa.privacy_erasure_record_decision WHERE tenant_id = $1",
         "DELETE FROM moa.hand_leases WHERE tenant_id = $1",
+        "DELETE FROM moa.tenant_sandbox_policy WHERE tenant_id = $1",
         "DELETE FROM moa.execution_node_materialization WHERE tenant_id = $1",
         "DELETE FROM moa.execution_planner_call_audit WHERE tenant_id = $1",
         "DELETE FROM moa.execution_compile_audit WHERE tenant_id = $1",
@@ -530,6 +535,15 @@ async fn delete_tenant_rows(
         "DELETE FROM moa.execution_template_admission WHERE tenant_id = $1",
         "DELETE FROM moa.execution_run WHERE tenant_id = $1",
         "DELETE FROM moa.execution_planning_context WHERE tenant_id = $1",
+        // Archived session history, single-sourced from the crate that owns the
+        // table. The column name lives only inside a string literal, so nothing
+        // connects this entry to the schema; `moa-session` exports the canonical
+        // statement so the purge and the test that proves it cannot drift apart.
+        // V000364 declares the `session_id` foreign key WITHOUT `ON DELETE
+        // CASCADE` deliberately, so removing this step fails the later
+        // `DELETE FROM sessions` on a foreign-key violation instead of silently
+        // leaving a purged tenant's conversation history behind in the archive.
+        moa_session::archive::TENANT_PURGE_SQL,
         "DELETE FROM session_agent_context WHERE tenant_id = $1",
         "DELETE FROM session_attachments WHERE tenant_id = $1",
         "DELETE FROM session_blobs WHERE tenant_id = $1",
@@ -556,10 +570,29 @@ async fn delete_tenant_rows(
         "DELETE FROM analytics.eval_dataset_items WHERE storage_partition_id = $1",
         "DELETE FROM moa.agent_deployment WHERE storage_partition_id = $1",
         "DELETE FROM moa.agent_installation WHERE storage_partition_id = $1",
+        // Behavior Lab score provenance goes before the trials it references.
+        // V000361 declares that foreign key WITHOUT `ON DELETE CASCADE`
+        // deliberately, so removing this line fails the trial delete on a
+        // foreign-key violation instead of silently leaving a purged tenant's
+        // evaluator evidence behind. A cascade here would make this step
+        // unfalsifiable: neutering it would change nothing observable.
+        "DELETE FROM moa.experiment_score_provenance WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_trial WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run_artifact_revision WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run WHERE storage_partition_id = $1",
         "DELETE FROM analytics.score_run WHERE storage_partition_id = $1",
+        // Learning-derived attribution goes before everything it references:
+        // `learning_candidates`, the artifact revision/file rows, and the
+        // sessions/experiences its source columns name. V000360 declares those
+        // foreign keys WITHOUT `ON DELETE CASCADE` deliberately, so deleting a
+        // parent first fails loudly rather than silently taking the child with
+        // it — a cascade here would make these steps unfalsifiable, since
+        // removing them would change nothing observable.
+        "DELETE FROM moa.artifact_suite_contribution WHERE storage_partition_id = $1",
+        "DELETE FROM moa.artifact_revision_contribution WHERE storage_partition_id = $1",
+        "DELETE FROM learning_log_source WHERE storage_partition_id = $1",
+        "DELETE FROM learning_candidate_decision WHERE storage_partition_id = $1",
+        "DELETE FROM learning_candidate_source WHERE storage_partition_id = $1",
         "DELETE FROM moa.skill_embedding WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact_file WHERE storage_partition_id = $1",
         "UPDATE moa.artifact SET latest_revision_uid = NULL WHERE storage_partition_id = $1",
@@ -570,6 +603,10 @@ async fn delete_tenant_rows(
         "DELETE FROM experience_records WHERE storage_partition_id = $1",
         "DELETE FROM learning_log WHERE storage_partition_id = $1",
         "DELETE FROM task_segments WHERE storage_partition_id = $1",
+        // The durable lineage journal holds accepted-but-unwritten rows destined
+        // for `turn_lineage`, so it is purged first: leaving a queued row behind
+        // would let a writer drain it into a tenant that no longer exists.
+        "DELETE FROM analytics.lineage_journal WHERE storage_partition_id = $1",
         "DELETE FROM analytics.turn_lineage WHERE storage_partition_id = $1",
         "DELETE FROM analytics.scores WHERE storage_partition_id = $1",
         "DELETE FROM analytics.audit_roots WHERE storage_partition_id = $1",
@@ -626,6 +663,24 @@ async fn delete_tenant_rows(
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("clear active channel binding: {error}"))?;
+    // `events` is append-only, enforced by a per-row BEFORE DELETE trigger that
+    // raises unless `moa.events_maintenance` is set. Without this line a tenant
+    // purge cannot delete any tenant that ever held a conversation — it fails
+    // with P0001 `events table is append-only`. The purge suite could not see it
+    // because a per-row trigger does not fire on zero rows and the fixture seeded
+    // no events, so the purge passed in tests and failed against every real
+    // tenant.
+    //
+    // `true` makes this transaction-local: it dies with the transaction, so the
+    // hatch is open for exactly the statements below and for no one else. Erasing
+    // a tenant's transcript on a right-to-erasure request is the one legitimate
+    // reason to delete from an append-only log, and it is why the hatch exists —
+    // but a purge that quietly disabled the guard process-wide would be a worse
+    // bug than the one it fixes.
+    sqlx::query("SELECT set_config('moa.events_maintenance', 'on', true)")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("enable append-only maintenance for tenant purge: {error}"))?;
     for statement in [
         "DELETE FROM context_snapshots WHERE tenant_id = $1",
         "DELETE FROM events WHERE tenant_id = $1",
@@ -1058,7 +1113,12 @@ mod tests {
         let error = purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
             .await
             .expect_err("scripted tenant delete must fail");
-        assert!(error.contains("scripted tenant purge rollback"));
+        assert!(
+            error.contains("scripted tenant purge rollback"),
+            "the tenant delete must be what failed, so the rollback this test \
+             pins is the one a real relational failure takes; a different error \
+             means the purge aborted before reaching the scripted trigger: {error}"
+        );
 
         let tenant_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants WHERE id = $1")
             .bind(tenant_id)

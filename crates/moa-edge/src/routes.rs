@@ -93,6 +93,14 @@ pub struct AppState {
     /// ClickHouse analytics query client when `[clickhouse]` is configured;
     /// dashboard queries follow the analytics-export backend.
     pub clickhouse_analytics: Option<Arc<moa_analytics::AnalyticsClickHouseClient>>,
+    /// Handle for the instance-owned security audit writer.
+    ///
+    /// Every authentication outcome is enqueued through this. Holding the
+    /// emitter on the state is what makes the writer's ownership visible: the
+    /// process that built the state also owns the task and drains it at
+    /// shutdown, so an audit event cannot be enqueued onto a writer nobody can
+    /// see, join, or stop.
+    pub audit: moa_ocsf::AuditEmitter,
 }
 
 /// Edge-local verification config for public tenant-knowledge webhooks.
@@ -123,8 +131,6 @@ pub fn router(state: AppState) -> Router {
 
 /// Build the REST route ladder without the sibling MCP transport router.
 pub(crate) fn base_router(state: AppState) -> Router {
-    moa_authz::configure_security_audit((*state.pool).clone(), false);
-
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/auth/login", post(auth_accounts::login))
@@ -193,10 +199,6 @@ pub(crate) fn base_router(state: AppState) -> Router {
         .route("/v1/lineage/query", post(lineage::handle_query))
         .route("/v1/lineage/verify", post(lineage::handle_verify))
         .merge(dashboard::router())
-        .route(
-            "/v1/security/secret-scanning/github",
-            post(handle_github_secret_scan),
-        )
         .route(
             "/v1/webhooks/auth0/connection-linked",
             post(handle_auth0_connection_webhook),
@@ -338,6 +340,7 @@ pub(super) async fn authenticate_edge_request(
         None => {
             span.record("moa.edge.auth.result", "missing_credential");
             moa_ocsf::spawn_authn_failure(
+                &state.audit,
                 Uuid::nil(),
                 None,
                 "unknown",
@@ -357,6 +360,7 @@ pub(super) async fn authenticate_edge_request(
                     span.record("moa.edge.auth.provider", state.oauth_access_tokens.name());
                     span.record("moa.edge.auth.result", "rejected");
                     moa_ocsf::spawn_authn_failure(
+                        &state.audit,
                         Uuid::nil(),
                         None,
                         state.oauth_access_tokens.name(),
@@ -380,6 +384,7 @@ pub(super) async fn authenticate_edge_request(
                 );
                 span.record("moa.edge.auth.result", "rejected");
                 moa_ocsf::spawn_authn_failure(
+                    &state.audit,
                     Uuid::nil(),
                     None,
                     state.auth.name(),
@@ -398,6 +403,7 @@ pub(super) async fn authenticate_edge_request(
     );
     span.record("moa.edge.auth.result", "accepted");
     moa_ocsf::spawn_authn_success(
+        &state.audit,
         principal.identity.tenant_id.0,
         &principal.identity,
         provider_name,
@@ -548,18 +554,6 @@ pub(super) fn user_session_token_from_headers(headers: &HeaderMap) -> Option<Str
     authorization_bearer_token(headers)
         .filter(|token| moa_auth_providers::looks_like_user_session_token(token))
         .or_else(|| user_session_token_from_cookie(headers))
-}
-
-async fn handle_github_secret_scan() -> axum::response::Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        [(
-            "x-moa-reason",
-            "not-yet-implemented-pending-github-partner-registration",
-        )],
-        "GitHub secret scanning partner endpoint is not implemented until registration is complete",
-    )
-        .into_response()
 }
 
 async fn handle_public_contact_verification_start(

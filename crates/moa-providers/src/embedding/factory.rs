@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use moa_config::MoaConfig;
-use moa_core::traits::EmbeddingProvider;
+use moa_core::traits::{EmbeddingProvider, RuntimeCacheStore};
 use moa_core::{error::MoaError, error::Result};
 
 use super::cache::CachedEmbeddingProvider;
@@ -29,7 +29,7 @@ use super::{
     ZeroEntropyEmbedding,
 };
 use crate::core::concurrency::ConcurrencyLimiter;
-use crate::core::concurrency_factory::{CallKind, ProviderConcurrency};
+use crate::core::concurrency_factory::{CallKind, ProviderCoordination};
 use crate::core::pacer::PacerConfig;
 use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
@@ -78,6 +78,7 @@ impl EmbeddingProviderKind {
     fn build(
         self,
         config: &MoaConfig,
+        coordination: &ProviderCoordination,
         model: String,
         output_dim: Option<usize>,
         role: EmbedderConstructionRole,
@@ -96,12 +97,12 @@ impl EmbeddingProviderKind {
                 }
                 Ok(Arc::new(apply_overrides(
                     provider,
-                    config,
+                    coordination,
                     OPENAI_PROVIDER_NAME,
                     &api_key,
                     config.providers.openai.max_inputs_per_min,
                     config.providers.openai.max_concurrent_requests,
-                )))
+                )?))
             }
             Self::Cohere => {
                 let api_key = read_api_key("MOA_COHERE_API_KEY", &config.providers.cohere.api_key)?;
@@ -112,12 +113,12 @@ impl EmbeddingProviderKind {
                 }
                 Ok(Arc::new(apply_overrides(
                     provider,
-                    config,
+                    coordination,
                     COHERE_PROVIDER_NAME,
                     &api_key,
                     config.providers.cohere.max_inputs_per_min,
                     config.providers.cohere.max_concurrent_requests,
-                )))
+                )?))
             }
             Self::Gemini => {
                 if model != GEMINI_V2_MODEL {
@@ -125,7 +126,7 @@ impl EmbeddingProviderKind {
                         "gemini embedder only supports {GEMINI_V2_MODEL}, got {model}"
                     )));
                 }
-                Ok(Arc::new(build_gemini_embedder(config, role)?))
+                Ok(Arc::new(build_gemini_embedder(config, coordination, role)?))
             }
             Self::ZeroEntropy => {
                 let api_key = read_api_key(
@@ -138,12 +139,12 @@ impl EmbeddingProviderKind {
                 }
                 Ok(Arc::new(apply_overrides(
                     provider,
-                    config,
+                    coordination,
                     ZEROENTROPY_PROVIDER_NAME,
                     &api_key,
                     config.providers.zeroentropy.max_inputs_per_min,
                     config.providers.zeroentropy.max_concurrent_requests,
-                )))
+                )?))
             }
         }
     }
@@ -161,6 +162,13 @@ trait EmbeddingOverrides: Sized {
     fn with_rate_limits(self, config: PacerConfig) -> Self;
 
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self;
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self;
 }
 
 impl EmbeddingOverrides for OpenAIEmbedding {
@@ -170,6 +178,15 @@ impl EmbeddingOverrides for OpenAIEmbedding {
 
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
+    }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
     }
 }
 
@@ -181,6 +198,15 @@ impl EmbeddingOverrides for CohereEmbedding {
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
     }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
+    }
 }
 
 impl EmbeddingOverrides for GeminiEmbeddingEmbedder {
@@ -190,6 +216,15 @@ impl EmbeddingOverrides for GeminiEmbeddingEmbedder {
 
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
+    }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
     }
 }
 
@@ -201,28 +236,40 @@ impl EmbeddingOverrides for ZeroEntropyEmbedding {
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
     }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
+    }
 }
 
 /// Applies pacer overrides and the config-driven (or globally-coordinated)
 /// embedding concurrency limiter for one provider credential.
 fn apply_overrides<T: EmbeddingOverrides>(
     mut provider: T,
-    config: &MoaConfig,
+    coordination: &ProviderCoordination,
     provider_name: &str,
     credential: &str,
     max_inputs_per_min: Option<u32>,
     max_concurrent_requests: Option<u32>,
-) -> T {
+) -> Result<T> {
     if let Some(pacer) = embed_pacer_override(max_inputs_per_min) {
         provider = provider.with_rate_limits(pacer);
     }
-    let limiter = ProviderConcurrency::from_config(config).limiter(
+    // Shared pacing is attached after any override so the coordinated limits are
+    // the effective ones.
+    provider = provider.with_shared_pacing(coordination, provider_name, credential);
+    let limiter = coordination.limiter(
         CallKind::Embedding,
         provider_name,
         credential,
         max_concurrent_requests,
     );
-    provider.with_limiter(limiter)
+    Ok(provider.with_limiter(limiter))
 }
 
 /// Builds a vector-space embedder from the tenant memory embedder configuration.
@@ -232,14 +279,28 @@ fn apply_overrides<T: EmbeddingOverrides>(
 /// repeated queries skip provider calls for text already embedded by this model.
 pub fn build_embedder_from_config(
     config: &MoaConfig,
+    runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
+    role: EmbedderConstructionRole,
+) -> Result<Arc<dyn EmbeddingProvider>> {
+    let coordination = ProviderCoordination::from_config(config, runtime_cache)?;
+    build_embedder(config, &coordination, role)
+}
+
+fn build_embedder(
+    config: &MoaConfig,
+    coordination: &ProviderCoordination,
     role: EmbedderConstructionRole,
 ) -> Result<Arc<dyn EmbeddingProvider>> {
     let cfg = &config.memory.vector.embedder;
     let resolved = resolve_embedding_model(&cfg.name, "memory.vector.embedder.name")?
         .ok_or_else(|| MoaError::ConfigError("memory vector embedder is disabled".to_string()))?;
-    let provider = resolved
-        .provider
-        .build(config, resolved.model, Some(cfg.output_dim), role)?;
+    let provider = resolved.provider.build(
+        config,
+        coordination,
+        resolved.model,
+        Some(cfg.output_dim),
+        role,
+    )?;
     Ok(with_embedding_cache(
         provider,
         config.memory.embedding_cache_capacity,
@@ -264,18 +325,19 @@ fn with_embedding_cache(
 
 fn build_gemini_embedder(
     config: &MoaConfig,
+    coordination: &ProviderCoordination,
     role: EmbedderConstructionRole,
 ) -> Result<GeminiEmbeddingEmbedder> {
     let cfg = &config.memory.vector.embedder;
     let api_key = read_api_key("MOA_GOOGLE_API_KEY", &config.providers.google.api_key)?;
-    Ok(apply_overrides(
+    apply_overrides(
         GeminiEmbeddingEmbedder::new(api_key.clone(), cfg.output_dim, role)?,
-        config,
+        coordination,
         GEMINI_PROVIDER_NAME,
         &api_key,
         config.providers.google.max_inputs_per_min,
         config.providers.google.max_concurrent_requests,
-    ))
+    )
 }
 
 fn read_api_key(env_name: &'static str, value: &str) -> Result<String> {
@@ -285,6 +347,15 @@ fn read_api_key(env_name: &'static str, value: &str) -> Result<String> {
 /// Builds the configured embedding provider for semantic memory search.
 pub fn build_embedding_provider_from_config(
     config: &MoaConfig,
+    runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
+) -> Result<Option<Arc<dyn EmbeddingProvider>>> {
+    let coordination = ProviderCoordination::from_config(config, runtime_cache)?;
+    build_embedding_provider(config, &coordination)
+}
+
+fn build_embedding_provider(
+    config: &MoaConfig,
+    coordination: &ProviderCoordination,
 ) -> Result<Option<Arc<dyn EmbeddingProvider>>> {
     let Some(resolved) =
         resolve_embedding_model(&config.memory.embedding_model, "memory.embedding_model")?
@@ -294,6 +365,7 @@ pub fn build_embedding_provider_from_config(
 
     match resolved.provider.build(
         config,
+        coordination,
         resolved.model,
         None,
         EmbedderConstructionRole::Retrieval,
@@ -387,7 +459,7 @@ mod tests {
         config.memory.embedding_model = "cohere:embed-v4.0".to_string();
         config.providers.cohere.api_key = "test-key".to_string();
 
-        let provider = build_embedding_provider_from_config(&config)
+        let provider = build_embedding_provider_from_config(&config, None)
             .expect("cohere provider config should build")
             .expect("cohere provider should be enabled");
 
@@ -402,7 +474,7 @@ mod tests {
         config.memory.embedding_model = "zeroentropy:zembed-1".to_string();
         config.providers.zeroentropy.api_key = "test-key".to_string();
 
-        let provider = build_embedding_provider_from_config(&config)
+        let provider = build_embedding_provider_from_config(&config, None)
             .expect("zeroentropy provider config should build")
             .expect("zeroentropy provider should be enabled");
 
@@ -419,7 +491,7 @@ mod tests {
         config.providers.cohere.api_key = "test-key".to_string();
 
         let provider =
-            build_embedder_from_config(&config, super::EmbedderConstructionRole::Retrieval)
+            build_embedder_from_config(&config, None, super::EmbedderConstructionRole::Retrieval)
                 .expect("cohere vector embedder config should build");
 
         assert_eq!(provider.model_id(), COHERE_DEFAULT_MODEL);
@@ -432,7 +504,7 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.embedding_model = "cohere:embed-v4.0".to_string();
 
-        let provider = build_embedding_provider_from_config(&config)
+        let provider = build_embedding_provider_from_config(&config, None)
             .expect("missing credential should not fail startup");
 
         assert!(provider.is_none());

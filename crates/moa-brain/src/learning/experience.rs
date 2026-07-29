@@ -4,12 +4,13 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    events::Event, types::context::WorkingContext, types::events_stream::EventRecord,
-    types::experience::ExperienceRecord, types::experience::ExperienceResource,
-    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
-    types::identifiers::UserId, types::segment_assessment::SegmentAssessment,
-    types::segments::TaskSegment, types::session::SessionMeta,
+    types::context::WorkingContext, types::experience::ExperienceRecord,
+    types::experience::ExperienceResource, types::experience::TaskFacetSet,
+    types::experience::TaskFingerprint, types::identifiers::SegmentId, types::identifiers::UserId,
+    types::segment_assessment::SegmentAssessment, types::segments::TaskSegment,
+    types::session::SessionMeta,
 };
+use moa_skills::evidence::{EvidenceSource, SanitizedEntry, SanitizedLearningEvidence};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -43,32 +44,49 @@ pub fn task_fingerprint_for_context(ctx: &WorkingContext) -> Option<TaskFingerpr
 }
 
 /// Builds an experience record from a task segment and an explicit assessment.
+///
+/// The record's summary, facets, actions, and resources are all derived from
+/// transcript content, and the row they land in is read back by distillation,
+/// embedding, and reviewer surfaces. It is therefore built from sanitized
+/// evidence: there is no signature here that accepts raw events.
+///
+/// `task_summary` in particular is stored REDACTED AT REST. Every candidate for
+/// it comes from `evidence`, which has already been through the classifier. The
+/// raw `rewrite.task_summary` is deliberately not a fallback: it is the exact
+/// text that was handed to sanitization, so reaching for it when sanitization
+/// produced nothing would reinstate the value the classifier rejected or
+/// abstained on — turning the one case where redaction mattered most into the
+/// one case where it did not happen. `rewrite` is still consulted for facets,
+/// which are categorical slots rather than transcript text.
+///
+/// This also keeps the stored summary and the embedded summary the same bytes.
+/// The embedding backfill reads sanitized text; a raw stored summary would fork
+/// the two, so a row's vector would describe text the row does not contain.
 #[must_use]
 pub fn experience_from_assessment(
     session: &SessionMeta,
     segment: &TaskSegment,
     assessment: &SegmentAssessment,
-    events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
     rewrite: Option<&QueryRewriteResult>,
     duration_ms: Option<u64>,
     now: DateTime<Utc>,
 ) -> ExperienceRecord {
-    let summary = segment
-        .task_summary
+    let sanitized_summary = first_text(evidence, EvidenceSource::TaskSummary);
+    let summary = sanitized_summary
         .as_deref()
-        .or_else(|| rewrite.and_then(|rewrite| rewrite.task_summary.as_deref()))
-        .or_else(|| first_user_message(events))
+        .or_else(|| first_user_message(evidence))
         .unwrap_or("unspecified task");
     let facets = facets_for_task(
         summary,
         rewrite.and_then(|rewrite| rewrite.task_facets.as_ref()),
         &segment.tools_used,
         &segment.skills_activated,
-        events,
+        evidence.entries(),
     );
     let fingerprint = fingerprint_for_task(summary, &facets);
     ExperienceRecord {
-        id: deterministic_experience_id(segment.id, EXPERIENCE_EXTRACTION_POLICY_VERSION),
+        id: deterministic_experience_id(segment.id),
         segment_id: segment.id,
         session_id: segment.session_id,
         tenant_id: session.tenant_id,
@@ -76,8 +94,8 @@ pub fn experience_from_assessment(
         task_summary: Some(summary.to_string()),
         task_fingerprint: fingerprint,
         task_facets: facets,
-        actions: actions_for_task(summary, events),
-        resources: resources_for_events(events),
+        actions: actions_for_task(summary, evidence.entries()),
+        resources: resources_for_evidence(evidence),
         outcome: assessment.outcome,
         confidence: assessment.confidence.clamp(0.0, 1.0),
         evidence: assessment.evidence.clone(),
@@ -102,14 +120,17 @@ fn experience_user_id(session: &SessionMeta) -> UserId {
     UserId::new(id)
 }
 
-fn deterministic_experience_id(
-    segment_id: moa_core::types::identifiers::SegmentId,
-    extraction_policy: &str,
-) -> Uuid {
+/// Returns the deterministic experience id one assessed segment produces.
+///
+/// Public because the evidence scope must name the experience before the record
+/// exists: the caller that sanitizes a segment's transcript stamps this id as
+/// provenance, and [`experience_from_assessment`] then produces exactly that row.
+#[must_use]
+pub fn deterministic_experience_id(segment_id: SegmentId) -> Uuid {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"moa:experience-record:v1");
     hasher.update(segment_id.0.as_bytes());
-    hasher.update(extraction_policy.as_bytes());
+    hasher.update(EXPERIENCE_EXTRACTION_POLICY_VERSION.as_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
@@ -138,9 +159,9 @@ pub fn facets_for_task(
     rewrite_facets: Option<&TaskFacetSet>,
     tools: &[String],
     skills: &[String],
-    events: &[EventRecord],
+    entries: &[SanitizedEntry],
 ) -> TaskFacetSet {
-    let text = task_text(summary, events);
+    let text = task_text(summary, entries);
     let mut facets = rewrite_facets.cloned().unwrap_or_default();
     facets.domain = facets
         .domain
@@ -156,7 +177,7 @@ pub fn facets_for_task(
         .or_else(|| first_matching(&text, LANGUAGE_PATTERNS));
     facets.verification_style = facets
         .verification_style
-        .or_else(|| verification_style(events, &text));
+        .or_else(|| verification_style(entries, &text));
     facets.risk_class = facets
         .risk_class
         .or_else(|| first_matching(&text, RISK_PATTERNS))
@@ -266,33 +287,44 @@ fn canonical_fingerprint_input(summary: &str, facets: &TaskFacetSet) -> String {
     parts.join("|")
 }
 
-fn task_text(summary: &str, events: &[EventRecord]) -> String {
+/// Builds the lowercased corpus the deterministic facet patterns match against.
+///
+/// Tool results are deliberately excluded, as they were before: a facet must
+/// describe the task, not whatever a tool happened to print.
+fn task_text(summary: &str, entries: &[SanitizedEntry]) -> String {
     let mut text = summary.to_ascii_lowercase();
-    for event in events {
-        match &event.event {
-            Event::UserMessage { text: value, .. }
-            | Event::QueuedMessage { text: value, .. }
-            | Event::BrainThinking { summary: value, .. }
-            | Event::BrainResponse { text: value, .. } => {
+    for entry in entries {
+        match entry.source() {
+            EvidenceSource::UserMessage
+            | EvidenceSource::QueuedMessage
+            | EvidenceSource::AssistantThinking
+            | EvidenceSource::AssistantMessage => {
                 text.push(' ');
-                text.push_str(&value.to_ascii_lowercase());
+                text.push_str(&entry.text().to_ascii_lowercase());
             }
-            Event::ToolCall {
-                tool_name, input, ..
-            } => {
-                text.push(' ');
-                text.push_str(&tool_name.to_ascii_lowercase());
-                collect_json_strings(input, &mut text);
+            EvidenceSource::ToolInput => {
+                if let Some(tool_name) = entry.tool_name() {
+                    text.push(' ');
+                    text.push_str(&tool_name.to_ascii_lowercase());
+                }
+                if let Some(input) = entry.structured() {
+                    collect_json_strings(input, &mut text);
+                }
             }
-            Event::ToolError {
-                tool_name, error, ..
-            } => {
+            EvidenceSource::ToolError => {
+                if let Some(tool_name) = entry.tool_name() {
+                    text.push(' ');
+                    text.push_str(&tool_name.to_ascii_lowercase());
+                }
                 text.push(' ');
-                text.push_str(&tool_name.to_ascii_lowercase());
-                text.push(' ');
-                text.push_str(&error.to_ascii_lowercase());
+                text.push_str(&entry.text().to_ascii_lowercase());
             }
-            _ => {}
+            EvidenceSource::ToolResult
+            | EvidenceSource::MemoryPath
+            | EvidenceSource::MemoryIngestSource
+            | EvidenceSource::MemoryIngestPage
+            | EvidenceSource::TaskSummary
+            | EvidenceSource::AssessmentEvidence => {}
         }
     }
     text
@@ -307,7 +339,7 @@ fn first_matching(text: &str, patterns: &[(&str, &[&str])]) -> Option<String> {
     })
 }
 
-fn verification_style(events: &[EventRecord], text: &str) -> Option<String> {
+fn verification_style(entries: &[SanitizedEntry], text: &str) -> Option<String> {
     if text.contains("cargo test")
         || text.contains("cargo clippy")
         || text.contains("validator")
@@ -315,19 +347,18 @@ fn verification_style(events: &[EventRecord], text: &str) -> Option<String> {
     {
         return Some("command".to_string());
     }
-    if events.iter().any(|record| {
-        matches!(
-            record.event,
-            Event::ToolResult { success: true, .. } | Event::ToolError { .. }
-        )
+    if entries.iter().any(|entry| match entry.source() {
+        EvidenceSource::ToolResult => entry.success() == Some(true),
+        EvidenceSource::ToolError => true,
+        _ => false,
     }) {
         return Some("tool_result".to_string());
     }
     None
 }
 
-fn actions_for_task(summary: &str, events: &[EventRecord]) -> Vec<String> {
-    let text = task_text(summary, events);
+fn actions_for_task(summary: &str, entries: &[SanitizedEntry]) -> Vec<String> {
+    let text = task_text(summary, entries);
     let mut actions = ACTION_PATTERNS
         .iter()
         .filter(|(_, needles)| needles.iter().any(|needle| text.contains(needle)))
@@ -338,42 +369,43 @@ fn actions_for_task(summary: &str, events: &[EventRecord]) -> Vec<String> {
     actions
 }
 
-fn resources_for_events(events: &[EventRecord]) -> Vec<ExperienceResource> {
+fn resources_for_evidence(evidence: &SanitizedLearningEvidence) -> Vec<ExperienceResource> {
     let mut resources = Vec::new();
     let mut seen = BTreeSet::new();
-    for record in events {
-        match &record.event {
-            Event::MemoryRead { path, scope } | Event::MemoryWrite { path, scope, .. } => {
+    for entry in evidence.entries() {
+        match entry.source() {
+            EvidenceSource::MemoryPath | EvidenceSource::MemoryIngestSource => {
                 push_resource(
                     &mut resources,
                     &mut seen,
                     "memory",
-                    path.clone(),
-                    Some(scope.clone()),
+                    entry.text().to_string(),
+                    entry.tool_name().map(str::to_string),
                 );
             }
-            Event::MemoryIngest {
-                source_path,
-                affected_pages,
-                ..
-            } => {
+            EvidenceSource::MemoryIngestPage => {
                 push_resource(
                     &mut resources,
                     &mut seen,
                     "memory",
-                    source_path.clone(),
-                    Some("ingest_source".to_string()),
+                    entry.text().to_string(),
+                    None,
                 );
-                for page in affected_pages {
-                    push_resource(&mut resources, &mut seen, "memory", page.clone(), None);
+            }
+            EvidenceSource::ToolInput => {
+                if let Some(tool_name) = entry.tool_name() {
+                    push_resource(
+                        &mut resources,
+                        &mut seen,
+                        "tool",
+                        tool_name.to_string(),
+                        None,
+                    );
                 }
-            }
-            Event::ToolCall {
-                tool_name, input, ..
-            } => {
-                push_resource(&mut resources, &mut seen, "tool", tool_name.clone(), None);
-                for value in json_resource_strings(input) {
-                    push_resource(&mut resources, &mut seen, "file", value, None);
+                if let Some(input) = entry.structured() {
+                    for value in json_resource_strings(input) {
+                        push_resource(&mut resources, &mut seen, "file", value, None);
+                    }
                 }
             }
             _ => {}
@@ -454,11 +486,19 @@ fn looks_like_resource(value: &str) -> bool {
         || value.starts_with("https://")
 }
 
-fn first_user_message(events: &[EventRecord]) -> Option<&str> {
-    events.iter().find_map(|record| match &record.event {
-        Event::UserMessage { text, .. } => Some(text.as_str()),
-        _ => None,
-    })
+fn first_user_message(evidence: &SanitizedLearningEvidence) -> Option<&str> {
+    evidence
+        .entries_from(EvidenceSource::UserMessage)
+        .next()
+        .map(SanitizedEntry::text)
+}
+
+/// Returns the first entry's text for one carrier, owned so it can outlive the borrow.
+fn first_text(evidence: &SanitizedLearningEvidence, source: EvidenceSource) -> Option<String> {
+    evidence
+        .entries_from(source)
+        .next()
+        .map(|entry| entry.text().to_string())
 }
 
 fn normalized_list(values: Vec<String>) -> Vec<String> {
@@ -476,10 +516,42 @@ fn normalized_list(values: Vec<String>) -> Vec<String> {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+        events::Event, types::events_stream::EventRecord, types::identifiers::SegmentId,
+        types::identifiers::SessionId, types::identifiers::TenantId,
     };
+    use moa_skills::evidence::{EvidenceScope, SegmentNarrative, sanitize_segment_evidence};
+    use uuid::Uuid;
 
     use super::*;
+
+    /// Sanitizes raw fixture events into the evidence extraction consumes.
+    ///
+    /// Experience extraction reads only sanitized evidence now, so the unit tests
+    /// run their fixtures through the same production gate.
+    async fn evidence(
+        session_id: SessionId,
+        segment_id: SegmentId,
+        task_summary: Option<&str>,
+        events: &[EventRecord],
+    ) -> SanitizedLearningEvidence {
+        sanitize_segment_evidence(
+            &moa_memory_pii::HeuristicPiiClassifier,
+            EvidenceScope {
+                tenant_id: TenantId::new(),
+                contact_id: None,
+                session_id,
+                segment_id,
+                experience_id: deterministic_experience_id(segment_id),
+            },
+            events,
+            SegmentNarrative {
+                task_summary,
+                assessment_summaries: &[],
+            },
+        )
+        .await
+        .expect("unit-test fixtures sanitize cleanly")
+    }
 
     #[test]
     fn fingerprint_is_stable_for_irrelevant_wording() {
@@ -502,8 +574,8 @@ mod tests {
         assert_eq!(left.normalized_summary, "auth failure fix rust");
     }
 
-    #[test]
-    fn experience_from_assessment_extracts_facets_and_resources() {
+    #[tokio::test]
+    async fn experience_from_assessment_extracts_facets_and_resources() {
         // Pins: an assessed segment becomes a bounded experience record with
         // deterministic task facets and deduplicated resources.
         let session_id = SessionId::new();
@@ -562,11 +634,18 @@ mod tests {
             token_count: None,
         }];
 
+        let evidence = evidence(
+            session_id,
+            segment_id,
+            segment.task_summary.as_deref(),
+            &events,
+        )
+        .await;
         let experience = experience_from_assessment(
             &session,
             &segment,
             &assessment,
-            &events,
+            &evidence,
             None,
             Some(100),
             now,
@@ -585,8 +664,86 @@ mod tests {
         assert_eq!(experience.resources.len(), 2);
     }
 
-    #[test]
-    fn experience_id_is_stable_for_reassessed_segment() {
+    #[tokio::test]
+    async fn stored_task_summary_never_falls_back_to_the_raw_query_rewrite() {
+        // Pins: `task_summary` is stored redacted at rest. When sanitization yields no
+        // summary — which is exactly what happens when the classifier rejects or abstains
+        // on it — extraction must fall through to other SANITIZED text, never to the raw
+        // rewrite summary it was handed.
+        //
+        // The raw value is the same text sanitization was asked to clean. Reaching for it
+        // on the sanitizer's failure would turn the one case where redaction mattered most
+        // into the one case where it did not happen, and nothing downstream would notice:
+        // the row would look populated and the value would be wrong.
+        let session_id = SessionId::new();
+        let segment_id = SegmentId::new();
+        let now = Utc
+            .with_ymd_and_hms(2026, 6, 15, 12, 0, 0)
+            .single()
+            .expect("fixed test timestamp should be valid");
+        let session = SessionMeta {
+            id: session_id,
+            tenant_id: TenantId::new(),
+            ..SessionMeta::default()
+        };
+        let assessment = SegmentAssessment {
+            outcome: moa_core::types::segment_assessment::SegmentOutcome::Resolved,
+            confidence: 0.9,
+            phase: moa_core::types::segment_assessment::AssessmentPhase::Immediate,
+            evidence: Vec::new(),
+            assessed_at: now,
+            policy_version: "assessment_v1".to_string(),
+        };
+        let segment = TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: "tenant".to_string(),
+            segment_index: 0,
+            task_summary: None,
+            started_at: now,
+            ended_at: Some(now),
+            turn_count: 1,
+            tools_used: Vec::new(),
+            skills_activated: Vec::new(),
+            skills_used: Vec::new(),
+            token_cost: 1,
+            previous_segment_id: None,
+            outcome: Some("resolved".to_string()),
+            assessment: Some(assessment.clone()),
+            outcome_confidence: Some(0.9),
+        };
+        // No narrative summary reaches sanitization, so the evidence carries no
+        // `TaskSummary` entry and the fallback chain is what decides the stored value.
+        let evidence = evidence(session_id, segment_id, None, &[]).await;
+        let raw = "escalate the outage for priya.raman@example.com";
+        let rewrite = QueryRewriteResult {
+            task_summary: Some(raw.to_string()),
+            ..QueryRewriteResult::original("escalate the outage")
+        };
+
+        let experience = experience_from_assessment(
+            &session,
+            &segment,
+            &assessment,
+            &evidence,
+            Some(&rewrite),
+            Some(10),
+            now,
+        );
+
+        let stored = experience.task_summary.unwrap_or_default();
+        assert_ne!(
+            stored, raw,
+            "the raw rewrite summary must never become the stored summary"
+        );
+        assert!(
+            !stored.contains("priya.raman@example.com"),
+            "unclassified transcript text reached the stored summary: {stored}"
+        );
+    }
+
+    #[tokio::test]
+    async fn experience_id_is_stable_for_reassessed_segment() {
         // Pins: repeated active-segment assessments upsert the same experience parent row.
         let session_id = SessionId::new();
         let segment_id = SegmentId::new();
@@ -626,23 +783,21 @@ mod tests {
             outcome_confidence: Some(0.7),
         };
 
+        let evidence = evidence(session_id, segment_id, segment.task_summary.as_deref(), &[]).await;
         let first =
-            experience_from_assessment(&session, &segment, &assessment, &[], None, None, now);
+            experience_from_assessment(&session, &segment, &assessment, &evidence, None, None, now);
         let second = experience_from_assessment(
             &session,
             &segment,
             &assessment,
-            &[],
+            &evidence,
             None,
             Some(100),
             now + chrono::Duration::seconds(1),
         );
 
         assert_eq!(first.id, second.id);
-        assert_eq!(
-            first.id,
-            deterministic_experience_id(segment_id, EXPERIENCE_EXTRACTION_POLICY_VERSION)
-        );
+        assert_eq!(first.id, deterministic_experience_id(segment_id));
     }
 
     #[test]

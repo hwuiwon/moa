@@ -12,6 +12,14 @@ pub enum Error {
         /// Human-readable hash parse failure.
         message: String,
     },
+    /// Two catalog entries claimed the same capability reference.
+    #[error("duplicate capability reference in catalog: {reference} at version {version}")]
+    DuplicateCapabilityReference {
+        /// Capability reference claimed more than once.
+        reference: String,
+        /// Version the duplicated reference was claimed at.
+        version: String,
+    },
     /// JSON Schema compilation or instance validation failed.
     #[error("JSON schema error at {path}: {message}")]
     Schema {

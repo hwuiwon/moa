@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     if telemetry_config.observability.service_name == "moa" {
         telemetry_config.observability.service_name = "moa-edge".to_string();
     }
-    let _telemetry_guard = moa_observability::init_observability(
+    let telemetry_guard = moa_observability::init_observability(
         &telemetry_config,
         &moa_observability::TelemetryConfig { json_stdout: true },
     )
@@ -89,7 +89,22 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("bootstrap OAuth authorization server")?,
     );
-    let fga = build_fga_client(&moa_config).context("build edge OpenFGA client")?;
+    // The audit writer is owned by this process for its whole lifetime: started
+    // before anything can produce an event, drained explicitly at shutdown.
+    // Startup fails if it cannot start, rather than silently turning every audit
+    // event for the process lifetime into a counted drop.
+    let audit = moa_ocsf::AuditRuntime::start(pool.as_ref().clone())
+        .context("start edge security audit writer")?;
+    let fga = build_fga_client(&moa_config)
+        .context("build edge OpenFGA client")?
+        .map(|client| {
+            client.with_security_audit(moa_authz::SecurityAudit {
+                pool: pool.as_ref().clone(),
+                emitter: audit.emitter(),
+                // Allow decisions are high volume; the edge audits denials only.
+                emit_allows: false,
+            })
+        });
     let session_store = moa_session::PostgresSessionStore::from_existing_pool_with_config(
         &moa_config,
         pool.as_ref().clone(),
@@ -115,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
             .clickhouse
             .as_ref()
             .map(|clickhouse| Arc::new(moa_lineage_sink::ClickHouseStore::connect(clickhouse))),
+        audit: audit.emitter(),
         clickhouse_analytics: moa_config.clickhouse.as_ref().map(|clickhouse| {
             Arc::new(
                 moa_analytics::AnalyticsClickHouseClient::connect(clickhouse).with_query_budgets(
@@ -139,6 +155,22 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("serve moa-edge")?;
 
+    // Shutdown order, and every step of it matters. The server has stopped
+    // accepting and has finished its in-flight requests by the time
+    // `axum::serve` returns, so nothing can produce a new audit event. Only then
+    // is it safe to drain the audit writer, and only after that is it safe to
+    // flush telemetry - flushing first would discard the spans and metrics
+    // describing the drain itself.
+    let dropped = audit.shutdown().await;
+    if dropped > 0 {
+        tracing::warn!(
+            dropped,
+            "security audit events were dropped during this process lifetime; the audit \
+             trail is incomplete"
+        );
+    }
+    telemetry_guard.shutdown();
+
     Ok(())
 }
 
@@ -160,9 +192,35 @@ fn build_fga_client(config: &moa_config::MoaConfig) -> anyhow::Result<Option<Fga
     .map_err(Into::into)
 }
 
+/// Cancels on SIGINT or SIGTERM.
+///
+/// SIGTERM is what Kubernetes actually sends. Listening for SIGINT alone meant
+/// every rolling update terminated the edge by its grace-period SIGKILL, so no
+/// graceful drain of any kind ran in the one environment where it matters.
 async fn cancel_on_shutdown_signal(shutdown: CancellationToken) {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("moa-edge shutdown signal received");
+    let interrupt = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = interrupt => tracing::info!("moa-edge received SIGINT"),
+                    _ = terminate.recv() => tracing::info!("moa-edge received SIGTERM"),
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not install SIGTERM handler; SIGINT only");
+                let _ = interrupt.await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = interrupt.await;
+        tracing::info!("moa-edge shutdown signal received");
+    }
+
     shutdown.cancel();
 }
 

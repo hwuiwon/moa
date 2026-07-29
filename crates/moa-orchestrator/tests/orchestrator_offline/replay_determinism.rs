@@ -135,31 +135,6 @@ impl ConsolidateSteps for RecordedConsolidateSteps<'_> {
         }))
     }
 
-    async fn record_memory_learning(
-        &mut self,
-        report: &ConsolidateReport,
-    ) -> Result<(), HandlerError> {
-        if report.records_updated == 0
-            && report.records_deleted == 0
-            && report.relative_dates_normalized == 0
-            && report.contradictions_resolved == 0
-            && report.confidence_decayed == 0
-            && report.duplicates_merged == 0
-            && report.entity_embeddings_backfilled == 0
-            && report.aliases_promoted == 0
-            && report.digests_rebuilt == 0
-            && report.errors.is_empty()
-        {
-            return Ok(());
-        }
-        self.recorder.run(
-            "record_memory_learning",
-            report,
-            || json!({"recorded": true}),
-        );
-        Ok(())
-    }
-
     async fn consolidation_completed(
         &mut self,
         report: &ConsolidateReport,

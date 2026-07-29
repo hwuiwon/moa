@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
-    traits::HandProvider, types::hands::HandHandle, types::hands::HandSpec,
-    types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
+    traits::HandProvider, types::hands::DeadlineEnforcement, types::hands::EgressMode,
+    types::hands::HandHandle, types::hands::HandProviderCapabilities, types::hands::HandSpec,
+    types::hands::HandStatus, types::hands::ResourceSupport, types::hands::SandboxFile,
+    types::hands::SandboxProfile, types::hands::SandboxTier, types::hands::SandboxTierCapabilities,
     types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -45,7 +47,6 @@ pub struct DaytonaHandProvider {
     api_url: String,
     toolbox_url: String,
     default_image: String,
-    idle_timeout: Duration,
 }
 
 impl DaytonaHandProvider {
@@ -107,7 +108,6 @@ impl DaytonaHandProvider {
             api_url: api_url.into().trim_end_matches('/').to_string(),
             toolbox_url: toolbox_url.into().trim_end_matches('/').to_string(),
             default_image: DEFAULT_DAYTONA_IMAGE.to_string(),
-            idle_timeout: DEFAULT_COMMAND_TIMEOUT,
         })
     }
 
@@ -116,13 +116,14 @@ impl DaytonaHandProvider {
             .image
             .clone()
             .unwrap_or_else(|| self.default_image.clone());
+        let auto_stop_minutes = daytona_auto_stop_minutes(spec.effective_profile.profile())?;
         let response = self
             .client
             .post(format!("{}/sandbox", self.api_url))
             .json(&json!({
                 "image": image,
                 "env": spec.env,
-                "autoStopInterval": (spec.idle_timeout.as_secs() / 60).max((self.idle_timeout.as_secs() / 60).max(1)),
+                "autoStopInterval": auto_stop_minutes,
             }))
             .send()
             .await
@@ -355,10 +356,94 @@ impl DaytonaHandProvider {
     }
 }
 
+/// Revision of the Daytona provider's capability declaration.
+pub const DAYTONA_CAPABILITIES_REVISION: &str = "daytona-hands-v1";
+
+/// What Daytona can enforce for a container sandbox.
+///
+/// The sandbox-create payload MOA sends carries exactly one policy-bearing
+/// field, `autoStopInterval`, which Daytona enforces as an idle timeout in
+/// whole minutes. Per-sandbox CPU, memory, and disk bounds and any network
+/// posture other than the account default are not fields on this request, so a
+/// profile that asks for them is refused before the sandbox is created rather
+/// than being sent as JSON Daytona ignores. The hard maximum lifetime has no
+/// Daytona-side owner, so the durable reaper owns it.
+pub static DAYTONA_CAPABILITIES: LazyLock<HandProviderCapabilities> =
+    LazyLock::new(|| HandProviderCapabilities {
+        revision: DAYTONA_CAPABILITIES_REVISION.to_string(),
+        tiers: vec![
+            daytona_tier_capabilities(SandboxTier::Container),
+            daytona_tier_capabilities(SandboxTier::None),
+        ],
+    });
+
+/// Capabilities for one Daytona-served tier.
+fn daytona_tier_capabilities(tier: SandboxTier) -> SandboxTierCapabilities {
+    SandboxTierCapabilities {
+        tier,
+        cpu: ResourceSupport::unbounded_only(),
+        memory: ResourceSupport::unbounded_only(),
+        ephemeral_disk: ResourceSupport::unbounded_only(),
+        egress_modes: vec![EgressMode::Unrestricted],
+        idle_enforcement: DeadlineEnforcement::Provider,
+        max_lifetime_enforcement: DeadlineEnforcement::DurableReaper,
+    }
+}
+
+/// Seconds in the whole-minute granularity Daytona's `autoStopInterval` uses.
+const DAYTONA_AUTO_STOP_GRANULARITY_SECS: u64 = 60;
+
+/// Translates the idle timeout into Daytona's `autoStopInterval`, refusing
+/// anything the field cannot express.
+///
+/// `autoStopInterval` counts whole minutes, and `0` disables auto-stop
+/// entirely. Rounding a 90-second policy to either 1 or 2 minutes would enforce
+/// a deadline nobody asked for, so a value that is not a whole number of
+/// minutes is refused instead.
+fn daytona_auto_stop_minutes(profile: &SandboxProfile) -> Result<u64> {
+    reject_unsupported_daytona_dimension("CPU", profile.cpu.bounded_millicores().is_some())?;
+    reject_unsupported_daytona_dimension("memory", profile.memory.bounded_mebibytes().is_some())?;
+    reject_unsupported_daytona_dimension(
+        "ephemeral disk",
+        profile.ephemeral_disk.bounded_mebibytes().is_some(),
+    )?;
+    if profile.egress.mode() != EgressMode::Unrestricted {
+        return Err(MoaError::Unsupported(format!(
+            "Daytona sandboxes cannot enforce {} egress",
+            profile.egress.mode().as_str()
+        )));
+    }
+    let Some(seconds) = profile.idle_timeout.bounded_seconds() else {
+        // 0 is Daytona's documented "never auto-stop", which is exactly what an
+        // explicitly unbounded idle timeout means.
+        return Ok(0);
+    };
+    if seconds.get() % DAYTONA_AUTO_STOP_GRANULARITY_SECS != 0 {
+        return Err(MoaError::Unsupported(format!(
+            "Daytona auto-stop is expressed in whole minutes; requested {seconds}s"
+        )));
+    }
+    Ok(seconds.get() / DAYTONA_AUTO_STOP_GRANULARITY_SECS)
+}
+
+/// Refuses a bounded resource dimension Daytona's create request cannot carry.
+fn reject_unsupported_daytona_dimension(dimension: &str, bounded: bool) -> Result<()> {
+    if bounded {
+        return Err(MoaError::Unsupported(format!(
+            "Daytona sandbox creation carries no {dimension} bound and cannot enforce one"
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl HandProvider for DaytonaHandProvider {
     fn provider_name(&self) -> &str {
         "daytona"
+    }
+
+    fn capabilities(&self) -> HandProviderCapabilities {
+        DAYTONA_CAPABILITIES.clone()
     }
 
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
@@ -613,12 +698,8 @@ fn status_label(status: Option<HandStatus>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
 
-    use moa_core::{
-        traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
-        types::hands::SandboxTier,
-    };
+    use moa_core::{traits::HandProvider, types::hands::SandboxProfile, types::hands::SandboxTier};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -678,15 +759,10 @@ mod tests {
         )
         .unwrap();
         let handle = provider
-            .provision(HandSpec {
-                sandbox_tier: SandboxTier::Container,
-                image: None,
-                resources: HandResources::default(),
-                env: std::collections::HashMap::new(),
-                workspace_mount: None,
-                idle_timeout: Duration::from_secs(300),
-                max_lifetime: Duration::from_secs(300),
-            })
+            .provision(crate::core::profile::test_support::hand_spec(
+                SandboxTier::Container,
+                SandboxProfile::unrestricted(),
+            ))
             .await
             .unwrap();
 

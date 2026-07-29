@@ -89,6 +89,7 @@ pub async fn emit_context_lineage(
         run_id: None,
         dataset_id: None,
         comment: None,
+        experiment_provenance: None,
     };
     push_event(&mut events, LineageEvent::Eval(score), "context score");
 
@@ -285,6 +286,7 @@ pub async fn emit_generation_lineage(
         run_id: None,
         dataset_id: None,
         comment: None,
+        experiment_provenance: None,
     };
     push_event(&mut events, LineageEvent::Eval(score), "generation score");
 
@@ -450,6 +452,7 @@ fn citation_score_events(citation: &CitationLineage) -> Vec<serde_json::Value> {
             run_id: None,
             dataset_id: None,
             comment: None,
+            experiment_provenance: None,
         };
         push_event(&mut events, LineageEvent::Eval(score), "citation score");
 
@@ -469,6 +472,7 @@ fn citation_score_events(citation: &CitationLineage) -> Vec<serde_json::Value> {
                 run_id: None,
                 dataset_id: None,
                 comment: None,
+                experiment_provenance: None,
             };
             push_event(&mut events, LineageEvent::Eval(score), "citation nli score");
         }

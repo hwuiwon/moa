@@ -103,6 +103,7 @@ impl ScoreCard {
                 run_id: Some(self.run_id),
                 dataset_id: None,
                 comment: Some(format!("provider={}", self.provider)),
+                experiment_provenance: None,
             })
             .collect()
     }

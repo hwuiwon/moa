@@ -7,7 +7,6 @@ use moa_core::{
     types::events_stream::EventRange,
     types::experience::{
         ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateStatus,
-        LearningCandidateStatusUpdate,
     },
     types::identifiers::{SegmentId, SessionId, TenantId},
     types::segment_assessment::SegmentAssessment,
@@ -190,13 +189,6 @@ pub struct ListLearningCandidatesRequest {
     pub limit: usize,
 }
 
-/// Request payload for `SessionStore/update_learning_candidate_status`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UpdateLearningCandidateStatusRequest {
-    /// Candidate status transition.
-    pub update: LearningCandidateStatusUpdate,
-}
-
 /// Review action requested for one learning candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -205,6 +197,14 @@ pub enum LearningCandidateReviewAction {
     Accept,
     /// Reject the candidate while preserving its draft artifacts for audit.
     Reject,
+    /// Close an informational item that no code can apply.
+    ///
+    /// The only decision available for an advisory or authoring candidate.
+    /// Deliberately a distinct action rather than a flavor of reject: rejecting
+    /// means a reviewer declined a proposal that could have been accepted, and
+    /// there is no such proposal here. Nothing is ever promoted by a dismissal,
+    /// which is why there is no generic promotion switch anywhere on this enum.
+    Dismiss,
 }
 
 /// Request payload for reviewing one learning candidate.

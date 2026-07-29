@@ -93,6 +93,8 @@ async fn http_client_sends_headers_and_parses_jsonrpc() {
     });
 
     let client = MCPClient::connect(&McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "remote".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
@@ -153,6 +155,8 @@ async fn http_client_parses_sse_tool_response() {
     });
 
     let client = MCPClient::connect(&McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: "remote".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),

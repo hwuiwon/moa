@@ -1,3 +1,4 @@
+include!("local_tools_support/sandbox_profile.rs");
 include!("local_tools_support/docker.rs");
 
 #[tokio::test]
@@ -5,26 +6,21 @@ include!("local_tools_support/docker.rs");
 async fn docker_file_tools_roundtrip_inside_container_workspace() {
     let dir = docker_mountable_tempdir();
     let provider = LocalHandProvider::new(dir.path()).await.unwrap();
-    if !provider.docker_available() {
-        return;
-    }
+    assert!(
+        provider.docker_available(),
+        "this test is Docker-selected by its `_docker` suffix; a run without Docker \
+         must fail loudly rather than silently pass"
+    );
 
     let handle = provider
-        .provision(HandSpec {
-            sandbox_tier: SandboxTier::Container,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        })
+        .provision(hand_spec(SandboxTier::Container))
         .await
         .unwrap();
 
-    if !matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }) {
-        return;
-    }
+    assert!(
+        matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }),
+        "the container tier must produce a Docker handle, not a silently downgraded one"
+    );
 
     let _result = async {
         let write = provider
@@ -115,26 +111,21 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
 async fn docker_bash_hard_cancel_stops_container_exec() {
     let dir = docker_mountable_tempdir();
     let provider = LocalHandProvider::new(dir.path()).await.unwrap();
-    if !provider.docker_available() {
-        return;
-    }
+    assert!(
+        provider.docker_available(),
+        "this test is Docker-selected by its `_docker` suffix; a run without Docker \
+         must fail loudly rather than silently pass"
+    );
 
     let handle = provider
-        .provision(HandSpec {
-            sandbox_tier: SandboxTier::Container,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        })
+        .provision(hand_spec(SandboxTier::Container))
         .await
         .unwrap();
 
-    if !matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }) {
-        return;
-    }
+    assert!(
+        matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }),
+        "the container tier must produce a Docker handle, not a silently downgraded one"
+    );
 
     let cancel_token = CancellationToken::new();
     let started = Instant::now();

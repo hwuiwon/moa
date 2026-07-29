@@ -7,9 +7,10 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
     error::MoaError, types::action_policy::ActionRuleScope, types::experience::LearningCandidate,
-    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
-    types::experience::LearningCandidateType, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::learning::LearningEntry,
+    types::experience::LearningCandidateSourceRef, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningProposalKind,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::learning::LearningEntry, types::learning::LearningLogSourceRef,
 };
 use moa_db::ScopedConn;
 use serde_json::{Value, json};
@@ -201,7 +202,7 @@ pub async fn prepare_skill_acceptance(
     request: &SkillReviewRequest,
 ) -> Result<PreparedSkillAcceptance> {
     let candidate = load_candidate(store, &request.tenant_id, request.candidate_id).await?;
-    ensure_skill_candidate(&candidate)?;
+    ensure_skill_draft_proposal(&candidate)?;
     ensure_proposed_candidate(&candidate)?;
     let draft_revision_uid = payload_uuid(&candidate.payload, "draft_artifact_revision_uid")?;
 
@@ -372,11 +373,21 @@ pub async fn release_claimed_skill_candidate(
 }
 
 /// Rejects a proposed learning candidate while preserving linked draft artifacts.
+///
+/// Rejection claims the proposal first. The state machine has no direct
+/// `Proposed -> Rejected` edge for either reviewable kind — a rejection is a
+/// decision about a proposal someone is holding, so the reviewer takes the claim
+/// exactly as `accept_skill` does and only then records the outcome. Claiming is
+/// also what makes concurrent review safe: two reviewers cannot both reject, and
+/// a reviewer cannot reject a proposal another one is mid-accept on. If the
+/// terminal write loses a race after the claim succeeded, the claim is released
+/// so a transient conflict never strands the proposal in `Evaluating`.
 pub async fn reject_learning_candidate(
     store: &(impl LearningReviewStore + ?Sized),
     request: &SkillReviewRequest,
 ) -> Result<SkillReviewOutcome> {
     let candidate = load_candidate(store, &request.tenant_id, request.candidate_id).await?;
+    ensure_reviewable_proposal(&candidate)?;
     ensure_proposed_candidate(&candidate)?;
     let artifact_uid = optional_payload_uuid(&candidate.payload, "artifact_uid")?;
     let draft_artifact_revision_uid =
@@ -394,6 +405,18 @@ pub async fn reject_learning_candidate(
         store,
         LearningCandidateStatusUpdate {
             candidate_id: candidate.id,
+            status: LearningCandidateStatus::Evaluating,
+            status_reason: Some("claimed for rejection".to_string()),
+            evaluation_payload: None,
+            updated_at: Utc::now(),
+        },
+    )
+    .await?;
+
+    let rejected = finish_claimed_candidate_review(
+        store,
+        LearningCandidateStatusUpdate {
+            candidate_id: candidate.id,
             status: LearningCandidateStatus::Rejected,
             status_reason: Some(
                 request
@@ -405,7 +428,19 @@ pub async fn reject_learning_candidate(
             updated_at: Utc::now(),
         },
     )
-    .await?;
+    .await;
+    if let Err(error) = rejected {
+        if let Err(release_error) =
+            release_claimed_skill_candidate(store, candidate.id, &error.to_string()).await
+        {
+            tracing::warn!(
+                candidate_id = %candidate.id,
+                error = %release_error,
+                "failed to release rejection claim after a terminal write conflict"
+            );
+        }
+        return Err(error);
+    }
 
     Ok(SkillReviewOutcome {
         candidate_id: candidate.id,
@@ -427,10 +462,31 @@ async fn load_candidate(
         .ok_or_else(|| SkillReviewError::NotFound("learning candidate not found".to_string()))
 }
 
-fn ensure_skill_candidate(candidate: &LearningCandidate) -> Result<()> {
-    if candidate.candidate_type != LearningCandidateType::Skill {
+/// Refuses anything but a skill draft at the accept-skill entry point.
+///
+/// Gated on `proposal_kind`, not `candidate_type`: the target domain (a skill)
+/// does not say whether a materializer exists for the proposal. A skill
+/// suggestion with no draft behind it is also `candidate_type = Skill`, and
+/// accepting one would run the publish path against a revision that was never
+/// generated.
+fn ensure_skill_draft_proposal(candidate: &LearningCandidate) -> Result<()> {
+    if candidate.proposal_kind != LearningProposalKind::SkillDraft {
         return Err(bad_request(
-            "only skill learning candidates can be accepted by this endpoint",
+            "only skill draft proposals can be accepted by this endpoint",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses any kind that has no reviewable outcome at the reject entry point.
+///
+/// Both `SkillDraft` and `SkillRollback` are decisions a reviewer can decline.
+/// Advisory and authoring items are not: they have no `Rejected` state at all,
+/// so their only close is a dismissal.
+fn ensure_reviewable_proposal(candidate: &LearningCandidate) -> Result<()> {
+    if !candidate.proposal_kind.is_reviewable() {
+        return Err(bad_request(
+            "only reviewable proposals can be rejected; advisory and authoring items are dismissed",
         ));
     }
     Ok(())
@@ -608,7 +664,7 @@ fn accepted_learning_entry(
             "review": evaluation_payload,
         }),
         confidence: candidate.confidence,
-        source_refs: source_refs(candidate),
+        sources: learning_log_sources(candidate, published),
         actor: format!("review:{}", request.reviewer_subject),
         valid_from: Utc::now(),
         valid_to: None,
@@ -652,19 +708,50 @@ fn target_label(candidate: &LearningCandidate) -> Option<String> {
     })
 }
 
-fn source_refs(candidate: &LearningCandidate) -> Vec<Uuid> {
-    let mut refs = Vec::with_capacity(candidate.source_experience_ids.len() + 2);
-    refs.push(candidate.id);
-    if let Some(session_id) = candidate
-        .payload
-        .get("source_session_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-    {
-        refs.push(session_id);
+/// Builds the typed provenance recorded on an accepted candidate's learning-log entry.
+///
+/// The entry inherits the candidate's own normalized sources rather than
+/// re-deriving them from payload strings, plus the candidate itself and the
+/// revision that was actually published. That keeps the derivation chain
+/// continuous: erasing a source experience now reaches the candidate, and
+/// through the candidate, this entry.
+fn learning_log_sources(
+    candidate: &LearningCandidate,
+    published: &StoredArtifactRevision,
+) -> Vec<LearningLogSourceRef> {
+    let mut sources = vec![
+        LearningLogSourceRef::Candidate {
+            candidate_id: candidate.id,
+        },
+        LearningLogSourceRef::ArtifactRevision {
+            revision_uid: published.revision_uid,
+        },
+    ];
+    for source in &candidate.sources {
+        match source {
+            LearningCandidateSourceRef::Experience { experience_id } => {
+                sources.push(LearningLogSourceRef::Experience {
+                    experience_id: *experience_id,
+                });
+            }
+            LearningCandidateSourceRef::Session { session_id } => {
+                sources.push(LearningLogSourceRef::Session {
+                    session_id: *session_id,
+                });
+            }
+            LearningCandidateSourceRef::TaskSegment { segment_id } => {
+                sources.push(LearningLogSourceRef::TaskSegment {
+                    segment_id: *segment_id,
+                });
+            }
+            // Attribution, event, contact, experiment, score, and revision
+            // references have no learning-log source column: the log's own
+            // referent set is deliberately narrower. They stay reachable through
+            // the candidate reference above rather than being flattened here.
+            _ => {}
+        }
     }
-    refs.extend(candidate.source_experience_ids.iter().copied());
-    refs
+    sources
 }
 
 impl SkillReviewAction {
@@ -685,7 +772,9 @@ fn bad_request(message: impl Into<String>) -> SkillReviewError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::types::experience::LearningRiskClass;
+    use moa_core::types::experience::{
+        LearningCandidateType, LearningProposalKind, LearningRiskClass,
+    };
     use std::sync::Mutex;
 
     /// In-memory [`LearningReviewStore`] that records the status updates it receives.
@@ -697,7 +786,27 @@ mod tests {
     struct RecordingReviewStore {
         candidate: Option<LearningCandidate>,
         status_change_applies: bool,
-        recorded_update: Mutex<Option<(LearningCandidateStatusUpdate, LearningCandidateStatus)>>,
+        /// Every compare-and-set attempted, in order. Review paths take more than
+        /// one, and the ORDER is the property under test: recording only the last
+        /// would hide a rejection that skipped its claim.
+        recorded_updates: Mutex<Vec<(LearningCandidateStatusUpdate, LearningCandidateStatus)>>,
+    }
+
+    impl RecordingReviewStore {
+        fn new(candidate: Option<LearningCandidate>, status_change_applies: bool) -> Self {
+            Self {
+                candidate,
+                status_change_applies,
+                recorded_updates: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn updates(&self) -> Vec<(LearningCandidateStatusUpdate, LearningCandidateStatus)> {
+            self.recorded_updates
+                .lock()
+                .expect("read recorded updates")
+                .clone()
+        }
     }
 
     impl LearningReviewStore for RecordingReviewStore {
@@ -717,10 +826,10 @@ mod tests {
             expected_status: LearningCandidateStatus,
         ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a {
             let applies = self.status_change_applies;
-            *self
-                .recorded_update
+            self.recorded_updates
                 .lock()
-                .expect("record candidate status update") = Some((update.clone(), expected_status));
+                .expect("record candidate status update")
+                .push((update.clone(), expected_status));
             async move { Ok(applies) }
         }
 
@@ -748,6 +857,7 @@ mod tests {
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status: LearningCandidateStatus::Proposed,
             target_id: None,
             target_label: None,
@@ -755,7 +865,9 @@ mod tests {
             task_facets: None,
             payload,
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            sources: vec![LearningCandidateSourceRef::Experience {
+                experience_id: Uuid::now_v7(),
+            }],
             confidence: None,
             risk_class: LearningRiskClass::Medium,
             promotion_requirements: Vec::new(),
@@ -777,19 +889,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_learning_candidate_marks_candidate_rejected_and_preserves_draft() {
-        // Pins: rejecting a proposed candidate compare-and-sets Proposed -> Rejected and keeps
-        // the linked draft/artifact references so the draft is preserved, not deleted.
+    async fn reject_learning_candidate_claims_before_recording_the_rejection() {
+        // Pins: rejection walks the real state machine, Proposed -> Evaluating -> Rejected,
+        // and keeps the linked draft/artifact references so the draft is preserved.
+        //
+        // There is no direct Proposed -> Rejected edge for either reviewable kind, and the
+        // database enforces that with a trigger. A reject that compare-and-set straight from
+        // Proposed compiled, passed every unit test against a fake store, and failed only on
+        // a live UPDATE — which is exactly what it did before this test existed.
         let draft_uid = Uuid::from_u128(77);
         let artifact_uid = Uuid::from_u128(88);
-        let store = RecordingReviewStore {
-            candidate: Some(proposed_skill_candidate(json!({
+        let store = RecordingReviewStore::new(
+            Some(proposed_skill_candidate(json!({
                 "draft_artifact_revision_uid": draft_uid.to_string(),
                 "artifact_uid": artifact_uid.to_string(),
             }))),
-            status_change_applies: true,
-            recorded_update: Mutex::new(None),
-        };
+            true,
+        );
         let request = reject_request(Some("not reusable"));
 
         let outcome = reject_learning_candidate(&store, &request)
@@ -802,30 +918,55 @@ mod tests {
         assert_eq!(outcome.artifact_uid, Some(artifact_uid));
         assert_eq!(outcome.published_artifact_revision_uid, None);
 
-        let recorded = store
-            .recorded_update
-            .lock()
-            .expect("lock recorded update")
-            .clone()
-            .expect("a status update was applied");
+        let recorded = store.updates();
+        assert_eq!(recorded.len(), 2, "rejection claims, then records");
+        assert_eq!(recorded[0].1, LearningCandidateStatus::Proposed);
+        assert_eq!(recorded[0].0.status, LearningCandidateStatus::Evaluating);
         assert_eq!(
-            recorded.1,
-            LearningCandidateStatus::Proposed,
-            "reject must compare-and-set against the Proposed status"
+            recorded[1].1,
+            LearningCandidateStatus::Evaluating,
+            "the terminal write compare-and-sets against the claim it took"
         );
-        assert_eq!(recorded.0.status, LearningCandidateStatus::Rejected);
-        assert_eq!(recorded.0.status_reason.as_deref(), Some("not reusable"));
+        assert_eq!(recorded[1].0.status, LearningCandidateStatus::Rejected);
+        assert_eq!(recorded[1].0.status_reason.as_deref(), Some("not reusable"));
+    }
+
+    #[tokio::test]
+    async fn reject_refuses_a_kind_that_has_no_rejected_state() {
+        // Pins: an advisory or authoring item cannot be rejected. Its state machine has no
+        // Rejected state at all, so a reject that reached the database would fail as a
+        // constraint violation; refusing at the handler keeps it a 400 the reviewer can act
+        // on, and keeps dismissal the only way to close an informational item.
+        let mut candidate = proposed_skill_candidate(json!({}));
+        candidate.proposal_kind = LearningProposalKind::SkillAuthoring;
+        candidate.status = LearningCandidateStatus::NeedsAuthoring;
+        let store = RecordingReviewStore::new(Some(candidate), true);
+
+        let error = reject_learning_candidate(&store, &reject_request(None))
+            .await
+            .expect_err("an authoring item has no rejected state");
+
+        // On the REASON, not merely on the variant. `ensure_proposed_candidate` also
+        // returns `BadRequest` for this fixture, so matching the variant alone would
+        // pass with no kind check at all — and the kind is the property under test.
+        let SkillReviewError::BadRequest(message) = &error else {
+            panic!("expected BadRequest, got {error:?}");
+        };
+        assert!(
+            message.contains("only reviewable proposals can be rejected"),
+            "refusal must name the kind, not the status: {message}"
+        );
+        assert!(
+            store.updates().is_empty(),
+            "the kind guard fires before any status write is attempted"
+        );
     }
 
     #[tokio::test]
     async fn reject_learning_candidate_conflicts_when_status_changed() {
         // Pins: a compare-and-set miss (another writer moved the candidate first) surfaces as a
         // Conflict instead of silently succeeding.
-        let store = RecordingReviewStore {
-            candidate: Some(proposed_skill_candidate(json!({}))),
-            status_change_applies: false,
-            recorded_update: Mutex::new(None),
-        };
+        let store = RecordingReviewStore::new(Some(proposed_skill_candidate(json!({}))), false);
         let request = reject_request(None);
 
         let error = reject_learning_candidate(&store, &request)
@@ -844,11 +985,7 @@ mod tests {
         // fires before any status write is attempted.
         let mut candidate = proposed_skill_candidate(json!({}));
         candidate.status = LearningCandidateStatus::Promoted;
-        let store = RecordingReviewStore {
-            candidate: Some(candidate),
-            status_change_applies: true,
-            recorded_update: Mutex::new(None),
-        };
+        let store = RecordingReviewStore::new(Some(candidate), true);
         let request = reject_request(None);
 
         let error = reject_learning_candidate(&store, &request)
@@ -860,11 +997,7 @@ mod tests {
             "expected BadRequest, got {error:?}"
         );
         assert!(
-            store
-                .recorded_update
-                .lock()
-                .expect("lock recorded update")
-                .is_none(),
+            store.updates().is_empty(),
             "the proposed-state guard must reject before any status write"
         );
     }
@@ -955,6 +1088,7 @@ mod tests {
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status: LearningCandidateStatus::Proposed,
             target_id: None,
             target_label: None,
@@ -962,7 +1096,9 @@ mod tests {
             task_facets: None,
             payload: json!({"operation": "unknown_operation"}),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            sources: vec![LearningCandidateSourceRef::Experience {
+                experience_id: Uuid::now_v7(),
+            }],
             confidence: None,
             risk_class: LearningRiskClass::Medium,
             promotion_requirements: Vec::new(),

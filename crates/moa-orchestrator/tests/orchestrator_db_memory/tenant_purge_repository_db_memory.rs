@@ -50,6 +50,11 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
             .expect("release legal-hold fixture")
     );
     let global_ids = seed_purge_families(pool, tenant_id, subject_id, &storage_partition_id).await;
+    // Transcripts for BOTH tenants: the purged tenant's proves the append-only
+    // guard is actually crossed, the neighbour's proves the maintenance escape
+    // hatch the purge opens is closed again when its transaction ends.
+    let purged_session_id = seed_session_transcript(&test_db, tenant_id).await;
+    seed_session_transcript(&test_db, NEIGHBOUR_TENANT).await;
     start_destruction(
         pool,
         TenantId::from(tenant_id),
@@ -60,10 +65,26 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
     .await
     .expect("start tenant-wide destruction fence");
 
-    let first = purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
+    // The purge runs through a BOUNDED pool so the maintenance-hatch assertion
+    // below can inspect every connection the purge could have used. That is the
+    // real risk: `set_config` opens the append-only hatch, and a connection that
+    // carried it back into the pool would silently disable the guard for whatever
+    // ran next on it. Asserting through the large shared pool would almost always
+    // pick a connection the purge never touched and prove nothing.
+    //
+    // Two, not one: the purge holds its destruction stage guard on one connection
+    // while its transaction runs on another, so a single-connection pool deadlocks
+    // waiting for itself.
+    const PURGE_POOL_CONNECTIONS: u32 = 2;
+    let purge_pool = PgPoolOptions::new()
+        .max_connections(PURGE_POOL_CONNECTIONS)
+        .connect(test_db.database_url())
+        .await
+        .expect("open a bounded pool for the purge");
+    let first = purge_relational(&purge_pool, &offline_fga(), tenant_id, &operation_id)
         .await
         .expect("registered tenant families should purge");
-    let replay = purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
+    let replay = purge_relational(&purge_pool, &offline_fga(), tenant_id, &operation_id)
         .await
         .expect("same purge operation should replay idempotently");
     assert_eq!(first, RelationalPurgeOutcome::Committed);
@@ -77,9 +98,78 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
             ("moa.kek".to_string(), 1),
             ("moa.legal_hold".to_string(), 1),
             ("moa.tenant_purge_operations".to_string(), 1),
-            ("public.authz_outbox".to_string(), 1),
+            // Two inverse authorization tuples, not one: the workspace tuple plus
+            // the `tenant -> session` tuple for the seeded session. Inverse intent
+            // is per-subject, so this count tracks what the fixture actually
+            // contains rather than being a constant — a session that produced no
+            // tuple would mean the purge left its FGA relationships behind.
+            ("public.authz_outbox".to_string(), 2),
         ])
     );
+
+    // The transcript is gone. `events` is append-only behind a per-row BEFORE
+    // DELETE trigger, so this assertion is the one that fails — with P0001
+    // `events table is append-only` — if the purge stops setting
+    // `moa.events_maintenance`. Before the fixture seeded an event, that trigger
+    // never fired and a purge that could not delete any real tenant's
+    // conversation passed this suite.
+    let transcript: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM events WHERE tenant_id = $1),
+            (SELECT count(*) FROM sessions WHERE tenant_id = $1)
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("load purged tenant transcript state");
+    assert_eq!(
+        transcript,
+        (0, 0),
+        "a purged tenant's events and sessions must be gone"
+    );
+
+    // The escape hatch closed with the transaction. `set_config(..., true)` is
+    // transaction-local, so no connection may carry `moa.events_maintenance` back
+    // into the pool. The first user of an escape hatch must not be whoever quietly
+    // disables it for everyone, and this is what makes that checkable.
+    //
+    // Every connection is held at once before any is inspected, so the check
+    // covers whichever one ran the purge transaction rather than whichever one the
+    // pool happens to hand back first.
+    let mut held = Vec::new();
+    for _ in 0..PURGE_POOL_CONNECTIONS {
+        held.push(
+            purge_pool
+                .acquire()
+                .await
+                .expect("hold every pooled connection for the hatch check"),
+        );
+    }
+    for (index, connection) in held.iter_mut().enumerate() {
+        let hatch: Option<String> =
+            sqlx::query_scalar("SELECT current_setting('moa.events_maintenance', true)")
+                .fetch_one(&mut **connection)
+                .await
+                .expect("read the append-only maintenance setting");
+        assert_ne!(
+            hatch.as_deref(),
+            Some("on"),
+            "connection {index} carried the append-only maintenance hatch back into the pool, \
+             observed: {hatch:?}"
+        );
+
+        let refused = sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(NEIGHBOUR_TENANT)
+            .execute(&mut **connection)
+            .await
+            .expect_err("the append-only guard must still refuse an ordinary delete");
+        assert!(
+            refused.to_string().contains("append-only"),
+            "connection {index} expected the append-only guard to refuse, observed: {refused}"
+        );
+    }
 
     // The neighbour tenant's rebuild state is untouched. This is the failure the
     // purged-tenant residue map structurally cannot catch: a step that dropped
@@ -106,6 +196,29 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
         "another tenant's source-ACL state must survive this tenant's purge"
     );
 
+    // The neighbour's pending lineage and archived transcript both survive. These
+    // are the assertions an `AND FALSE` or a dropped `WHERE` dies on: the purged
+    // tenant's residue map cannot see them, because it only counts rows belonging
+    // to the tenant being purged.
+    let neighbour_transcript: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $1),
+            (SELECT count(*) FROM session_event_archives WHERE tenant_id = $2)
+        "#,
+    )
+    .bind(StoragePartitionId::for_tenant(TenantId::from(NEIGHBOUR_TENANT)).as_str())
+    .bind(NEIGHBOUR_TENANT)
+    .fetch_one(pool)
+    .await
+    .expect("load neighbour lineage and archive state");
+    assert_eq!(
+        neighbour_transcript,
+        (1, 1),
+        "another tenant's pending lineage and archived transcript must survive this \
+         tenant's purge"
+    );
+
     let neighbour_rebuild: (i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
@@ -124,6 +237,23 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
         neighbour_rebuild,
         (1, 1, 1, 1, 1),
         "another tenant's index-rebuild state must survive this tenant's purge"
+    );
+
+    // Behavior Lab score provenance: gone for the purged tenant (the residue map
+    // above already proves that), still present for the neighbour. A step that
+    // dropped its storage-partition predicate would satisfy the residue map and
+    // fail here.
+    let neighbour_partition = StoragePartitionId::for_tenant(TenantId::from(NEIGHBOUR_TENANT));
+    let neighbour_provenance: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.experiment_score_provenance WHERE storage_partition_id = $1",
+    )
+    .bind(neighbour_partition.to_string())
+    .fetch_one(pool)
+    .await
+    .expect("load neighbour experiment score provenance");
+    assert_eq!(
+        neighbour_provenance, 1,
+        "another tenant's Behavior Lab score provenance must survive this tenant's purge"
     );
 
     let hold_tombstone: (Option<Uuid>, String, String, Option<String>, bool) = sqlx::query_as(
@@ -156,13 +286,38 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
     .await
     .expect("load KEK tombstone");
     assert_eq!(kek_tombstone, (true, true));
-    let inverse_tuple: (String, String) =
-        sqlx::query_as("SELECT op, status FROM authz_outbox WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_one(pool)
-            .await
-            .expect("load inverse authorization intent");
-    assert_eq!(inverse_tuple, ("delete".to_string(), "pending".to_string()));
+    // Every enqueued tuple, by identity — not `fetch_one`, which silently
+    // inspected whichever row came back first and would pass while the other was
+    // wrong or missing. This is also what makes the residue count of two above a
+    // statement rather than a magic number: the rows are named here.
+    let inverse_tuples: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT op, status, tuple_relation, tuple_object FROM authz_outbox \
+         WHERE tenant_id = $1 ORDER BY tuple_relation",
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .expect("load inverse authorization intent");
+    assert_eq!(
+        inverse_tuples,
+        vec![
+            (
+                "delete".to_string(),
+                "pending".to_string(),
+                "tenant".to_string(),
+                format!("session:{purged_session_id}"),
+            ),
+            (
+                "delete".to_string(),
+                "pending".to_string(),
+                "workspace".to_string(),
+                format!("tenant:{tenant_id}"),
+            ),
+        ],
+        "the purge must enqueue inverse intent for the tenant AND for each of its \
+         sessions; a missing session tuple leaves that session's FGA relationships \
+         behind after its rows are gone"
+    );
 
     let global_rows: (i64, i64, i64) = sqlx::query_as(
         r#"
@@ -750,6 +905,13 @@ async fn seed_purge_families(
     .execute(pool)
     .await
     .expect("seed security event");
+    // A session AND at least one event, for BOTH tenants. The event is the
+    // load-bearing row: the append-only guard on `events` is a per-row BEFORE
+    // DELETE trigger, so a fixture with zero events never fires it, and a purge
+    // that cannot delete a real tenant's transcript passes anyway. The
+    // neighbour's transcript proves two things at once — that the purge is
+    // scoped, and that the maintenance escape hatch the purge opens is closed
+    // again afterwards.
     sqlx::query("INSERT INTO moa.storage_partition_state (storage_partition_id) VALUES ($1)")
         .bind(storage_partition_id.as_str())
         .execute(pool)
@@ -804,11 +966,98 @@ async fn seed_purge_families(
     // the purged-tenant residue check cannot see that because it only counts
     // rows belonging to the tenant being purged.
     seed_index_rebuild_families(pool, NEIGHBOUR_TENANT, &neighbour_partition).await;
+    // Behavior Lab score provenance for BOTH tenants. The purged tenant's rows
+    // prove the explicit delete runs; the neighbour's prove it is scoped. Without
+    // the neighbour, a step that lost its `WHERE storage_partition_id = $1` would
+    // still leave the purged-tenant residue map empty and pass.
+    seed_experiment_score_provenance(pool, storage_partition_id).await;
+    seed_experiment_score_provenance(pool, &neighbour_partition).await;
 
     GlobalFixtureIds {
         oauth_client_id,
         root_generation,
     }
+}
+
+/// Seeds one session and one event for `tenant_id` through the production path.
+///
+/// The event exists so the append-only `events` guard is reachable at all: it is
+/// a per-row `BEFORE DELETE` trigger, so a tenant with no events never fires it
+/// and every assertion about deleting a transcript is vacuous.
+///
+/// Driven through `SessionStore` rather than raw INSERTs because a session is not
+/// one row. It needs creator attribution and a committed `session_agent_context`
+/// (a deferred constraint trigger refuses it otherwise), and reproducing that
+/// chain by hand is how a fixture drifts from the shape production writes.
+async fn seed_session_transcript(
+    test_db: &moa_test_support::postgres::TestDb,
+    tenant_id: Uuid,
+) -> Uuid {
+    let session_id = moa_core::traits::SessionStore::create_session(
+        test_db.store(),
+        moa_core::types::session::SessionMeta {
+            tenant_id: TenantId::from(tenant_id),
+            created_by: Some(moa_core::types::contact::SessionActorRef::Identity {
+                id: Uuid::from_u128(1),
+            }),
+            model: moa_core::types::identifiers::ModelId::new("test-model"),
+            agent_context: Some(moa_core::types::agent::AgentContext::system_default()),
+            ..moa_core::types::session::SessionMeta::default()
+        },
+    )
+    .await
+    .expect("seed the session whose transcript the purge must delete");
+    test_db
+        .store()
+        .append_events(
+            session_id,
+            vec![moa_session::EventAppend {
+                event: moa_core::events::Event::UserMessage {
+                    text: "purge fixture transcript".to_string(),
+                    attachments: Vec::new(),
+                },
+                dedupe_key: None,
+            }],
+        )
+        .await
+        .expect("seed the event that makes the append-only guard reachable");
+
+    // Both purge-relevant per-session/per-partition families, for EVERY tenant this
+    // helper is called with. Seeding the neighbour too is what makes the deletes
+    // falsifiable: with only the purged tenant, an `AND FALSE` on either predicate
+    // is indistinguishable from deleting the right rows, because deleting
+    // everything and deleting exactly the target look identical when there is only
+    // one target.
+    let partition = StoragePartitionId::for_tenant(TenantId::from(tenant_id));
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.lineage_journal
+            (journal_id, storage_partition_id, event_class, payload, accepted_at, available_at)
+        VALUES ($1, $2, 'lineage', '{}'::JSONB, NOW(), NOW())
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(partition.as_str())
+    .execute(test_db.store().pool())
+    .await
+    .expect("seed pending lineage a purge must drain");
+    // Archived transcript for the same session. Its FK to `sessions` is
+    // ON DELETE RESTRICT, so this row also proves the purge deletes archives
+    // BEFORE the sessions they reference rather than relying on a cascade.
+    sqlx::query(
+        r#"
+        INSERT INTO session_event_archives
+            (session_id, tenant_id, format_version, event_count, first_sequence_num,
+             last_sequence_num, payload, content_digest, archived_at)
+        VALUES ($1, $2, 1, 1, 0, 0, '\x00'::BYTEA, repeat('a', 32)::BYTEA, NOW())
+        "#,
+    )
+    .bind(session_id.0)
+    .bind(tenant_id)
+    .execute(test_db.store().pool())
+    .await
+    .expect("seed an archived transcript the purge must remove before its session");
+    session_id.0
 }
 
 /// Tenant whose rows must outlive a different tenant's purge.
@@ -1151,4 +1400,100 @@ fn offline_fga() -> FgaClient {
 
 fn hex64(character: char) -> String {
     std::iter::repeat_n(character, 64).collect()
+}
+
+/// Seeds one experiment run, trial, score run, and provenance row for a tenant.
+///
+/// The provenance row is the point; the rest exist because V000361's composite
+/// foreign keys refuse a provenance row whose trial, run, pinned plan revision,
+/// and storage partition do not line up exactly.
+async fn seed_experiment_score_provenance(
+    pool: &PgPool,
+    storage_partition_id: &StoragePartitionId,
+) {
+    let partition = storage_partition_id.to_string();
+    let score_run_id = Uuid::new_v4();
+    let run_uid = Uuid::new_v4();
+    let trial_uid = Uuid::new_v4();
+    let plan_revision_uid = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO analytics.score_run (run_id, storage_partition_id, user_id, source)
+         VALUES ($1, $2, NULL, 'experiment_trial')",
+    )
+    .bind(score_run_id)
+    .bind(&partition)
+    .execute(pool)
+    .await
+    .expect("seed experiment score run");
+
+    sqlx::query(
+        "INSERT INTO moa.experiment_run (
+             run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
+             scorecard, score_run_id, artifact_revision_uids, created_by_identity
+         ) VALUES ($1, $2, NULL, 'purge experiment', 'agent_loop', 'completed', '{}'::jsonb,
+                   '{}'::jsonb, '{}'::jsonb, $3, '{}', '{}'::jsonb)",
+    )
+    .bind(run_uid)
+    .bind(&partition)
+    .bind(score_run_id)
+    .execute(pool)
+    .await
+    .expect("seed experiment run");
+
+    sqlx::query(
+        "INSERT INTO moa.experiment_trial (
+             trial_uid, run_uid, storage_partition_id, user_id, trial_key, status, target_kind,
+             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id
+         ) VALUES ($1, $2, $3, NULL, 'purge/0', 'completed', 'agent_loop', 'baseline', $4,
+                   '{}'::jsonb, 'sim-model', $5)",
+    )
+    .bind(trial_uid)
+    .bind(run_uid)
+    .bind(&partition)
+    .bind(plan_revision_uid)
+    .bind(score_run_id)
+    .execute(pool)
+    .await
+    .expect("seed experiment trial");
+
+    let score_id = Uuid::new_v4();
+    let score_ts = chrono::Utc::now();
+    let target_session_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO analytics.scores (
+             score_id, ts, storage_partition_id, target_kind, session_id, run_id, name,
+             value_type, value_boolean, source, model_or_evaluator
+         ) VALUES ($1, $2, $3, 'session', $4, $5, 'target_completed', 'boolean',
+                   TRUE, 'product_evaluator', 'target_completed@v1')",
+    )
+    .bind(score_id)
+    .bind(score_ts)
+    .bind(&partition)
+    .bind(target_session_id)
+    .bind(score_run_id)
+    .execute(pool)
+    .await
+    .expect("seed experiment score");
+
+    sqlx::query(
+        "INSERT INTO moa.experiment_score_provenance (
+             score_id, score_ts, storage_partition_id, user_id, score_run_id, experiment_run_uid,
+             plan_revision_uid, trial_uid, target_session_id, target_execution_run_uid,
+             evaluator_id, evaluator_version, score_name, value_type, evidence_ref, evidence_hash
+         ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, NULL, 'target_completed', 'v1',
+                   'target_completed', 'boolean', 'session:purge#seq=1', $9)",
+    )
+    .bind(score_id)
+    .bind(score_ts)
+    .bind(&partition)
+    .bind(score_run_id)
+    .bind(run_uid)
+    .bind(plan_revision_uid)
+    .bind(trial_uid)
+    .bind(target_session_id)
+    .bind(vec![1_u8; 32])
+    .execute(pool)
+    .await
+    .expect("seed experiment score provenance");
 }

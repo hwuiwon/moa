@@ -1,15 +1,20 @@
 //! PostgreSQL contracts for normalized skill-regression compile audits.
 
+use moa_core::traits::SessionStore;
 use moa_core::types::{
+    agent::AgentContext,
+    contact::SessionActorRef,
     execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlanningAuditEnvelope,
         ExecutionPlanningAuditPayload, bounded_audit_report, canonical_json_bytes,
     },
     experience::{
-        LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-        LearningCandidateType, LearningRiskClass,
+        LearningCandidate, LearningCandidateSourceRef, LearningCandidateStatus,
+        LearningCandidateStatusUpdate, LearningCandidateType, LearningProposalKind,
+        LearningRiskClass,
     },
-    identifiers::TenantId,
+    identifiers::{ModelId, SessionId, TenantId},
+    session::SessionMeta,
 };
 use moa_execution::repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
@@ -22,8 +27,27 @@ async fn learning_audit_test_db() -> TestDb {
         .expect("bootstrap learning planning-audit test database")
 }
 
+/// Seeds one session so a candidate fixture has a source row its foreign key can
+/// actually resolve. Provenance is normalized now: a fabricated uuid is rejected.
+async fn seed_source_session(test_db: &TestDb, tenant_id: TenantId) -> SessionId {
+    test_db
+        .store()
+        .create_session(SessionMeta {
+            tenant_id,
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(1),
+            }),
+            model: ModelId::new("test-model"),
+            agent_context: Some(AgentContext::system_default()),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("seed learning-candidate source session")
+}
+
 fn candidate(
     tenant_id: TenantId,
+    source_session_id: SessionId,
     draft_revision_uid: Uuid,
     evaluation_payload: Option<Value>,
 ) -> LearningCandidate {
@@ -33,6 +57,7 @@ fn candidate(
         tenant_id,
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
+        proposal_kind: LearningProposalKind::SkillDraft,
         status: LearningCandidateStatus::Evaluating,
         target_id: Some(format!("skill://audit-{}", draft_revision_uid.simple())),
         target_label: Some(format!("audit-{}", draft_revision_uid.simple())),
@@ -43,7 +68,9 @@ fn candidate(
             "draft_artifact_revision_uid": draft_revision_uid,
         }),
         evaluation_payload,
-        source_experience_ids: vec![Uuid::now_v7()],
+        sources: vec![LearningCandidateSourceRef::Session {
+            session_id: source_session_id,
+        }],
         confidence: Some(0.9),
         risk_class: LearningRiskClass::Low,
         promotion_requirements: vec!["human_review".to_string()],
@@ -96,8 +123,10 @@ async fn learning_candidate_finalization_requires_normalized_compile_audit_db() 
     let test_db = learning_audit_test_db().await;
     let tenant_id = TenantId::new();
     let draft_revision_uid = Uuid::now_v7();
+    let source_session_id = seed_source_session(&test_db, tenant_id).await;
     let candidate = candidate(
         tenant_id,
+        source_session_id,
         draft_revision_uid,
         Some(json!({"seed": {"keep": true}})),
     );
@@ -179,7 +208,8 @@ async fn learning_candidate_finalization_rejects_a_different_compile_operation_d
     let test_db = learning_audit_test_db().await;
     let tenant_id = TenantId::new();
     let draft_revision_uid = Uuid::now_v7();
-    let candidate = candidate(tenant_id, draft_revision_uid, None);
+    let source_session_id = seed_source_session(&test_db, tenant_id).await;
+    let candidate = candidate(tenant_id, source_session_id, draft_revision_uid, None);
     test_db
         .store()
         .append_learning_candidate(&candidate)
@@ -230,8 +260,10 @@ async fn noncompiling_skill_review_finalizes_without_compile_audit_db() {
     // manufacturing an audit record or compatibility payload.
     let test_db = learning_audit_test_db().await;
     let tenant_id = TenantId::new();
+    let source_session_id = seed_source_session(&test_db, tenant_id).await;
     let candidate = candidate(
         tenant_id,
+        source_session_id,
         Uuid::now_v7(),
         Some(json!({"skill_form": "instruction_only", "seed": {"keep": true}})),
     );

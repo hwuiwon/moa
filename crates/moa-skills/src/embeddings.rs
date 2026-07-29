@@ -16,6 +16,8 @@ use moa_artifacts::registry::{ArtifactRegistry, NewSkillEmbedding};
 use moa_config::EmbeddingBackfillConfig;
 use moa_core::error::{MoaError, Result};
 use moa_core::traits::EmbeddingProvider;
+use moa_memory_pii::PiiClassifier;
+use moa_memory_pii::sanitized::sanitize_with;
 use moa_session::PostgresSessionStore;
 use sha2::{Digest, Sha256};
 
@@ -75,9 +77,18 @@ pub fn should_reembed_skill(stored_source_hash: Option<&[u8]>, current_hash: &[u
 /// provenance. Returns the number of records embedded. A provider failure logs a
 /// warning and returns the count embedded so far, leaving the rest NULL for the
 /// next tick.
+///
+/// A task summary is model-written text derived from the transcript, and this is
+/// an automatic provider call over stored rows, so each summary is sanitized
+/// before it is sent. A summary that cannot be released is skipped with its
+/// stable reason code and left unembedded, which costs that row its semantic
+/// routing rather than leaking it to the embedder. The filing-time probe
+/// sanitizes the same way, so a probe and these stored vectors stay in one
+/// vector space.
 pub async fn backfill_experience_embeddings(
     store: &PostgresSessionStore,
     provider: &dyn EmbeddingProvider,
+    classifier: &dyn PiiClassifier,
     config: &EmbeddingBackfillConfig,
     now: DateTime<Utc>,
 ) -> Result<usize> {
@@ -104,9 +115,29 @@ pub async fn backfill_experience_embeddings(
         return Ok(0);
     }
 
+    // Sanitize every summary before any of them reach the embedder, and drop the
+    // rows that refuse. Doing this ahead of the batching keeps a refused row from
+    // silently shifting the vector-to-row alignment inside a provider call.
+    let mut releasable = Vec::with_capacity(missing.len());
+    for row in missing {
+        match sanitize_with(classifier, &row.task_summary).await {
+            Ok(sanitized) => releasable.push((row, sanitized.into_redacted())),
+            Err(rejection) => {
+                tracing::warn!(
+                    experience_id = %row.id,
+                    reason = rejection.code(),
+                    "experience task summary refused sanitization; leaving it unembedded"
+                );
+            }
+        }
+    }
+    if releasable.is_empty() {
+        return Ok(0);
+    }
+
     let mut written = 0usize;
-    for chunk in missing.chunks(MAX_INPUTS_PER_CALL) {
-        let inputs: Vec<String> = chunk.iter().map(|row| row.task_summary.clone()).collect();
+    for chunk in releasable.chunks(MAX_INPUTS_PER_CALL) {
+        let inputs: Vec<String> = chunk.iter().map(|(_, text)| text.clone()).collect();
         let vectors = match provider.embed(&inputs).await {
             Ok(vectors) => vectors,
             Err(error) => {
@@ -125,12 +156,15 @@ pub async fn backfill_experience_embeddings(
             );
             break;
         }
-        // Carry the exact summary that was embedded so the write can refuse a row
-        // whose summary changed under it (see `set_experience_task_embeddings`).
+        // Carry the exact stored summary the vector was derived from so the write
+        // can refuse a row whose summary changed under it (see
+        // `set_experience_task_embeddings`). The guard compares against the stored
+        // column, so it stays the original text even though the embedded input was
+        // the sanitized form.
         let pairs: Vec<(uuid::Uuid, String, Vec<f32>)> = chunk
             .iter()
             .zip(vectors)
-            .map(|(row, vector)| (row.id, row.task_summary.clone(), vector))
+            .map(|((row, _), vector)| (row.id, row.task_summary.clone(), vector))
             .collect();
         store
             .set_experience_task_embeddings(&pairs, &model, model_version)

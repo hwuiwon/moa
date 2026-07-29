@@ -29,7 +29,7 @@ pub struct ToolResultSearchTool;
 #[async_trait]
 impl BuiltInTool for ToolResultReadTool {
     fn name(&self) -> &'static str {
-        "tool_result_read"
+        moa_core::types::tools::TOOL_RESULT_READ_TOOL_NAME
     }
 
     fn description(&self) -> &'static str {
@@ -180,7 +180,7 @@ impl BuiltInTool for ToolResultReadTool {
 #[async_trait]
 impl BuiltInTool for ToolResultSearchTool {
     fn name(&self) -> &'static str {
-        "tool_result_search"
+        moa_core::types::tools::TOOL_RESULT_SEARCH_TOOL_NAME
     }
 
     fn description(&self) -> &'static str {

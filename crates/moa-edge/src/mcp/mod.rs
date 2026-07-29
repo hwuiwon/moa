@@ -472,7 +472,9 @@ mod tests {
             "index_rebuild_rollback",
             "index_rebuild_start",
             "index_rebuild_status",
+            "learning_candidate_accept_rollback",
             "learning_candidate_accept_skill",
+            "learning_candidate_dismiss",
             "learning_candidate_get",
             "learning_candidate_reject",
             "learning_candidates_list",
@@ -494,8 +496,8 @@ mod tests {
         assert_eq!(actual, expected, "MCP tool discovery allowlist drifted");
         assert_eq!(
             actual.len(),
-            59,
-            "expected exactly 59 tenant-operation tools"
+            61,
+            "expected exactly 61 tenant-operation tools"
         );
         assert!(!actual.contains("execute_run"));
         assert!(!actual.contains("replay"));

@@ -58,6 +58,7 @@ pub fn build_default_graph_memory_retriever(
 ) -> Arc<GraphMemoryRetriever> {
     let retrieval_embedder = match build_embedder_from_config(
         config,
+        None,
         EmbedderConstructionRole::Retrieval,
     ) {
         Ok(embedder) => Some(embedder),

@@ -1,13 +1,13 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use moa_core::{
     types::action_policy::ActionRuleScope, types::channel::Attachment,
     types::execution_planning::PinnedExecutionTemplateRef, types::identifiers::ModelId,
     types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_experiments::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
-    ExperimentVariant,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget,
+    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
 };
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -100,21 +100,44 @@ fn execution_template_target_round_trips_through_public_model_offline() {
 }
 
 #[test]
-fn scorecard_carries_expected_scores_without_evaluator_execution_offline() {
-    // Pins: scorecards define expected score names and evaluator metadata only.
-    let scorecard = ExperimentScorecard {
-        score_names: vec!["grounding".to_string(), "task_success".to_string()],
-        evaluator_metadata: json!({
-            "judge": "offline-replay",
-            "rubric_version": "2026-06-16"
-        }),
-    };
+fn scorecard_round_trips_evaluator_linkage_without_output_metadata_offline() {
+    // Pins: scorecards identify evaluators; the registry owns their output name and type.
+    let scorecard = ExperimentScorecard::new(vec![
+        ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        },
+        ScorecardRequirement {
+            evaluator_id: "scenario_quality".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Informational,
+        },
+    ])
+    .expect("scorecard is structurally valid");
 
-    let encoded = serde_json::to_string(&scorecard).expect("scorecard serializes");
+    let encoded = serde_json::to_value(&scorecard).expect("scorecard serializes");
+    for requirement in encoded["requirements"]
+        .as_array()
+        .expect("scorecard requirements serialize as an array")
+    {
+        assert!(requirement.get("score_name").is_none());
+        assert!(requirement.get("value_type").is_none());
+    }
     let decoded: ExperimentScorecard =
-        serde_json::from_str(&encoded).expect("scorecard deserializes");
+        serde_json::from_value(encoded).expect("scorecard deserializes");
 
-    assert_eq!(decoded.score_names, ["grounding", "task_success"]);
+    assert_eq!(
+        decoded
+            .requirements()
+            .iter()
+            .map(|requirement| requirement.evaluator_id.as_str())
+            .collect::<Vec<_>>(),
+        ["target_completed", "scenario_quality"]
+    );
+    assert_eq!(decoded.blocking_requirements().count(), 1);
     assert_eq!(decoded, scorecard);
 }
 
@@ -189,6 +212,7 @@ fn trial_record_round_trips_through_public_model_offline() {
         session_id: Some(session_id),
         execution_run_uid: Some(execution_run_uid),
         score_run_id: Uuid::now_v7(),
+        final_evidence_hash: Some(vec![7; 32]),
         turn_count: 4,
         stop_reason: Some(ExperimentTrialStopReason::Success),
         error: None,
@@ -242,10 +266,13 @@ fn record_for_target(
             }),
             metadata: json!({ "cohort": "offline" }),
         },
-        scorecard: ExperimentScorecard {
-            score_names: vec!["grounding".to_string()],
-            evaluator_metadata: json!({ "judge": "offline-replay" }),
-        },
+        scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("fixture scorecard is valid"),
         score_run_id: Uuid::now_v7(),
         session_id,
         execution_run_uid,

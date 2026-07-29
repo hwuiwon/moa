@@ -15,8 +15,8 @@
 use chrono::{DateTime, Duration, Utc};
 use moa_config::RegressionMonitorConfig;
 use moa_core::types::experience::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningRiskClass,
+    LearningCandidate, LearningCandidateSourceRef, LearningCandidateStatus,
+    LearningCandidateStatusUpdate, LearningCandidateType, LearningProposalKind, LearningRiskClass,
 };
 use moa_core::types::identifiers::TenantId;
 use moa_session::{PostgresSessionStore, RecentSkillPromotion, SkillResolutionSample};
@@ -238,14 +238,20 @@ fn rollback_candidate(decision: &RollbackDecision, now: DateTime<Utc>) -> Learni
         tenant_id: decision.promotion.tenant_id,
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
-        status: LearningCandidateStatus::Proposed,
+        proposal_kind: LearningProposalKind::SkillRollback,
+        status: LearningProposalKind::SkillRollback.initial_status(),
         target_id: Some(decision.promotion.artifact_uid.to_string()),
         target_label: Some(decision.promotion.skill_name.clone()),
         task_fingerprint: None,
         task_facets: None,
         payload,
         evaluation_payload: None,
-        source_experience_ids: Vec::new(),
+        // The promotion being reversed and the exact revisions involved, as rows
+        // rather than payload strings. Accepting a rollback previously depended
+        // on parsing `promotion_candidate_id` back out of JSON, which meant a
+        // malformed or absent string turned into a runtime 400 on a proposal
+        // that should never have been filed.
+        sources: rollback_sources(decision),
         confidence: None,
         // Rolling back a live, serving skill has a larger blast radius than a
         // draft promotion, so the proposal is filed at high risk.
@@ -258,6 +264,24 @@ fn rollback_candidate(decision: &RollbackDecision, now: DateTime<Utc>) -> Learni
     }
 }
 
+/// Builds the typed provenance for one rollback proposal.
+fn rollback_sources(decision: &RollbackDecision) -> Vec<LearningCandidateSourceRef> {
+    let mut sources = vec![
+        LearningCandidateSourceRef::PromotionCandidate {
+            candidate_id: decision.promotion.promotion_candidate_id,
+        },
+        LearningCandidateSourceRef::ArtifactRevision {
+            revision_uid: decision.promotion.promoted_revision_uid,
+        },
+    ];
+    if let Some(previous_revision_uid) = decision.promotion.previous_revision_uid {
+        sources.push(LearningCandidateSourceRef::ArtifactRevision {
+            revision_uid: previous_revision_uid,
+        });
+    }
+    sources
+}
+
 fn bump_update(
     existing: &LearningCandidate,
     decision: &RollbackDecision,
@@ -265,6 +289,10 @@ fn bump_update(
 ) -> LearningCandidateStatusUpdate {
     LearningCandidateStatusUpdate {
         candidate_id: existing.id,
+        // Restated, not chosen: a rollback proposal lives on the reviewable
+        // lifecycle, so `Proposed -> Proposed` is a legal no-op refresh. The
+        // apply path compare-and-sets against `Proposed`, which is what leaves a
+        // claimed (`Evaluating`) proposal untouched.
         status: LearningCandidateStatus::Proposed,
         status_reason: Some(format!(
             "skill `{}` regression re-observed: post-promotion resolution {:.3} over {} segment(s)",

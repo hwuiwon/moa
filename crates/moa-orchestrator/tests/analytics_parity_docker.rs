@@ -1367,13 +1367,28 @@ async fn seed_corpus(pool: &PgPool, tenant: Uuid) -> TestResult<()> {
     )
     .await?;
 
-    // Learning candidates.
-    seed_learning_candidate(pool, tenant, "skill", "proposed", Some(0.72), "low", base).await?;
+    // Learning candidates. One reviewable draft and one informational advisory:
+    // the two kinds admit disjoint status sets, so seeding both keeps the
+    // dataset's kind and status dimensions populated on either backend.
     seed_learning_candidate(
         pool,
         tenant,
+        session1,
+        "skill",
+        "skill_draft",
+        "proposed",
+        Some(0.72),
+        "low",
+        base,
+    )
+    .await?;
+    seed_learning_candidate(
+        pool,
+        tenant,
+        session1,
         "memory",
-        "evaluating",
+        "memory_advisory",
+        "advisory",
         Some(0.55),
         "medium",
         base + Duration::hours(1),
@@ -1661,33 +1676,66 @@ async fn seed_execution_run_and_tasks(
     Ok(())
 }
 
+/// Seeds one learning candidate together with the normalized source row it
+/// must have.
+///
+/// Two database guarantees shape this fixture, and both are production
+/// contracts rather than fixture bookkeeping:
+///
+/// - `learning_candidates_kind_status_valid` constrains the (kind, status)
+///   product, so `proposal_kind` is explicit: a caller that picks a status must
+///   pick the kind that admits it.
+/// - the `learning_candidate_sources_complete` constraint trigger is
+///   `DEFERRABLE INITIALLY DEFERRED` and fires at COMMIT, so the candidate and
+///   its source must be written in ONE transaction. Autocommitting the two
+///   inserts separately fails on the first, which is the whole point of the
+///   guarantee.
+#[allow(clippy::too_many_arguments)]
 async fn seed_learning_candidate(
     pool: &PgPool,
     tenant: Uuid,
+    session: Uuid,
     candidate_type: &str,
+    proposal_kind: &str,
     status: &str,
     confidence: Option<f64>,
     risk_class: &str,
     updated_at: DateTime<Utc>,
 ) -> TestResult<()> {
+    let candidate = Uuid::now_v7();
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO learning_candidates \
-             (id, tenant_id, storage_partition_id, candidate_type, status, target_id, \
-              target_label, payload, confidence, risk_class, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb, $8, $9, $10, $10)",
+             (id, tenant_id, storage_partition_id, candidate_type, proposal_kind, status, \
+              target_id, target_label, payload, confidence, risk_class, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, $9, $10, $11, $11)",
     )
-    .bind(Uuid::now_v7())
+    .bind(candidate)
     .bind(tenant.to_string())
     .bind(tenant.to_string())
     .bind(candidate_type)
+    .bind(proposal_kind)
     .bind(status)
     .bind(format!("target-{candidate_type}"))
     .bind(format!("Target {candidate_type}"))
     .bind(confidence)
     .bind(risk_class)
     .bind(updated_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "INSERT INTO learning_candidate_source \
+             (id, candidate_id, tenant_id, storage_partition_id, user_id, source_kind, session_id) \
+         VALUES ($1, $2, $3, $3, $4, 'session', $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(candidate)
+    .bind(tenant.to_string())
+    .bind("user-1")
+    .bind(session)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

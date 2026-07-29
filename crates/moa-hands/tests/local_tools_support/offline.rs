@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moa_core::{traits::HandProvider, types::hands::HandResources, types::hands::HandSpec, types::hands::SandboxFile, types::hands::SandboxTier, types::completion::ToolInvocation};
+use moa_core::{traits::HandProvider, types::hands::SandboxFile, types::hands::SandboxTier, types::completion::ToolInvocation};
 use moa_config::ToolBudgetConfig;
 use moa_hands::{LocalHandProvider, ToolRouter};
 use serde_json::json;

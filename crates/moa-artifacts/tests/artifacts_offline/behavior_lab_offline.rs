@@ -60,8 +60,11 @@ definition:
       max_total_tokens: 100000
       max_trial_tokens: 10000
     scorecard:
-      metrics:
-        - id: resolution
+      requirements:
+        - evaluator_id: target_completed
+          evaluator_version: v1
+          config: {}
+          effect: blocking
     learning_proposals:
       enabled: true
 ui:

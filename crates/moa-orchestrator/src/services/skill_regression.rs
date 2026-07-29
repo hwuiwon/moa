@@ -9,7 +9,10 @@ use moa_artifacts::{
     execution_plan::{
         ExecutionBudgetLimit, ExecutionGoalContract, ExecutionPlanDefinition, ExecutionPlanTemplate,
     },
-    registry::{ArtifactFile, StoredArtifactRevision},
+    registry::{
+        ArtifactFile, ArtifactRegistry, StoredArtifactRevision, StoredSuiteContribution,
+        SuiteContributionKind,
+    },
 };
 use moa_config::MoaConfig;
 use moa_core::{error::MoaError, traits::LLMProvider, types::provider::ModelTask};
@@ -157,7 +160,15 @@ pub async fn skill_acceptance_regression_report(
     candidate: LearningCandidate,
     compile_context: SkillRegressionCompileContext,
 ) -> Result<SkillRegressionGate> {
-    let Some(generated_suite) = generated_suite_payload(&candidate.payload) else {
+    // Review input is assembled from the artifact owner's contribution rows, not
+    // from candidate payload JSON. The bytes are attributable storage: one
+    // `generated` row for the candidate's own suite and one `accumulated` row per
+    // deduped sibling session, each naming the session and experience it came
+    // from so an erasure can reach them.
+    let contributions = ArtifactRegistry::new(store.pool().clone())
+        .list_suite_contributions(&scope, candidate.id)
+        .await?;
+    let Some(generated_suite) = generated_suite_contribution(&contributions) else {
         return Ok(SkillRegressionGate::blocked(
             json!({
                 "regression_execution": "unavailable",
@@ -188,7 +199,7 @@ pub async fn skill_acceptance_regression_report(
         .as_ref()
         .map(|package| previous_skill_payload(&package.skill));
 
-    let mut suite = match toml::from_str::<TestSuite>(generated_suite.source_text) {
+    let mut suite = match toml::from_str::<TestSuite>(&generated_suite.suite_source) {
         Ok(suite) => suite,
         Err(error) => {
             return Ok(SkillRegressionGate::blocked(
@@ -321,7 +332,7 @@ pub async fn skill_acceptance_regression_report(
     // Held-out material the candidate was not derived from: the previous
     // promoted revision's own suite (it rode that revision's package) plus
     // sibling suites accumulated from deduped recurring sessions.
-    let held_out = collect_held_out_pool(previous_package.as_ref(), &candidate.payload);
+    let held_out = collect_held_out_pool(previous_package.as_ref(), &contributions);
 
     let run_count = if previous_package.is_some() { 2.0 } else { 1.0 };
     let mut estimated_cost = estimate_suite_cost(&suite, provider.as_ref()) * run_count;
@@ -555,7 +566,7 @@ impl HeldOutPool {
 /// under review. Case names are prefixed by source so merged cases stay unique.
 fn collect_held_out_pool(
     previous_package: Option<&moa_skills::registry::StoredSkillPackage>,
-    candidate_payload: &Value,
+    contributions: &[StoredSuiteContribution],
 ) -> HeldOutPool {
     let mut cases = Vec::new();
     let mut source_count = 0usize;
@@ -579,22 +590,20 @@ fn collect_held_out_pool(
         }
     }
 
-    let sibling_entries = candidate_payload
-        .get("accumulated_regression_suites")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    for (index, entry) in sibling_entries.iter().enumerate() {
-        let Some(source_text) = entry.get("source_text").and_then(Value::as_str) else {
-            skipped.push(format!("sibling suite {index} missing source_text"));
-            continue;
-        };
-        match toml::from_str::<TestSuite>(source_text) {
+    for (index, contribution) in contributions
+        .iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .enumerate()
+    {
+        match toml::from_str::<TestSuite>(&contribution.suite_source) {
             Ok(suite) => {
                 source_count += 1;
                 cases.extend(prefixed_cases(&format!("sib{index}"), suite));
             }
-            Err(error) => skipped.push(format!("sibling suite {index} unreadable: {error}")),
+            Err(error) => skipped.push(format!(
+                "sibling suite `{}` unreadable: {error}",
+                contribution.suite_name
+            )),
         }
     }
 
@@ -625,25 +634,28 @@ fn prefixed_cases(
     })
 }
 
-struct GeneratedSuitePayload<'a> {
-    relative_path: Option<&'a str>,
-    source_format: Option<&'a str>,
-    source_text: &'a str,
+/// Suite source format; generated suites are always TOML.
+const GENERATED_SUITE_SOURCE_FORMAT: &str = "toml";
+
+/// Report fields describing the candidate's own generated suite.
+trait GeneratedSuiteReport {
+    fn summary(&self) -> Value;
+    fn summary_with_suite(&self, suite: &TestSuite) -> Value;
 }
 
-impl GeneratedSuitePayload<'_> {
+impl GeneratedSuiteReport for StoredSuiteContribution {
     fn summary(&self) -> Value {
         json!({
-            "relative_path": self.relative_path,
-            "source_format": self.source_format,
+            "relative_path": self.suite_name,
+            "source_format": GENERATED_SUITE_SOURCE_FORMAT,
             "source_text_present": true,
         })
     }
 
     fn summary_with_suite(&self, suite: &TestSuite) -> Value {
         json!({
-            "relative_path": self.relative_path,
-            "source_format": self.source_format,
+            "relative_path": self.suite_name,
+            "source_format": GENERATED_SUITE_SOURCE_FORMAT,
             "source_text_present": true,
             "suite_name": suite.name,
             "case_count": suite.cases.len(),
@@ -651,13 +663,13 @@ impl GeneratedSuitePayload<'_> {
     }
 }
 
-fn generated_suite_payload(payload: &Value) -> Option<GeneratedSuitePayload<'_>> {
-    let suite = payload.get("generated_regression_suite")?;
-    Some(GeneratedSuitePayload {
-        relative_path: suite.get("relative_path").and_then(Value::as_str),
-        source_format: suite.get("source_format").and_then(Value::as_str),
-        source_text: suite.get("source_text").and_then(Value::as_str)?,
-    })
+/// Returns the candidate's own generated suite from its contribution rows.
+fn generated_suite_contribution(
+    contributions: &[StoredSuiteContribution],
+) -> Option<&StoredSuiteContribution> {
+    contributions
+        .iter()
+        .find(|contribution| contribution.kind == SuiteContributionKind::Generated)
 }
 
 fn skill_name(candidate: &LearningCandidate) -> Option<String> {
@@ -1200,29 +1212,44 @@ mod tests {
     use crate::services::execution::build_capability_response;
 
     use super::{
-        RegressionExecutionInput, SkillTemplateCompileRequest, collect_held_out_pool,
-        compile_skill_execution_template, resolve_regression_execution_input,
+        RegressionExecutionInput, SkillTemplateCompileRequest, StoredSuiteContribution,
+        SuiteContributionKind, collect_held_out_pool, compile_skill_execution_template,
+        generated_suite_contribution, resolve_regression_execution_input,
     };
+
+    fn contribution(
+        kind: SuiteContributionKind,
+        suite_name: &str,
+        suite_source: &str,
+    ) -> StoredSuiteContribution {
+        StoredSuiteContribution {
+            kind,
+            suite_name: suite_name.to_string(),
+            suite_source: suite_source.to_string(),
+            source_session_id: Some(uuid::Uuid::now_v7()),
+            source_experience_id: Some(uuid::Uuid::now_v7()),
+        }
+    }
 
     #[test]
     fn held_out_pool_merges_sibling_suites_with_prefixed_case_names() {
         // Pins: accumulated sibling suites merge into one pool suite with source-prefixed
         // case names, and unreadable entries are skipped with a recorded reason instead
         // of rejecting the candidate.
-        let payload = json!({
-            "accumulated_regression_suites": [
-                {
-                    "source_experience_id": "a",
-                    "source_text": "[suite]\nname = \"s0\"\ndefault_timeout_seconds = 90\n\n[[cases]]\nname = \"smoke\"\ninput = \"run\"\n",
-                },
-                {
-                    "source_experience_id": "b",
-                    "source_text": "this is [not toml",
-                },
-            ],
-        });
+        let contributions = [
+            contribution(
+                SuiteContributionKind::Accumulated,
+                "sibling/a",
+                "[suite]\nname = \"s0\"\ndefault_timeout_seconds = 90\n\n[[cases]]\nname = \"smoke\"\ninput = \"run\"\n",
+            ),
+            contribution(
+                SuiteContributionKind::Accumulated,
+                "sibling/b",
+                "this is [not toml",
+            ),
+        ];
 
-        let pool = collect_held_out_pool(None, &payload);
+        let pool = collect_held_out_pool(None, &contributions);
 
         assert_eq!(pool.source_count, 1);
         assert_eq!(
@@ -1236,10 +1263,61 @@ mod tests {
     }
 
     #[test]
+    fn held_out_pool_excludes_the_candidates_own_generated_suite() {
+        // Pins: the pool is HELD-OUT material. The candidate's own generated suite lives
+        // in the same contribution table as its siblings, so a collector that took every
+        // row would grade the draft on the very cases it was derived from and report a
+        // passing held-out split that never held anything out.
+        let contributions = [
+            contribution(
+                SuiteContributionKind::Generated,
+                "tests/regression-suite.toml",
+                "[suite]\nname = \"own\"\ndefault_timeout_seconds = 90\n\n[[cases]]\nname = \"own\"\ninput = \"run\"\n",
+            ),
+            contribution(
+                SuiteContributionKind::Accumulated,
+                "sibling/a",
+                "[suite]\nname = \"s0\"\ndefault_timeout_seconds = 90\n\n[[cases]]\nname = \"smoke\"\ninput = \"run\"\n",
+            ),
+        ];
+
+        let pool = collect_held_out_pool(None, &contributions);
+
+        assert_eq!(
+            pool.source_count, 1,
+            "only the sibling is held-out material"
+        );
+        let suite = pool.suite.expect("sibling contributes cases");
+        assert_eq!(suite.cases.len(), 1);
+        assert_eq!(suite.cases[0].name, "sib0-smoke");
+    }
+
+    #[test]
+    fn the_generated_suite_is_selected_by_kind_not_by_position() {
+        // Pins: the candidate's own suite is identified by its stored kind. Rows come back
+        // ordered by `suite_kind` first, so a positional read would silently pick an
+        // accumulated sibling as the candidate's own suite whenever the generated row was
+        // erased — grading a draft against another session's cases.
+        let contributions = [
+            contribution(SuiteContributionKind::Accumulated, "sibling/a", "x"),
+            contribution(
+                SuiteContributionKind::Generated,
+                "tests/regression-suite.toml",
+                "y",
+            ),
+        ];
+
+        let generated =
+            generated_suite_contribution(&contributions).expect("generated suite is found");
+        assert_eq!(generated.suite_name, "tests/regression-suite.toml");
+        assert!(generated_suite_contribution(&contributions[..1]).is_none());
+    }
+
+    #[test]
     fn held_out_pool_is_empty_without_material() {
         // Pins: a first revision of a novel task has no held-out material and the report
         // base says so instead of implying a split ran.
-        let pool = collect_held_out_pool(None, &json!({}));
+        let pool = collect_held_out_pool(None, &[]);
 
         assert_eq!(pool.source_count, 0);
         assert!(pool.suite.is_none());

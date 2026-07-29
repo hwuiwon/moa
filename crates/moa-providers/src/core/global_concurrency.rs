@@ -3,58 +3,36 @@
 //! Process-local [`ConcurrencyLimiter`](super::concurrency::ConcurrencyLimiter)
 //! bounds in-flight calls per process, but an autoscaled fleet then multiplies a
 //! shared provider/API-key quota by the replica count. [`GlobalConcurrency`]
-//! coordinates one ceiling across replicas by recording a short-lived lease per
-//! held slot in a per-key structure in the runtime coordination store
-//! ([`RuntimeCacheStore`]). Admission is a compare-and-set over the lease set:
-//! stale leases (from a crashed replica) are pruned by TTL as part of every
-//! acquisition, so a killed pod's slots self-reclaim.
+//! coordinates one ceiling across replicas through the runtime store's bounded
+//! atomic lease operation
+//! ([`try_acquire_bounded_lease`](RuntimeCacheStore::try_acquire_bounded_lease)):
+//! admission, expiry pruning, and the live count all happen inside one atomic
+//! store operation, so two replicas racing for the last slot cannot both win.
+//! A killed pod's slots self-reclaim when their TTL expires.
 //!
-//! Availability over strict bounding: if the coordination store is unavailable,
-//! acquisition degrades open to a process-local semaphore of the same size rather
-//! than failing provider calls.
+//! When the coordination store fails, the configured
+//! [`CoordinationFailurePolicy`] decides: `bounded_degraded` falls back to this
+//! replica's local semaphore and says so loudly (metric, warning, duration),
+//! while `fail_closed` rejects admission rather than enforcing a ceiling that is
+//! no longer fleet-wide.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use moa_config::CoordinationFailurePolicy;
+use moa_core::error::Result;
 use moa_core::traits::RuntimeCacheStore;
-use moa_core::{error::MoaError, error::Result};
-use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
-use tokio::time::sleep;
+// The admission deadline must share the clock the coordination store and the
+// sleeps below use, so a paused-time test cannot advance one without the other.
+use tokio::time::{Instant, sleep};
 
 use super::concurrency::PermitLease;
-
-/// One held global-concurrency slot recorded in the shared lease set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Lease {
-    /// Globally-unique lease identity for this held slot.
-    id: String,
-    /// Wall-clock expiry (ms since epoch); the crash backstop for the slot.
-    expires_at_ms: u64,
-}
-
-/// Millisecond wall clock, injectable so lease expiry is deterministic in tests.
-#[derive(Clone)]
-pub(crate) struct MillisClock(Arc<dyn Fn() -> u64 + Send + Sync>);
-
-impl MillisClock {
-    /// The real system clock.
-    pub(crate) fn system() -> Self {
-        Self(Arc::new(system_now_ms))
-    }
-
-    /// A manually-advanced clock backed by a shared counter (tests only).
-    #[cfg(test)]
-    pub(crate) fn manual(source: Arc<AtomicU64>) -> Self {
-        Self(Arc::new(move || source.load(Ordering::SeqCst)))
-    }
-
-    fn now_ms(&self) -> u64 {
-        (self.0)()
-    }
-}
+use super::concurrency_factory::{
+    CoordinatedControl, record_coordination_degraded, record_coordination_rejected,
+};
 
 fn system_now_ms() -> u64 {
     SystemTime::now()
@@ -73,23 +51,25 @@ fn next_lease_id() -> String {
     format!("{}-{}-{}", std::process::id(), system_now_ms(), sequence)
 }
 
-/// Cross-replica in-flight gate backed by a TTL lease set in the runtime store.
+/// Cross-replica in-flight gate backed by a bounded TTL lease set in the store.
 pub(crate) struct GlobalConcurrency {
     store: Arc<dyn RuntimeCacheStore>,
     key: String,
     limit: usize,
     lease_ttl: Duration,
-    clock: MillisClock,
     provider: String,
     /// Call-kind label for metrics only; the budget key is per (provider, credential).
     kind: &'static str,
     /// Degrade-open local bound used when the coordination store errors. Shared
     /// per (provider, credential), so a degraded fleet still shares one budget.
     local_fallback: Arc<Semaphore>,
+    /// What to do when the coordination store cannot answer.
+    on_failure: CoordinationFailurePolicy,
 }
 
 impl GlobalConcurrency {
     /// Builds a global limiter for one `(provider, credential)` budget.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn RuntimeCacheStore>,
         key: String,
@@ -98,47 +78,50 @@ impl GlobalConcurrency {
         provider: String,
         kind: &'static str,
         local_fallback: Arc<Semaphore>,
+        on_failure: CoordinationFailurePolicy,
     ) -> Self {
         Self {
             store,
             key,
             limit,
             lease_ttl,
-            clock: MillisClock::system(),
             provider,
             kind,
             local_fallback,
+            on_failure,
         }
     }
 
-    /// Test constructor with an injectable clock and store.
+    /// Test constructor with an explicit store and failure policy.
     #[cfg(test)]
     pub(crate) fn for_test(
         store: Arc<dyn RuntimeCacheStore>,
         key: impl Into<String>,
         limit: usize,
         lease_ttl: Duration,
-        clock: MillisClock,
+        on_failure: CoordinationFailurePolicy,
     ) -> Self {
         Self {
             store,
             key: key.into(),
             limit,
             lease_ttl,
-            clock,
             provider: "test".to_string(),
             kind: "test",
             local_fallback: Arc::new(Semaphore::new(limit)),
+            on_failure,
         }
     }
 
     /// Acquires a global slot, waiting at most `max_wait`.
     ///
     /// Returns `None` when the shared gate stays saturated for the whole wait
-    /// (the same failover-eligible signal as the local limiter). A coordination-
-    /// store failure degrades to the local fallback rather than blocking calls.
+    /// (the same failover-eligible signal as the local limiter), and also when a
+    /// coordination failure is met with `fail_closed`. A coordination failure
+    /// under `bounded_degraded` falls back to the local semaphore instead.
     pub(crate) async fn acquire(&self, max_wait: Duration) -> Option<PermitLease> {
-        let deadline = Instant::now() + max_wait;
+        let started = Instant::now();
+        let deadline = started + max_wait;
         let mut backoff = Duration::from_millis(10);
         loop {
             match self.try_acquire_once().await {
@@ -152,18 +135,24 @@ impl GlobalConcurrency {
                     return Some(PermitLease::Global(guard));
                 }
                 Ok(None) => {}
+                // A store failure is never retried here: retrying a broken store
+                // in the admission path is exactly the storm this control exists
+                // to prevent. One failure decides the outcome by policy.
                 Err(error) => {
-                    tracing::warn!(
-                        provider = %self.provider,
-                        error = %error,
-                        "global concurrency store unavailable; degrading to local limiter"
+                    if self.on_failure.rejects_admission() {
+                        record_coordination_rejected(
+                            &self.provider,
+                            CoordinatedControl::Concurrency,
+                            &error,
+                        );
+                        return None;
+                    }
+                    record_coordination_degraded(
+                        &self.provider,
+                        CoordinatedControl::Concurrency,
+                        started.elapsed(),
+                        &error,
                     );
-                    metrics::counter!(
-                        "moa_provider_concurrency_degraded_local_total",
-                        "provider" => self.provider.clone(),
-                        "kind" => self.kind,
-                    )
-                    .increment(1);
                     return self.acquire_local_fallback(deadline).await;
                 }
             }
@@ -184,46 +173,30 @@ impl GlobalConcurrency {
         }
     }
 
-    /// One admission attempt: prune expired leases, then CAS-add ours if there is
-    /// room. `Ok(None)` means the gate was full or another writer won the CAS
-    /// race; `Err` means the store failed and the caller should degrade.
+    /// One admission attempt against the store's bounded lease set.
+    ///
+    /// `Ok(None)` means the gate was full; `Err` means the store failed and the
+    /// caller applies the coordination-failure policy.
     async fn try_acquire_once(&self) -> Result<Option<GlobalLeaseGuard>> {
-        let raw = self.store.get(&self.key).await?;
-        let mut leases = decode_leases(raw.as_deref());
-        let now = self.clock.now_ms();
-        leases.retain(|lease| lease.expires_at_ms > now);
-        if leases.len() >= self.limit {
+        let lease_id = next_lease_id();
+        let decision = self
+            .store
+            .try_acquire_bounded_lease(&self.key, &lease_id, self.limit, self.lease_ttl)
+            .await?;
+        if !decision.acquired {
             return Ok(None);
         }
-
-        let id = next_lease_id();
-        leases.push(Lease {
-            id: id.clone(),
-            expires_at_ms: now + self.lease_ttl.as_millis() as u64,
-        });
-        let live = leases.len();
-        let encoded = encode_leases(&leases)?;
-        if self
-            .store
-            .compare_and_set(&self.key, raw.as_deref(), encoded, self.lease_ttl)
-            .await?
-        {
-            metrics::gauge!(
-                "moa_provider_concurrency_lease_count",
-                "provider" => self.provider.clone(),
-                "kind" => self.kind,
-            )
-            .set(live as f64);
-            Ok(Some(GlobalLeaseGuard {
-                store: Arc::clone(&self.store),
-                key: self.key.clone(),
-                id,
-                lease_ttl: self.lease_ttl,
-                clock: self.clock.clone(),
-            }))
-        } else {
-            Ok(None)
-        }
+        metrics::gauge!(
+            "moa_provider_concurrency_lease_count",
+            "provider" => self.provider.clone(),
+            "kind" => self.kind,
+        )
+        .set(decision.live as f64);
+        Ok(Some(GlobalLeaseGuard {
+            store: Arc::clone(&self.store),
+            key: self.key.clone(),
+            id: lease_id,
+        }))
     }
 
     async fn acquire_local_fallback(&self, deadline: Instant) -> Option<PermitLease> {
@@ -250,13 +223,11 @@ impl GlobalConcurrency {
 /// An acquired global slot; releasing it deletes the lease from the shared set.
 ///
 /// `Drop` spawns a best-effort async release. If that cannot run (no runtime) or
-/// loses every CAS race, the lease's TTL reclaims the slot as the backstop.
+/// fails, the lease's TTL reclaims the slot as the backstop.
 pub(crate) struct GlobalLeaseGuard {
     store: Arc<dyn RuntimeCacheStore>,
     key: String,
     id: String,
-    lease_ttl: Duration,
-    clock: MillisClock,
 }
 
 impl Drop for GlobalLeaseGuard {
@@ -264,13 +235,9 @@ impl Drop for GlobalLeaseGuard {
         let store = Arc::clone(&self.store);
         let key = std::mem::take(&mut self.key);
         let id = std::mem::take(&mut self.id);
-        let lease_ttl = self.lease_ttl;
-        let clock = self.clock.clone();
         if let Ok(handle) = Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) =
-                    release_lease(store.as_ref(), &key, &id, lease_ttl, &clock).await
-                {
+                if let Err(error) = store.release_bounded_lease(&key, &id).await {
                     tracing::debug!(
                         error = %error,
                         "global concurrency lease release failed; TTL will reclaim the slot"
@@ -281,122 +248,65 @@ impl Drop for GlobalLeaseGuard {
     }
 }
 
-/// Removes one lease id from the shared set, pruning expired entries too.
-async fn release_lease(
-    store: &dyn RuntimeCacheStore,
-    key: &str,
-    id: &str,
-    ttl: Duration,
-    clock: &MillisClock,
-) -> Result<()> {
-    for _ in 0..5 {
-        let Some(raw) = store.get(key).await? else {
-            return Ok(());
-        };
-        let mut leases = decode_leases(Some(&raw));
-        let now = clock.now_ms();
-        leases.retain(|lease| lease.id != id && lease.expires_at_ms > now);
-        let encoded = encode_leases(&leases)?;
-        if store.compare_and_set(key, Some(&raw), encoded, ttl).await? {
-            return Ok(());
-        }
-    }
-    // The lease's own TTL is the backstop when release keeps losing CAS races.
-    Ok(())
-}
-
-fn decode_leases(raw: Option<&[u8]>) -> Vec<Lease> {
-    raw.and_then(|bytes| serde_json::from_slice(bytes).ok())
-        .unwrap_or_default()
-}
-
-fn encode_leases(leases: &[Lease]) -> Result<Vec<u8>> {
-    serde_json::to_vec(leases).map_err(|error| {
-        MoaError::SerializationError(format!("encode vector sync leases: {error}"))
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicU64;
-
-    use async_trait::async_trait;
-    use tokio::sync::Mutex;
+    use moa_core::error::MoaError;
+    use moa_core::traits::BoundedLeaseDecision;
+    use moa_runtime_store::MemoryRuntimeCacheStore;
 
     use super::*;
 
-    /// A minimal in-memory store with a manually-advanced clock so lease TTLs are
-    /// deterministic. Values never expire on their own — expiry is modeled purely
-    /// through the lease `expires_at_ms` and the injected [`MillisClock`].
-    #[derive(Default)]
-    struct TestStore {
-        entries: Mutex<HashMap<String, Vec<u8>>>,
-        fail: std::sync::atomic::AtomicBool,
-    }
+    /// A store that fails every coordination operation, for the policy tests.
+    struct FailingStore;
 
-    impl TestStore {
-        fn shared() -> Arc<Self> {
-            Arc::new(Self::default())
+    #[async_trait::async_trait]
+    impl RuntimeCacheStore for FailingStore {
+        async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            Err(MoaError::StorageError("test store unavailable".to_string()))
         }
-        fn set_failing(&self, failing: bool) {
-            self.fail.store(failing, Ordering::SeqCst);
+        async fn set(&self, _key: &str, _value: Vec<u8>, _ttl: Duration) -> Result<()> {
+            Err(MoaError::StorageError("test store unavailable".to_string()))
         }
-        async fn lease_count(&self, key: &str) -> usize {
-            let entries = self.entries.lock().await;
-            entries
-                .get(key)
-                .map(|raw| decode_leases(Some(raw)).len())
-                .unwrap_or(0)
-        }
-    }
-
-    #[async_trait]
-    impl RuntimeCacheStore for TestStore {
-        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            if self.fail.load(Ordering::SeqCst) {
-                return Err(MoaError::StorageError("test store unavailable".to_string()));
-            }
-            Ok(self.entries.lock().await.get(key).cloned())
-        }
-        async fn set(&self, key: &str, value: Vec<u8>, _ttl: Duration) -> Result<()> {
-            self.entries.lock().await.insert(key.to_string(), value);
-            Ok(())
-        }
-        async fn delete(&self, key: &str) -> Result<()> {
-            self.entries.lock().await.remove(key);
-            Ok(())
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Err(MoaError::StorageError("test store unavailable".to_string()))
         }
         async fn compare_and_set(
             &self,
-            key: &str,
-            expected: Option<&[u8]>,
-            value: Vec<u8>,
+            _key: &str,
+            _expected: Option<&[u8]>,
+            _value: Vec<u8>,
             _ttl: Duration,
         ) -> Result<bool> {
-            if self.fail.load(Ordering::SeqCst) {
-                return Err(MoaError::StorageError("test store unavailable".to_string()));
-            }
-            let mut entries = self.entries.lock().await;
-            let current = entries.get(key).map(|value| value.as_slice());
-            if current != expected {
-                return Ok(false);
-            }
-            entries.insert(key.to_string(), value);
-            Ok(true)
+            Err(MoaError::StorageError("test store unavailable".to_string()))
         }
         async fn expire(&self, _key: &str, _ttl: Duration) -> Result<()> {
-            Ok(())
+            Err(MoaError::StorageError("test store unavailable".to_string()))
+        }
+        async fn try_acquire_bounded_lease(
+            &self,
+            _key: &str,
+            _lease_id: &str,
+            _limit: usize,
+            _ttl: Duration,
+        ) -> Result<BoundedLeaseDecision> {
+            Err(MoaError::StorageError("test store unavailable".to_string()))
+        }
+        async fn release_bounded_lease(&self, _key: &str, _lease_id: &str) -> Result<usize> {
+            Err(MoaError::StorageError("test store unavailable".to_string()))
         }
     }
 
-    fn limiter(store: Arc<TestStore>, clock: MillisClock, limit: usize) -> GlobalConcurrency {
+    fn limiter(
+        store: Arc<dyn RuntimeCacheStore>,
+        limit: usize,
+        ttl: Duration,
+    ) -> GlobalConcurrency {
         GlobalConcurrency::for_test(
             store,
             "moa:concurrency:test",
             limit,
-            Duration::from_secs(60),
-            clock,
+            ttl,
+            CoordinationFailurePolicy::BoundedDegraded,
         )
     }
 
@@ -404,10 +314,9 @@ mod tests {
     async fn two_handles_sharing_a_store_enforce_a_combined_limit() {
         // Pins: leases in one shared store bound total in-flight across independent
         // limiter handles (the multi-replica case) to the configured limit.
-        let store = TestStore::shared();
-        let clock = MillisClock::manual(Arc::new(AtomicU64::new(1_000)));
-        let replica_a = limiter(Arc::clone(&store), clock.clone(), 2);
-        let replica_b = limiter(Arc::clone(&store), clock.clone(), 2);
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let replica_a = limiter(Arc::clone(&store), 2, Duration::from_secs(60));
+        let replica_b = limiter(Arc::clone(&store), 2, Duration::from_secs(60));
 
         let a1 = replica_a
             .acquire(Duration::from_millis(50))
@@ -417,7 +326,6 @@ mod tests {
             .acquire(Duration::from_millis(50))
             .await
             .expect("slot 2");
-        assert_eq!(store.lease_count("moa:concurrency:test").await, 2);
 
         // The combined limit of 2 is reached; a third caller on either handle is
         // saturated.
@@ -431,14 +339,12 @@ mod tests {
         drop(b1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn expired_lease_frees_a_slot_after_a_simulated_crash() {
         // Pins: a crashed replica that never releases its lease does not strand the
-        // slot — the TTL prunes it and a later caller acquires.
-        let store = TestStore::shared();
-        let now = Arc::new(AtomicU64::new(1_000));
-        let clock = MillisClock::manual(Arc::clone(&now));
-        let limiter = limiter(Arc::clone(&store), clock, 1);
+        // slot — the store's TTL prunes it and a later caller acquires.
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let limiter = limiter(Arc::clone(&store), 1, Duration::from_secs(60));
 
         // Simulate a crashed holder: a lease that is never released via Drop.
         std::mem::forget(
@@ -453,7 +359,7 @@ mod tests {
         );
 
         // Advance past the 60s lease TTL: the stale lease is pruned on acquire.
-        now.fetch_add(61_000, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(61)).await;
         assert!(
             limiter.acquire(Duration::from_millis(50)).await.is_some(),
             "the expired lease must free the slot"
@@ -464,9 +370,8 @@ mod tests {
     async fn saturated_gate_returns_none_at_the_deadline() {
         // Pins: a full shared gate returns the failover-eligible None once the wait
         // elapses rather than blocking indefinitely.
-        let store = TestStore::shared();
-        let clock = MillisClock::manual(Arc::new(AtomicU64::new(1_000)));
-        let limiter = limiter(Arc::clone(&store), clock, 1);
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let limiter = limiter(store, 1, Duration::from_secs(60));
         std::mem::forget(
             limiter
                 .acquire(Duration::from_millis(10))
@@ -483,25 +388,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_failure_degrades_to_the_local_bound() {
-        // Pins: when the coordination store errors, acquisition degrades open to a
-        // local semaphore of the same size instead of failing the call — and still
-        // bounds concurrency locally.
-        let store = TestStore::shared();
-        let clock = MillisClock::manual(Arc::new(AtomicU64::new(1_000)));
-        let limiter = limiter(Arc::clone(&store), clock, 1);
-        store.set_failing(true);
+    async fn store_failure_degrades_to_the_local_bound_under_the_default_policy() {
+        // Pins: with bounded_degraded, a coordination-store failure falls back to a
+        // local semaphore of the same size instead of failing the call — and that
+        // fallback still bounds in-flight calls within this replica.
+        let limiter = limiter(Arc::new(FailingStore), 1, Duration::from_secs(60));
 
         let first = limiter
             .acquire(Duration::from_millis(50))
             .await
             .expect("degrades to a local slot rather than failing");
-        // The local fallback still enforces the bound of 1.
         assert!(
             limiter.acquire(Duration::from_millis(50)).await.is_none(),
             "the degraded local limiter still bounds in-flight calls"
         );
         drop(first);
+    }
+
+    #[tokio::test]
+    async fn store_failure_rejects_admission_under_fail_closed() {
+        // Pins: fail_closed refuses the very first admission when coordination is
+        // unavailable, instead of enforcing a per-replica ceiling that the fleet
+        // would multiply. This is the case bounded_degraded deliberately allows,
+        // so the two policies cannot be confused.
+        let limiter = GlobalConcurrency::for_test(
+            Arc::new(FailingStore),
+            "moa:concurrency:fail-closed",
+            4,
+            Duration::from_secs(60),
+            CoordinationFailurePolicy::FailClosed,
+        );
+
+        let started = Instant::now();
+        assert!(
+            limiter.acquire(Duration::from_millis(50)).await.is_none(),
+            "fail_closed must reject admission when the store is unavailable"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(40),
+            "rejection must be immediate, not a retry loop against a broken store"
+        );
     }
 
     /// Live coverage against a real Redis/Valkey coordination store. Requires
@@ -535,14 +461,14 @@ mod tests {
             key.clone(),
             2,
             ttl,
-            MillisClock::system(),
+            CoordinationFailurePolicy::BoundedDegraded,
         );
         let replica_b = GlobalConcurrency::for_test(
             Arc::clone(&store),
             key.clone(),
             2,
             ttl,
-            MillisClock::system(),
+            CoordinationFailurePolicy::BoundedDegraded,
         );
 
         let slot_a = replica_a

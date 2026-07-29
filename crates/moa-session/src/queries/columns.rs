@@ -41,7 +41,7 @@ pub(crate) const TASK_SEGMENT_COLUMNS: &str = concat!(
 /// Canonical column list for selecting learning-log rows.
 pub(crate) const LEARNING_ENTRY_COLUMNS: &str = concat!(
     "id, tenant_id, learning_type, target_id, target_label, payload, ",
-    "confidence::DOUBLE PRECISION AS confidence, source_refs, actor, valid_from, valid_to, ",
+    "confidence::DOUBLE PRECISION AS confidence, actor, valid_from, valid_to, ",
     "batch_id, version"
 );
 
@@ -62,9 +62,9 @@ pub(crate) const EXPERIENCE_ATTRIBUTION_COLUMNS: &str = concat!(
 
 /// Canonical column list for selecting learning candidates.
 pub(crate) const LEARNING_CANDIDATE_COLUMNS: &str = concat!(
-    "id, tenant_id, storage_partition_id, user_id, candidate_type, status, target_id, target_label, ",
+    "id, tenant_id, storage_partition_id, user_id, candidate_type, proposal_kind, status, target_id, target_label, ",
     "task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, ",
-    "source_experience_ids, confidence::DOUBLE PRECISION AS confidence, risk_class, ",
+    "confidence::DOUBLE PRECISION AS confidence, risk_class, ",
     "promotion_requirements, status_reason, batch_id, created_at, updated_at"
 );
 

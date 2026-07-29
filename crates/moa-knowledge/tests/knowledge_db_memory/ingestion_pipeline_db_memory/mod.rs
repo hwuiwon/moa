@@ -1,11 +1,11 @@
 //! DB integration coverage for the tenant knowledge ingestion pipeline.
 
+mod chunk_adjacency;
 mod concurrency;
 mod content_fetch;
 mod deletion;
 mod idempotency;
 mod occurrence_identity;
-mod semantic_graph;
 mod source_acl;
 
 use std::{
@@ -322,16 +322,6 @@ impl FakeGraphWriter {
                 .expect("node mutex should not be poisoned"),
         )
         .expect("serialize graph node properties")
-    }
-
-    fn edge_properties_json(&self) -> String {
-        serde_json::to_string(
-            &*self
-                .edges
-                .lock()
-                .expect("edge mutex should not be poisoned"),
-        )
-        .expect("serialize graph edge properties")
     }
 }
 
@@ -894,41 +884,6 @@ async fn sync_counters(pool: &sqlx::PgPool, sync_run_uid: Uuid) -> Counters {
         graph_nodes_upserted: row.7,
         graph_edges_upserted: row.8,
     }
-}
-
-async fn semantic_graph_step_counters(
-    pool: &sqlx::PgPool,
-    sync_run_uid: Uuid,
-    object_uid: Uuid,
-) -> Value {
-    sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT counters
-        FROM moa.knowledge_ingestion_steps
-        WHERE sync_run_id = $1
-          AND object_id = $2
-          AND stage = 'semantic_graph_extracted'
-        "#,
-    )
-    .bind(sync_run_uid)
-    .bind(object_uid)
-    .fetch_one(pool)
-    .await
-    .expect("read semantic graph extraction counters")
-}
-
-async fn semantic_graph_cache_row_count(pool: &sqlx::PgPool, tenant_id: TenantId) -> i64 {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT count(*)
-        FROM moa.knowledge_semantic_graph_extractions
-        WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id.0)
-    .fetch_one(pool)
-    .await
-    .expect("count semantic graph extraction cache rows")
 }
 
 /// One persisted chunk occurrence, as storage sees it.

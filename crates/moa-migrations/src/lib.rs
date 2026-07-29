@@ -193,6 +193,11 @@ pub async fn run_hands_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 }
 
 /// Ensures the standalone lineage schema exists.
+///
+/// Deliberately does NOT install `analytics.lineage_journal`. Every caller
+/// reaches this on a database where the central migrations have already run, so
+/// a second copy of that DDL here could never execute - it could only drift from
+/// V000363 and describe a queue shape nothing installs.
 pub async fn ensure_lineage_schema(pool: &PgPool) -> Result<()> {
     pool.execute(LINEAGE_SCHEMA_DDL)
         .await

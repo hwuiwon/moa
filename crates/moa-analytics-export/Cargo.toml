@@ -17,3 +17,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 workspace-hack = { workspace = true }
+
+[dev-dependencies]
+clickhouse = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

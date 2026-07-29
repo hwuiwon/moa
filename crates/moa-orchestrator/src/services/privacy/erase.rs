@@ -9,6 +9,10 @@ use moa_memory_pii::erasure::{
     EraseCandidate, GraphErasureAudit, crypto_shred_erased_subject, delete_subject_digests,
     delete_subject_retrieval_lineage, enumerate_erase_candidates, hard_purge_erase_candidates,
 };
+use moa_memory_pii::learning_erasure::{
+    ErasureSubjects, LearningClosure, dry_run_decisions, enumerate_learning_closure,
+    erase_learning_closure, legal_hold_decisions, record_decisions,
+};
 use moa_wire::privacy::{ContactErasureScope, PrivacyEraseResponse, PrivacyEraseStatus};
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -50,13 +54,34 @@ pub async fn run_privacy_erase(
     .await?;
     validate_contact_erasure_scope(&ctx, resolved.kind)?;
 
+    let erasure_subjects = erasure_subjects(&resolved.subjects);
     // Legal hold overrides right-to-erasure: if any included subject (or the
-    // tenant) is under an active hold, refuse the erase before enumerating,
-    // claiming the approval JTI, or writing anything. Failing closed here keeps
-    // the erase atomic (nothing is partially erased then blocked), leaves the
-    // approval token unspent so a retry after release still verifies, and lets a
-    // later request resume normally once the hold is lifted.
+    // tenant) is under an active hold, refuse the erase before claiming the
+    // approval JTI, taking the destruction fence, or writing anything. Failing
+    // closed here keeps the erase atomic, leaves the approval token unspent so a
+    // retry after release still verifies, and lets a later request resume once
+    // the hold is lifted.
+    //
+    // A refusal is not silence. The blocked path still enumerates the
+    // learning-derived closure READ-ONLY and records exactly one idempotent
+    // `retained_legal_hold` decision per record, so "the hold was honored" is a
+    // durable, per-record fact rather than an absence of evidence. No protected
+    // byte is read or written to produce it: enumeration returns identifiers.
     if subjects_under_legal_hold(&ctx, &resolved.subjects).await? {
+        let closure = enumerate_learning_closure(&ctx.pool, ctx.tenant_id, &erasure_subjects)
+            .await
+            .map_err(handler_error)?;
+        let attempt_id =
+            erasure_decision_attempt_id(&ctx.claims.jti, ErasureDecisionMode::LegalHold);
+        record_decisions(
+            &ctx.pool,
+            ctx.tenant_id,
+            &ctx.subject_user_id,
+            &attempt_id,
+            &legal_hold_decisions(&closure, "active legal hold blocks right-to-erasure"),
+        )
+        .await
+        .map_err(handler_error)?;
         return Ok(blocked_by_legal_hold_response(&ctx));
     }
 
@@ -64,6 +89,23 @@ pub async fn run_privacy_erase(
     let candidates = flatten_erase_candidates(&candidate_groups);
 
     if ctx.dry_run {
+        // A dry run persists a typed PLANNED disposition per record with
+        // `applied = false`. It must never persist a deletion it did not perform:
+        // a false record of destruction is worse than no record at all, because
+        // it would be read later as proof the subject's data is gone.
+        let closure = enumerate_learning_closure(&ctx.pool, ctx.tenant_id, &erasure_subjects)
+            .await
+            .map_err(handler_error)?;
+        let attempt_id = erasure_decision_attempt_id(&ctx.claims.jti, ErasureDecisionMode::DryRun);
+        record_decisions(
+            &ctx.pool,
+            ctx.tenant_id,
+            &ctx.subject_user_id,
+            &attempt_id,
+            &dry_run_decisions(&closure),
+        )
+        .await
+        .map_err(handler_error)?;
         return Ok(dry_run_response(&ctx, &candidates));
     }
 
@@ -138,13 +180,30 @@ pub async fn run_privacy_erase(
         ));
     }
 
+    // Enumerated AFTER the destruction fence is committed, so the closure is a
+    // stable snapshot rather than a set that concurrent learning can grow between
+    // enumeration and deletion. The fence also refuses new contribution inserts
+    // for the tenant while it is in progress, which is the other half of the same
+    // guarantee: without it, a turn completing mid-erase could file derived
+    // learning that survives the run.
+    let closure = enumerate_learning_closure(&ctx.pool, ctx.tenant_id, &erasure_subjects)
+        .await
+        .map_err(handler_error)?;
+
+    let applied_attempt_id =
+        erasure_decision_attempt_id(&ctx.claims.jti, ErasureDecisionMode::Applied);
     let progress = run_erasure_stages(
         &ctx,
         &resolved.subjects,
         &candidate_groups,
         candidate_count,
         job,
-        &destruction_operation_id,
+        &closure,
+        ErasureAttempt {
+            subject_user_id: &ctx.subject_user_id,
+            attempt_id: &applied_attempt_id,
+            destruction_operation_id: &destruction_operation_id,
+        },
     )
     .await?;
 
@@ -163,19 +222,85 @@ pub async fn run_privacy_erase(
 
 /// Runs the remaining erasure stages in order, persisting progress after each so
 /// a resumed job continues from where it stopped rather than restarting.
+/// The identity of one erasure attempt, as the decision ledger records it.
+///
+/// Groups the subject-scoped ledger identity with the destruction fence so the
+/// similarly shaped strings cannot be transposed at a call site.
+struct ErasureAttempt<'a> {
+    /// Subject whose export may read this attempt's decisions.
+    subject_user_id: &'a str,
+    /// Identity of this one execution.
+    attempt_id: &'a str,
+    /// Destruction fence this attempt runs under, held for each stage guard.
+    destruction_operation_id: &'a str,
+}
+
 async fn run_erasure_stages(
     ctx: &PrivacyEraseContext,
     subjects: &[PrivacySubject],
     candidate_groups: &[(PrivacySubject, Vec<EraseCandidate>)],
     candidate_count: u64,
     job: ClaimedErasureJob,
-    destruction_operation_id: &str,
+    closure: &LearningClosure,
+    attempt: ErasureAttempt<'_>,
 ) -> Result<ErasureJobProgress, HandlerError> {
+    let ErasureAttempt {
+        subject_user_id,
+        attempt_id,
+        destruction_operation_id,
+    } = attempt;
     let mut progress = job.progress;
     let destruction_subjects = subjects
         .iter()
         .map(|subject| subject.target_uid)
         .collect::<Vec<_>>();
+
+    // Reverse-derived erasure runs FIRST, while the memories the learning points
+    // at still exist. Running it after the graph stage would leave the closure
+    // walk nothing to walk: the sources would already be gone and the derived
+    // learning would survive unattributably, which is the exact failure this
+    // stage exists to prevent.
+    if progress.stage == ErasureJobStage::Learning {
+        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+            &ctx.pool,
+            ctx.tenant_id,
+            &destruction_subjects,
+            destruction_operation_id,
+        )
+        .await
+        .map_err(handler_error)?;
+        // The deletions and the dispositions that explain them commit in ONE
+        // transaction inside this call. Splitting them would leave a window in
+        // which rows are gone and nothing on record says why or under whose
+        // authority — the one state a subject-access request cannot be answered
+        // from.
+        let decisions = erase_learning_closure(
+            &ctx.pool,
+            ctx.tenant_id,
+            subject_user_id,
+            attempt_id,
+            closure,
+        )
+        .await
+        .map_err(handler_error)?;
+        guard.finish().await.map_err(handler_error)?;
+        progress.learning_erased = usize_to_u64(closure.candidate_ids.len())
+            .saturating_add(usize_to_u64(closure.learning_ids.len()));
+        progress.artifact_erased = usize_to_u64(closure.revision_uids.len())
+            .saturating_add(usize_to_u64(closure.suite_contribution_uids.len()));
+        progress.decisions_recorded = usize_to_u64(decisions.len());
+        progress.stage = ErasureJobStage::Artifacts;
+        save_erasure_job_progress(&ctx.pool, &ctx.claims.jti, &progress).await?;
+    }
+
+    if progress.stage == ErasureJobStage::Artifacts {
+        // Nothing to re-record: the Learning stage committed its dispositions
+        // atomically with its deletions, so reaching this stage already means the
+        // ledger is complete for that closure. This stage exists as the resume
+        // point between the learning-derived work and the vault/graph stages.
+        progress.stage = ErasureJobStage::Vault;
+        save_erasure_job_progress(&ctx.pool, &ctx.claims.jti, &progress).await?;
+    }
 
     if progress.stage == ErasureJobStage::Vault {
         let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
@@ -315,6 +440,32 @@ fn request_fingerprint(ctx: &PrivacyEraseContext) -> String {
     )
 }
 
+/// Builds the ledger identity for one outcome mode under an approval token.
+///
+/// Dry runs and legal-hold refusals deliberately do not consume the JTI, so a
+/// later applied run may reuse it. Including the mode keeps each replay
+/// idempotent without letting an earlier unapplied row mask that applied run.
+#[derive(Clone, Copy)]
+enum ErasureDecisionMode {
+    LegalHold,
+    DryRun,
+    Applied,
+}
+
+impl ErasureDecisionMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegalHold => "legal_hold",
+            Self::DryRun => "dry_run",
+            Self::Applied => "applied",
+        }
+    }
+}
+
+fn erasure_decision_attempt_id(approval_jti: &str, mode: ErasureDecisionMode) -> String {
+    format!("{approval_jti}:{}", mode.as_str())
+}
+
 /// Dual-control operation type identifying a privacy erasure.
 pub const DUAL_CONTROL_OPERATION_ERASE: &str = "privacy.erase";
 
@@ -438,6 +589,25 @@ mod tests {
         assert_ne!(
             base,
             fingerprint_parts("tenant-2", "contact:abc", None, "gdpr erasure")
+        );
+    }
+
+    #[test]
+    fn decision_attempt_identity_distinguishes_unapplied_and_applied_runs() {
+        // Pins: reusing an unconsumed approval after a dry run or legal hold
+        // records a later applied attempt instead of conflicting with the plan.
+        let jti = "approval-jti";
+        assert_eq!(
+            erasure_decision_attempt_id(jti, ErasureDecisionMode::DryRun),
+            "approval-jti:dry_run"
+        );
+        assert_ne!(
+            erasure_decision_attempt_id(jti, ErasureDecisionMode::DryRun),
+            erasure_decision_attempt_id(jti, ErasureDecisionMode::Applied)
+        );
+        assert_ne!(
+            erasure_decision_attempt_id(jti, ErasureDecisionMode::LegalHold),
+            erasure_decision_attempt_id(jti, ErasureDecisionMode::Applied)
         );
     }
 }
@@ -570,6 +740,18 @@ async fn erase_pii_vault_subjects(
         );
     }
     Ok(erased)
+}
+
+/// Projects resolved privacy subjects into the two identifier forms the
+/// normalized learning schema keys on.
+fn erasure_subjects(subjects: &[PrivacySubject]) -> ErasureSubjects {
+    ErasureSubjects {
+        user_ids: subjects
+            .iter()
+            .map(|subject| subject.user_id.to_string())
+            .collect(),
+        contact_ids: subjects.iter().map(|subject| subject.target_uid).collect(),
+    }
 }
 
 fn graph_erasure_audit(ctx: &PrivacyEraseContext, subject: &PrivacySubject) -> GraphErasureAudit {

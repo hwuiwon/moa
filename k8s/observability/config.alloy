@@ -1,0 +1,247 @@
+// Grafana Alloy collector configuration for the MOA deployment.
+//
+// This lives as a standalone `.alloy` file rather than inline inside a ConfigMap
+// so `alloy fmt` and `alloy validate` can read it. A config embedded in a YAML
+// block scalar is unparseable by every tool that understands the language, which
+// is how a broken reference reaches a cluster: nothing checks it until the
+// collector crash-loops.
+//
+// MOA pushes both signals over OTLP/HTTP. There is deliberately no scrape target
+// for moa-orchestrator or moa-edge: production runs them behind non-sticky
+// Services with autoscaled replica counts, so a scrape through the Service lands
+// on an arbitrary replica each interval and blends unrelated processes into one
+// series.
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces  = [otelcol.processor.batch.default.input]
+    metrics = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    traces  = [otelcol.exporter.otlphttp.tempo.input]
+    metrics = [otelcol.exporter.prometheus.mimir.input]
+  }
+}
+
+otelcol.auth.basic "tempo" {
+  username = sys.env("GRAFANA_CLOUD_TRACES_USER")
+  password = sys.env("GRAFANA_CLOUD_TRACES_KEY")
+}
+
+otelcol.exporter.otlphttp "tempo" {
+  client {
+    endpoint = sys.env("GRAFANA_TEMPO_OTLP_ENDPOINT")
+    auth     = otelcol.auth.basic.tempo.handler
+  }
+}
+
+otelcol.exporter.prometheus "mimir" {
+  forward_to = [prometheus.remote_write.mimir.receiver]
+
+  // MOA's instrument names are already Prometheus convention: `moa_turns_total`,
+  // `moa_turn_latency_seconds`. The OTLP-to-Prometheus translator's suffixing
+  // rule appends type and unit suffixes on its own terms, and the result is a
+  // RENAME that no test, alert or dashboard can see - a query simply returns no
+  // data against a metric that is being exported correctly. Naming is owned in
+  // one place, the Rust instrument, so this is off.
+  add_metric_suffixes = false
+
+  // Copy resource attributes (service.name, deployment.environment,
+  // service.version) onto every series. Without this they exist only on the
+  // separate `target_info` metric, so no alert can scope itself to a service and
+  // no query can tell staging series from production ones. MOA's resource
+  // carries a fixed, bounded attribute set, so this adds no cardinality that
+  // scales with traffic.
+  resource_to_telemetry_conversion = true
+}
+
+prometheus.remote_write "mimir" {
+  external_labels = {
+    cluster = "moa",
+  }
+
+  endpoint {
+    url = sys.env("GRAFANA_MIMIR_REMOTE_WRITE_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_METRICS_USER")
+      password = sys.env("GRAFANA_CLOUD_METRICS_KEY")
+    }
+  }
+}
+
+// The single owner of alert-rule delivery. Rules are authored as PrometheusRule
+// resources under ops/prometheus/alerts and synchronized from the cluster, so
+// the rules Mimir evaluates are the rules in git. Both selectors are explicit:
+// this component must adopt MOA's own rules and nothing else, because Mimir's
+// rule namespace is shared and an unselected sync would delete or overwrite
+// rules this deployment does not own.
+mimir.rules.kubernetes "moa" {
+  address       = sys.env("GRAFANA_MIMIR_RULER_URL")
+  sync_interval = "5m"
+
+  basic_auth {
+    username = sys.env("GRAFANA_CLOUD_METRICS_USER")
+    password = sys.env("GRAFANA_CLOUD_METRICS_KEY")
+  }
+
+  rule_namespace_selector {
+    match_labels = {
+      name = "observability",
+    }
+  }
+
+  rule_selector {
+    match_labels = {
+      "moa.dev/rule-sync" = "mimir",
+    }
+  }
+}
+
+discovery.kubernetes "pods" {
+  role = "pod"
+
+  namespaces {
+    names = ["moa-system", "moa-restate"]
+  }
+}
+
+// Restate metrics are node-local, so discover the three labeled cluster pods
+// rather than scraping the load-balanced Service and blending their counters.
+discovery.relabel "restate" {
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    regex         = "moa-restate"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster"]
+    regex         = "moa-restate"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_port_number"]
+    regex         = "5122"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_ip"]
+    replacement   = "$1:5122"
+    target_label  = "__address__"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "instance"
+  }
+
+  rule {
+    replacement  = "restate"
+    target_label = "job"
+  }
+}
+
+prometheus.scrape "restate" {
+  scrape_interval = "15s"
+  metrics_path    = "/metrics"
+  targets         = discovery.relabel.restate.output
+  forward_to      = [prometheus.remote_write.mimir.receiver]
+}
+
+loki.source.kubernetes "pods" {
+  targets    = discovery.kubernetes.pods.targets
+  forward_to = [loki.process.moa.receiver]
+}
+
+loki.process "moa" {
+  forward_to = [loki.relabel.moa.receiver]
+
+  stage.json {
+    expressions = {
+      level      = "level",
+      message    = "message",
+      target     = "target",
+      session_id = "\"moa.session.id\"",
+      tenant_id  = "\"moa.tenant.id\"",
+      user_id    = "\"moa.user.id\"",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      session_id = "",
+      tenant_id  = "",
+      user_id    = "",
+      target     = "",
+    }
+  }
+
+  stage.static_labels {
+    values = {
+      cluster = "moa",
+      env     = "production",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  stage.output {
+    source = "message"
+  }
+}
+
+loki.relabel "moa" {
+  forward_to = [loki.write.loki.receiver]
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+    action        = "replace"
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    action        = "replace"
+    target_label  = "namespace"
+  }
+
+  rule {
+    action = "labelkeep"
+    regex  = "^(service|namespace|level|cluster|env)$"
+  }
+}
+
+loki.write "loki" {
+  external_labels = {
+    cluster = "moa",
+  }
+
+  endpoint {
+    url = sys.env("GRAFANA_LOKI_WRITE_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOGS_USER")
+      password = sys.env("GRAFANA_CLOUD_LOGS_KEY")
+    }
+  }
+}

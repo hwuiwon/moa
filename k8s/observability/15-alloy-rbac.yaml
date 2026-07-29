@@ -4,6 +4,14 @@ metadata:
   name: alloy
   namespace: observability
 ---
+# Exactly the permissions the configured components need, and no others.
+#
+# - pods, pods/log, namespaces: discovery.kubernetes and loki.source.kubernetes
+#   tail container logs from the moa-system and moa-restate namespaces.
+# - prometheusrules: mimir.rules.kubernetes reads the PrometheusRule resources it
+#   synchronizes into Mimir. Read-only is sufficient and is the right ceiling:
+#   the component's job is to copy git-authored rules INTO Mimir, so it has no
+#   reason to be able to modify a rule inside the cluster.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -14,6 +22,13 @@ rules:
       - pods
       - pods/log
       - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - prometheusrules
     verbs:
       - get
       - list

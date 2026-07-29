@@ -325,6 +325,14 @@ fn fingerprint_is_suppressed(
         LearningCandidateStatus::Rejected | LearningCandidateStatus::RolledBack => {
             decision.updated_at >= now - cooldown
         }
+        // Informational dispositions. An advisory or authoring item for this
+        // fingerprint is a note that nobody can promote, so it must not
+        // suppress a real skill proposal; a dismissal is not a review of the
+        // skill work either. Suppressing on these would let one filed advisory
+        // silently block every future draft for the same recurring task.
+        LearningCandidateStatus::Advisory
+        | LearningCandidateStatus::NeedsAuthoring
+        | LearningCandidateStatus::Dismissed => false,
     })
 }
 

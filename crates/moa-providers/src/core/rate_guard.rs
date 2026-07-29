@@ -1,11 +1,9 @@
-//! Per-provider cooperative rate-limit state shared across provider clones.
+//! Cooperative 429 cooldown and retry budget for one provider quota.
 //!
-//! Two anti-storm mechanisms live here, both process-local and shared across a
-//! provider instance's clones (like [`RatePacer`](super::pacer::RatePacer) and
-//! [`ConcurrencyLimiter`](super::concurrency::ConcurrencyLimiter)):
+//! Two anti-storm mechanisms live here:
 //!
 //! 1. **429 cooldown** — after a rate-limit response the provider records a
-//!    `pause_until` deadline; subsequent calls short-circuit with a typed
+//!    pause deadline; subsequent calls short-circuit with a typed
 //!    [`MoaError::RateLimited`] *without* sleeping, so a caller (or the failover
 //!    wrapper) decides whether to wait or fail over rather than every task piling
 //!    onto a provider that just said "slow down".
@@ -13,24 +11,30 @@
 //!    volume stays under a fraction of recent request volume, so a burst of
 //!    rate-limited calls cannot amplify into a retry storm.
 //!
-//! Limits are enforced per API key in-process; a multi-instance fleet sharing one
-//! key divides the real budget across instances.
+//! With no shared quota attached both are process-local, and a fleet sharing one
+//! API key divides the real budget across instances. Attaching a shared quota
+//! ([`with_shared_quota`](RateGuard::with_shared_quota)) moves the cooldown
+//! deadline and the retry-budget window into the runtime coordination store, so
+//! one replica's 429 pauses the fleet and the retry budget is a fraction of
+//! *fleet* request volume rather than a per-replica allowance that the replica
+//! count multiplies.
+//!
+//! Both controls are credential-wide. No production adapter can reliably
+//! distinguish a model-only 429 from account exhaustion, so a model-scoped
+//! state machine would add complexity while letting callers escape a real
+//! credential cooldown by selecting another model.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
-use moa_core::error::MoaError;
+use moa_config::{CoordinationFailurePolicy, ProviderPacingConfig};
+use moa_core::error::{MoaError, Result};
+use moa_core::traits::RuntimeCacheStore;
+use tokio::time::Instant;
 
-/// Fallback cooldown applied when a rate-limit response carries no `Retry-After`.
-const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(5);
-/// Sliding window over which request/retry volume is measured for the budget.
-const RETRY_BUDGET_WINDOW: Duration = Duration::from_secs(60);
-/// Retries may consume up to this percent of the window's request volume.
-const RETRY_BUDGET_PERCENT: u64 = 20;
-/// Retries always allowed up to this floor, so low-volume callers keep normal
-/// retry behavior and the budget only bites under sustained high volume.
-const RETRY_BUDGET_FLOOR: u64 = 8;
+use super::concurrency_factory::{
+    CoordinatedControl, QuotaIdentity, record_coordination_degraded, record_coordination_rejected,
+};
 
 /// Builds a typed rate-limit error for a provider that is in its 429 cooldown.
 pub(crate) fn rate_limited_paused(remaining: Duration) -> MoaError {
@@ -54,194 +58,689 @@ pub(crate) fn rate_limited_saturated(waited: Duration) -> MoaError {
     }
 }
 
-/// Cloneable per-provider rate-limit guard; clones share one set of counters.
+/// Cloneable per-quota rate-limit guard; clones share one set of counters.
 #[derive(Clone)]
 pub(crate) struct RateGuard {
     inner: Arc<RateGuardInner>,
+    pacing: ProviderPacingConfig,
+    /// Rate class label for the shared keys (the provider call kind).
+    class: &'static str,
+    shared: Option<Arc<SharedGuard>>,
 }
 
 struct RateGuardInner {
-    /// Wall-clock base for the millisecond counters below.
-    base: Instant,
-    /// Cooldown deadline in millis since `base`; `0` means not paused.
-    pause_until_ms: AtomicU64,
-    /// Start of the current retry-budget window, in millis since `base`.
-    window_start_ms: AtomicU64,
-    window_requests: AtomicU64,
-    window_retries: AtomicU64,
+    /// Credential-wide local state used directly under local scope and retained
+    /// as the bounded fallback when shared coordination degrades.
+    state: Mutex<ScopeState>,
+}
+
+/// Process-local cooldown and retry-budget state for one credential.
+#[derive(Debug, Clone, Copy)]
+struct ScopeState {
+    /// Cooldown deadline; `None` means not paused.
+    pause_until: Option<Instant>,
+    /// When the current retry-budget window opened.
+    window_start: Instant,
+    requests: u64,
+    retries: u64,
+}
+
+impl ScopeState {
+    fn new(now: Instant) -> Self {
+        Self {
+            pause_until: None,
+            window_start: now,
+            requests: 0,
+            retries: 0,
+        }
+    }
+}
+
+/// Fleet-shared cooldown and retry-budget state for one credential's quota.
+struct SharedGuard {
+    store: Arc<dyn RuntimeCacheStore>,
+    identity: QuotaIdentity,
+    on_failure: CoordinationFailurePolicy,
 }
 
 impl RateGuard {
-    /// Builds an active guard.
-    pub(crate) fn new() -> Self {
+    /// Builds a process-local guard.
+    pub(crate) fn new(pacing: ProviderPacingConfig) -> Self {
+        let now = Instant::now();
         Self {
             inner: Arc::new(RateGuardInner {
-                base: Instant::now(),
-                pause_until_ms: AtomicU64::new(0),
-                window_start_ms: AtomicU64::new(0),
-                window_requests: AtomicU64::new(0),
-                window_retries: AtomicU64::new(0),
+                state: Mutex::new(ScopeState::new(now)),
             }),
+            pacing,
+            class: "chat",
+            shared: None,
         }
     }
 
-    /// Returns the remaining 429 cooldown, or `None` when not paused.
-    pub(crate) fn pause_remaining(&self) -> Option<Duration> {
-        self.pause_remaining_at(Instant::now())
+    /// Moves cooldown and retry budget into the coordination store.
+    ///
+    /// A `None` store leaves both process-local, which is the correct behavior
+    /// for a deliberate single-node deployment.
+    pub(crate) fn with_shared_quota(
+        mut self,
+        store: Option<Arc<dyn RuntimeCacheStore>>,
+        identity: QuotaIdentity,
+        on_failure: CoordinationFailurePolicy,
+    ) -> Self {
+        self.shared = store.map(|store| {
+            Arc::new(SharedGuard {
+                store,
+                identity,
+                on_failure,
+            })
+        });
+        self
     }
 
-    /// Records a rate-limit response, extending the cooldown deadline.
-    pub(crate) fn record_rate_limited(&self, retry_after: Option<Duration>) {
-        self.record_rate_limited_at(Instant::now(), retry_after);
+    /// Overrides the rate class label used in the shared keys.
+    pub(crate) fn with_class(mut self, class: &'static str) -> Self {
+        self.class = class;
+        self
+    }
+
+    /// Returns the remaining 429 cooldown for this quota, or `None` when clear.
+    ///
+    /// Always combines the local and fleet-shared deadlines. Keeping the local
+    /// deadline active even while Redis is healthy makes a later degraded read
+    /// preserve every 429 this process already observed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rate-limit error only when the cooldown cannot be read
+    /// from the coordination store and the policy is `fail_closed`.
+    pub(crate) async fn pause_remaining(&self) -> Result<Option<Duration>> {
+        let Some(shared) = self.shared.as_ref() else {
+            return Ok(self.local_pause_remaining());
+        };
+        let started = Instant::now();
+        let local = self.local_pause_remaining().unwrap_or(Duration::ZERO);
+        match shared
+            .store
+            .cooldown_remaining(&self.cooldown_key(shared))
+            .await
+        {
+            Ok(shared) => {
+                let remaining = local.max(shared);
+                if remaining.is_zero() {
+                    Ok(None)
+                } else {
+                    Ok(Some(remaining))
+                }
+            }
+            Err(error) => {
+                if shared.on_failure.rejects_admission() {
+                    record_coordination_rejected(
+                        shared.identity.provider(),
+                        CoordinatedControl::Cooldown,
+                        &error,
+                    );
+                    return Err(MoaError::RateLimited {
+                        retries: 0,
+                        message: format!(
+                            "provider cooldown coordination is unavailable and the \
+                             coordination-failure policy is fail_closed: {error}"
+                        ),
+                    });
+                }
+                record_coordination_degraded(
+                    shared.identity.provider(),
+                    CoordinatedControl::Cooldown,
+                    started.elapsed(),
+                    &error,
+                );
+                Ok(self.local_pause_remaining())
+            }
+        }
+    }
+
+    /// Records a credential-wide rate-limit response.
+    ///
+    /// A provider-supplied `Retry-After` is capped at the configured maximum, so
+    /// one hostile header cannot pause a fleet's access to a credential for an
+    /// unbounded time. The local deadline is always recorded too, so a later
+    /// coordination failure degrades onto state that is already correct.
+    pub(crate) async fn record_rate_limited(&self, retry_after: Option<Duration>) {
+        let cooldown = retry_after
+            .filter(|delay| !delay.is_zero())
+            .unwrap_or_else(|| Duration::from_millis(self.pacing.default_cooldown_ms))
+            .min(Duration::from_millis(self.pacing.max_cooldown_ms));
+        let now = Instant::now();
+        self.with_state(|state| {
+            let deadline = now + cooldown;
+            // Never shorten an active cooldown set by a concurrent call.
+            if state.pause_until.is_none_or(|current| current < deadline) {
+                state.pause_until = Some(deadline);
+            }
+        });
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        // Best effort: this runs on a path that already failed, so a coordination
+        // failure here degrades onto the local deadline recorded above rather
+        // than turning into a second error.
+        if let Err(error) = shared
+            .store
+            .extend_cooldown(&self.cooldown_key(shared), cooldown)
+            .await
+        {
+            record_coordination_degraded(
+                shared.identity.provider(),
+                CoordinatedControl::Cooldown,
+                Duration::ZERO,
+                &error,
+            );
+        }
     }
 
     /// Counts one outbound request toward the retry-budget window.
-    pub(crate) fn note_request(&self) {
-        self.note_request_at(Instant::now());
-    }
-
-    /// Returns whether another in-call retry is within the budget, consuming one
-    /// unit of retry budget when it returns `true`.
-    pub(crate) fn allow_retry(&self) -> bool {
-        self.allow_retry_at(Instant::now())
-    }
-
-    fn pause_remaining_at(&self, now: Instant) -> Option<Duration> {
-        let until = self.inner.pause_until_ms.load(Ordering::Relaxed);
-        let now_ms = self.ms_since_base(now);
-        (until > now_ms).then(|| Duration::from_millis(until - now_ms))
-    }
-
-    fn record_rate_limited_at(&self, now: Instant, retry_after: Option<Duration>) {
-        let cooldown = retry_after
-            .filter(|delay| !delay.is_zero())
-            .unwrap_or(DEFAULT_RATE_LIMIT_COOLDOWN);
-        let until = self
-            .ms_since_base(now)
-            .saturating_add(cooldown.as_millis().min(u128::from(u64::MAX)) as u64);
-        // Never shorten an active cooldown set by a concurrent call.
-        self.inner
-            .pause_until_ms
-            .fetch_max(until, Ordering::Relaxed);
-    }
-
-    fn note_request_at(&self, now: Instant) {
-        self.rotate_window(now);
-        self.inner.window_requests.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn allow_retry_at(&self, now: Instant) -> bool {
-        self.rotate_window(now);
-        let requests = self.inner.window_requests.load(Ordering::Relaxed);
-        let retries = self.inner.window_retries.load(Ordering::Relaxed);
-        let budget = (requests * RETRY_BUDGET_PERCENT / 100).max(RETRY_BUDGET_FLOOR);
-        if retries < budget {
-            self.inner.window_retries.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Resets the retry-budget counters when the sliding window has elapsed.
-    fn rotate_window(&self, now: Instant) {
-        let now_ms = self.ms_since_base(now);
-        let start = self.inner.window_start_ms.load(Ordering::Relaxed);
-        let window_ms = RETRY_BUDGET_WINDOW.as_millis() as u64;
-        if now_ms.saturating_sub(start) < window_ms {
-            return;
-        }
-        // Only the winner of the CAS resets the counters, avoiding a double reset.
-        if self
-            .inner
-            .window_start_ms
-            .compare_exchange(start, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rate-limit error only when the shared window cannot be
+    /// updated and the policy is `fail_closed`.
+    pub(crate) async fn note_request(&self) -> Result<()> {
+        let now = Instant::now();
+        self.note_local_request(now);
+        let Some(shared) = self.shared.as_ref() else {
+            return Ok(());
+        };
+        let started = now;
+        match shared
+            .store
+            .note_windowed_request(&self.retry_key(shared), self.retry_window())
+            .await
         {
-            self.inner.window_requests.store(0, Ordering::Relaxed);
-            self.inner.window_retries.store(0, Ordering::Relaxed);
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if shared.on_failure.rejects_admission() {
+                    record_coordination_rejected(
+                        shared.identity.provider(),
+                        CoordinatedControl::RetryBudget,
+                        &error,
+                    );
+                    return Err(MoaError::RateLimited {
+                        retries: 0,
+                        message: format!(
+                            "provider retry-budget coordination is unavailable and the \
+                             coordination-failure policy is fail_closed: {error}"
+                        ),
+                    });
+                }
+                record_coordination_degraded(
+                    shared.identity.provider(),
+                    CoordinatedControl::RetryBudget,
+                    started.elapsed(),
+                    &error,
+                );
+                Ok(())
+            }
         }
     }
 
-    fn ms_since_base(&self, now: Instant) -> u64 {
-        now.saturating_duration_since(self.inner.base)
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64
+    /// Returns whether another in-call retry is within budget, consuming one unit
+    /// of budget when it returns `true`.
+    ///
+    /// A coordination failure under `fail_closed` denies the retry: refusing to
+    /// retry is the bounded answer, since an uncoordinated retry allowance is
+    /// exactly what multiplies into a fleet-wide storm.
+    pub(crate) async fn allow_retry(&self) -> bool {
+        let Some(shared) = self.shared.as_ref() else {
+            return self.allow_local_retry(Instant::now());
+        };
+        let started = Instant::now();
+        // Consume local budget too: it remains an up-to-date bounded fallback
+        // if the store fails on this or a later call.
+        if !self.allow_local_retry(started) {
+            return false;
+        }
+        match shared
+            .store
+            .try_consume_retry_budget(
+                &self.retry_key(shared),
+                self.retry_window(),
+                self.pacing.retry_budget_percent,
+                self.pacing.retry_budget_floor,
+            )
+            .await
+        {
+            Ok(decision) => decision.allowed,
+            Err(error) => {
+                if shared.on_failure.rejects_admission() {
+                    record_coordination_rejected(
+                        shared.identity.provider(),
+                        CoordinatedControl::RetryBudget,
+                        &error,
+                    );
+                    return false;
+                }
+                record_coordination_degraded(
+                    shared.identity.provider(),
+                    CoordinatedControl::RetryBudget,
+                    started.elapsed(),
+                    &error,
+                );
+                true
+            }
+        }
+    }
+
+    fn retry_window(&self) -> Duration {
+        Duration::from_millis(self.pacing.retry_budget_window_ms)
+    }
+
+    fn cooldown_key(&self, shared: &SharedGuard) -> String {
+        shared.identity.cooldown_key(self.class)
+    }
+
+    /// The retry budget is one allowance for the whole credential, so its key
+    /// deliberately carries no model.
+    fn retry_key(&self, shared: &SharedGuard) -> String {
+        shared.identity.retry_budget_key(self.class)
+    }
+
+    fn local_pause_remaining(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.with_state(|state| {
+            state
+                .pause_until
+                .filter(|deadline| *deadline > now)
+                .map(|deadline| deadline.saturating_duration_since(now))
+        })
+    }
+
+    fn note_local_request(&self, now: Instant) {
+        let window = self.retry_window();
+        self.with_state(|state| {
+            rotate(state, now, window);
+            state.requests = state.requests.saturating_add(1);
+        });
+    }
+
+    fn allow_local_retry(&self, now: Instant) -> bool {
+        let window = self.retry_window();
+        let percent = u64::from(self.pacing.retry_budget_percent);
+        let floor = self.pacing.retry_budget_floor;
+        self.with_state(|state| {
+            rotate(state, now, window);
+            let budget = state
+                .requests
+                .saturating_mul(percent)
+                .saturating_div(100)
+                .max(floor);
+            if state.retries < budget {
+                state.retries = state.retries.saturating_add(1);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    fn with_state<T>(&self, apply: impl FnOnce(&mut ScopeState) -> T) -> T {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        apply(&mut state)
+    }
+}
+
+/// Resets the retry-budget counters when the sliding window has elapsed.
+fn rotate(state: &mut ScopeState, now: Instant, window: Duration) {
+    if now.saturating_duration_since(state.window_start) >= window {
+        state.window_start = now;
+        state.requests = 0;
+        state.retries = 0;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use moa_runtime_store::MemoryRuntimeCacheStore;
+
+    use crate::core::coordination_test_support::FailingStore;
+
     use super::*;
 
-    #[test]
-    fn pause_short_circuits_until_cooldown_elapses() {
+    fn local_guard() -> RateGuard {
+        RateGuard::new(ProviderPacingConfig::default())
+    }
+
+    fn shared_guard(
+        store: Arc<dyn RuntimeCacheStore>,
+        on_failure: CoordinationFailurePolicy,
+    ) -> RateGuard {
+        RateGuard::new(ProviderPacingConfig::default()).with_shared_quota(
+            Some(store),
+            QuotaIdentity::new("anthropic", "shared-credential"),
+            on_failure,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_short_circuits_until_cooldown_elapses() {
         // Pins: a recorded 429 pauses the provider for the cooldown window and the
         // pause clears once the window elapses, without any sleeping.
-        let guard = RateGuard::new();
-        let now = Instant::now();
-        assert!(guard.pause_remaining_at(now).is_none());
+        let guard = local_guard();
+        assert!(guard.pause_remaining().await.expect("read pause").is_none());
 
-        guard.record_rate_limited_at(now, Some(Duration::from_secs(10)));
+        guard
+            .record_rate_limited(Some(Duration::from_secs(10)))
+            .await;
         assert!(
-            guard.pause_remaining_at(now).is_some(),
+            guard.pause_remaining().await.expect("read pause").is_some(),
             "provider should be paused immediately after a 429"
         );
+
+        tokio::time::advance(Duration::from_secs(11)).await;
         assert!(
-            guard
-                .pause_remaining_at(now + Duration::from_secs(11))
-                .is_none(),
+            guard.pause_remaining().await.expect("read pause").is_none(),
             "pause should clear once the cooldown elapses"
         );
     }
 
-    #[test]
-    fn missing_retry_after_uses_default_cooldown() {
-        // Pins: a 429 with no Retry-After still pauses for the default cooldown.
-        let guard = RateGuard::new();
-        let now = Instant::now();
-        guard.record_rate_limited_at(now, None);
-        assert!(guard.pause_remaining_at(now).is_some());
+    #[tokio::test(start_paused = true)]
+    async fn missing_retry_after_uses_the_configured_default_cooldown() {
+        // Pins: a 429 with no Retry-After still pauses, for the configured default.
+        let guard = local_guard();
+        guard.record_rate_limited(None).await;
+        assert!(guard.pause_remaining().await.expect("read pause").is_some());
+
+        let default = Duration::from_millis(ProviderPacingConfig::default().default_cooldown_ms);
+        tokio::time::advance(default + Duration::from_millis(1)).await;
+        assert!(guard.pause_remaining().await.expect("read pause").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hostile_retry_after_is_capped_at_the_configured_maximum() {
+        // Pins: one provider response cannot pause a credential for an unbounded
+        // time — the cooldown is capped, so the fleet recovers on schedule.
+        let guard = local_guard();
+        guard
+            .record_rate_limited(Some(Duration::from_secs(86_400)))
+            .await;
+
+        let cap = Duration::from_millis(ProviderPacingConfig::default().max_cooldown_ms);
+        tokio::time::advance(cap + Duration::from_millis(1)).await;
         assert!(
-            guard
-                .pause_remaining_at(now + DEFAULT_RATE_LIMIT_COOLDOWN + Duration::from_millis(1))
-                .is_none()
+            guard.pause_remaining().await.expect("read pause").is_none(),
+            "a day-long Retry-After must be capped at max_cooldown_ms"
         );
     }
 
-    #[test]
-    fn retry_budget_allows_the_floor_then_fails_fast() {
+    /// Two guards over one coordination store, standing in for two replicas.
+    fn shared_replicas(store: Arc<dyn RuntimeCacheStore>) -> (RateGuard, RateGuard) {
+        let build = |store| {
+            RateGuard::new(ProviderPacingConfig::default()).with_shared_quota(
+                Some(store),
+                QuotaIdentity::new("anthropic", "shared-credential"),
+                CoordinationFailurePolicy::BoundedDegraded,
+            )
+        };
+        (build(Arc::clone(&store)), build(store))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_credential_scoped_429_cannot_be_escaped_by_switching_models() {
+        // Pins the load-bearing property of the cooldown scope. A 429 that
+        // evidences account-level quota exhaustion is recorded credential-wide,
+        // so no model on that credential is callable — on this replica or any
+        // other. Narrowing such a cooldown to the model that happened to be
+        // called would let every other model keep hammering an exhausted key,
+        // which is worse than the per-provider-instance behavior this replaced.
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let (replica_a, replica_b) = shared_replicas(store);
+
+        replica_a
+            .clone()
+            .record_rate_limited(Some(Duration::from_secs(30)))
+            .await;
+
+        for model in ["claude-opus-4-6", "claude-haiku-4-5", "claude-sonnet-4-6"] {
+            assert!(
+                replica_b
+                    .clone()
+                    .pause_remaining()
+                    .await
+                    .expect("read")
+                    .is_some(),
+                "{model} must observe the credential-wide pause on the other replica"
+            );
+        }
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(
+            replica_b
+                .clone()
+                .pause_remaining()
+                .await
+                .expect("read")
+                .is_none(),
+            "the credential-wide pause must clear on schedule rather than latch"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_cooldown_is_shared_by_every_client_clone() {
+        // Pins: switching model clients in one process cannot escape a cooldown
+        // observed on the shared credential guard.
+        let guard = RateGuard::new(ProviderPacingConfig::default());
+        let opus = guard.clone();
+        let haiku = guard.clone();
+
+        opus.record_rate_limited(Some(Duration::from_secs(30)))
+            .await;
+        assert!(opus.pause_remaining().await.expect("read").is_some());
+        assert!(
+            haiku.pause_remaining().await.expect("read").is_some(),
+            "a second model client must observe the same credential cooldown"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_budget_allows_the_floor_then_fails_fast() {
         // Pins: retries are allowed up to the floor under low volume, then the
         // budget blocks further retries until request volume grows.
-        let guard = RateGuard::new();
-        let now = Instant::now();
-        guard.note_request_at(now);
-        for _ in 0..RETRY_BUDGET_FLOOR {
+        let guard = local_guard();
+        guard.note_request().await.expect("note request");
+        for _ in 0..ProviderPacingConfig::default().retry_budget_floor {
             assert!(
-                guard.allow_retry_at(now),
+                guard.allow_retry().await,
                 "retries within the floor are allowed"
             );
         }
         assert!(
-            !guard.allow_retry_at(now),
+            !guard.allow_retry().await,
             "the retry budget must fail fast once the floor is exhausted at low volume"
         );
     }
 
-    #[test]
-    fn retry_budget_scales_to_twenty_percent_of_request_volume() {
-        // Pins: under high request volume the budget grows to ~20% of requests.
-        let guard = RateGuard::new();
-        let now = Instant::now();
+    #[tokio::test(start_paused = true)]
+    async fn retry_budget_scales_to_the_configured_percent_of_request_volume() {
+        // Pins: under high request volume the budget grows to the configured
+        // percentage of observed requests.
+        let guard = local_guard();
         for _ in 0..1_000 {
-            guard.note_request_at(now);
+            guard.note_request().await.expect("note request");
         }
         let mut allowed = 0;
         for _ in 0..1_000 {
-            if guard.allow_retry_at(now) {
+            if guard.allow_retry().await {
                 allowed += 1;
             }
         }
         assert_eq!(allowed, 200, "retry budget should be 20% of 1000 requests");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_replicas_429_pauses_every_replica_sharing_the_quota() {
+        // Pins: the distinguishing behavior for cooldown. Two guards backed by one
+        // coordination store share a pause: replica A's 429 short-circuits replica
+        // B, which has its own untouched local state and would proceed under
+        // process-local cooldown.
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let replica_a = shared_guard(
+            Arc::clone(&store),
+            CoordinationFailurePolicy::BoundedDegraded,
+        );
+        let replica_b = shared_guard(
+            Arc::clone(&store),
+            CoordinationFailurePolicy::BoundedDegraded,
+        );
+
+        assert!(replica_b.pause_remaining().await.expect("read").is_none());
+        replica_a
+            .record_rate_limited(Some(Duration::from_secs(30)))
+            .await;
+
+        let remaining = replica_b
+            .pause_remaining()
+            .await
+            .expect("read")
+            .expect("replica B must observe replica A's cooldown");
+        assert!(remaining <= Duration::from_secs(30) && remaining > Duration::from_secs(25));
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(
+            replica_b.pause_remaining().await.expect("read").is_none(),
+            "the shared pause must clear for every replica once it elapses"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn uncoordinated_replicas_do_not_share_a_cooldown() {
+        // Pins: the negative control. Without a shared quota, replica A's 429 is
+        // invisible to replica B — the exact fleet behavior this task removes.
+        let replica_a = RateGuard::new(ProviderPacingConfig::default());
+        let replica_b = RateGuard::new(ProviderPacingConfig::default());
+
+        replica_a
+            .record_rate_limited(Some(Duration::from_secs(30)))
+            .await;
+        assert!(replica_a.pause_remaining().await.expect("read").is_some());
+        assert!(
+            replica_b.pause_remaining().await.expect("read").is_none(),
+            "an uncoordinated replica cannot see another replica's cooldown"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_retry_budget_is_one_allowance_for_the_whole_credential() {
+        // Pins: the retry budget bounds retry volume against one API key, so
+        // every model on that key draws from a single allowance. Keying it per
+        // model would hand each model its own floor — the same multiplication
+        // across models that this task removes across replicas.
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let (replica_a, replica_b) = shared_replicas(store);
+        let floor = ProviderPacingConfig::default().retry_budget_floor;
+
+        let opus = replica_a.clone();
+        opus.note_request().await.expect("note request");
+        for _ in 0..floor {
+            assert!(opus.allow_retry().await, "opus spends the shared floor");
+        }
+
+        assert!(
+            !replica_b.allow_retry().await,
+            "a different model on the same credential must find the budget spent"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_retry_budget_is_one_fleet_wide_allowance() {
+        // Pins: the distinguishing behavior for the retry budget. Two replicas
+        // sharing a quota draw from ONE floor-sized allowance; under process-local
+        // budgets each would get its own floor, which is the multiplication this
+        // task removes.
+        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
+        let replica_a = shared_guard(
+            Arc::clone(&store),
+            CoordinationFailurePolicy::BoundedDegraded,
+        );
+        let replica_b = shared_guard(
+            Arc::clone(&store),
+            CoordinationFailurePolicy::BoundedDegraded,
+        );
+        let floor = ProviderPacingConfig::default().retry_budget_floor;
+
+        replica_a.note_request().await.expect("note request");
+        let mut allowed_a = 0;
+        for _ in 0..floor {
+            if replica_a.allow_retry().await {
+                allowed_a += 1;
+            }
+        }
+        assert_eq!(allowed_a, floor, "replica A spends the shared floor");
+        assert!(
+            !replica_b.allow_retry().await,
+            "replica B must find the fleet-wide retry budget already spent"
+        );
+
+        let uncoordinated = RateGuard::new(ProviderPacingConfig::default());
+        assert!(
+            uncoordinated.allow_retry().await,
+            "an uncoordinated guard still has its own full budget, proving the \
+             assertion above is about coordination and not about exhaustion"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_guard_degrades_to_local_state_when_the_store_fails() {
+        // Pins: bounded_degraded keeps the guard usable on a coordination failure,
+        // falling back to this replica's own cooldown and budget.
+        let guard = shared_guard(
+            Arc::new(FailingStore),
+            CoordinationFailurePolicy::BoundedDegraded,
+        );
+
+        guard
+            .note_request()
+            .await
+            .expect("degraded note must not fail");
+        guard
+            .record_rate_limited(Some(Duration::from_secs(10)))
+            .await;
+        assert!(
+            guard
+                .pause_remaining()
+                .await
+                .expect("degraded read")
+                .is_some(),
+            "the degraded guard must still observe its own cooldown"
+        );
+        assert!(
+            guard.allow_retry().await,
+            "the degraded guard must still allow bounded local retries"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_guard_fails_closed_when_the_store_fails() {
+        // Pins: fail_closed rejects admission and denies retries rather than
+        // running on an uncoordinated allowance.
+        let guard = shared_guard(
+            Arc::new(FailingStore),
+            CoordinationFailurePolicy::FailClosed,
+        );
+
+        let error = guard
+            .pause_remaining()
+            .await
+            .expect_err("fail_closed must reject a cooldown it cannot read");
+        assert!(matches!(error, MoaError::RateLimited { .. }), "{error}");
+        assert!(
+            guard.note_request().await.is_err(),
+            "fail_closed must reject a request it cannot count toward the fleet budget"
+        );
+        assert!(
+            !guard.allow_retry().await,
+            "fail_closed must deny retries it cannot coordinate"
+        );
     }
 }

@@ -1,5 +1,6 @@
 //! End-to-end coverage for behavior-lab trial execution through Restate.
 
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use std::{
     fs,
     path::Path,
@@ -20,8 +21,7 @@ use moa_core::{
 };
 use moa_experiments::{
     model::{
-        ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTrialRecord, NewExperimentRun,
-        NewExperimentTrial,
+        ExperimentSimulatorConfig, ExperimentTrialRecord, NewExperimentRun, NewExperimentTrial,
     },
     store::ExperimentStore,
 };
@@ -1002,10 +1002,13 @@ fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimen
         target: serde_json::from_value(agent_loop_target(agent_revision_uid))
             .expect("target fixture should parse"),
         variant: serde_json::from_value(baseline_variant()).expect("variant fixture should parse"),
-        scorecard: ExperimentScorecard {
-            score_names: vec!["task_success".to_string()],
-            evaluator_metadata: json!({ "judge": "manual-or-later" }),
-        },
+        scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("fixture scorecard is valid"),
         score_run_id: Uuid::now_v7(),
         session_id: None,
         execution_run_uid: None,
@@ -1203,10 +1206,13 @@ fn new_execution_template_parent_run(
         name: "execution-template trial workflow".to_string(),
         target: serde_json::from_value(target).expect("execution-template target should parse"),
         variant: serde_json::from_value(variant).expect("execution-template variant should parse"),
-        scorecard: ExperimentScorecard {
-            score_names: vec!["task_success".to_string()],
-            evaluator_metadata: json!({ "judge": "manual-or-later" }),
-        },
+        scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("fixture scorecard is valid"),
         score_run_id: Uuid::now_v7(),
         session_id: None,
         execution_run_uid: None,
@@ -1372,4 +1378,172 @@ fn write_scripted_fixture(path: &Path) -> Result<()> {
     });
     let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted fixture")?;
     fs::write(path, body).context("write scripted fixture")
+}
+
+/// Returns true when both live-lane flags are explicitly enabled.
+///
+/// Both are required, not either: `MOA_RUN_LIVE_E2E` admits the Restate stack and
+/// `MOA_RUN_LIVE_PROVIDER_TESTS` admits billed provider calls. A run that set only
+/// one of them asked for something this test cannot honour, so it does nothing.
+fn billed_live_lane_enabled() -> bool {
+    ["MOA_RUN_LIVE_E2E", "MOA_RUN_LIVE_PROVIDER_TESTS"]
+        .into_iter()
+        .all(|flag| {
+            std::env::var(flag).is_ok_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+        })
+}
+
+/// Returns the provider credential this lane will spend, or a clear failure.
+///
+/// Failing loudly here is the point: a live lane that silently degraded to a
+/// scripted provider would report a green billed smoke without ever having
+/// exercised a real model.
+fn require_live_provider_credential() -> Result<(&'static str, String)> {
+    for name in [
+        "MOA_ANTHROPIC_API_KEY",
+        "MOA_OPENAI_API_KEY",
+        "MOA_GOOGLE_API_KEY",
+    ] {
+        if let Ok(value) = std::env::var(name)
+            && !value.trim().is_empty()
+        {
+            return Ok((name, value));
+        }
+    }
+    bail!(
+        "MOA_RUN_LIVE_E2E=1 and MOA_RUN_LIVE_PROVIDER_TESTS=1 require one provider credential: \
+         MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
+    )
+}
+
+#[tokio::test]
+#[ignore = "billed: requires MOA_RUN_LIVE_E2E=1, MOA_RUN_LIVE_PROVIDER_TESTS=1, provider credentials, restate-server, Postgres, and OpenFGA"]
+async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
+    // Pins the one thing no deterministic lane can: that a trial driven by a REAL
+    // model still lands complete, provenance-backed score rows before it reports
+    // Completed. Everything else about the scorecard path is proven unbilled; this
+    // exists so a provider-shaped regression (a model that returns no visible
+    // output, or usage the budget evaluators cannot read) cannot hide behind the
+    // scripted fixtures.
+    //
+    // Billed, so it is opt-in twice over and never runs in default CI.
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    if !billed_live_lane_enabled() {
+        return Ok(());
+    }
+    // Explicitly NOT a silent skip: the operator asked for the billed lane, so a
+    // missing credential is a failure rather than a pass.
+    let (credential_name, credential) = require_live_provider_credential()?;
+
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    grant_tenant_admin(&identity, tenant_id).await?;
+
+    let mut orchestrator = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
+        .arg("--port")
+        .arg(ports.restate.to_string())
+        .arg("--health-port")
+        .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
+        .env("MOA_DATABASE_URL", test_database_url())
+        .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
+        .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
+        .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_SECURITY_PROFILE", "local")
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
+        .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
+        // The durable sink is mandatory for this assertion: a telemetry-only sink
+        // makes the trial fail with `experiment_score_sink_not_durable` instead of
+        // producing the score rows this test reads back.
+        .env("MOA_LINEAGE_SINK", "postgres")
+        .env(credential_name, credential)
+        .env_remove("MOA_PROVIDERS_OVERRIDE")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn moa-orchestrator binary for the billed experiment score smoke")?;
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        let pool = PgPool::connect(&test_database_url())
+            .await
+            .context("connect to test Postgres")?;
+        let store = ExperimentStore::new(pool.clone());
+        let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
+        let run = store
+            .insert_run(&scope, new_parent_run(&identity, agent_revision_uid))
+            .await
+            .context("seed parent experiment run")?;
+        let plan_revision_uid = publish_trial_plan(&pool, &scope, agent_revision_uid).await?;
+        let trial = new_trial(run.run_uid, plan_revision_uid);
+        let trial_key = trial.trial_key.clone();
+        let request = ExperimentTrialRunWorkflowRequest {
+            tenant_id,
+            trial,
+            target: agent_loop_target(agent_revision_uid),
+            variant: baseline_variant(),
+            identity: identity.clone(),
+            completion_awakeable_id: None,
+        };
+
+        let response = run_trial_workflow(
+            &client,
+            ingress,
+            &identity,
+            run.run_uid,
+            &trial_key,
+            &request,
+        )
+        .await?;
+
+        // The scores must be readable the instant the trial reports terminal, with
+        // no additional wait. That is the whole ordering guarantee: evaluate, emit,
+        // confirm visibility, and only then persist the terminal status.
+        let rows = moa_scoring::exact_experiment_score_rows_for_tenant(
+            &pool,
+            moa_scoring::ExperimentScoreRowsRef {
+                tenant_id,
+                score_run_id: response.score_run_id,
+            },
+        )
+        .await
+        .context("read exact experiment score rows")?;
+        if rows.is_empty() {
+            bail!(
+                "trial {} reported status {} with no provenance-backed score rows",
+                response.trial_uid,
+                response.status
+            );
+        }
+        for row in &rows {
+            assert_eq!(row.trial_uid, response.trial_uid);
+            assert_eq!(row.experiment_run_uid, run.run_uid);
+            assert_eq!(row.plan_revision_uid, plan_revision_uid);
+            assert_eq!(row.evaluator_version, "v1");
+            assert_eq!(row.evidence_hash.len(), 32);
+        }
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+    result
 }

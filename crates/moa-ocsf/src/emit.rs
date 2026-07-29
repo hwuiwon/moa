@@ -268,17 +268,20 @@ pub async fn emit_authn_success(
 
 /// Enqueue an authentication success event on the background audit writer.
 ///
-/// This never blocks the caller and never fails: if the queue is saturated or
-/// uninitialized the event is dropped and counted. Use this on hot request
-/// paths where an audit write must not gate the response.
+/// This never blocks the caller and never fails: if the queue is saturated the
+/// event is dropped and counted. Use this on hot request paths where an audit
+/// write must not gate the response. Taking the emitter by reference is what
+/// makes the writer's ownership visible here rather than resolved from a global
+/// that may never have been installed.
 pub fn spawn_authn_success(
+    emitter: &crate::AuditEmitter,
     tenant_id: Uuid,
     identity: &Identity,
     auth_protocol: &str,
     src_ip: Option<&str>,
 ) {
     let event = authn_success_event(identity, auth_protocol, src_ip);
-    enqueue_event(tenant_id, &event, None);
+    enqueue_event(emitter, tenant_id, &event, None);
 }
 
 /// Emit an authentication failure event synchronously, failing closed.
@@ -300,6 +303,7 @@ pub async fn emit_authn_failure(
 /// unauthenticated and rejected credentials so a flood of bad requests cannot
 /// amplify into synchronous signed inserts on the request path.
 pub fn spawn_authn_failure(
+    emitter: &crate::AuditEmitter,
     tenant_id: Uuid,
     actor_uid: Option<&str>,
     auth_protocol: &str,
@@ -307,7 +311,7 @@ pub fn spawn_authn_failure(
     reason: &str,
 ) {
     let event = authn_failure_event(actor_uid, auth_protocol, src_ip, reason);
-    enqueue_event(tenant_id, &event, None);
+    enqueue_event(emitter, tenant_id, &event, None);
 }
 
 /// Emit an authorization decision event.
@@ -341,6 +345,7 @@ pub async fn emit_authz_decision(
 /// are recorded off the request path so an authorization check never fails or
 /// stalls because of an audit write.
 pub fn spawn_authz_decision(
+    emitter: &crate::AuditEmitter,
     tenant_id: TenantId,
     identity: &Identity,
     object_uid: &str,
@@ -360,7 +365,7 @@ pub fn spawn_authz_decision(
             authz_activity::OTHER
         },
     );
-    enqueue_event(tenant_id.0, &event, Some(object_uid.to_string()));
+    enqueue_event(emitter, tenant_id.0, &event, Some(object_uid.to_string()));
 }
 
 /// Emit a memory data-access event synchronously, failing closed.
@@ -991,12 +996,17 @@ impl EventColumns {
 /// Serialization failures are logged and dropped rather than surfaced: the
 /// spawn variants are used only where an audit write must never fail a request.
 fn enqueue_event<E: serde::Serialize>(
+    emitter: &crate::AuditEmitter,
     tenant_id: Uuid,
     event: &E,
     target_resource_uid: Option<String>,
 ) {
     match serde_json::to_value(event) {
-        Ok(value) => crate::audit_sink::enqueue(tenant_id, value, target_resource_uid),
+        Ok(value) => emitter.enqueue(crate::audit_sink::QueuedAudit {
+            tenant_id,
+            value,
+            target_resource_uid,
+        }),
         Err(error) => {
             tracing::warn!(error = %error, "failed to serialize security audit event; dropping");
         }

@@ -178,6 +178,8 @@ fn server(
     credentials: Option<McpCredentialConfig>,
 ) -> McpServerConfig {
     McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: name.to_string(),
         transport: McpTransportConfig::Http,
         url: Some("http://127.0.0.1:1".to_string()),

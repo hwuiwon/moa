@@ -16,8 +16,9 @@ use moa_core::{
     types::agent::AgentContext,
     types::contact::SessionActorRef,
     types::experience::{
-        LearningCandidate, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-        TaskFacetSet, TaskFingerprint,
+        LearningCandidate, LearningCandidateSourceRef, LearningCandidateStatus,
+        LearningCandidateType, LearningProposalKind, LearningRiskClass, TaskFacetSet,
+        TaskFingerprint,
     },
     types::identifiers::{ModelId, SessionId, TenantId, UserId},
     types::segment_assessment::SegmentOutcome,
@@ -309,12 +310,17 @@ async fn candidate_decisions_lookup_returns_status_and_time() {
     // suppression sees exactly the decisions for the fingerprint it is judging.
     with_test_store(|store| async move {
         let tenant = tenant_id("recurrence-decisions");
+        let source_session_id = store
+            .create_session(session_meta(tenant))
+            .await
+            .expect("seed candidate source session");
         let now = moa_test_support::fixtures::pg_now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: tenant,
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status: LearningCandidateStatus::Rejected,
             target_id: None,
             target_label: Some("some-skill".to_string()),
@@ -326,7 +332,9 @@ async fn candidate_decisions_lookup_returns_status_and_time() {
             task_facets: None,
             payload: serde_json::json!({ "kind": "skill_draft_proposal" }),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            sources: vec![LearningCandidateSourceRef::Session {
+                session_id: source_session_id,
+            }],
             confidence: None,
             risk_class: LearningRiskClass::Medium,
             promotion_requirements: vec!["human_review".to_string()],
@@ -368,6 +376,10 @@ async fn batched_candidate_decisions_key_each_fingerprint_and_ignore_others() {
     // per-fingerprint N+1.
     with_test_store(|store| async move {
         let tenant = tenant_id("recurrence-batch-decisions");
+        let source_session_id = store
+            .create_session(session_meta(tenant))
+            .await
+            .expect("seed candidate source session");
         let now = moa_test_support::fixtures::pg_now();
         for (hash, status) in [
             ("alpha", LearningCandidateStatus::Rejected),
@@ -379,6 +391,7 @@ async fn batched_candidate_decisions_key_each_fingerprint_and_ignore_others() {
                 tenant_id: tenant,
                 user_id: None,
                 candidate_type: LearningCandidateType::Skill,
+                proposal_kind: LearningProposalKind::SkillDraft,
                 status,
                 target_id: None,
                 target_label: Some(format!("{hash}-skill")),
@@ -390,7 +403,9 @@ async fn batched_candidate_decisions_key_each_fingerprint_and_ignore_others() {
                 task_facets: None,
                 payload: serde_json::json!({ "kind": "skill_draft_proposal" }),
                 evaluation_payload: None,
-                source_experience_ids: Vec::new(),
+                sources: vec![LearningCandidateSourceRef::Session {
+                    session_id: source_session_id,
+                }],
                 confidence: None,
                 risk_class: LearningRiskClass::Medium,
                 promotion_requirements: vec!["human_review".to_string()],
