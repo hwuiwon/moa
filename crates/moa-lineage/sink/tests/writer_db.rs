@@ -186,16 +186,12 @@ async fn lineage_writer_repeated_dead_letter_of_same_batch_is_idempotent_db() ->
     let turn_id = Uuid::now_v7();
     let partition = test_partition();
     let event = retrieval_event(turn_id, &partition);
+    poison_turn_lineage_with_sqlstate(&pool, "23514").await?;
 
     for _ in 0..2 {
         let config = test_sink_config(Duration::from_secs(3600));
         let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-        // spawn_writer bootstraps the schema, so drop the target AFTER it opens
-        // to keep the write path poisoned for this lifetime.
         let handle = spawn_writer(rx, config, LineageStore::new(pool.clone())).await?;
-        sqlx::query("DROP TABLE analytics.turn_lineage CASCADE")
-            .execute(&pool)
-            .await?;
         tx.send(event.clone())
             .await
             .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
@@ -691,11 +687,10 @@ async fn lineage_writer_experiment_score_replay_is_accepted_but_never_rewrites_d
         "the refused replay must have left the stored evidence hash untouched"
     );
 
-    // A NON-replay-stable timestamp is the other half of the contract: the score
-    // row is keyed `(score_id, ts)`, so a finalizer that called `Utc::now()` per
-    // attempt would insert a SECOND row for the same score. Nothing refuses that
-    // at the storage layer, which is exactly why the eligibility gate treats two
-    // rows for one requirement as Invalid rather than as a pass.
+    // A non-replay-stable timestamp is also a provenance conflict: `score_id` is
+    // the score's immutable identity, while `score_ts` binds that identity to one
+    // exact append-only score row. A retry cannot create a second row by drifting
+    // its timestamp.
     let drifted_stats = {
         let (tx, rx) = mpsc::channel::<LineageEvent>(16);
         let handle = spawn_writer(
@@ -716,15 +711,18 @@ async fn lineage_writer_experiment_score_replay_is_accepted_but_never_rewrites_d
         drop(tx);
         handle.shutdown().await?
     };
-    assert_eq!(drifted_stats.written, 1);
+    assert_eq!(
+        drifted_stats.written, 0,
+        "timestamp drift must be refused as a provenance conflict"
+    );
     let rows_after_drift: i64 =
         sqlx::query_scalar("SELECT count(*) FROM analytics.scores WHERE score_id = $1")
             .bind(score_id)
             .fetch_one(&pool)
             .await?;
     assert_eq!(
-        rows_after_drift, 2,
-        "a drifted timestamp duplicates the score row, which the eligibility gate must catch"
+        rows_after_drift, 1,
+        "timestamp drift must leave the original score as the only row"
     );
 
     pool.close().await;

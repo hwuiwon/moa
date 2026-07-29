@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
-use moa_core::types::memory::RlsContext;
+use moa_core::types::memory::{RlsContext, SourceAclContext};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
@@ -172,6 +172,36 @@ trait MemoryAccessAuditor: Send + Sync {
     ) -> Result<()>;
 }
 
+#[async_trait]
+trait SourceAclContextResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        pool: &PgPool,
+        ctx: &WorkingContext,
+        assume_app_role: bool,
+    ) -> Result<SourceAclContext>;
+}
+
+struct DurableSourceAclContextResolver;
+
+#[async_trait]
+impl SourceAclContextResolver for DurableSourceAclContextResolver {
+    async fn resolve(
+        &self,
+        pool: &PgPool,
+        ctx: &WorkingContext,
+        assume_app_role: bool,
+    ) -> Result<SourceAclContext> {
+        moa_db::resolve_source_acl_context(
+            pool,
+            ctx.tenant_id,
+            ctx.contact.as_ref().map(|contact| contact.contact_id),
+            assume_app_role,
+        )
+        .await
+    }
+}
+
 struct DurableMemoryAccessAuditor;
 
 #[async_trait]
@@ -198,6 +228,7 @@ pub struct GraphMemoryRetriever {
     planner: moa_retrieval::planning::QueryPlanner,
     scoped_runtimes: moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>>,
     runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
+    source_acl_resolver: Arc<dyn SourceAclContextResolver>,
     access_auditor: Arc<dyn MemoryAccessAuditor>,
 }
 
@@ -356,6 +387,7 @@ impl GraphMemoryRetriever {
             planner: moa_retrieval::planning::QueryPlanner::new(),
             scoped_runtimes: build_scoped_runtime_cache(),
             runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory { kms, enrichment }),
+            source_acl_resolver: Arc::new(DurableSourceAclContextResolver),
             access_auditor: Arc::new(DurableMemoryAccessAuditor),
         }
     }
@@ -395,6 +427,15 @@ impl GraphMemoryRetriever {
     #[cfg(test)]
     fn with_access_auditor(mut self, access_auditor: Arc<dyn MemoryAccessAuditor>) -> Self {
         self.access_auditor = access_auditor;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_source_acl_resolver(
+        mut self,
+        source_acl_resolver: Arc<dyn SourceAclContextResolver>,
+    ) -> Self {
+        self.source_acl_resolver = source_acl_resolver;
         self
     }
 
@@ -458,15 +499,11 @@ impl GraphMemoryRetriever {
         // Resolve the caller's provider-source principals ONCE per turn, from
         // durable bindings keyed by the authenticated session identity. No leg
         // re-reads them, and nothing in the request payload can influence them.
-        let policy = &policy.clone().with_source_acl(
-            moa_db::resolve_source_acl_context(
-                &self.pool,
-                ctx.tenant_id,
-                ctx.contact.as_ref().map(|contact| contact.contact_id),
-                self.assume_app_role,
-            )
-            .await?,
-        );
+        let source_acl = self
+            .source_acl_resolver
+            .resolve(&self.pool, ctx, self.assume_app_role)
+            .await?;
+        let policy = &policy.clone().with_source_acl(source_acl);
 
         let retrieval_started = Instant::now();
         let (hits, provenance) = match strategy {
@@ -1289,6 +1326,7 @@ mod tests {
         types::identifiers::ModelId,
         types::identifiers::SessionId,
         types::identifiers::TenantId,
+        types::memory::SourceAclContext,
         types::model::ModelCapabilities,
         types::model::TokenPricing,
         types::model::ToolCallFormat,
@@ -1311,9 +1349,9 @@ mod tests {
 
     use super::{
         GraphMemoryRetriever, MemoryAccessAuditor, MemoryEvidenceRequest, ScopedRetrievalRuntime,
-        ScopedRetrievalRuntimeFactory, SharedGraphMemoryRetriever, build_memory_evidence_response,
-        emit_data_access_audit, extract_search_keywords, extract_search_query,
-        should_disable_graph_expansion,
+        ScopedRetrievalRuntimeFactory, SharedGraphMemoryRetriever, SourceAclContextResolver,
+        build_memory_evidence_response, emit_data_access_audit, extract_search_keywords,
+        extract_search_query, should_disable_graph_expansion,
     };
 
     /// Wraps scripted hits in a retrieval output with empty diagnostics/provenance.
@@ -1349,6 +1387,20 @@ mod tests {
     struct NoopGraphStore;
 
     struct NoopMemoryAccessAuditor;
+
+    struct ResolvedEmptySourceAclContextResolver;
+
+    #[async_trait]
+    impl SourceAclContextResolver for ResolvedEmptySourceAclContextResolver {
+        async fn resolve(
+            &self,
+            _pool: &sqlx::PgPool,
+            _ctx: &WorkingContext,
+            _assume_app_role: bool,
+        ) -> moa_core::error::Result<SourceAclContext> {
+            Ok(SourceAclContext::empty(0))
+        }
+    }
 
     #[async_trait]
     impl MemoryAccessAuditor for NoopMemoryAccessAuditor {
@@ -2531,6 +2583,7 @@ mod tests {
             .expect("lazy test pool should not connect");
         let graph_memory = GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
             .with_access_auditor(Arc::new(NoopMemoryAccessAuditor))
+            .with_source_acl_resolver(Arc::new(ResolvedEmptySourceAclContextResolver))
             .with_scoped_runtime_factory(Arc::new(QueryScriptedRuntimeFactory { retriever }));
 
         let session = SessionMeta {
@@ -3086,6 +3139,7 @@ mod tests {
         });
         GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
             .with_access_auditor(Arc::new(NoopMemoryAccessAuditor))
+            .with_source_acl_resolver(Arc::new(ResolvedEmptySourceAclContextResolver))
             .with_scoped_runtime_factory(Arc::new(ScriptedRuntimeFactory { retriever }))
     }
 
