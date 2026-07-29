@@ -55,6 +55,9 @@ impl PgvectorStore {
     ///
     /// This is intended for administrative operations, such as backend promotion,
     /// that must validate both tenant and contact-owned vectors in one tenant.
+    /// Control-plane KNN returns only vector identifiers and scores, never hydrated
+    /// source content, so it also bypasses caller source-ACL admission. Callers must
+    /// authorize the maintenance operation before constructing this store.
     pub fn new_for_control_plane(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
@@ -200,11 +203,17 @@ impl PgvectorStore {
             builder.push_bind(labels.as_slice());
             builder.push(")");
         }
-        // Inside the shortlist's WHERE clause: a denied vector must not consume
-        // one of the shortlist slots, or an admitted neighbour is lost to a row
-        // that would have been filtered afterwards anyway.
-        builder.push(" AND ");
-        moa_db::push_source_acl_predicate(&mut builder, "embedding.uid", self.scope.source_acl());
+        if !self.control_plane {
+            // Inside the shortlist's WHERE clause: a denied vector must not consume
+            // one of the shortlist slots, or an admitted neighbour is lost to a row
+            // that would have been filtered afterwards anyway.
+            builder.push(" AND ");
+            moa_db::push_source_acl_predicate(
+                &mut builder,
+                "embedding.uid",
+                self.scope.source_acl(),
+            );
+        }
         // `shortlist_dims` is a validated `usize` (0 < dims < VECTOR_DIMENSION), so it is
         // inlined safely: pgvector type modifiers (`halfvec(<n>)`) cannot be bound parameters.
         builder.push(format!(
@@ -381,15 +390,17 @@ impl VectorStore for PgvectorStore {
                     builder.push_bind(labels.as_slice());
                     builder.push(")");
                 }
-                // Applied inside the ranked subquery's WHERE, before `LIMIT k`:
-                // a denied vector must never consume one of the k slots, which
-                // is what post-filtering would silently do.
-                builder.push(" AND ");
-                moa_db::push_source_acl_predicate(
-                    &mut builder,
-                    "embedding.uid",
-                    self.scope.source_acl(),
-                );
+                if !self.control_plane {
+                    // Applied inside the ranked subquery's WHERE, before `LIMIT k`:
+                    // a denied vector must never consume one of the k slots, which
+                    // is what post-filtering would silently do.
+                    builder.push(" AND ");
+                    moa_db::push_source_acl_predicate(
+                        &mut builder,
+                        "embedding.uid",
+                        self.scope.source_acl(),
+                    );
+                }
                 builder.push(" ORDER BY dist, embedding.uid ASC LIMIT ");
                 builder.push_bind(limit);
                 builder.push(") AS ranked ORDER BY ranked.dist, ranked.uid ASC");

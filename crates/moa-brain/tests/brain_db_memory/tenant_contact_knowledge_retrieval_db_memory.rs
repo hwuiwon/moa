@@ -749,7 +749,9 @@ async fn retrieval_cache_invalidates_when_graph_node_invalidates() {
 async fn vector_promotion_bumps_retrieval_cache_version() {
     // Pins: vector backend promotion is a real freshness boundary for cached
     // hybrid retrieval because vector candidate generation changes by backend
-    // state even when graph rows are unchanged.
+    // state even when graph rows are unchanged. Maintenance validation includes
+    // source-governed vectors without turning that control-plane visibility into
+    // a caller content-ACL bypass.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -795,7 +797,7 @@ async fn vector_promotion_bumps_retrieval_cache_version() {
     );
     let before_version = storage_partition_version(&pool, tenant_id).await;
 
-    let source: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+    let source: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_control_plane(
         pool.clone(),
         RlsContext::tenant(tenant_id),
     ));
@@ -1113,13 +1115,30 @@ async fn seed_knowledge_chunk_with_text(
             entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind,
             principal_kind, principal_fingerprint, fingerprint_key_version
         )
-        VALUES ($1, $2, $3, $4, 'allow', 'user', $5, 1)
+        VALUES ($1, $2, $3, $4, 'allow', 'anyone', $5, 1)
         "#,
     )
     .bind(Uuid::now_v7())
     .bind(tenant_id.0)
     .bind(&storage_partition_id)
     .bind(snapshot_uid)
+    .bind(acl_principal.as_bytes())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_principal_bindings (
+            binding_uid, tenant_id, storage_partition_id, contact_id, connection_id,
+            principal_kind, principal_fingerprint, fingerprint_key_version, verified_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'anyone', $6, 1, now())
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id.0)
+    .bind(&storage_partition_id)
+    .bind(moa_db::TENANT_WIDE_PRINCIPAL_HOLDER)
+    .bind(connection_uid)
     .bind(acl_principal.as_bytes())
     .execute(pool)
     .await?;

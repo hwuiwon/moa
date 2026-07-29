@@ -1500,8 +1500,11 @@ async fn fast_remember_real_detector_flags_restated_fact_as_duplicate_db_memory(
         .check_one_fast(
             fact,
             Some(
-                moa_memory_vector::QueryEmbedding::new(deterministic_vector(fact), "test-embed")
-                    .expect("valid query embedding"),
+                moa_memory_vector::QueryEmbedding::new(
+                    deterministic_vector(fact),
+                    "mock-fast-embedder",
+                )
+                .expect("valid query embedding"),
             ),
             NodeLabel::Fact,
             SensitivityClass::None,
