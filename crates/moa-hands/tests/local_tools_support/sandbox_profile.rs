@@ -19,6 +19,7 @@ fn effective_profile_from(
     profile: moa_core::types::hands::SandboxProfile,
     capability_revision: &str,
 ) -> moa_core::types::hands::EffectiveSandboxProfile {
+    use moa_core::types::action_policy::CallOrigin;
     use moa_core::types::hands::{BuiltinPolicyRevision, SandboxPolicySnapshot};
 
     moa_core::types::hands::resolve_effective_sandbox_profile(
@@ -26,6 +27,7 @@ fn effective_profile_from(
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
         capability_revision,
     )
     .expect("test policy resolution should succeed")
@@ -53,6 +55,7 @@ fn hand_spec_with_profile(
     capability_revision: &str,
 ) -> moa_core::types::hands::HandSpec {
     moa_core::types::hands::HandSpec {
+        budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,
         env: std::collections::HashMap::new(),

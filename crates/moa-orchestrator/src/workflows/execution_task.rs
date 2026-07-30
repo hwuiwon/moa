@@ -1114,6 +1114,7 @@ async fn invoke_capability_tool(
                 generation: task.generation,
             },
             capability_provenance: Some(&provenance),
+            resource_budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         },
         &workflow.session_limits,
         workflow.session_store.clone(),

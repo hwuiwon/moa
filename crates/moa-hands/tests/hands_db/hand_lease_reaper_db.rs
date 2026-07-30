@@ -20,6 +20,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use moa_core::types::action_policy::CallOrigin;
 use moa_core::types::hands::{
     BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
     SandboxPolicySnapshot, SandboxProfile, SandboxTier,
@@ -70,6 +71,7 @@ fn lease_policy(idle: LifetimeLimit, hard: LifetimeLimit) -> HandLeasePolicy {
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
         "db-capabilities-v1",
     )
     .expect("test resolution should succeed");

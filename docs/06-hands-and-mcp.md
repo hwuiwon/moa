@@ -28,7 +28,7 @@ maximum lifetime. Each resource and deadline is a nonzero bound or an explicit
 `Unrestricted`. Revision identity belongs to the surrounding
 `SandboxPolicySnapshot`; an allowlist does not carry a second revision.
 
-Four layers contribute a `SandboxPolicySnapshot { revision, profile }`:
+Five layers contribute a `SandboxPolicySnapshot { revision, profile }`:
 
 | Layer | Source | Unauthored revision |
 |---|---|---|
@@ -36,16 +36,22 @@ Four layers contribute a `SandboxPolicySnapshot { revision, profile }`:
 | Tenant | `moa.tenant_sandbox_policy` | `tenant-sandbox-unset` |
 | Agent | `AgentDefinition.sandbox_policy`, pinned on the session | `agent-sandbox-unset` |
 | Route | `[sandbox_policy.routes.<provider>]` | `route-sandbox-unset` |
+| Origin | Effective session `CallOrigin` | `origin-production`, `origin-experiment-deny-all`, or `origin-generated-code-deny-all` |
 
 Resolution is a restrictive intersection: the lowest bounded limit wins,
 `Unbounded` is the identity element, `DenyAll` egress dominates, two allowlists
 intersect, and an empty intersection becomes `DenyAll`. No layer can widen what
 another bounded, which is why an unauthored layer contributes the identity
 element rather than being absent — but it still contributes a *named* revision,
-because all four revisions plus the serving provider's capability revision are
+because all five revisions plus the serving provider's capability revision are
 covered by the profile's stable SHA-256 identity hash. A layer that starts
 declaring limits therefore changes the hash, and no sandbox provisioned under
 the old identity can be reused.
+
+Experiment trials and generated code contribute `DenyAll` egress at the origin
+layer. A provider tier that cannot enforce deny-all — including direct host
+execution — refuses admission before provisioning. Secure trials therefore run
+on an enforcing tier rather than widening their origin policy to fit the host.
 
 ## Provider Capabilities
 
@@ -187,6 +193,15 @@ interpreter never calls a hand, MCP server, datasource, or memory store directly
 Capability availability and authorization restrict what may run; resource
 budgets restrict only how much may run.
 
+`ToolCallRequest.resource_budget` is the downward-only runtime slice admitted
+for that call. `ToolExecutor` preserves it across durable retries and invokes
+the router's budget-aware recovery path; the router refuses an exhausted
+tool-call allowance, checks the deadline before provisioning, and applies the
+same bound to local, remote-sandbox, and retry execution. Ordinary calls state
+`Unbounded` explicitly. Experiment Session turns carry their reserved target
+slice here rather than relying on parent-side reconciliation after the tool has
+already run.
+
 The router publishes the executable registry and its model-visible schemas as
 one immutable snapshot. A refresh cannot expose a new executor with stale
 prompt schemas, or the reverse. Durable execution pins each MCP tool's schema
@@ -207,7 +222,7 @@ orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
 leases for every worker scope rather than only handles cached in the current
 process.
 
-A lease persists the exact profile, its identity hash, all four source
+A lease persists the exact profile, its identity hash, all five source
 revisions, the capability revision, a renewable `idle_expires_at`, and an
 immutable `hard_expires_at`. `NULL` on either deadline means that dimension was
 explicitly `Unbounded`. Renewal moves only the idle deadline and is capped at

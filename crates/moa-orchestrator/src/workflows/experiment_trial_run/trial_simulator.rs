@@ -114,15 +114,27 @@ where
     Ok(())
 }
 
-pub(super) async fn simulator_next_user_message(
-    ctx: &WorkflowContext<'_>,
+/// One simulator model call: the message it produced and what it actually cost.
+///
+/// The usage travels with the message because the run ledger reconciles against
+/// it. Emitting these numbers as telemetry and dropping them, as this path used
+/// to, leaves the simulator's spend unaccounted for in the envelope that is
+/// supposed to bound it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct SimulatorTurn {
+    /// Next simulated user message, trimmed.
+    pub(super) message: String,
+    /// Actual tokens and cost the call consumed.
+    pub(super) usage: ExperimentResourceUsage,
+}
+
+/// Builds the deterministic completion request for one simulator turn.
+pub(super) fn simulator_completion_request(
     trial: &ExperimentTrialRecord,
     simulator_context: &SimulatorContext,
     transcript: &[ContextMessage],
     turn_index: u32,
-    providers: &Arc<ProviderRegistry>,
-) -> Result<String, HandlerError> {
-    let gateway = LLMGatewayImpl::new(providers.clone());
+) -> CompletionRequest {
     let mut request = CompletionRequest::new(format!(
         "Generate simulator user message number {}.",
         turn_index + 1
@@ -138,29 +150,25 @@ pub(super) async fn simulator_next_user_message(
         .messages
         .insert(0, ContextMessage::system(SIMULATOR_SYSTEM_PROMPT));
     request.messages.extend(transcript.iter().cloned());
+    request
+}
 
-    Ok(ctx
-        .run(|| async move {
-            gateway
-                .complete_buffered(request)
-                .await
-                .map(|response| {
-                    let usage = response.token_usage();
-                    record_simulation_tokens(
-                        "simulator",
-                        (usage.total_input_tokens() + usage.output_tokens) as u64,
-                    );
-                    record_simulation_cost_cents(
-                        "simulator",
-                        compute_cost_cents(response.model.as_str(), usage) as u64,
-                    );
-                    Json::from(response.text.trim().to_string())
-                })
-                .map_err(moa_error_to_handler_error)
-        })
-        .name("simulation_user_model_call")
-        .await?
-        .into_inner())
+/// Converts one durable gateway response into a metered simulator turn.
+pub(super) fn simulator_turn_from_response(response: CompletionResponse) -> SimulatorTurn {
+    let usage = response.token_usage();
+    let input_tokens = usage.total_input_tokens() as u64;
+    let output_tokens = usage.output_tokens as u64;
+    let cost_cents = compute_cost_cents(response.model.as_str(), usage) as u64;
+    record_simulation_tokens("simulator", input_tokens + output_tokens);
+    record_simulation_cost_cents("simulator", cost_cents);
+    SimulatorTurn {
+        message: response.text.trim().to_string(),
+        usage: ExperimentResourceUsage::model_call(
+            input_tokens,
+            output_tokens,
+            cost_cents.saturating_mul(MICRO_USD_PER_CENT),
+        ),
+    }
 }
 
 pub(super) fn effective_max_turns(simulator_max_turns: u32, scenario_max_turns: u32) -> u32 {

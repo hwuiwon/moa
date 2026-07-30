@@ -416,6 +416,91 @@ async fn recovery_returns_fatal_failures_immediately() {
 }
 
 #[tokio::test]
+async fn recovery_propagates_budget_exhaustion_from_hand_execution() {
+    // Pins: a terminal run-budget error is not converted into a model-visible
+    // tool failure or passed through retry classification.
+    let provider = Arc::new(MockHandProvider::new(
+        "mock-execute-budget",
+        MockProviderState {
+            execute_results: VecDeque::from([Err(MoaError::BudgetExhausted(
+                "run deadline exhausted during hand execution".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::Retryable {
+                reason: "must not classify terminal budget exhaustion".to_string(),
+                backoff_hint: Duration::ZERO,
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
+
+    let error = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
+        .await
+        .expect_err("budget exhaustion must escape recovery unchanged");
+
+    assert!(matches!(
+        error,
+        MoaError::BudgetExhausted(message)
+            if message == "run deadline exhausted during hand execution"
+    ));
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.provision_calls, 1);
+    assert_eq!(snapshot.execute_calls, 1);
+    assert_eq!(snapshot.destroy_calls, 0);
+}
+
+#[tokio::test]
+async fn recovery_propagates_budget_exhaustion_from_health_check() {
+    // Pins: recovery does not classify a budget error raised before execution
+    // as a sandbox failure and therefore never executes or reprovisions.
+    let provider = Arc::new(MockHandProvider::new(
+        "mock-health-budget",
+        MockProviderState {
+            health_checks: VecDeque::from([Err(MoaError::BudgetExhausted(
+                "run deadline exhausted during health check".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::ReProvision {
+                reason: "must not classify terminal budget exhaustion".to_string(),
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
+
+    let error = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
+        .await
+        .expect_err("budget exhaustion must escape recovery unchanged");
+
+    assert!(matches!(
+        error,
+        MoaError::BudgetExhausted(message)
+            if message == "run deadline exhausted during health check"
+    ));
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.provision_calls, 1);
+    assert_eq!(snapshot.execute_calls, 0);
+    assert_eq!(snapshot.destroy_calls, 0);
+}
+
+#[tokio::test]
 async fn recovery_caps_reprovision_attempts_per_session() {
     let provider = Arc::new(MockHandProvider::new(
         "mock-cap",

@@ -107,6 +107,7 @@ fn tool_request(tool_call_id: ToolCallId, tool_name: &str) -> ToolCallRequest {
         session_id: SessionId::new(),
         trusted_sandbox_manifest: None,
         worker_id: None,
+        resource_budget: Default::default(),
     }
 }
 

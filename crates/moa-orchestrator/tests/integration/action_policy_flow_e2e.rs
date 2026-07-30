@@ -545,6 +545,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
         session_id,
         trusted_sandbox_manifest: None,
         worker_id: None,
+        resource_budget: Default::default(),
     };
     let envelope = ActionEnvelope {
         review_id,
@@ -755,6 +756,7 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
                     session_id,
                     trusted_sandbox_manifest: None,
                     worker_id: None,
+                    resource_budget: Default::default(),
                 },
                 origin: Some(ExecutionTaskOrigin {
                     run_uid: Uuid::new_v4(),
@@ -1247,6 +1249,7 @@ async fn run_scripted_turn_with_id(
                 model: None,
                 contact: None,
                 max_turns: None,
+                resource_budget: Default::default(),
                 execution_template: None,
             },
             None,
@@ -1329,6 +1332,7 @@ async fn create_pending_bash_review(
         session_id,
         trusted_sandbox_manifest: None,
         worker_id: Some("worker-action-policy-e2e".to_string()),
+        resource_budget: Default::default(),
     };
     let summary: ActionReviewSummary = test
         .client()

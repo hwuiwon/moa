@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-clickhouse test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-clickhouse test-service-e2e test-behavior-lab test-behavior-lab-live test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
 
 codegraph:
 	@./scripts/codegraph init
@@ -93,6 +93,21 @@ test-clickhouse:
 	cargo nextest run --locked --profile clickhouse-docker --run-ignored all
 
 test-service-e2e: e2e-clean-live
+
+# The deterministic Behavior Lab lanes (behavior-lab-service-e2e and
+# behavior-lab-fixture-service-e2e) are part of the live clean E2E run: they need
+# the same ephemeral Restate/Postgres/OpenFGA harness the script builds, so there
+# is nothing to run them against outside it. This alias exists so the lane is
+# discoverable by name. Unbilled.
+test-behavior-lab: e2e-clean-live
+
+# Billed. Adds the Behavior Lab trial-to-score smoke, which spends real provider
+# credit and therefore demands authorization plus an approved budget.
+test-behavior-lab-live:
+	@: $${MOA_RUN_LIVE_E2E:?set MOA_RUN_LIVE_E2E=1 to run live/billed E2E checks}
+	@: $${MOA_RUN_LIVE_PROVIDER_TESTS:?set MOA_RUN_LIVE_PROVIDER_TESTS=1 to run billed provider checks}
+	@: $${MOA_BEHAVIOR_LAB_BUDGET_USD:?set MOA_BEHAVIOR_LAB_BUDGET_USD to a positive approved USD ceiling with at most six decimal places}
+	./scripts/run-clean-e2e.sh --live --behavior-lab-live
 
 test-provider-e2e:
 	@: $${MOA_RUN_LIVE_E2E:?set MOA_RUN_LIVE_E2E=1 to run live/billed E2E checks}

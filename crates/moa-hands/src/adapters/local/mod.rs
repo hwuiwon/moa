@@ -18,7 +18,7 @@ use moa_core::{
     types::hands::HandStatus, types::hands::MemoryLimit, types::hands::ResourceSupport,
     types::hands::SandboxFile, types::hands::SandboxProfile, types::hands::SandboxTier,
     types::hands::SandboxTierCapabilities, types::hands::validate_sandbox_file_path,
-    types::tools::ToolOutput,
+    types::resource::ResourceBudget, types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
 use opentelemetry::trace::Status;
@@ -348,15 +348,18 @@ impl LocalHandProvider {
         tool: &str,
         input: &str,
         hard_cancel_token: Option<&CancellationToken>,
+        budget: ResourceBudget,
     ) -> Result<ToolOutput> {
         let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
+        let now = Utc::now();
         match supported_capability_for_tool(tool, LOCAL_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
                 bash::execute_local(
                     &sandbox.execution_root,
                     input,
                     self.command_timeout,
-                    bash::remaining_lifetime(sandbox.hard_deadline, Utc::now()),
+                    bash::remaining_lifetime(sandbox.hard_deadline, now),
+                    budget.time_remaining(now),
                     hard_cancel_token,
                 )
                 .await
@@ -392,6 +395,7 @@ impl LocalHandProvider {
         tool: &str,
         input: &str,
         hard_cancel_token: Option<&CancellationToken>,
+        budget: ResourceBudget,
     ) -> Result<ToolOutput> {
         let sandbox = self
             .docker_sandboxes
@@ -411,6 +415,7 @@ impl LocalHandProvider {
                     input,
                     self.command_timeout,
                     bash::remaining_lifetime(sandbox.hard_deadline, Utc::now()),
+                    budget.time_remaining(Utc::now()),
                     hard_cancel_token,
                 )
                 .await
@@ -625,6 +630,31 @@ impl LocalHandProvider {
         input: &str,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
+        self.execute_bounded(
+            handle,
+            tool,
+            input,
+            hard_cancel_token,
+            ResourceBudget::UNBOUNDED,
+        )
+        .await
+    }
+
+    /// Executes a tool under both cooperative cancellation and a run budget.
+    ///
+    /// The token and the budget are not redundant. The token says *stop now*
+    /// and only arrives when something else decides to cancel; the budget says
+    /// *how much time is left*, which lets the command be started with the
+    /// right timeout instead of being interrupted after the fact — and lets an
+    /// already-expired run be refused before a process is spawned at all.
+    pub async fn execute_bounded(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        hard_cancel_token: Option<&CancellationToken>,
+        budget: ResourceBudget,
+    ) -> Result<ToolOutput> {
         let tier = match handle {
             HandHandle::Local { .. } => "local",
             HandHandle::Docker { .. } => "container",
@@ -651,11 +681,11 @@ impl LocalHandProvider {
             let started_at = Instant::now();
             let result = match handle {
                 HandHandle::Local { sandbox_dir } => {
-                    self.execute_local_tool(sandbox_dir, tool, input, hard_cancel_token)
+                    self.execute_local_tool(sandbox_dir, tool, input, hard_cancel_token, budget)
                         .await
                 }
                 HandHandle::Docker { container_id } => {
-                    self.execute_docker_tool(container_id, tool, input, hard_cancel_token)
+                    self.execute_docker_tool(container_id, tool, input, hard_cancel_token, budget)
                         .await
                 }
                 _ => Err(MoaError::Unsupported(
@@ -812,6 +842,17 @@ impl HandProvider for LocalHandProvider {
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
         self.execute_with_cancel(handle, tool, input, None).await
+    }
+
+    async fn execute_within(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        budget: ResourceBudget,
+    ) -> Result<ToolOutput> {
+        self.execute_bounded(handle, tool, input, None, budget)
+            .await
     }
 
     async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {

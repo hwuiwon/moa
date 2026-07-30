@@ -92,6 +92,63 @@ binary(/^orchestrator_fixture_service_e2e$/)
   | binary(/^turn_terminal_failure_service_e2e$/)
 '''
 
+# --- Behavior Lab lanes -------------------------------------------------------
+#
+# The Behavior Lab is the contained candidate-evaluation surface: an
+# ExperimentRun / ExperimentTrialRun executes a release candidate against a
+# scripted environment and produces the scorecard that release gating consumes.
+# Its binaries existed but matched no lane that `scripts/run-clean-e2e.sh`
+# invoked, so nothing scheduled them and they decayed silently. These profiles
+# are the wiring; renaming the binaries would not have scheduled them.
+#
+# The surface splits by how each binary obtains its Restate stack, and that
+# split is a hard constraint rather than a preference:
+#
+#   * `behavior-lab-service-e2e` binaries resolve the stack from
+#     `MOA_RESTATE_INGRESS_URL`/`MOA_RESTATE_ADMIN_URL` and spawn their own
+#     `moa-orchestrator-bin` on reserved ports. They must run with those
+#     variables SET (the ephemeral server `run-clean-e2e.sh` starts).
+#   * `behavior-lab-fixture-service-e2e` uses
+#     `OrchestratorTestFixture::with_execution_fixture`, which hard-fails with
+#     "dedicated execution fixtures cannot use an external orchestrator" when
+#     `MOA_RESTATE_INGRESS_URL` is set. It must run with those variables UNSET,
+#     like the `fixture-service-e2e` lane.
+#
+# Both lanes are `test-threads = 1`: every one of these tests takes the
+# process-wide `RESTATE_E2E_LOCK` or owns a dedicated fixture, and they share
+# one Postgres database, one OpenFGA store, and one Valkey instance.
+#
+# `skill_learning_gate_e2e` needs Postgres and `provider-overrides` but no
+# Restate. It is grouped here rather than in a lane of its own because it
+# evaluates a release candidate through the real eval engine before the skill
+# can be accepted, which is the same gating surface; the lane's runtime
+# requirements are a strict superset of its own.
+[profile.behavior-lab-service-e2e]
+inherits = "default"
+test-threads = 1
+# The billed trial-to-score smoke is excluded here and selected only by
+# `behavior-lab-live`. Without this subtraction, `--run-ignored ignored-only`
+# would spend provider credit inside the deterministic lane whenever a run also
+# enabled the provider flags.
+default-filter = '''
+binary(/^(behavior_lab_simulation_e2e|experiment_agent_loop_e2e|experiment_trial_run_e2e|skill_learning_gate_e2e)$/)
+  - (binary(/^experiment_trial_run_e2e$/) & test(/^experiment_plan_to_trial_to_score_live$/))
+'''
+
+[profile.behavior-lab-fixture-service-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = 'binary(/^experiment_execution_service_e2e$/)'
+
+# Billed. Selected only by `scripts/run-clean-e2e.sh --behavior-lab-live`, which
+# demands MOA_RUN_LIVE_E2E=1, MOA_RUN_LIVE_PROVIDER_TESTS=1, and a positive
+# MOA_BEHAVIOR_LAB_BUDGET_USD before it will schedule anything. The test itself
+# stays `#[ignore]`d and re-checks its own authorization flags.
+[profile.behavior-lab-live]
+inherits = "default"
+test-threads = 1
+default-filter = 'binary(/^experiment_trial_run_e2e$/) & test(/^experiment_plan_to_trial_to_score_live$/)'
+
 [profile.loadtest-service-e2e]
 inherits = "default"
 test-threads = 1
@@ -206,6 +263,25 @@ threads-required = "num-test-threads"
 filter = 'binary(/_service_e2e$/)'
 test-group = "service-e2e"
 threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+# Behavior Lab binaries that do not carry the `_service_e2e` suffix still drive a
+# shared Restate server, Postgres database, and OpenFGA store, so they take the
+# same exclusive slot as the rest of the service lane.
+filter = 'binary(/^(behavior_lab_simulation_e2e|experiment_agent_loop_e2e|experiment_trial_run_e2e|skill_learning_gate_e2e)$/)'
+test-group = "service-e2e"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+# A Behavior Lab case boots an orchestrator process, registers a deployment, and
+# then polls a durable ExperimentRun/ExperimentTrialRun to completion; the
+# in-test waits alone budget 90s twice over. The default 60s/4 ceiling lands
+# right on that worst case, so give the lane a wider leash before nextest
+# terminates a run that is merely slow.
+filter = '''
+binary(/^(behavior_lab_simulation_e2e|experiment_agent_loop_e2e|experiment_trial_run_e2e|experiment_execution_service_e2e)$/)
+'''
+slow-timeout = { period = "120s", terminate-after = 6 }
 
 [[profile.default.overrides]]
 # The explicit 500-task fan-out and restart scenarios intentionally hold every

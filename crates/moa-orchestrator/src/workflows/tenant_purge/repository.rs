@@ -534,6 +534,12 @@ async fn delete_tenant_rows(
         // evaluator evidence behind. A cascade here would make this step
         // unfalsifiable: neutering it would change nothing observable.
         "DELETE FROM moa.experiment_score_provenance WHERE storage_partition_id = $1",
+        // Resource reservations reference both the trial and the run, so they go
+        // before either. V000371 does declare `ON DELETE CASCADE` on those keys,
+        // but the cascade is not what this step relies on: an explicit delete is
+        // what keeps the purge falsifiable, and a tenant's spend ledger is exactly
+        // the kind of record that must not survive an erasure by accident.
+        "DELETE FROM moa.experiment_resource_reservation WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_trial WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run_artifact_revision WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run WHERE storage_partition_id = $1",

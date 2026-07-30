@@ -6,20 +6,28 @@ use moa_core::types::experiments::{
     ScorecardValueType,
 };
 use moa_core::types::memory::RlsContext;
+use moa_core::types::resource::ResourceAmounts;
 use moa_core::{
-    error::Result, types::action_policy::ActionRuleScope, types::contact::ContactId,
-    types::identifiers::ModelId, types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    error::{MoaError, Result},
+    types::action_policy::ActionRuleScope,
+    types::contact::ContactId,
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
     types::identifiers::UserId,
 };
 use moa_db::ScopedConn;
 use moa_experiments::{
     eligibility::ScorecardEligibility,
     model::{
-        ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
+        ExperimentResourceAdmission, ExperimentResourceComponent, ExperimentResourceEnvelope,
+        ExperimentResourceReservationRequest, ExperimentResourceUsage, ExperimentRunStatus,
+        ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
         ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun as NewExperiment,
         NewExperimentTrial,
     },
+    plan::admission::DEFAULT_MAX_ARTIFACT_ACTIVE_TRIALS,
     scores::{
         ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, TrialScoreSummary,
         VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
@@ -1316,6 +1324,178 @@ async fn concurrent_trial_creation_uses_unique_storage_partitions_db() -> Result
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn pre_expansion_admission_reserves_projected_trial_count_db() -> Result<()> {
+    // Pins: an accepted run consumes its full projected trial quota before child rows exist.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("experiment-projected-admission");
+    let plan_revision_uid = insert_artifact_revision(pool, &scope).await?;
+    let plan_artifact_uid = artifact_uid_for_revision(pool, &scope, plan_revision_uid).await?;
+
+    let mut first = new_experiment("projected-admission-first", None, vec![plan_revision_uid]);
+    first.plan_artifact_uid = Some(plan_artifact_uid);
+    first.expected_trials = DEFAULT_MAX_ARTIFACT_ACTIVE_TRIALS;
+    let admitted = store.insert_run(&scope, first).await?;
+
+    let child_count = scoped_trial_count(pool, &scope, admitted.run_uid).await?;
+    assert_eq!(
+        child_count, 0,
+        "the quota assertion must run before plan expansion mints child rows"
+    );
+
+    let mut second = new_experiment("projected-admission-second", None, vec![plan_revision_uid]);
+    second.plan_artifact_uid = Some(plan_artifact_uid);
+    second.expected_trials = 1;
+    let error = store
+        .insert_run(&scope, second)
+        .await
+        .expect_err("the prior run's projected matrix should fill the artifact trial quota");
+
+    match error {
+        MoaError::ValidationError(message) => {
+            assert!(
+                message.contains(
+                    "plan_artifact trials quota is full (5000 active + 1 requested exceeds 5000)"
+                ),
+                "unexpected admission refusal: {message}"
+            );
+        }
+        other => panic!("expected an admission validation error, got {other}"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn reservation_rejects_trial_owned_by_another_run_db() -> Result<()> {
+    // Pins: a reservation cannot pair a run with another run's trial.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("experiment-reservation-run-trial-integrity");
+    let plan_revision_uid = insert_artifact_revision(pool, &scope).await?;
+
+    let owner = store
+        .insert_run(
+            &scope,
+            new_experiment("reservation-trial-owner", None, vec![plan_revision_uid]),
+        )
+        .await?;
+    let other = store
+        .insert_run(
+            &scope,
+            new_experiment("reservation-other-run", None, vec![plan_revision_uid]),
+        )
+        .await?;
+    let trial = store
+        .insert_trial(
+            &scope,
+            new_trial(
+                owner.run_uid,
+                "owned-trial",
+                plan_revision_uid,
+                vec![plan_revision_uid],
+            ),
+        )
+        .await?;
+
+    let error = store
+        .try_reserve_resources(
+            &scope,
+            ExperimentResourceReservationRequest {
+                run_uid: other.run_uid,
+                trial_uid: Some(trial.trial_uid),
+                reservation_key: "mismatched-run-trial".to_string(),
+                component: ExperimentResourceComponent::Target,
+                worst_case: ResourceAmounts {
+                    tokens: 1,
+                    ..ResourceAmounts::ZERO
+                },
+            },
+            Utc::now(),
+        )
+        .await
+        .expect_err("the composite run/trial foreign key should reject the reservation");
+
+    match error {
+        MoaError::StorageError(message) => assert!(
+            message.contains("experiment_resource_reservation_run_trial_fkey"),
+            "unexpected storage error: {message}"
+        ),
+        other => panic!("expected a foreign-key storage error, got {other}"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn reconciliation_rejects_inconsistent_token_split_without_settling_db() -> Result<()> {
+    // Pins: actual input/output tokens must equal the token total committed to the ledger.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("experiment-reconciliation-token-split");
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("reconciliation-token-split", None, Vec::new()),
+        )
+        .await?;
+    let request = ExperimentResourceReservationRequest {
+        run_uid: run.run_uid,
+        trial_uid: None,
+        reservation_key: "invalid-token-split".to_string(),
+        component: ExperimentResourceComponent::Target,
+        worst_case: ResourceAmounts {
+            tokens: 2,
+            ..ResourceAmounts::ZERO
+        },
+    };
+    let admission = store
+        .try_reserve_resources(&scope, request.clone(), Utc::now())
+        .await?;
+    assert!(
+        matches!(admission, ExperimentResourceAdmission::Granted(_)),
+        "the valid reservation should be open before reconciliation"
+    );
+
+    let error = store
+        .reconcile_resources(
+            &scope,
+            run.run_uid,
+            &request.reservation_key,
+            ExperimentResourceUsage {
+                input_tokens: 1,
+                output_tokens: 0,
+                amounts: ResourceAmounts {
+                    tokens: 2,
+                    ..ResourceAmounts::ZERO
+                },
+            },
+        )
+        .await
+        .expect_err("an inconsistent token split must not be committed");
+    assert!(
+        matches!(error, MoaError::ValidationError(_)),
+        "expected token accounting validation error, got {error}"
+    );
+
+    let retry = store
+        .try_reserve_resources(&scope, request, Utc::now())
+        .await?;
+    assert!(
+        matches!(retry, ExperimentResourceAdmission::Granted(_)),
+        "failed reconciliation must leave the reservation open"
+    );
+    Ok(())
+}
+
 fn tenant_scope(_label: &str) -> ActionRuleScope {
     ActionRuleScope::Tenant {
         tenant_id: TenantId::from(Uuid::now_v7()),
@@ -1366,7 +1546,29 @@ fn new_experiment(
             "type": "user",
             "id": "experimenter"
         }),
+        plan_artifact_uid: None,
+        expected_trials: 1,
+        resource_envelope: fixture_experiment_envelope(),
     }
+}
+
+/// A bounded envelope for store round-trip fixtures.
+///
+/// Stated explicitly rather than borrowed from a production ceiling: these tests
+/// pin persistence, so the numbers must not move when a platform limit does.
+fn fixture_experiment_envelope() -> ExperimentResourceEnvelope {
+    let limits = ResourceAmounts {
+        cost_micro_usd: 1_000_000,
+        tokens: 100_000,
+        turns: 8,
+        model_calls: 16,
+        tool_calls: 32,
+    };
+    ExperimentResourceEnvelope::new(
+        limits,
+        limits,
+        moa_test_support::fixtures::pg_now() + chrono::Duration::hours(1),
+    )
 }
 
 fn new_trial(
@@ -1640,6 +1842,38 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     Ok(revision_uid)
+}
+
+async fn artifact_uid_for_revision(
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+    revision_uid: Uuid,
+) -> Result<Uuid> {
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
+    let artifact_uid = sqlx::query_scalar(
+        "SELECT artifact_uid FROM moa.artifact_revision WHERE revision_uid = $1",
+    )
+    .bind(revision_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(artifact_uid)
+}
+
+async fn scoped_trial_count(
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+) -> Result<i64> {
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
+    let count = sqlx::query_scalar("SELECT count(*) FROM moa.experiment_trial WHERE run_uid = $1")
+        .bind(run_uid)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(count)
 }
 
 async fn assert_score_run_exists(

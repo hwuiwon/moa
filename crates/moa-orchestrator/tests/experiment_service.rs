@@ -647,6 +647,8 @@ fn score_row(
 fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentRunRecord {
     let template = pinned_execution_template(22);
     ExperimentRunRecord {
+        plan_artifact_uid: None,
+        resource_envelope: fixture_experiment_envelope(),
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::new(),
         },
@@ -692,6 +694,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
 
 fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
     ExperimentTrialRecord {
+        resource_envelope: fixture_experiment_envelope().trial_envelope(),
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::new(),
         },
@@ -807,4 +810,23 @@ fn scorecard_rollup(
         eligibility,
         trials,
     }
+}
+
+/// Bounded experiment envelope for fixtures in this test binary.
+///
+/// Stated locally rather than pulled from a platform ceiling so a change to a
+/// production limit cannot silently retune what these tests exercise.
+fn fixture_experiment_envelope() -> moa_experiments::model::ExperimentResourceEnvelope {
+    let limits = moa_core::types::resource::ResourceAmounts {
+        cost_micro_usd: 1_000_000,
+        tokens: 100_000,
+        turns: 8,
+        model_calls: 16,
+        tool_calls: 32,
+    };
+    moa_experiments::model::ExperimentResourceEnvelope::new(
+        limits,
+        limits,
+        moa_test_support::fixtures::pg_now(),
+    )
 }

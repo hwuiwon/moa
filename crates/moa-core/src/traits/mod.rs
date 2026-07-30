@@ -614,6 +614,27 @@ pub trait HandProvider: Send + Sync {
     /// Executes a tool within a provisioned hand.
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput>;
 
+    /// Executes a tool bounded by what the calling run may still spend.
+    ///
+    /// `budget` is the run's remaining allowance — an absolute deadline plus a
+    /// token/cost remainder — which is a different and usually much shorter
+    /// bound than the sandbox's own lifetime. Providers that can push a deadline
+    /// into the execution target (a process timeout, a remote exec deadline)
+    /// should override this so an expired run actually stops work inside the
+    /// sandbox. The default body ignores the budget and delegates to
+    /// [`HandProvider::execute`], which is honest about what an unmodified
+    /// provider enforces: the router still refuses to dispatch past the
+    /// deadline, but a call already in flight runs to completion.
+    async fn execute_within(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        _budget: crate::types::resource::ResourceBudget,
+    ) -> Result<ToolOutput> {
+        self.execute(handle, tool, input).await
+    }
+
     /// Installs trusted files into a provisioned sandbox before tool execution.
     async fn install_files(&self, _handle: &HandHandle, _files: &[SandboxFile]) -> Result<()> {
         Err(MoaError::Unsupported(
@@ -782,6 +803,14 @@ pub struct ToolContext<'a> {
     pub session_store: Option<&'a dyn SessionStore>,
     /// Cooperative cancellation token for the current session, when available.
     pub cancel_token: Option<&'a CancellationToken>,
+    /// What the calling run may still spend inside this tool.
+    ///
+    /// Carried alongside `cancel_token` rather than folded into it because the
+    /// two answer different questions: the token says *stop now*, the budget
+    /// says *how much is left*. A built-in that bounds its own work — a search
+    /// that pages, a read that follows a large file — needs the second to size
+    /// the work before starting it, not just to be interrupted mid-way.
+    pub budget: crate::types::resource::ResourceBudget,
     /// Optional graph-memory executor installed by runtimes that support memory writes.
     pub memory_tool_executor: Option<&'a dyn MemoryToolExecutor>,
     /// Optional graph-memory retrieval executor backing the read-only memory tools.

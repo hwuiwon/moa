@@ -6,19 +6,21 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_config::SessionLimitsConfig;
 use moa_core::{
-    events::Event, types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY, types::completion::TokenUsage,
-    types::contact::ContactId, types::identifiers::ModelId, types::identifiers::SessionId,
-    types::identifiers::TenantId, types::model::TokenPricing,
+    error::MoaError, events::Event, traits::LLMProvider, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
+    types::completion::TokenUsage, types::contact::ContactId, types::identifiers::ModelId,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::model::TokenPricing,
     types::observability::genai_operation_name, types::observability::genai_provider_name,
-    types::provider::ModelTier,
+    types::provider::ModelTier, types::resource::DeadlineGuard, types::resource::ResourceAmounts,
+    types::resource::ResourceBudget,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_observability::record_llm_cost_cents;
-use moa_providers::ProviderRegistry;
+use moa_providers::{CancellableLLMProvider, ProviderRegistry};
 use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
@@ -35,12 +37,26 @@ pub trait LLMGateway {
         request: Json<CompletionRequest>,
     ) -> Result<Json<CompletionResponse>, HandlerError>;
 
+    /// Executes one buffered completion inside a caller-admitted resource slice.
+    async fn complete_bounded(
+        request: Json<BoundedCompletionRequest>,
+    ) -> Result<Json<CompletionResponse>, HandlerError>;
+
     /// Produces at most one durable progress narration for a session.
     ///
     /// Invoked as a detached job by the per-session narration tick. Hosted on
     /// this service to reuse its provider registry and avoid a new Restate
     /// binding; the narration logic lives in [`crate::services::narration`].
     async fn narrate_session(request: Json<NarrateSessionRequest>) -> Result<(), HandlerError>;
+}
+
+/// Completion request plus the downward-only resource slice admitted for it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BoundedCompletionRequest {
+    /// Provider completion request.
+    pub request: CompletionRequest,
+    /// Deadline and metered allowance this dispatch may consume.
+    pub budget: ResourceBudget,
 }
 
 /// Concrete Restate service implementation backed by configured providers.
@@ -72,15 +88,165 @@ impl LLMGatewayImpl {
         &self,
         request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionResponse> {
+        self.complete_buffered_with_budget(request, ResourceBudget::UNBOUNDED)
+            .await
+    }
+
+    /// Executes one completion while enforcing the caller's provider-side budget.
+    pub async fn complete_buffered_with_budget(
+        &self,
+        request: CompletionRequest,
+        budget: ResourceBudget,
+    ) -> moa_core::error::Result<CompletionResponse> {
         let requested_model = request.model.as_ref().map(ModelId::as_str);
         let (provider_id, model) = self.providers.resolve_provider_id(requested_model)?;
         let resolved = self.providers.provider_for_id(provider_id, &model)?;
-        let mut request = request;
+        let mut request = bound_completion_request(request, budget)?;
         request.model = Some(resolved.model.clone());
 
-        let stream = resolved.provider.complete(request).await?;
-        stream.collect().await
+        let provider = CancellableLLMProvider::new(
+            resolved.provider,
+            DeadlineGuard::from_budget(CancellationToken::new(), budget),
+        );
+        let stream = provider.complete(request).await?;
+        let response = stream.collect().await?;
+        admit_completion_usage(&response, budget)?;
+        Ok(response)
     }
+}
+
+fn bound_completion_request(
+    mut request: CompletionRequest,
+    budget: ResourceBudget,
+) -> moa_core::error::Result<CompletionRequest> {
+    let Some(remaining) = budget.remaining else {
+        return Ok(request);
+    };
+    if remaining.model_calls == 0 {
+        return Err(MoaError::BudgetExhausted(
+            "model dispatch refused: no model calls remain".to_string(),
+        ));
+    }
+    if remaining.tokens == 0 {
+        return Err(MoaError::BudgetExhausted(
+            "model dispatch refused: no tokens remain".to_string(),
+        ));
+    }
+    let token_cap = usize::try_from(remaining.tokens).unwrap_or(usize::MAX);
+    request.max_output_tokens = Some(
+        request
+            .max_output_tokens
+            .map_or(token_cap, |configured| configured.min(token_cap)),
+    );
+    Ok(request)
+}
+
+fn admit_completion_usage(
+    response: &CompletionResponse,
+    budget: ResourceBudget,
+) -> moa_core::error::Result<()> {
+    let usage = response.token_usage();
+    let actual = ResourceAmounts {
+        cost_micro_usd: compute_cost_micros(response.model.as_str(), usage),
+        tokens: usage
+            .total_input_tokens()
+            .saturating_add(usage.output_tokens) as u64,
+        turns: 0,
+        model_calls: 1,
+        tool_calls: 0,
+    };
+    if let Some(kind) = budget.first_exceeding(&actual) {
+        return Err(MoaError::BudgetExhausted(format!(
+            "model completion exceeded its admitted {kind} allowance"
+        )));
+    }
+    Ok(())
+}
+
+async fn record_completion(
+    ctx: &Context<'_>,
+    request: &CompletionRequest,
+    response: CompletionResponse,
+    provider_id: &str,
+) -> Result<Json<CompletionResponse>, HandlerError> {
+    let usage = response.token_usage();
+    let cost_cents = compute_cost_cents(response.model.as_str(), usage);
+    let finish_reason = match &response.stop_reason {
+        moa_core::types::completion::StopReason::EndTurn => "end_turn",
+        moa_core::types::completion::StopReason::MaxTokens => "max_tokens",
+        moa_core::types::completion::StopReason::ToolUse => "tool_use",
+        moa_core::types::completion::StopReason::Cancelled => "cancelled",
+        moa_core::types::completion::StopReason::Other(_) => "other",
+    };
+    let provider_name = genai_provider_name(provider_id);
+    let operation_name = genai_operation_name(provider_id);
+    let span = tracing::Span::current();
+    span.set_attribute("gen_ai.operation.name", operation_name);
+    span.set_attribute("gen_ai.provider.name", provider_name.to_string());
+    span.set_attribute("gen_ai.request.model", response.model.to_string());
+    span.set_attribute("gen_ai.response.model", response.model.to_string());
+    span.set_attribute("gen_ai.response.finish_reasons", finish_reason.to_string());
+    span.set_attribute(
+        "gen_ai.usage.input_tokens",
+        usage.total_input_tokens() as i64,
+    );
+    span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens as i64);
+    if usage.input_tokens_cache_read > 0 {
+        span.set_attribute(
+            "gen_ai.usage.cache_read.input_tokens",
+            usage.input_tokens_cache_read as i64,
+        );
+    }
+    if usage.input_tokens_cache_write > 0 {
+        span.set_attribute(
+            "gen_ai.usage.cache_creation.input_tokens",
+            usage.input_tokens_cache_write as i64,
+        );
+    }
+    record_llm_cost_cents(provider_id, response.model.as_str(), u64::from(cost_cents));
+
+    if !should_defer_brain_response(request)
+        && let Some(session_id) = session_id_from_request(request)
+    {
+        let event = Event::BrainResponse {
+            text: response.text.clone(),
+            thought_signature: response.thought_signature.clone(),
+            model: response.model.clone(),
+            model_tier: ModelTier::Main,
+            input_tokens_uncached: usage.input_tokens_uncached,
+            input_tokens_cache_write: usage.input_tokens_cache_write,
+            input_tokens_cache_read: usage.input_tokens_cache_read,
+            output_tokens: usage.output_tokens,
+            cost_cents,
+            duration_ms: response.duration_ms,
+            llm_ttft_ms: None,
+        };
+
+        let turn_seq = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .append_event(Json(AppendEventRequest {
+                    session_id,
+                    event,
+                    dedupe_key: None,
+                })),
+        )
+        .call()
+        .await?
+        .into_inner()
+        .sequence_num;
+
+        if let Some(turn) =
+            session_turn_from_completion_request(request, session_id, turn_seq, Utc::now())
+        {
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
+                    .ingest_turn(Json(turn)),
+            )
+            .send();
+        }
+    }
+
+    Ok(Json::from(response))
 }
 
 impl LLMGateway for LLMGatewayImpl {
@@ -112,88 +278,38 @@ impl LLMGateway for LLMGatewayImpl {
             .retry_policy(llm_run_retry_policy())
             .await?
             .into_inner();
-        let usage = response.token_usage();
-        let cost_cents = compute_cost_cents(response.model.as_str(), usage);
-        let finish_reason = match &response.stop_reason {
-            moa_core::types::completion::StopReason::EndTurn => "end_turn",
-            moa_core::types::completion::StopReason::MaxTokens => "max_tokens",
-            moa_core::types::completion::StopReason::ToolUse => "tool_use",
-            moa_core::types::completion::StopReason::Cancelled => "cancelled",
-            moa_core::types::completion::StopReason::Other(_) => "other",
-        };
-        let provider_name = genai_provider_name(provider_id.as_str());
-        let operation_name = genai_operation_name(provider_id.as_str());
-        let span = tracing::Span::current();
-        span.set_attribute("gen_ai.operation.name", operation_name);
-        span.set_attribute("gen_ai.provider.name", provider_name.to_string());
-        span.set_attribute("gen_ai.request.model", response.model.to_string());
-        span.set_attribute("gen_ai.response.model", response.model.to_string());
-        span.set_attribute("gen_ai.response.finish_reasons", finish_reason.to_string());
-        span.set_attribute(
-            "gen_ai.usage.input_tokens",
-            usage.total_input_tokens() as i64,
-        );
-        span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens as i64);
-        if usage.input_tokens_cache_read > 0 {
-            span.set_attribute(
-                "gen_ai.usage.cache_read.input_tokens",
-                usage.input_tokens_cache_read as i64,
-            );
-        }
-        if usage.input_tokens_cache_write > 0 {
-            span.set_attribute(
-                "gen_ai.usage.cache_creation.input_tokens",
-                usage.input_tokens_cache_write as i64,
-            );
-        }
-        record_llm_cost_cents(
-            provider_id.as_str(),
-            response.model.as_str(),
-            cost_cents as u64,
-        );
+        record_completion(&ctx, &request, response, provider_id.as_str()).await
+    }
 
-        if !should_defer_brain_response(&request)
-            && let Some(session_id) = session_id_from_request(&request)
-        {
-            let event = Event::BrainResponse {
-                text: response.text.clone(),
-                thought_signature: response.thought_signature.clone(),
-                model: response.model.clone(),
-                model_tier: ModelTier::Main,
-                input_tokens_uncached: usage.input_tokens_uncached,
-                input_tokens_cache_write: usage.input_tokens_cache_write,
-                input_tokens_cache_read: usage.input_tokens_cache_read,
-                output_tokens: usage.output_tokens,
-                cost_cents,
-                duration_ms: response.duration_ms,
-                llm_ttft_ms: None,
-            };
-
-            let turn_seq = crate::restate_identity::replay_safe_request(
-                ctx.service_client::<RestateSessionStoreClient>()
-                    .append_event(Json(AppendEventRequest {
-                        session_id,
-                        event,
-                        dedupe_key: None,
-                    })),
-            )
-            .call()
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal workflow callers admit the resource slice and session or tenant access before requesting provider completion.
+    async fn complete_bounded(
+        &self,
+        ctx: Context<'_>,
+        request: Json<BoundedCompletionRequest>,
+    ) -> Result<Json<CompletionResponse>, HandlerError> {
+        let BoundedCompletionRequest { request, budget } = request.into_inner();
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("LLMGateway", "complete_bounded");
+        let (provider_id, _) = self
+            .providers
+            .resolve_provider_id(request.model.as_ref().map(ModelId::as_str))
+            .map_err(moa_error_to_handler_error)?;
+        let request_for_run = request.clone();
+        let service = self.clone();
+        let response = ctx
+            .run(|| async move {
+                service
+                    .complete_buffered_with_budget(request_for_run, budget)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name("llm_complete_bounded")
+            .retry_policy(llm_run_retry_policy())
             .await?
-            .into_inner()
-            .sequence_num;
-
-            if let Some(turn) =
-                session_turn_from_completion_request(&request, session_id, turn_seq, Utc::now())
-            {
-                crate::restate_identity::replay_safe_request(
-                    ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
-                        .ingest_turn(Json(turn)),
-                )
-                .send();
-            }
-        }
-
-        Ok(Json::from(response))
+            .into_inner();
+        record_completion(&ctx, &request, response, provider_id.as_str()).await
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -373,16 +489,58 @@ mod tests {
 
     use chrono::{DateTime, Utc};
     use moa_core::{
-        types::completion::CompletionRequest, types::contact::ContactId,
-        types::context::ContextMessage, types::identifiers::SessionId,
+        error::MoaError,
+        types::completion::CompletionRequest,
+        types::contact::ContactId,
+        types::context::ContextMessage,
+        types::identifiers::SessionId,
         types::identifiers::TenantId,
+        types::resource::{ResourceAmounts, ResourceBudget},
     };
     use serde_json::json;
 
     use super::{
-        MEMORY_WRITE_BARRIER_METADATA_KEY, USER_TURN_METADATA_KEY,
+        MEMORY_WRITE_BARRIER_METADATA_KEY, USER_TURN_METADATA_KEY, bound_completion_request,
         session_turn_from_completion_request,
     };
+
+    #[test]
+    fn bounded_completion_clamps_output_and_refuses_an_exhausted_call_offline() {
+        // Pins: the budget is enforced inside LLMGateway, after the Restate hop and
+        // before provider dispatch, so a child cannot silently regain provider defaults.
+        let request = CompletionRequest {
+            max_output_tokens: Some(8_192),
+            ..CompletionRequest::new("bounded")
+        };
+        let bounded = bound_completion_request(
+            request.clone(),
+            ResourceBudget::new(
+                None,
+                Some(ResourceAmounts {
+                    cost_micro_usd: 1_000,
+                    tokens: 256,
+                    turns: 0,
+                    model_calls: 1,
+                    tool_calls: 0,
+                }),
+            ),
+        )
+        .expect("one admitted model call should be accepted");
+        assert_eq!(bounded.max_output_tokens, Some(256));
+
+        let error = bound_completion_request(
+            request,
+            ResourceBudget::new(
+                None,
+                Some(ResourceAmounts {
+                    tokens: 256,
+                    ..ResourceAmounts::ZERO
+                }),
+            ),
+        )
+        .expect_err("zero remaining model calls must fail before provider dispatch");
+        assert!(matches!(error, MoaError::BudgetExhausted(_)));
+    }
 
     #[test]
     fn session_turn_contact_id_matches_turn_author() {

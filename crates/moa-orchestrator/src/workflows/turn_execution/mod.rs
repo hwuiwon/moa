@@ -95,7 +95,8 @@ use self::tools::{
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::{
-    execution::ExecutionClient, llm_gateway::LLMGatewayClient,
+    execution::ExecutionClient,
+    llm_gateway::{BoundedCompletionRequest, LLMGatewayClient},
     session_store::RestateSessionStoreClient,
 };
 use crate::turn::util::{
@@ -137,10 +138,12 @@ struct RunOnceContext<'a> {
     durable_upgrade_allowed: bool,
     execution_synthesis_instruction: Option<&'a str>,
     identity: &'a moa_core::traits::Identity,
+    resource_budget: moa_core::types::resource::ResourceBudget,
 }
 
 struct RestateExecutionModelProvider<'a> {
     ctx: &'a WorkflowContext<'a>,
+    budget: moa_core::types::resource::ResourceBudget,
 }
 
 #[async_trait]
@@ -160,7 +163,10 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
         let response = crate::restate_identity::replay_safe_request(
             self.ctx
                 .service_client::<LLMGatewayClient>()
-                .complete(Json::from(request)),
+                .complete_bounded(Json::from(BoundedCompletionRequest {
+                    request,
+                    budget: self.budget,
+                })),
         )
         .call()
         .await
@@ -168,6 +174,25 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
         .into_inner();
         Ok(CompletionStream::from_response(response))
     }
+}
+
+fn per_model_call_budget(
+    budget: moa_core::types::resource::ResourceBudget,
+) -> moa_core::types::resource::ResourceBudget {
+    let Some(remaining) = budget.remaining else {
+        return budget;
+    };
+    let calls = remaining.model_calls.max(1);
+    moa_core::types::resource::ResourceBudget::new(
+        budget.deadline,
+        Some(moa_core::types::resource::ResourceAmounts {
+            cost_micro_usd: remaining.cost_micro_usd / calls,
+            tokens: remaining.tokens / calls,
+            turns: 0,
+            model_calls: 1,
+            tool_calls: 0,
+        }),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -263,9 +288,15 @@ async fn execute_turn_inside_workflow(
     let meta = load_session_meta(ctx, workflow.session_store.clone(), session_id).await?;
     let user_sequence_num = match request.trigger {
         TurnTrigger::UserMessage => {
-            if let Some(outcome) =
-                evaluate_input_guardrail(workflow, ctx, session_id, &meta, &request.user_message)
-                    .await?
+            if let Some(outcome) = evaluate_input_guardrail(
+                workflow,
+                ctx,
+                session_id,
+                &meta,
+                &request.user_message,
+                request.resource_budget,
+            )
+            .await?
             {
                 return Ok(outcome);
             }
@@ -336,7 +367,10 @@ async fn execute_turn_inside_workflow(
             .clone()
             .unwrap_or_else(|| workflow.config.models.main.clone()),
     );
-    let route_provider = RestateExecutionModelProvider { ctx };
+    let route_provider = RestateExecutionModelProvider {
+        ctx,
+        budget: per_model_call_budget(request.resource_budget),
+    };
     let route_result = if execution_synthesis_turn || action_review_turn {
         None
     } else {
@@ -419,6 +453,12 @@ async fn execute_turn_inside_workflow(
             strategy: ExecutionStrategy::Durable,
             ..
         } => {
+            if !request.resource_budget.is_unbounded() {
+                return Err(TerminalError::new(
+                    "a resource-bounded session turn cannot hand work to an unbounded durable execution",
+                )
+                .into());
+            }
             driver_progress::initialize_non_loop_progress(ctx, route.clone());
             return execute_durable_admission(
                 workflow,
@@ -443,6 +483,7 @@ async fn execute_turn_inside_workflow(
         driver_model_loop::RootLoopPlanRequest {
             route: &route,
             request_max_turns: request.max_turns,
+            resource_budget: request.resource_budget,
         },
         session_limits,
     )
@@ -516,10 +557,12 @@ async fn execute_turn_inside_workflow(
                                 generation: request.generation,
                                 loop_class,
                                 objective: &request.user_message,
-                                durable_upgrade_allowed: durable_upgrade_guard.allows_tool_signal(),
+                                durable_upgrade_allowed: durable_upgrade_guard.allows_tool_signal()
+                                    && request.resource_budget.is_unbounded(),
                                 execution_synthesis_instruction: execution_synthesis_turn
                                     .then_some(request.user_message.as_str()),
                                 identity: &request.identity,
+                                resource_budget: request.resource_budget,
                             },
                             &mut last_summary,
                             &mut turn_evidence,
@@ -991,7 +1034,10 @@ async fn execute_durable_admission(
         .clone()
         .unwrap_or_else(|| workflow.config.models.main.clone());
     let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
-    let provider = RestateExecutionModelProvider { ctx };
+    let provider = RestateExecutionModelProvider {
+        ctx,
+        budget: per_model_call_budget(request.resource_budget),
+    };
     let planned = plan_execution(
         &provider,
         ExecutionPlanningRequest {
@@ -1256,7 +1302,9 @@ async fn run_once_inside_workflow(
     if turn_context.loop_class == ModelLoopClass::Respond {
         request.tools.clear();
     } else {
-        ensure_delegation_tool_schemas(&mut request);
+        if turn_context.resource_budget.is_unbounded() {
+            ensure_delegation_tool_schemas(&mut request);
+        }
         exclude_reserved_control_tool_schemas(&mut request);
         configure_durable_upgrade_tool_schema(&mut request, turn_context.durable_upgrade_allowed);
     }
@@ -1294,7 +1342,10 @@ async fn run_once_inside_workflow(
             },
             response = crate::restate_identity::replay_safe_request(
                 ctx.service_client::<LLMGatewayClient>()
-                    .complete(Json::from(request.clone())),
+                    .complete_bounded(Json::from(BoundedCompletionRequest {
+                        request: request.clone(),
+                        budget: per_model_call_budget(turn_context.resource_budget),
+                    })),
             )
                 .call() => {
                     response?.into_inner()
@@ -1303,9 +1354,15 @@ async fn run_once_inside_workflow(
     };
     let llm_call_duration = llm_started.elapsed();
     record_turn_llm_call_duration(llm_call_duration);
-    let (visible_response, output_blocked) =
-        visible_response_after_output_guardrail(workflow, ctx, session_id, &meta, &response)
-            .await?;
+    let (visible_response, output_blocked) = visible_response_after_output_guardrail(
+        workflow,
+        ctx,
+        session_id,
+        &meta,
+        &response,
+        turn_context.resource_budget,
+    )
+    .await?;
     let (visible_response, verification_annotated) =
         annotate_unresolved_verification(&visible_response, turn_evidence);
     let response_usage = visible_response.token_usage();
@@ -1360,6 +1417,7 @@ async fn run_once_inside_workflow(
             selected_skills: &selected_skills,
             objective: turn_context.objective,
             durable_upgrade_allowed: turn_context.durable_upgrade_allowed,
+            resource_budget: turn_context.resource_budget,
             turn_evidence,
             file_read_cache,
             disabled_tools,

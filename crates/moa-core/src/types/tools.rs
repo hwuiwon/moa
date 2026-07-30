@@ -515,6 +515,9 @@ pub struct ToolCallRequest {
     /// `{session_id}:{worker_id}` so each worker owns its own sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
+    /// Downward-only resource slice that bounds this tool dispatch.
+    #[serde(default)]
+    pub resource_budget: crate::types::resource::ResourceBudget,
 }
 
 /// Name of the built-in tool that reads a line range from a stored tool result.
@@ -644,6 +647,7 @@ mod tests {
             session_id: SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
+            resource_budget: Default::default(),
         };
         let mut wire = serde_json::to_value(request).expect("serialize request");
         wire.as_object_mut()

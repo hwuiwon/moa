@@ -12,10 +12,12 @@ export CARGO_INCREMENTAL=0
 LIVE=0
 RUN_PROVIDERS=0
 RUN_LONG_EVAL=0
+RUN_BEHAVIOR_LAB_LIVE=0
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/run-clean-e2e.sh [--live] [--providers] [--long-eval]
+                                [--behavior-lab-live]
 
 Runs E2E tests against isolated state:
   - temporary Postgres database on the local compose Postgres service
@@ -26,13 +28,20 @@ Environment:
   MOA_CLEAN_E2E_TEST_THREADS  Nextest test threads for the fast orchestrator
                               preflight lane. Defaults to 4. DB lanes use the
                               repository nextest profile caps.
+  MOA_BEHAVIOR_LAB_BUDGET_USD Approved spend ceiling for --behavior-lab-live.
+                              Must be positive with at most six decimal places.
 
 Options:
-  --live       Run ignored Restate E2E tests. Requires MOA_RUN_LIVE_E2E=1.
+  --live       Run ignored Restate E2E tests. Requires MOA_RUN_LIVE_E2E=1. This
+               includes the deterministic Behavior Lab lanes, which are unbilled.
   --providers  Also run live provider/query-rewrite checks. Requires --live and
                the provider tests' own opt-in flags, such as
                MOA_RUN_LIVE_PROVIDER_TESTS=1.
   --long-eval  Also run ignored long-conversation eval smoke. Requires --live.
+  --behavior-lab-live
+               Also run the billed Behavior Lab trial-to-score smoke. Requires
+               --live, MOA_RUN_LIVE_PROVIDER_TESTS=1, a provider credential, and
+               a positive MOA_BEHAVIOR_LAB_BUDGET_USD.
 USAGE
 }
 
@@ -46,6 +55,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --long-eval)
       RUN_LONG_EVAL=1
+      ;;
+    --behavior-lab-live)
+      RUN_BEHAVIOR_LAB_LIVE=1
       ;;
     -h|--help)
       usage
@@ -523,6 +535,40 @@ if [[ "${RUN_LONG_EVAL}" -eq 1 && "${LIVE}" -ne 1 ]]; then
   exit 2
 fi
 
+# The billed Behavior Lab smoke spends real provider credit. Authorization and a
+# positive budget are both required, and they are checked here, before any
+# container or database is created, so an unauthorized run cannot get far enough
+# to bill anything.
+positive_usd_budget() {
+  local value="${1:-}"
+  [[ "${value}" =~ ^([0-9]+([.][0-9]{1,6})?|[.][0-9]{1,6})$ ]] \
+    && [[ "${value}" =~ [1-9] ]]
+}
+
+if [[ "${RUN_BEHAVIOR_LAB_LIVE}" -eq 1 ]]; then
+  if [[ "${LIVE}" -ne 1 ]]; then
+    echo "--behavior-lab-live requires --live" >&2
+    exit 2
+  fi
+  if ! truthy "${MOA_RUN_LIVE_PROVIDER_TESTS:-}"; then
+    echo "refusing billed Behavior Lab lane without MOA_RUN_LIVE_PROVIDER_TESTS=1" >&2
+    exit 2
+  fi
+  if ! positive_usd_budget "${MOA_BEHAVIOR_LAB_BUDGET_USD:-}"; then
+    echo "refusing billed Behavior Lab lane without a positive MOA_BEHAVIOR_LAB_BUDGET_USD with at most six decimal places" >&2
+    exit 2
+  fi
+  anthropic_key="${MOA_ANTHROPIC_API_KEY:-}"
+  openai_key="${MOA_OPENAI_API_KEY:-}"
+  google_key="${MOA_GOOGLE_API_KEY:-}"
+  if [[ -z "${anthropic_key//[[:space:]]/}" \
+    && -z "${openai_key//[[:space:]]/}" \
+    && -z "${google_key//[[:space:]]/}" ]]; then
+    echo "billed Behavior Lab lane requires MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY" >&2
+    exit 2
+  fi
+fi
+
 require_cmd cargo
 require_cmd curl
 require_cmd docker
@@ -671,6 +717,23 @@ if [[ "${LIVE}" -eq 1 ]]; then
 
   run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only --no-tests fail
 
+  # Deterministic Behavior Lab lane. These binaries resolve the Restate stack
+  # from MOA_RESTATE_INGRESS_URL/MOA_RESTATE_ADMIN_URL and spawn their own
+  # orchestrator on reserved ports, so they run here — with the ephemeral
+  # server's URLs still exported and before the shared orchestrator claims the
+  # deployment — rather than in the self-contained fixture arm below. Provider
+  # keys are stripped so nothing in this lane can reach a billed model; the
+  # billed trial-to-score smoke is excluded by the profile and gated separately.
+  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile behavior-lab-service-e2e --run-ignored ignored-only --no-tests fail
+
+  if [[ "${RUN_BEHAVIOR_LAB_LIVE}" -eq 1 ]]; then
+    # Billed. Authorization and MOA_BEHAVIOR_LAB_BUDGET_USD were verified up
+    # front. It runs in this window, alongside the other lanes that register
+    # their own Restate deployment, so it never displaces the shared
+    # orchestrator registered further below.
+    run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile behavior-lab-live --run-ignored ignored-only --no-tests fail
+  fi
+
   FIXTURE_ORCHESTRATOR_TARGET_DIR="$(orchestrator_fixture_target_dir)"
   run env CARGO_TARGET_DIR="${FIXTURE_ORCHESTRATOR_TARGET_DIR}" \
     cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${EXECUTION_EVAL_FEATURES}" --locked
@@ -684,6 +747,13 @@ if [[ "${LIVE}" -eq 1 ]]; then
   run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only --no-tests fail
 
   run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${EXECUTION_EVAL_FEATURES}" --profile execution-eval-pr --run-ignored ignored-only --no-tests fail
+
+  # Self-contained Behavior Lab lane. `OrchestratorTestFixture::with_execution_fixture`
+  # refuses to start when MOA_RESTATE_INGRESS_URL is set ("dedicated execution
+  # fixtures cannot use an external orchestrator"), so this arm must unset the
+  # Restate URLs and let the fixture bring up its own containers, exactly like
+  # fixture-service-e2e above. It reuses the MOA_ORCHESTRATOR_BIN built there.
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile behavior-lab-fixture-service-e2e --run-ignored ignored-only --no-tests fail
 
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"

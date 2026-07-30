@@ -9,6 +9,7 @@ pub mod golden;
 pub mod kernel;
 pub mod long_conversation;
 pub mod memory_eval;
+pub mod mock_domain;
 pub mod pentest;
 pub mod plan;
 pub mod setup;

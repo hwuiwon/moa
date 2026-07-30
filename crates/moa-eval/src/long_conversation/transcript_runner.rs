@@ -486,6 +486,10 @@ async fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
     );
     score_records.extend(lineage_events.iter().filter_map(lineage_score_record));
     let result = EvalResult {
+        // Long-conversation scenarios are scored by their ScoreCard and budgets,
+        // not by the typed assertion model, so this case carries neither.
+        evidence: None,
+        assertions: Vec::new(),
         test_case: input.case.name.clone(),
         agent_config: input.agent_config.name.clone(),
         status: EvalStatus::Passed,
@@ -1518,6 +1522,9 @@ fn score_card_scores(score_card: &ScoreCard) -> Vec<EvalScore> {
         .metric_rows()
         .into_iter()
         .map(|row| EvalScore {
+            // ScoreCard rows report; the separate budget evaluation is what gates
+            // a long-conversation scenario.
+            gate: moa_eval_core::assertion::GateEffect::Diagnostic,
             evaluator: "long_conversation".to_string(),
             name: row.name,
             value: eval_score_value(row.value),

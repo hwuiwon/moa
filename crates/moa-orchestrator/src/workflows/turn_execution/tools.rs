@@ -400,6 +400,7 @@ pub(super) struct RootToolContext<'a> {
     pub(super) selected_skills: &'a [String],
     pub(super) objective: &'a str,
     pub(super) durable_upgrade_allowed: bool,
+    pub(super) resource_budget: moa_core::types::resource::ResourceBudget,
     pub(super) turn_evidence: &'a mut TurnEvidence,
     /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
     pub(super) file_read_cache: &'a mut FileReadTurnCache,
@@ -554,6 +555,7 @@ async fn handle_tool_call(
                 generation: tool_context.generation,
             },
             capability_provenance: None,
+            resource_budget: tool_context.resource_budget,
         };
         append_cached_tool_result(ctx, &request, &cached_output).await?;
         tool_context
@@ -579,6 +581,7 @@ async fn handle_tool_call(
                 generation: tool_context.generation,
             },
             capability_provenance: None,
+            resource_budget: tool_context.resource_budget,
         },
         workflow.session_limits(),
         workflow.session_store.clone(),

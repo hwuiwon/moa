@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "deploy-to-staging-regression"
 description = "Example regression suite for a single skill"
 default_timeout_seconds = 120
@@ -9,7 +10,44 @@ name = "basic-staging-deploy"
 input = "Deploy the app to staging"
 timeout_seconds = 120
 tags = ["deployment", "staging"]
-expected_trajectory = ["bash", "bash", "bash"]
 
-[cases.expected_output]
+[[cases.assertions]]
+id = "response-reports-the-deploy"
+category = "communication"
+gate_effect = "blocking"
+
+[cases.assertions.evaluator]
+id = "text_match"
+version = 1
+determinism = "deterministic"
+
+[cases.assertions.config]
 contains = ["staging", "deployed"]
+
+[[cases.assertions]]
+id = "recorded-tools-were-used"
+category = "action"
+gate_effect = "blocking"
+
+[cases.assertions.evaluator]
+id = "required_actions"
+version = 1
+determinism = "deterministic"
+
+[[cases.assertions.config.actions]]
+name = "bash"
+
+# Path order is a drift signal, not a gate: a skill that reaches the same state by
+# a different route has not regressed.
+[[cases.assertions]]
+id = "recorded-tool-order"
+category = "action"
+gate_effect = "diagnostic"
+
+[cases.assertions.evaluator]
+id = "ordered_actions"
+version = 1
+determinism = "deterministic"
+
+[cases.assertions.config]
+sequence = ["bash", "bash", "bash"]

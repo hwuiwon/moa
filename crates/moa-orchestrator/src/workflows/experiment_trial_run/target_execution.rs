@@ -2,11 +2,16 @@
 
 use super::finalize::failure_outcome;
 use super::status::{attach_trial_execution_run, attach_trial_session, increment_trial_turn};
-use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
+use super::trial_simulator::{
+    SimulatorContext, simulator_completion_request, simulator_done, simulator_turn_from_response,
+};
 use super::*;
 use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
-use crate::services::execution::ExecutionClient;
 use crate::services::session_store::RestateSessionStoreClient;
+use crate::services::{
+    execution::ExecutionClient,
+    llm_gateway::{BoundedCompletionRequest, LLMGatewayClient},
+};
 use crate::workflows::durable_utc_now;
 use moa_artifacts::{
     canonical::canonical_json_bytes as artifact_canonical_json_bytes,
@@ -23,6 +28,7 @@ use moa_core::types::{
         PinnedExecutionTemplateRef, bounded_audit_report, canonical_json_bytes,
         execution_planning_hash,
     },
+    resource::ResourceAmounts,
 };
 use moa_execution::{
     CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationReport,
@@ -53,12 +59,48 @@ struct TargetObservation {
     latest_sequence: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum TargetWaitOutcome {
+    Completed(SessionStatus),
+    Cancelled(ExperimentCancelSignal),
+    TimedOut,
+}
+
+/// What one target session actually consumed since the last observation.
+///
+/// Model and tool call counts are read alongside tokens and cost because the run
+/// ledger meters all four: a turn that spent no money but issued twenty tool
+/// calls is still work the envelope has to bound.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct TargetUsageObservation {
     latest_sequence: u64,
-    tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
     cost_cents: u64,
+    model_calls: u64,
+    tool_calls: u64,
     latest_response: Option<String>,
+}
+
+impl TargetUsageObservation {
+    /// Returns input plus output tokens, the dimension the ledger meters.
+    const fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// Converts the observation into the ledger's reconciliation shape.
+    fn as_experiment_usage(&self, turns: u64) -> ExperimentResourceUsage {
+        ExperimentResourceUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            amounts: moa_core::types::resource::ResourceAmounts {
+                cost_micro_usd: self.cost_cents.saturating_mul(MICRO_USD_PER_CENT),
+                tokens: self.total_tokens(),
+                turns,
+                model_calls: self.model_calls,
+                tool_calls: self.tool_calls,
+            },
+        }
+    }
 }
 
 /// What one target path observed, and how the trial should end because of it.
@@ -88,7 +130,7 @@ struct TargetObservations {
 
 impl TargetObservations {
     fn absorb(&mut self, usage: &TargetUsageObservation) {
-        self.total_tokens = self.total_tokens.saturating_add(usage.tokens);
+        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens());
         self.total_cost_cents = self.total_cost_cents.saturating_add(usage.cost_cents);
         self.latest_sequence = self.latest_sequence.max(usage.latest_sequence);
         if let Some(response) = usage.latest_response.clone() {
@@ -156,7 +198,7 @@ pub(super) async fn run_agent_loop_trial(
     simulator_context: SimulatorContext,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
-    providers: &Arc<ProviderRegistry>,
+    _providers: &Arc<ProviderRegistry>,
 ) -> Result<TrialTargetOutcome, HandlerError> {
     // Scope mismatch is decided before the target payload is used for any
     // session read, session write, or simulator provider call.
@@ -203,7 +245,32 @@ pub(super) async fn run_agent_loop_trial(
             None,
         ));
     }
+    // The trial's own persisted envelope: the same ceiling on every replay, not
+    // one re-derived from a clock that has moved.
+    let trial_envelope = trial.resource_envelope.clone();
+    let turn_share = resources::per_turn_worst_case(trial_envelope.limits);
+
     for turn_index in trial.turn_count.max(0) as u32..simulator_context.max_turns {
+        // The deadline is raced before every turn, not only inside reservations,
+        // so a trial blocked on a slow target still stops on time and cancels
+        // the child it is waiting on.
+        if resources::deadline_passed(ctx, &trial_envelope).await? {
+            // Cancel the child rather than only stopping the parent. The child races
+            // the same absolute `deadline_at`, so this is not what makes the stop
+            // correct — but a target already mid-turn would otherwise keep spending
+            // against a run whose envelope has expired.
+            forward_child_cancellation_signal(ctx, &deadline_cancel_signal(&request.identity))
+                .await?;
+            let stop = resources::TrialResourceStop::deadline();
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
+                stop.status,
+                ExperimentTrialStopReason::BudgetCap,
+                stop.error,
+            ));
+        }
+
         let observation = observe_session_after(
             ctx,
             &request.identity,
@@ -230,15 +297,126 @@ pub(super) async fn run_agent_loop_trial(
         transcript_sequence = observation.latest_sequence;
         observations.latest_sequence = observations.latest_sequence.max(transcript_sequence);
 
-        let simulator_message = simulator_next_user_message(
+        // Reserve before the simulator provider call, never after: an exhausted
+        // envelope must dispatch zero further paid calls.
+        let simulator_key = resources::simulator_reservation_key(trial.trial_uid, turn_index);
+        let simulator_admission = resources::reserve(
             ctx,
             &trial,
-            &simulator_context,
-            &transcript,
-            turn_index,
-            providers,
+            ExperimentResourceComponent::Simulator,
+            simulator_key.clone(),
+            resources::simulator_worst_case(turn_share),
+            pool,
         )
         .await?;
+        if let Some(denial) = resources::reservation_denial(&simulator_admission)? {
+            let stop = resources::TrialResourceStop::from_denial(denial);
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
+                stop.status,
+                ExperimentTrialStopReason::BudgetCap,
+                stop.error,
+            ));
+        }
+        let simulator_worst_case = resources::simulator_worst_case(turn_share);
+        let simulator_started_at =
+            durable_utc_now(ctx, "experiment_trial_simulator_started_at").await?;
+        let Some(simulator_remaining) =
+            resources::time_remaining(&trial_envelope, simulator_started_at)
+        else {
+            resources::reconcile(
+                ctx,
+                &trial,
+                simulator_key,
+                worst_case_usage(simulator_worst_case),
+                pool,
+            )
+            .await?;
+            let stop = resources::TrialResourceStop::deadline();
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
+                stop.status,
+                ExperimentTrialStopReason::BudgetCap,
+                stop.error,
+            ));
+        };
+        let simulator_request =
+            simulator_completion_request(&trial, &simulator_context, &transcript, turn_index);
+        let simulator_call = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<LLMGatewayClient>()
+                .complete_bounded(Json::from(BoundedCompletionRequest {
+                    request: simulator_request,
+                    budget: moa_core::types::resource::ResourceBudget::new(
+                        trial_envelope.deadline,
+                        Some(simulator_worst_case),
+                    ),
+                })),
+        )
+        .call();
+        let simulator_turn = restate_sdk::select! {
+            signal = ctx.promise::<Json<ExperimentCancelSignal>>(K_CANCEL_SIGNAL_PROMISE) => {
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    simulator_key,
+                    worst_case_usage(simulator_worst_case),
+                    pool,
+                )
+                .await?;
+                let signal = signal?.into_inner();
+                forward_child_cancellation_signal(ctx, &signal).await?;
+                return Ok(observations.into_outcome(
+                    score_target,
+                    session_id,
+                    ExperimentTrialStatus::Cancelled,
+                    ExperimentTrialStopReason::Cancelled,
+                    None,
+                ));
+            },
+            _ = ctx.sleep(simulator_remaining) => {
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    simulator_key,
+                    worst_case_usage(simulator_worst_case),
+                    pool,
+                )
+                .await?;
+                forward_child_cancellation_signal(
+                    ctx,
+                    &deadline_cancel_signal(&request.identity),
+                )
+                .await?;
+                let stop = resources::TrialResourceStop::deadline();
+                return Ok(observations.into_outcome(
+                    score_target,
+                    session_id,
+                    stop.status,
+                    ExperimentTrialStopReason::BudgetCap,
+                    stop.error,
+                ));
+            },
+            turn = simulator_call => {
+                match turn {
+                    Ok(turn) => simulator_turn_from_response(turn.into_inner()),
+                    Err(error) => {
+                        resources::reconcile(
+                            ctx,
+                            &trial,
+                            simulator_key,
+                            worst_case_usage(simulator_worst_case),
+                            pool,
+                        )
+                        .await?;
+                        return Err(error.into());
+                    }
+                }
+            }
+        };
+        resources::reconcile(ctx, &trial, simulator_key, simulator_turn.usage, pool).await?;
+        let simulator_message = simulator_turn.message;
         if simulator_done(&simulator_message) {
             return Ok(observations.into_outcome(
                 score_target,
@@ -246,6 +424,30 @@ pub(super) async fn run_agent_loop_trial(
                 ExperimentTrialStatus::Completed,
                 ExperimentTrialStopReason::SimulatorDone,
                 None,
+            ));
+        }
+
+        // Reserve before the target turn is queued. The queue call is the
+        // side-effecting dispatch: once it lands the target starts billing.
+        let target_key = resources::target_reservation_key(trial.trial_uid, turn_index);
+        let target_worst_case = resources::target_worst_case(turn_share);
+        let target_admission = resources::reserve(
+            ctx,
+            &trial,
+            ExperimentResourceComponent::Target,
+            target_key.clone(),
+            target_worst_case,
+            pool,
+        )
+        .await?;
+        if let Some(denial) = resources::reservation_denial(&target_admission)? {
+            let stop = resources::TrialResourceStop::from_denial(denial);
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
+                stop.status,
+                ExperimentTrialStopReason::BudgetCap,
+                stop.error,
             ));
         }
 
@@ -268,14 +470,36 @@ pub(super) async fn run_agent_loop_trial(
                     model: target_model.as_ref().map(ToString::to_string),
                     contact: None,
                     max_turns: None,
+                    resource_budget: moa_core::types::resource::ResourceBudget::new(
+                        trial_envelope.deadline,
+                        Some(target_worst_case),
+                    ),
                     execution_template: None,
                 })),
             &request.identity,
         )
         .call()
-        .await?
-        .into_inner();
+        .await;
+        let response = match response {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                // The request may have reached the child even when the response
+                // was lost, so settle conservatively instead of releasing.
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    target_key,
+                    worst_case_usage(target_worst_case),
+                    pool,
+                )
+                .await?;
+                return Err(error.into());
+            }
+        };
         let Some(turn_id) = response.started_turn_id else {
+            // Nothing was dispatched, so the withheld capacity goes back rather
+            // than staying outstanding against every later turn.
+            resources::release(ctx, &trial, target_key, pool).await?;
             return Err(TerminalError::new(
                 "target session queued simulator message behind an active turn",
             )
@@ -285,12 +509,139 @@ pub(super) async fn run_agent_loop_trial(
         observations.turns = observations.turns.saturating_add(1);
         transcript.push(ContextMessage::user(simulator_message));
 
-        let status =
-            wait_for_target_after_turn(ctx, &request.identity, session_id, turn_id).await?;
-        let usage =
-            record_target_usage_after(ctx, session_id, &mut target_usage_sequence, session_store)
+        let wait_started_at =
+            durable_utc_now(ctx, "experiment_trial_target_wait_started_at").await?;
+        let Some(remaining) = resources::time_remaining(&trial_envelope, wait_started_at) else {
+            resources::reconcile(
+                ctx,
+                &trial,
+                target_key,
+                worst_case_usage(target_worst_case),
+                pool,
+            )
+            .await?;
+            forward_child_cancellation_signal(ctx, &deadline_cancel_signal(&request.identity))
                 .await?;
+            let stop = resources::TrialResourceStop::deadline();
+            return Ok(observations.into_outcome(
+                score_target,
+                session_id,
+                stop.status,
+                ExperimentTrialStopReason::BudgetCap,
+                stop.error,
+            ));
+        };
+        let wait_timeout = remaining.min(EXECUTION_TARGET_WAIT_TIMEOUT);
+        let deadline_limited = wait_timeout == remaining;
+        let wait_outcome = match wait_for_target_after_turn(
+            ctx,
+            &request.identity,
+            session_id,
+            turn_id,
+            wait_timeout,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    target_key,
+                    worst_case_usage(target_worst_case),
+                    pool,
+                )
+                .await?;
+                forward_child_cancellation_signal(
+                    ctx,
+                    &ExperimentCancelSignal {
+                        reason: "experiment_target_turn_wait_failed".to_string(),
+                        identity: request.identity.clone(),
+                    },
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        let status = match wait_outcome {
+            TargetWaitOutcome::Completed(status) => status,
+            TargetWaitOutcome::Cancelled(signal) => {
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    target_key,
+                    worst_case_usage(target_worst_case),
+                    pool,
+                )
+                .await?;
+                forward_child_cancellation_signal(ctx, &signal).await?;
+                return Ok(observations.into_outcome(
+                    score_target,
+                    session_id,
+                    ExperimentTrialStatus::Cancelled,
+                    ExperimentTrialStopReason::Cancelled,
+                    None,
+                ));
+            }
+            TargetWaitOutcome::TimedOut => {
+                let signal = if deadline_limited {
+                    deadline_cancel_signal(&request.identity)
+                } else {
+                    ExperimentCancelSignal {
+                        reason: "experiment_target_turn_wait_timeout".to_string(),
+                        identity: request.identity.clone(),
+                    }
+                };
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    target_key,
+                    worst_case_usage(target_worst_case),
+                    pool,
+                )
+                .await?;
+                forward_child_cancellation_signal(ctx, &signal).await?;
+                if deadline_limited {
+                    let stop = resources::TrialResourceStop::deadline();
+                    return Ok(observations.into_outcome(
+                        score_target,
+                        session_id,
+                        stop.status,
+                        ExperimentTrialStopReason::BudgetCap,
+                        stop.error,
+                    ));
+                }
+                return Err(TerminalError::new(
+                    "timed out waiting for experiment target session turn",
+                )
+                .into());
+            }
+        };
+        let usage = match record_target_usage_after(
+            ctx,
+            session_id,
+            &mut target_usage_sequence,
+            session_store,
+        )
+        .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    target_key,
+                    worst_case_usage(target_worst_case),
+                    pool,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         observations.absorb(&usage);
+        // Reconcile what the turn really cost. An overrun is committed, not
+        // discarded, so the next turn's reservation fails sooner.
+        resources::reconcile(ctx, &trial, target_key, usage.as_experiment_usage(1), pool).await?;
         if let Some(stop) = stop_for_session_status(&status) {
             return Ok(observations.into_outcome(
                 score_target,
@@ -612,6 +963,34 @@ pub(super) async fn run_execution_template_trial(
         TerminalError::new_with_code(422, "experiment execution template was rejected")
     })?;
 
+    // Reserve before `Execution/start`, which is the side-effecting dispatch: once
+    // it lands the run bills against the tenant. A durable execution run is one
+    // dispatch rather than a per-turn loop, so it withholds the whole trial
+    // envelope rather than a per-turn share.
+    let execution_key = resources::execution_reservation_key(trial.trial_uid);
+    let execution_worst_case = trial.resource_envelope.limits;
+    let execution_admission = resources::reserve(
+        ctx,
+        &trial,
+        ExperimentResourceComponent::Target,
+        execution_key.clone(),
+        execution_worst_case,
+        pool,
+    )
+    .await?;
+    if let Some(denial) = resources::reservation_denial(&execution_admission)? {
+        let stop = resources::TrialResourceStop::from_denial(denial);
+        return Ok(TargetObservations::default().into_outcome(
+            TrialScoreTarget::Session {
+                session_id: effective.session_id,
+            },
+            effective.session_id,
+            stop.status,
+            ExperimentTrialStopReason::BudgetCap,
+            stop.error,
+        ));
+    }
+
     let start_call =
         ctx.service_client::<ExecutionClient>()
             .start(Json::from(ExecutionStartRequest {
@@ -631,49 +1010,135 @@ pub(super) async fn run_execution_template_trial(
                 run_input: compiled.run_input,
                 source_provenance: compiled.source_provenance,
             }));
-    let started = with_identity_headers(start_call, &request.identity)
+    let started = match with_identity_headers(start_call, &request.identity)
         .call()
-        .await?
-        .into_inner();
+        .await
+    {
+        Ok(started) => started.into_inner(),
+        Err(error) => {
+            // A lost response does not prove Execution/start failed before
+            // dispatch. Charge the withheld worst case instead of leaking the
+            // reservation or freeing potentially spent capacity.
+            resources::reconcile(
+                ctx,
+                &trial,
+                execution_key,
+                worst_case_usage(execution_worst_case),
+                pool,
+            )
+            .await?;
+            return Err(error.into());
+        }
+    };
     let execution_run_uid = started.run.run_uid;
+    ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
     let attach_pool = pool.clone();
     let scope = trial.scope;
     let trial_uid = trial.trial_uid;
-    ctx.run(|| async move {
-        attach_trial_execution_run(attach_pool, scope, trial_uid, execution_run_uid)
-            .await
-            .map(Json::from)
-    })
-    .name("experiment_trial_attach_execution_run")
-    .await?;
-    ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
+    if let Err(error) = ctx
+        .run(|| async move {
+            attach_trial_execution_run(attach_pool, scope, trial_uid, execution_run_uid)
+                .await
+                .map(Json::from)
+        })
+        .name("experiment_trial_attach_execution_run")
+        .await
+    {
+        resources::reconcile(
+            ctx,
+            &trial,
+            execution_key,
+            worst_case_usage(execution_worst_case),
+            pool,
+        )
+        .await?;
+        forward_child_cancellation_signal(
+            ctx,
+            &ExperimentCancelSignal {
+                reason: "experiment_trial_link_persistence_failed".to_string(),
+                identity: request.identity.clone(),
+            },
+        )
+        .await?;
+        return Err(error.into());
+    }
     forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await?;
     tracing::Span::current().set_attribute(
         "moa.experiment.execution_run_uid",
         execution_run_uid.to_string(),
     );
 
-    let (stop, error) = wait_for_execution_outcome(
+    let (stop, error) = match wait_for_execution_outcome(
         ctx,
         &request.identity,
         request.tenant_id,
         effective.contact_id,
         effective.session_id,
         execution_run_uid,
+        &trial.resource_envelope,
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            resources::reconcile(
+                ctx,
+                &trial,
+                execution_key,
+                worst_case_usage(execution_worst_case),
+                pool,
+            )
+            .await?;
+            forward_child_cancellation_signal(
+                ctx,
+                &ExperimentCancelSignal {
+                    reason: "experiment_trial_execution_wait_failed".to_string(),
+                    identity: request.identity.clone(),
+                },
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     // The typed execution path never observed its own token or cost use; it only
     // polled for a terminal status. The budget evaluators need real numbers, so
     // the durable session log is read once here rather than left as a gap the
     // evaluators would have to guess around.
     let mut sequence = 0_u64;
     let usage =
-        record_target_usage_after(ctx, effective.session_id, &mut sequence, session_store).await?;
+        match record_target_usage_after(ctx, effective.session_id, &mut sequence, session_store)
+            .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                resources::reconcile(
+                    ctx,
+                    &trial,
+                    execution_key,
+                    worst_case_usage(execution_worst_case),
+                    pool,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
     let mut observations = TargetObservations {
         turns: trial.turn_count.max(0) as u32,
         ..TargetObservations::default()
     };
     observations.absorb(&usage);
+
+    // Reconcile the whole-envelope reservation against what the run actually spent,
+    // so the unused remainder returns to the run ledger instead of staying withheld
+    // for the lifetime of the run.
+    resources::reconcile(
+        ctx,
+        &trial,
+        execution_key,
+        usage.as_experiment_usage(u64::from(observations.turns.max(1))),
+        pool,
+    )
+    .await?;
 
     Ok(observations.into_outcome(
         TrialScoreTarget::ExecutionRun { execution_run_uid },
@@ -1242,6 +1707,13 @@ async fn persist_compile_audit(
     Ok(())
 }
 
+/// Polls a durable execution run until it terminates, its envelope expires, or the
+/// fixed wait ceiling is reached.
+///
+/// The poll budget is the *smaller* of the platform wait ceiling and the time the
+/// trial's own envelope has left. Without that, a trial with a near deadline would
+/// keep waiting — and the run would keep billing — long past the instant its
+/// envelope expired.
 async fn wait_for_execution_outcome(
     ctx: &WorkflowContext<'_>,
     identity: &Identity,
@@ -1249,6 +1721,7 @@ async fn wait_for_execution_outcome(
     contact_id: Option<ContactId>,
     session_id: SessionId,
     run_uid: Uuid,
+    envelope: &moa_core::types::resource::ResourceEnvelope,
 ) -> Result<(WorkflowTrialStop, Option<String>), HandlerError> {
     let run = ExecutionRunRequest {
         tenant_id,
@@ -1256,8 +1729,16 @@ async fn wait_for_execution_outcome(
         session_id,
         run_uid,
     };
-    let poll_count =
-        EXECUTION_TARGET_WAIT_TIMEOUT.as_secs() / EXECUTION_STATUS_POLL_INTERVAL.as_secs();
+    // Read through a journaled step so a replay reuses the same budget instead of
+    // recomputing one against a clock that has moved.
+    let now = durable_utc_now(ctx, "experiment_trial_execution_wait_now").await?;
+    let envelope_budget = resources::time_remaining(envelope, now);
+    let wait_ceiling = match envelope_budget {
+        // The deadline already passed; the caller's own deadline check owns the stop.
+        None => Duration::ZERO,
+        Some(remaining) => remaining.min(EXECUTION_TARGET_WAIT_TIMEOUT),
+    };
+    let poll_count = wait_ceiling.as_secs() / EXECUTION_STATUS_POLL_INTERVAL.as_secs();
     for _ in 0..poll_count {
         let status = with_identity_headers(
             ctx.service_client::<ExecutionClient>()
@@ -1413,7 +1894,8 @@ async fn wait_for_target_after_turn(
     identity: &Identity,
     session_id: SessionId,
     turn_id: String,
-) -> Result<SessionStatus, HandlerError> {
+    timeout: Duration,
+) -> Result<TargetWaitOutcome, HandlerError> {
     let (awakeable_id, completion) = ctx.awakeable::<String>();
     let attached = with_identity_headers(
         ctx.object_client::<SessionClient>(session_id.to_string())
@@ -1427,29 +1909,64 @@ async fn wait_for_target_after_turn(
     .await?
     .into_inner();
     if let Some(outcome) = attached.outcome {
-        return status_for_turn_outcome(&outcome);
+        return status_for_turn_outcome(&outcome).map(TargetWaitOutcome::Completed);
     }
 
     restate_sdk::select! {
         outcome = completion => {
             let outcome = parse_turn_outcome(&outcome?)?;
-            status_for_turn_outcome(&outcome)
+            status_for_turn_outcome(&outcome).map(TargetWaitOutcome::Completed)
         },
-        _ = ctx.sleep(EXECUTION_TARGET_WAIT_TIMEOUT) => {
-            with_identity_headers(
-                ctx.object_client::<SessionClient>(session_id.to_string())
-                    .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
-                    turn_id: turn_id.clone(),
-                    awakeable_id,
-                })),
+        signal = ctx.promise::<Json<ExperimentCancelSignal>>(K_CANCEL_SIGNAL_PROMISE) => {
+            remove_target_turn_waiter(
+                ctx,
                 identity,
+                session_id,
+                turn_id,
+                awakeable_id,
             )
-            .call()
             .await?;
-            Err(TerminalError::new(format!(
-                "timed out waiting for target session turn {turn_id}"
-            )).into())
+            Ok(TargetWaitOutcome::Cancelled(signal?.into_inner()))
+        },
+        _ = ctx.sleep(timeout) => {
+            remove_target_turn_waiter(
+                ctx,
+                identity,
+                session_id,
+                turn_id,
+                awakeable_id,
+            )
+            .await?;
+            Ok(TargetWaitOutcome::TimedOut)
         }
+    }
+}
+
+async fn remove_target_turn_waiter(
+    ctx: &WorkflowContext<'_>,
+    identity: &Identity,
+    session_id: SessionId,
+    turn_id: String,
+    awakeable_id: String,
+) -> Result<(), HandlerError> {
+    with_identity_headers(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
+                turn_id,
+                awakeable_id,
+            })),
+        identity,
+    )
+    .call()
+    .await?;
+    Ok(())
+}
+
+fn worst_case_usage(amounts: ResourceAmounts) -> ExperimentResourceUsage {
+    ExperimentResourceUsage {
+        input_tokens: amounts.tokens,
+        output_tokens: 0,
+        amounts,
     }
 }
 
@@ -1468,14 +1985,13 @@ async fn record_target_usage_after(
                 .get_events(session_id, range)
                 .await
                 .map_err(moa_error_to_handler_error)?;
-            let (tokens, cost_cents) = target_usage_from_events(&events);
-            record_simulation_tokens("target", tokens);
-            record_simulation_cost_cents("target", cost_cents);
+            let usage = target_usage_from_events(&events);
+            record_simulation_tokens("target", usage.total_tokens());
+            record_simulation_cost_cents("target", usage.cost_cents);
             Ok::<_, HandlerError>(Json::from(TargetUsageObservation {
                 latest_sequence: latest_sequence(&events).max(previous_sequence),
-                tokens,
-                cost_cents,
                 latest_response: latest_brain_response(&events),
+                ..usage
             }))
         })
         .name("experiment_trial_record_target_usage")
@@ -1485,33 +2001,56 @@ async fn record_target_usage_after(
     Ok(observation)
 }
 
-fn target_usage_from_events(events: &[EventRecord]) -> (u64, u64) {
+fn target_usage_from_events(events: &[EventRecord]) -> TargetUsageObservation {
     events
         .iter()
-        .fold((0_u64, 0_u64), |(tokens, cost_cents), record| {
-            (
-                tokens + (record.event.input_tokens() + record.event.output_tokens()) as u64,
-                cost_cents + u64::from(record.event.cost_cents()),
-            )
+        .fold(TargetUsageObservation::default(), |mut usage, record| {
+            usage.input_tokens = usage
+                .input_tokens
+                .saturating_add(record.event.input_tokens() as u64);
+            usage.output_tokens = usage
+                .output_tokens
+                .saturating_add(record.event.output_tokens() as u64);
+            usage.cost_cents = usage
+                .cost_cents
+                .saturating_add(u64::from(record.event.cost_cents()));
+            // One brain response is one model call the target billed for; one
+            // tool call is one side effect the envelope has to bound.
+            match record.event.event_type() {
+                EventType::BrainResponse => {
+                    usage.model_calls = usage.model_calls.saturating_add(1);
+                }
+                EventType::ToolCall => {
+                    usage.tool_calls = usage.tool_calls.saturating_add(1);
+                }
+                _ => {}
+            }
+            usage
         })
 }
 
 fn target_usage_from_events_after(events: &[EventRecord], boundary: u64) -> (u64, u64) {
-    events
-        .iter()
-        .filter(|record| record.sequence_num > boundary)
-        .fold((0_u64, 0_u64), |(tokens, cost_cents), record| {
-            (
-                tokens + (record.event.input_tokens() + record.event.output_tokens()) as u64,
-                cost_cents + u64::from(record.event.cost_cents()),
-            )
-        })
+    let usage = target_usage_from_events(
+        &events
+            .iter()
+            .filter(|record| record.sequence_num > boundary)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    (usage.total_tokens(), usage.cost_cents)
 }
 
 fn event_range_after(sequence_num: u64) -> EventRange {
     EventRange {
         from_seq: Some(sequence_num.saturating_add(1)),
-        event_types: Some(vec![EventType::UserMessage, EventType::BrainResponse]),
+        // Tool calls are included because the ledger meters them: a turn that
+        // fans out into governed tool work has to reconcile that work into the
+        // same envelope as its tokens and its spend.
+        event_types: Some(vec![
+            EventType::UserMessage,
+            EventType::BrainResponse,
+            EventType::ToolCall,
+        ]),
         ..EventRange::default()
     }
 }
@@ -1584,6 +2123,18 @@ pub(super) fn stop_for_session_status(
             ExperimentTrialStopReason::Error,
         )),
         SessionStatus::Created | SessionStatus::Running | SessionStatus::Paused => None,
+    }
+}
+
+/// The cancellation signal a trial sends its child when its envelope deadline passes.
+///
+/// Carries the trial caller's identity because the child authorizes the cancel the
+/// same way an operator-issued one is authorized. The reason is a stable string so a
+/// child's terminal record names the deadline rather than an anonymous cancellation.
+fn deadline_cancel_signal(identity: &Identity) -> ExperimentCancelSignal {
+    ExperimentCancelSignal {
+        reason: "experiment_resource_deadline_exceeded".to_string(),
+        identity: identity.clone(),
     }
 }
 
@@ -1737,6 +2288,7 @@ mod tests {
 
     fn call_origin_trial_record() -> ExperimentTrialRecord {
         ExperimentTrialRecord {
+            resource_envelope: super::resources::fixture_trial_envelope(),
             scope: ActionRuleScope::Tenant {
                 tenant_id: TenantId(Uuid::from_u128(0x0a01)),
             },

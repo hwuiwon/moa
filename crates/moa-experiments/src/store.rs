@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::resource::{ReconcileOutcome, ResourceAmounts, ResourceError, ResourceKind};
 use moa_core::{
     error::MoaError,
     error::Result as MoaResult,
@@ -21,11 +22,27 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTrialRecord,
-    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun,
-    NewExperimentTrial,
+    ExperimentComponentUsage, ExperimentResourceAdmission, ExperimentResourceComponent,
+    ExperimentResourceDenial, ExperimentResourceEnvelope, ExperimentResourceLedgerState,
+    ExperimentResourceLimitScope, ExperimentResourceReservationRecord,
+    ExperimentResourceReservationRequest, ExperimentResourceReservationState,
+    ExperimentResourceUsage, ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig,
+    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
+    NewExperimentRun, NewExperimentTrial,
+};
+use crate::plan::admission::{
+    ExperimentAdmissionLimits, ExperimentAdmissionUsage, admit_experiment_run,
 };
 use crate::scores::{SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL};
+
+/// Advisory lock key that serializes experiment admissions across the fleet.
+///
+/// Admission reads its quota snapshot inside the transaction that inserts the
+/// run. Without a fence, two concurrent admissions each read pre-admission
+/// counts and both commit, so every ceiling is exceeded by exactly the
+/// concurrency. Experiment admissions are rare and already do several round
+/// trips, so one fleet-wide transaction lock is the cheapest correct fence.
+const EXPERIMENT_ADMISSION_LOCK_KEY: i64 = 0x6d6f_615f_6578_7031;
 
 /// Postgres-backed repository for experiment run metadata.
 pub struct ExperimentStore {
@@ -102,6 +119,18 @@ impl ExperimentStore {
     }
 
     /// Inserts a new experiment run or returns the scoped idempotent existing row.
+    ///
+    /// Admission quotas are decided here rather than in the caller because the
+    /// decision is only sound when the load snapshot it reads and the row it
+    /// admits commit together. The transaction takes a fleet-wide advisory lock
+    /// first, so two concurrent admissions cannot both observe pre-admission
+    /// counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MoaError::ValidationError`] when an admission ceiling refuses
+    /// the run; no row is created in that case. Every other failure on this path
+    /// is a storage or serialization fault.
     pub async fn insert_run(
         &self,
         scope: &ActionRuleScope,
@@ -114,7 +143,25 @@ impl ExperimentStore {
         let scorecard = to_json(run.scorecard)?;
         let score_run_id = run.score_run_id;
         let artifact_revision_uids = run.artifact_revision_uids;
+        let plan_artifact_uid = run.plan_artifact_uid;
+        let expected_trials = run.expected_trials;
+        let persisted_expected_trials = i64::try_from(expected_trials).map_err(|_| {
+            MoaError::ValidationError(
+                "experiment expected trial count exceeds Postgres BIGINT".to_string(),
+            )
+        })?;
+        run.resource_envelope
+            .validate()
+            .map_err(map_resource_error)?;
+        let resource_envelope = to_json(&run.resource_envelope)?;
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(EXPERIMENT_ADMISSION_LOCK_KEY)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?;
+        // Checked before the quota read: an idempotent retry of an
+        // already-admitted run must not be counted as a second admission.
         if let Some(idempotency_key) = run.idempotency_key.as_deref()
             && let Some(row) =
                 load_scoped_run_by_idempotency_key(conn.as_mut(), scope, idempotency_key).await?
@@ -122,6 +169,27 @@ impl ExperimentStore {
             let existing = run_from_row(&row)?;
             conn.commit().await?;
             return Ok(existing);
+        }
+        let usage = match load_admission_usage(
+            conn.as_mut(),
+            parts.storage_partition_id.as_deref(),
+            plan_artifact_uid,
+        )
+        .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Err(error);
+            }
+        };
+        if let Err(rejection) = admit_experiment_run(
+            &usage,
+            &ExperimentAdmissionLimits::default(),
+            expected_trials,
+        ) {
+            let _ = conn.rollback().await;
+            return Err(MoaError::ValidationError(rejection.to_string()));
         }
         if let Err(error) = ensure_score_run_parent(
             conn.as_mut(),
@@ -147,9 +215,12 @@ impl ExperimentStore {
                 run_uid, storage_partition_id, user_id, name, target_kind, status,
                 target, variant, scorecard, score_run_id, session_id,
                 execution_run_uid, artifact_revision_uids, idempotency_key,
-                created_by_identity
+                created_by_identity, plan_artifact_uid, expected_trials, resource_envelope
             )
-            VALUES ($1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES (
+                $1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17
+            )
             RETURNING {RUN_COLUMNS}
             "#
         ))
@@ -167,6 +238,9 @@ impl ExperimentStore {
         .bind(&artifact_revision_uids)
         .bind(run.idempotency_key)
         .bind(run.created_by_identity)
+        .bind(plan_artifact_uid)
+        .bind(persisted_expected_trials)
+        .bind(resource_envelope)
         .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -331,6 +405,20 @@ impl ExperimentStore {
             let _ = conn.rollback().await;
             return Err(error);
         }
+        // The trial envelope is derived from the owning run rather than supplied
+        // by the caller, so a trial can never be minted with a ceiling the run
+        // never authored.
+        let trial_envelope = match load_run_resource_envelope(conn.as_mut(), scope, trial.run_uid)
+            .await
+            .map(|envelope| envelope.trial_envelope())
+            .and_then(|envelope| to_json(&envelope))
+        {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Err(error);
+            }
+        };
         if let Some(row) =
             load_scoped_trial_by_key(conn.as_mut(), scope, trial.run_uid, &trial.trial_key).await?
         {
@@ -362,11 +450,12 @@ impl ExperimentStore {
                 trial_uid, run_uid, storage_partition_id, user_id, trial_key, status,
                 target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                 scenario_id, data_bundle_ids, artifact_revision_uids,
-                simulator, simulator_model, target_model, seed, score_run_id
+                simulator, simulator_model, target_model, seed, score_run_id,
+                resource_envelope
             )
             VALUES (
                 $1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17, $18
+                $12, $13, $14, $15, $16, $17, $18, $19
             )
             RETURNING {TRIAL_COLUMNS}
             "#
@@ -389,6 +478,7 @@ impl ExperimentStore {
         .bind(target_model)
         .bind(trial.seed)
         .bind(score_run_id)
+        .bind(trial_envelope)
         .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -805,6 +895,365 @@ impl ExperimentStore {
         row.as_ref().map(trial_from_row).transpose()
     }
 
+    /// Withholds worst-case capacity before one paid or side-effecting dispatch.
+    ///
+    /// This is the only admission point for experiment spend. A caller must
+    /// treat anything other than a granted reservation as "do not dispatch": no
+    /// provider call, target turn, execution start, tool call, or sandbox start
+    /// may be issued without one.
+    ///
+    /// The run row is locked for the whole decision, so parallel trials of one
+    /// run queue on it and the sum of their reservations can never exceed the
+    /// run envelope. `reservation_key` makes the whole thing replay-safe: a
+    /// re-executed journal step finds its own reservation instead of charging
+    /// the envelope a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the run is not visible in `scope` or its
+    /// persisted envelope cannot be decoded. A refusal by the envelope itself is
+    /// an [`ExperimentResourceAdmission::Denied`] value, not an error.
+    pub async fn try_reserve_resources(
+        &self,
+        scope: &ActionRuleScope,
+        request: ExperimentResourceReservationRequest,
+        now: DateTime<Utc>,
+    ) -> MoaResult<ExperimentResourceAdmission> {
+        let parts = ScopeParts::from_scope(scope);
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        let ledger = match lock_run_ledger(conn.as_mut(), scope, request.run_uid).await {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Err(error);
+            }
+        };
+
+        if let Some(record) = load_reservation(
+            conn.as_mut(),
+            scope,
+            request.run_uid,
+            &request.reservation_key,
+        )
+        .await?
+            && record.state != ExperimentResourceReservationState::Released
+        {
+            conn.commit().await?;
+            return Ok(match record.state {
+                // The dispatch this key covers has not settled. Handing the same
+                // reservation back lets the replayed step re-issue its own
+                // idempotent dispatch without a second charge.
+                ExperimentResourceReservationState::Open => {
+                    ExperimentResourceAdmission::Granted(record)
+                }
+                // The dispatch already committed its real usage. Re-issuing it
+                // would be a duplicate charge and a duplicate side effect.
+                ExperimentResourceReservationState::Reconciled
+                | ExperimentResourceReservationState::Released => {
+                    ExperimentResourceAdmission::AlreadySettled(record)
+                }
+            });
+        }
+
+        if let Err(error) = ledger.envelope.validate() {
+            let _ = conn.rollback().await;
+            return Ok(denied(&error, ExperimentResourceLimitScope::Run));
+        }
+        if request.worst_case.is_zero() {
+            let _ = conn.rollback().await;
+            return Ok(denied(
+                &ResourceError::EmptyReservation,
+                ExperimentResourceLimitScope::Run,
+            ));
+        }
+        if now >= ledger.envelope.deadline_at {
+            let _ = conn.rollback().await;
+            return Ok(denied(
+                &ResourceError::DeadlineExceeded {
+                    deadline: ledger.envelope.deadline_at,
+                },
+                ExperimentResourceLimitScope::Run,
+            ));
+        }
+
+        let run_used = match checked_sum(ledger.committed, ledger.outstanding) {
+            Ok(used) => used,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Ok(denied(&error, ExperimentResourceLimitScope::Run));
+            }
+        };
+        if let Err(error) = project_within(run_used, request.worst_case, ledger.envelope.run_limits)
+        {
+            let _ = conn.rollback().await;
+            return Ok(denied(&error, ExperimentResourceLimitScope::Run));
+        }
+
+        if let Some(trial_uid) = request.trial_uid {
+            let trial_used =
+                match load_trial_resource_use(conn.as_mut(), scope, request.run_uid, trial_uid)
+                    .await
+                {
+                    Ok(used) => used,
+                    Err(error) => {
+                        let _ = conn.rollback().await;
+                        return Err(error);
+                    }
+                };
+            if let Err(error) =
+                project_within(trial_used, request.worst_case, ledger.envelope.trial_limits)
+            {
+                let _ = conn.rollback().await;
+                return Ok(denied(&error, ExperimentResourceLimitScope::Trial));
+            }
+        }
+
+        let outstanding = ledger
+            .outstanding
+            .checked_add(&request.worst_case)
+            .ok_or_else(|| {
+                MoaError::StorageError(
+                    "experiment resource outstanding projection overflowed".to_string(),
+                )
+            })?;
+        let reserved = to_json(request.worst_case)?;
+        let row = sqlx::query(&format!(
+            r#"
+            INSERT INTO moa.experiment_resource_reservation (
+                reservation_uid, run_uid, trial_uid, storage_partition_id, user_id,
+                reservation_key, component, state, reserved, actual
+            )
+            VALUES ($1, $4, $5, $2, $3, $6, $7, 'open', $8, NULL)
+            ON CONFLICT (run_uid, reservation_key) DO UPDATE
+                SET state = 'open',
+                    reserved = EXCLUDED.reserved,
+                    actual = NULL,
+                    updated_at = now()
+            RETURNING {RESERVATION_COLUMNS}
+            "#
+        ))
+        .bind(Uuid::now_v7())
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(request.run_uid)
+        .bind(request.trial_uid)
+        .bind(&request.reservation_key)
+        .bind(request.component.as_str())
+        .bind(reserved)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        write_run_ledger(
+            conn.as_mut(),
+            scope,
+            request.run_uid,
+            ledger.committed,
+            outstanding,
+        )
+        .await?;
+        conn.commit().await?;
+        Ok(ExperimentResourceAdmission::Granted(reservation_from_row(
+            &row,
+        )?))
+    }
+
+    /// Commits actual usage and frees the unused part of a reservation.
+    ///
+    /// Reconciling twice is a no-op that returns the same outcome, so a replayed
+    /// journal step cannot charge the envelope again. An overrun is committed
+    /// rather than discarded — the money was already spent — which shrinks the
+    /// envelope and makes later reservations fail sooner.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the run or the named reservation is not
+    /// visible in `scope`.
+    pub async fn reconcile_resources(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+        reservation_key: &str,
+        actual: ExperimentResourceUsage,
+    ) -> MoaResult<ReconcileOutcome> {
+        actual
+            .validate()
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        let ledger = match lock_run_ledger(conn.as_mut(), scope, run_uid).await {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Err(error);
+            }
+        };
+        let Some(record) = load_reservation(conn.as_mut(), scope, run_uid, reservation_key).await?
+        else {
+            let _ = conn.rollback().await;
+            return Err(MoaError::StorageError(format!(
+                "experiment resource reservation `{reservation_key}` is not open on run {run_uid}"
+            )));
+        };
+        if record.state != ExperimentResourceReservationState::Open {
+            conn.commit().await?;
+            let settled = record.actual.unwrap_or(ExperimentResourceUsage::ZERO);
+            return Ok(reconcile_outcome(record.reserved, settled.amounts));
+        }
+
+        let outstanding = ledger.outstanding.saturating_sub(&record.reserved);
+        let committed = ledger
+            .committed
+            .checked_add(&actual.amounts)
+            .ok_or_else(|| {
+                MoaError::StorageError(
+                    "experiment resource committed projection overflowed".to_string(),
+                )
+            })?;
+        let actual_json = to_json(actual)?;
+        sqlx::query(
+            r#"
+            UPDATE moa.experiment_resource_reservation
+            SET state = 'reconciled',
+                actual = $3,
+                updated_at = now()
+            WHERE run_uid = $1
+              AND reservation_key = $2
+              AND state = 'open'
+            "#,
+        )
+        .bind(run_uid)
+        .bind(reservation_key)
+        .bind(actual_json)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        write_run_ledger(conn.as_mut(), scope, run_uid, committed, outstanding).await?;
+        conn.commit().await?;
+        Ok(reconcile_outcome(record.reserved, actual.amounts))
+    }
+
+    /// Returns a reservation to the envelope without committing any usage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the run is not visible in `scope`.
+    pub async fn release_resources(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+        reservation_key: &str,
+    ) -> MoaResult<()> {
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        let ledger = match lock_run_ledger(conn.as_mut(), scope, run_uid).await {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Err(error);
+            }
+        };
+        let Some(record) = load_reservation(conn.as_mut(), scope, run_uid, reservation_key).await?
+        else {
+            conn.commit().await?;
+            return Ok(());
+        };
+        if record.state != ExperimentResourceReservationState::Open {
+            conn.commit().await?;
+            return Ok(());
+        }
+        let outstanding = ledger.outstanding.saturating_sub(&record.reserved);
+        sqlx::query(
+            r#"
+            UPDATE moa.experiment_resource_reservation
+            SET state = 'released',
+                actual = NULL,
+                updated_at = now()
+            WHERE run_uid = $1
+              AND reservation_key = $2
+              AND state = 'open'
+            "#,
+        )
+        .bind(run_uid)
+        .bind(reservation_key)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        write_run_ledger(conn.as_mut(), scope, run_uid, ledger.committed, outstanding).await?;
+        conn.commit().await?;
+        Ok(())
+    }
+
+    /// Reads one run's durable ledger with its per-component attribution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the run is not visible in `scope`.
+    pub async fn load_resource_ledger(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+    ) -> MoaResult<ExperimentResourceLedgerState> {
+        let parts = ScopeParts::from_scope(scope);
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        let ledger = match load_run_ledger_row(conn.as_mut(), scope, run_uid, false).await {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                let _ = conn.rollback().await;
+                return Err(error);
+            }
+        };
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT {RESERVATION_COLUMNS}
+            FROM moa.experiment_resource_reservation
+            WHERE run_uid = $4
+              AND scope = $1
+              AND storage_partition_id IS NOT DISTINCT FROM $2
+              AND user_id IS NOT DISTINCT FROM $3
+            "#
+        ))
+        .bind(parts.scope)
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(run_uid)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+
+        let reservations = rows
+            .iter()
+            .map(reservation_from_row)
+            .collect::<MoaResult<Vec<_>>>()?;
+        let open_reservations = reservations
+            .iter()
+            .filter(|record| record.state == ExperimentResourceReservationState::Open)
+            .count() as u64;
+        let by_component = ExperimentResourceComponent::ALL
+            .into_iter()
+            .map(|component| ExperimentComponentUsage {
+                component,
+                usage: reservations
+                    .iter()
+                    .filter(|record| record.component == component)
+                    .filter_map(|record| record.actual)
+                    .fold(ExperimentResourceUsage::ZERO, |total, usage| {
+                        total.saturating_add(&usage)
+                    }),
+            })
+            .collect();
+        let used = ledger
+            .committed
+            .checked_add(&ledger.outstanding)
+            .unwrap_or(ledger.envelope.run_limits);
+        Ok(ExperimentResourceLedgerState {
+            remaining: ledger.envelope.run_limits.saturating_sub(&used),
+            envelope: ledger.envelope,
+            committed: ledger.committed,
+            outstanding: ledger.outstanding,
+            open_reservations,
+            by_component,
+        })
+    }
+
     async fn update_trial_links(
         &self,
         scope: &ActionRuleScope,
@@ -1107,6 +1556,305 @@ async fn ensure_artifact_revisions_visible(
     Ok(())
 }
 
+/// Column projection shared by every reservation load.
+const RESERVATION_COLUMNS: &str = "reservation_uid, run_uid, trial_uid, reservation_key, \
+     component, state, reserved, actual, created_at, updated_at";
+
+/// Persisted ledger state for one run.
+struct RunLedgerRow {
+    envelope: ExperimentResourceEnvelope,
+    committed: ResourceAmounts,
+    outstanding: ResourceAmounts,
+}
+
+/// Reads a run's ledger under a row lock, serializing concurrent reservations.
+async fn lock_run_ledger(
+    conn: &mut PgConnection,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+) -> MoaResult<RunLedgerRow> {
+    load_run_ledger_row(conn, scope, run_uid, true).await
+}
+
+async fn load_run_ledger_row(
+    conn: &mut PgConnection,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    lock: bool,
+) -> MoaResult<RunLedgerRow> {
+    let parts = ScopeParts::from_scope(scope);
+    let locking = if lock { "FOR UPDATE" } else { "" };
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT resource_envelope, resource_committed, resource_outstanding
+        FROM moa.experiment_run
+        WHERE run_uid = $4
+          AND scope = $1
+          AND storage_partition_id IS NOT DISTINCT FROM $2
+          AND user_id IS NOT DISTINCT FROM $3
+        {locking}
+        "#
+    ))
+    .bind(parts.scope)
+    .bind(parts.storage_partition_id.as_deref())
+    .bind(parts.user_id.as_deref())
+    .bind(run_uid)
+    .fetch_optional(conn)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| {
+        MoaError::StorageError(format!(
+            "experiment run `{run_uid}` is not visible in the requested experiment scope"
+        ))
+    })?;
+    Ok(RunLedgerRow {
+        envelope: from_json("resource_envelope", row.col("resource_envelope")?)?,
+        committed: from_json("resource_committed", row.col("resource_committed")?)?,
+        outstanding: from_json("resource_outstanding", row.col("resource_outstanding")?)?,
+    })
+}
+
+/// Reads only the authored envelope of a run.
+async fn load_run_resource_envelope(
+    conn: &mut PgConnection,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+) -> MoaResult<ExperimentResourceEnvelope> {
+    Ok(load_run_ledger_row(conn, scope, run_uid, false)
+        .await?
+        .envelope)
+}
+
+async fn write_run_ledger(
+    conn: &mut PgConnection,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    committed: ResourceAmounts,
+    outstanding: ResourceAmounts,
+) -> MoaResult<()> {
+    let parts = ScopeParts::from_scope(scope);
+    sqlx::query(
+        r#"
+        UPDATE moa.experiment_run
+        SET resource_committed = $5,
+            resource_outstanding = $6,
+            updated_at = now()
+        WHERE run_uid = $4
+          AND scope = $1
+          AND storage_partition_id IS NOT DISTINCT FROM $2
+          AND user_id IS NOT DISTINCT FROM $3
+        "#,
+    )
+    .bind(parts.scope)
+    .bind(parts.storage_partition_id.as_deref())
+    .bind(parts.user_id.as_deref())
+    .bind(run_uid)
+    .bind(to_json(committed)?)
+    .bind(to_json(outstanding)?)
+    .execute(conn)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn load_reservation(
+    conn: &mut PgConnection,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    reservation_key: &str,
+) -> MoaResult<Option<ExperimentResourceReservationRecord>> {
+    let parts = ScopeParts::from_scope(scope);
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT {RESERVATION_COLUMNS}
+        FROM moa.experiment_resource_reservation
+        WHERE run_uid = $4
+          AND reservation_key = $5
+          AND scope = $1
+          AND storage_partition_id IS NOT DISTINCT FROM $2
+          AND user_id IS NOT DISTINCT FROM $3
+        "#
+    ))
+    .bind(parts.scope)
+    .bind(parts.storage_partition_id.as_deref())
+    .bind(parts.user_id.as_deref())
+    .bind(run_uid)
+    .bind(reservation_key)
+    .fetch_optional(conn)
+    .await
+    .map_err(map_sqlx_error)?;
+    row.as_ref().map(reservation_from_row).transpose()
+}
+
+/// Sums what one trial has already withheld or committed on the shared ledger.
+async fn load_trial_resource_use(
+    conn: &mut PgConnection,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    trial_uid: Uuid,
+) -> MoaResult<ResourceAmounts> {
+    let parts = ScopeParts::from_scope(scope);
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT {RESERVATION_COLUMNS}
+        FROM moa.experiment_resource_reservation
+        WHERE run_uid = $4
+          AND trial_uid = $5
+          AND state <> 'released'
+          AND scope = $1
+          AND storage_partition_id IS NOT DISTINCT FROM $2
+          AND user_id IS NOT DISTINCT FROM $3
+        "#
+    ))
+    .bind(parts.scope)
+    .bind(parts.storage_partition_id.as_deref())
+    .bind(parts.user_id.as_deref())
+    .bind(run_uid)
+    .bind(trial_uid)
+    .fetch_all(conn)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    let mut used = ResourceAmounts::ZERO;
+    for row in &rows {
+        let record = reservation_from_row(row)?;
+        let amounts = match record.state {
+            ExperimentResourceReservationState::Open => record.reserved,
+            ExperimentResourceReservationState::Reconciled => {
+                record
+                    .actual
+                    .unwrap_or(ExperimentResourceUsage::ZERO)
+                    .amounts
+            }
+            ExperimentResourceReservationState::Released => ResourceAmounts::ZERO,
+        };
+        used = used.checked_add(&amounts).ok_or_else(|| {
+            MoaError::StorageError("experiment trial resource use overflowed".to_string())
+        })?;
+    }
+    Ok(used)
+}
+
+/// Reads the three-scope admission snapshot for one prospective run.
+///
+/// The fleet total spans tenants the caller's row policies hide, so it comes
+/// from a `SECURITY DEFINER` aggregate that returns counts and nothing else.
+async fn load_admission_usage(
+    conn: &mut PgConnection,
+    storage_partition_id: Option<&str>,
+    plan_artifact_uid: Option<Uuid>,
+) -> MoaResult<ExperimentAdmissionUsage> {
+    let row = sqlx::query(
+        r#"
+        SELECT artifact_active_runs, artifact_active_trials,
+               tenant_active_runs, tenant_active_trials,
+               fleet_active_runs, fleet_active_trials
+        FROM moa.experiment_admission_counts($1, $2)
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(plan_artifact_uid)
+    .fetch_one(conn)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(ExperimentAdmissionUsage {
+        artifact_active_runs: non_negative(row.col::<i64>("artifact_active_runs")?),
+        artifact_active_trials: non_negative(row.col::<i64>("artifact_active_trials")?),
+        tenant_active_runs: non_negative(row.col::<i64>("tenant_active_runs")?),
+        tenant_active_trials: non_negative(row.col::<i64>("tenant_active_trials")?),
+        fleet_active_runs: non_negative(row.col::<i64>("fleet_active_runs")?),
+        fleet_active_trials: non_negative(row.col::<i64>("fleet_active_trials")?),
+    })
+}
+
+const fn non_negative(value: i64) -> u64 {
+    if value < 0 { 0 } else { value as u64 }
+}
+
+fn reservation_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> MoaResult<ExperimentResourceReservationRecord> {
+    let component_text: String = row.col("component")?;
+    let state_text: String = row.col("state")?;
+    let actual: Option<Value> = row.col("actual")?;
+    Ok(ExperimentResourceReservationRecord {
+        reservation_uid: row.col("reservation_uid")?,
+        run_uid: row.col("run_uid")?,
+        trial_uid: row.col("trial_uid")?,
+        reservation_key: row.col("reservation_key")?,
+        component: ExperimentResourceComponent::from_db(&component_text).ok_or_else(|| {
+            MoaError::StorageError(format!(
+                "invalid experiment resource component `{component_text}`"
+            ))
+        })?,
+        state: ExperimentResourceReservationState::from_db(&state_text).ok_or_else(|| {
+            MoaError::StorageError(format!(
+                "invalid experiment resource reservation state `{state_text}`"
+            ))
+        })?,
+        reserved: from_json("reserved", row.col("reserved")?)?,
+        actual: actual.map(|value| from_json("actual", value)).transpose()?,
+        created_at: row.col("created_at")?,
+        updated_at: row.col("updated_at")?,
+    })
+}
+
+fn checked_sum(
+    left: ResourceAmounts,
+    right: ResourceAmounts,
+) -> Result<ResourceAmounts, ResourceError> {
+    left.checked_add(&right).ok_or(ResourceError::Overflow {
+        kind: ResourceKind::CostMicroUsd,
+    })
+}
+
+/// Returns `Ok` only when `used + request` stays inside every limit.
+fn project_within(
+    used: ResourceAmounts,
+    request: ResourceAmounts,
+    limits: ResourceAmounts,
+) -> Result<(), ResourceError> {
+    let projected = checked_sum(used, request)?;
+    match projected.first_exceeding(&limits) {
+        None => Ok(()),
+        Some(kind) => Err(ResourceError::Exhausted {
+            kind,
+            requested: request.get(kind),
+            remaining: limits.get(kind).saturating_sub(used.get(kind)),
+            limit: limits.get(kind),
+        }),
+    }
+}
+
+fn denied(
+    error: &ResourceError,
+    limit_scope: ExperimentResourceLimitScope,
+) -> ExperimentResourceAdmission {
+    ExperimentResourceAdmission::Denied(ExperimentResourceDenial::from_resource_error(
+        error,
+        limit_scope,
+    ))
+}
+
+fn reconcile_outcome(reserved: ResourceAmounts, actual: ResourceAmounts) -> ReconcileOutcome {
+    let overrun = actual.saturating_sub(&reserved);
+    if overrun.is_zero() {
+        ReconcileOutcome::WithinReservation
+    } else {
+        ReconcileOutcome::Overrun(overrun)
+    }
+}
+
+fn from_json<T: serde::de::DeserializeOwned>(field: &'static str, value: Value) -> MoaResult<T> {
+    serde_json::from_value(value).map_err(|error| {
+        MoaError::SerializationError(format!("invalid experiment {field}: {error}"))
+    })
+}
+
+fn map_resource_error(error: ResourceError) -> MoaError {
+    MoaError::ValidationError(error.to_string())
+}
+
 /// Reads a Postgres column by name, mapping decode failures to [`MoaError`].
 ///
 /// Collapses the repeated `row.try_get(name).map_err(map_sqlx_error)?` pattern
@@ -1133,7 +1881,8 @@ impl RowExt for sqlx::postgres::PgRow {
 /// column by name; keep both in sync when columns are added or removed.
 const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, target_kind, status, \
      target, variant, scorecard, score_run_id, session_id, execution_run_uid, \
-     artifact_revision_uids, idempotency_key, created_by_identity, error, \
+     artifact_revision_uids, idempotency_key, created_by_identity, \
+     plan_artifact_uid, resource_envelope, error, \
      started_at, completed_at, created_at, updated_at";
 
 /// Column projection shared by every full experiment-trial load.
@@ -1144,7 +1893,8 @@ const TRIAL_COLUMNS: &str = "trial_uid, run_uid, storage_partition_id, user_id, 
      target_kind, variant_key, plan_revision_uid, persona_id, profile_id, \
      scenario_id, data_bundle_ids, artifact_revision_uids, \
      simulator, target_model, seed, session_id, execution_run_uid, \
-     score_run_id, final_evidence_hash, turn_count, stop_reason, error, trace_id, \
+     score_run_id, final_evidence_hash, turn_count, resource_envelope, \
+     stop_reason, error, trace_id, \
      started_at, completed_at, created_at, updated_at";
 
 fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
@@ -1183,6 +1933,8 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
             .unwrap_or_default(),
         idempotency_key: row.col("idempotency_key")?,
         created_by_identity: row.col("created_by_identity")?,
+        plan_artifact_uid: row.col("plan_artifact_uid")?,
+        resource_envelope: from_json("resource_envelope", row.col("resource_envelope")?)?,
         error: row.col("error")?,
         created_at: row.col("created_at")?,
         started_at: row.col("started_at")?,
@@ -1240,6 +1992,7 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
         score_run_id: row.col("score_run_id")?,
         final_evidence_hash: row.col("final_evidence_hash")?,
         turn_count: row.col("turn_count")?,
+        resource_envelope: from_json("trial resource_envelope", row.col("resource_envelope")?)?,
         stop_reason: stop_reason_text
             .as_deref()
             .map(|value| {

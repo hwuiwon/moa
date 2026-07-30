@@ -179,6 +179,7 @@ pub(crate) async fn start_turn_in_session(
                 model: None,
                 contact: None,
                 max_turns: None,
+                resource_budget: Default::default(),
                 execution_template,
             },
             None,

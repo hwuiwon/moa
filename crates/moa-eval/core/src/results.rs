@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::assertion::{AssertionOutcome, GateEffect};
+use crate::evidence::EvidenceEnvelope;
+
 /// Outcome of running one test case against one agent configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -16,7 +19,17 @@ pub struct EvalResult {
     /// Final agent response text, when one was produced.
     pub response: Option<String>,
     /// Actual trajectory collected during execution.
+    ///
+    /// This is a diagnostic path summary. It is deliberately *not* the input to
+    /// any gate: what the run actually did is settled by [`Self::evidence`].
     pub trajectory: Vec<TrajectoryStep>,
+    /// Versioned evidence captured before the run's environment was torn down.
+    ///
+    /// `None` means nothing was captured, which makes every blocking assertion
+    /// on the case fail closed.
+    pub evidence: Option<EvidenceEnvelope>,
+    /// Typed assertion outcomes evaluated against [`Self::evidence`].
+    pub assertions: Vec<AssertionOutcome>,
     /// Scores returned by evaluators.
     pub scores: Vec<EvalScore>,
     /// Aggregate metrics collected during execution.
@@ -40,6 +53,8 @@ impl Default for EvalResult {
             status: EvalStatus::default(),
             response: None,
             trajectory: Vec::new(),
+            evidence: None,
+            assertions: Vec::new(),
             scores: Vec::new(),
             metrics: EvalMetrics::default(),
             trace_id: None,
@@ -47,6 +62,17 @@ impl Default for EvalResult {
             started_at: now,
             completed_at: now,
         }
+    }
+}
+
+impl EvalResult {
+    /// Returns every blocking assertion that failed.
+    #[must_use]
+    pub fn gate_failures(&self) -> Vec<&AssertionOutcome> {
+        self.assertions
+            .iter()
+            .filter(|outcome| outcome.is_gate_failure())
+            .collect()
     }
 }
 
@@ -114,8 +140,51 @@ pub struct EvalScore {
     pub name: String,
     /// Score value.
     pub value: EvalScoreValue,
+    /// Whether a low or false value downgrades the run.
+    ///
+    /// Explicit because several scores are now reporting-only signals — path
+    /// similarity above all — and a silent numeric threshold must never be the
+    /// thing that decides a gate.
+    #[serde(default)]
+    pub gate: GateEffect,
     /// Optional evaluator comment or reasoning.
     pub comment: Option<String>,
+}
+
+impl EvalScore {
+    /// Builds a gating score.
+    #[must_use]
+    pub fn gating(
+        evaluator: impl Into<String>,
+        name: impl Into<String>,
+        value: EvalScoreValue,
+        comment: Option<String>,
+    ) -> Self {
+        Self {
+            evaluator: evaluator.into(),
+            name: name.into(),
+            value,
+            gate: GateEffect::Blocking,
+            comment,
+        }
+    }
+
+    /// Builds a reporting-only score that can never fail a run.
+    #[must_use]
+    pub fn diagnostic(
+        evaluator: impl Into<String>,
+        name: impl Into<String>,
+        value: EvalScoreValue,
+        comment: Option<String>,
+    ) -> Self {
+        Self {
+            evaluator: evaluator.into(),
+            name: name.into(),
+            value,
+            gate: GateEffect::Diagnostic,
+            comment,
+        }
+    }
 }
 
 /// Score value emitted by an evaluator.

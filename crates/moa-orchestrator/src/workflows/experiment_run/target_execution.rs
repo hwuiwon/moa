@@ -10,11 +10,12 @@ use moa_artifacts::{
     reference::ArtifactRef,
 };
 use moa_core::{
-    events::Event,
+    events::{Event, EventType},
     types::{
         action_policy::CallOrigin,
         agent::AgentContext,
         contact::{ClientMessageId, ContactId, ContactRef, ContactVerificationState},
+        events_stream::EventRange,
         events_stream::EventRecord,
         execution_planning::{
             ExecutionAuditViolation, ExecutionCompileOutcome, ExecutionCompileSource,
@@ -22,6 +23,7 @@ use moa_core::{
             ExecutionSourceProvenance, PinnedExecutionTemplateRef, bounded_audit_report,
             canonical_json_bytes, execution_planning_hash,
         },
+        resource::{ResourceAmounts, ResourceBudget, ResourceEnvelope},
     },
 };
 use moa_execution::{
@@ -36,10 +38,16 @@ use moa_execution::{
     },
 };
 use moa_wire::session_store::AppendEventRequest;
+use moa_wire::turn::{TurnOutcome, TurnOutcomeKind};
 
 use moa_config::MoaConfig;
 
+use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
 use crate::services::{execution::ExecutionClient, session_store::RestateSessionStoreClient};
+use crate::workflows::experiment_trial_run::resources;
+use moa_experiments::model::{
+    ExperimentResourceComponent, ExperimentResourceUsage, MICRO_USD_PER_CENT,
+};
 
 const EXECUTION_TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const EXECUTION_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -61,6 +69,31 @@ struct CompiledExperimentTemplate {
     source_provenance: ExecutionSourceProvenance,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct DirectTargetUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_cents: u64,
+    model_calls: u64,
+    tool_calls: u64,
+}
+
+impl DirectTargetUsage {
+    fn as_experiment_usage(&self, turns: u64) -> ExperimentResourceUsage {
+        ExperimentResourceUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            amounts: ResourceAmounts {
+                cost_micro_usd: self.cost_cents.saturating_mul(MICRO_USD_PER_CENT),
+                tokens: self.input_tokens.saturating_add(self.output_tokens),
+                turns,
+                model_calls: self.model_calls,
+                tool_calls: self.tool_calls,
+            },
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the workflow target keeps durable input and concrete stores explicit instead of hiding them in a dependency bag"
@@ -69,6 +102,7 @@ pub(super) async fn run_agent_loop_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
+    resource_envelope: ResourceEnvelope,
     prompt: String,
     agent: Option<AgentSessionSelection>,
     model: ModelId,
@@ -134,7 +168,40 @@ pub(super) async fn run_agent_loop_target(
         .await;
     }
 
-    with_identity_headers(
+    let reservation_key = resources::direct_target_reservation_key(request.run_uid);
+    let admission = resources::reserve_run(
+        ctx,
+        scope,
+        request.run_uid,
+        ExperimentResourceComponent::Target,
+        reservation_key.clone(),
+        resource_envelope.limits,
+        pool,
+    )
+    .await?;
+    if let Some(denial) = resources::reservation_denial(&admission)? {
+        finalize_run_status(
+            ctx,
+            scope,
+            request.run_uid,
+            ExperimentRunStatus::Failed,
+            Some(denial.message.clone()),
+            pool,
+        )
+        .await?;
+        return run_status_response(
+            ctx,
+            ExperimentRunStatusRequest {
+                tenant_id: request.tenant_id,
+                run_uid: request.run_uid,
+            },
+            pool,
+            session_store,
+        )
+        .await;
+    }
+
+    let response = with_identity_headers(
         ctx.object_client::<SessionClient>(session_id.to_string())
             .queue_message(Json::from(QueueMessageRequest {
                 // One agent-loop target submits exactly one prompt, so the run uid and
@@ -150,12 +217,125 @@ pub(super) async fn run_agent_loop_target(
                 model: Some(model.to_string()),
                 contact: None,
                 max_turns: None,
+                resource_budget: ResourceBudget::new(
+                    resource_envelope.deadline,
+                    Some(resource_envelope.limits),
+                ),
                 execution_template: None,
             })),
         &request.identity,
     )
     .call()
+    .await;
+    let response = match response {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            resources::reconcile_run(
+                ctx,
+                scope,
+                request.run_uid,
+                reservation_key,
+                worst_case_usage(resource_envelope.limits),
+                pool,
+            )
+            .await?;
+            return Err(error.into());
+        }
+    };
+    let Some(turn_id) = response.started_turn_id else {
+        resources::release_run(ctx, scope, request.run_uid, reservation_key, pool).await?;
+        return Err(
+            TerminalError::new("direct experiment target queued behind an active turn").into(),
+        );
+    };
+    let outcome = match wait_for_direct_turn(
+        ctx,
+        &request.identity,
+        session_id,
+        turn_id,
+        &resource_envelope,
+    )
+    .await
+    {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => {
+            resources::reconcile_run(
+                ctx,
+                scope,
+                request.run_uid,
+                reservation_key,
+                worst_case_usage(resource_envelope.limits),
+                pool,
+            )
+            .await?;
+            with_identity_headers(
+                ctx.object_client::<SessionClient>(session_id.to_string())
+                    .request_cancel(Json::from(
+                        "direct experiment resource deadline exceeded".to_string(),
+                    )),
+                &request.identity,
+            )
+            .call()
+            .await?;
+            finalize_run_status(
+                ctx,
+                scope,
+                request.run_uid,
+                ExperimentRunStatus::Failed,
+                Some("direct experiment resource deadline exceeded".to_string()),
+                pool,
+            )
+            .await?;
+            return run_status_response(
+                ctx,
+                ExperimentRunStatusRequest {
+                    tenant_id: request.tenant_id,
+                    run_uid: request.run_uid,
+                },
+                pool,
+                session_store,
+            )
+            .await;
+        }
+        Err(error) => {
+            resources::reconcile_run(
+                ctx,
+                scope,
+                request.run_uid,
+                reservation_key,
+                worst_case_usage(resource_envelope.limits),
+                pool,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let usage = match load_direct_target_usage(ctx, session_id, 0, session_store).await {
+        Ok(usage) => usage,
+        Err(error) => {
+            resources::reconcile_run(
+                ctx,
+                scope,
+                request.run_uid,
+                reservation_key,
+                worst_case_usage(resource_envelope.limits),
+                pool,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    resources::reconcile_run(
+        ctx,
+        scope,
+        request.run_uid,
+        reservation_key,
+        usage.as_experiment_usage(1),
+        pool,
+    )
     .await?;
+    let (status, error) = run_status_for_turn_outcome(&outcome);
+    finalize_run_status(ctx, scope, request.run_uid, status, error, pool).await?;
 
     run_status_response(
         ctx,
@@ -178,6 +358,7 @@ pub(super) async fn run_execution_template_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
+    resource_envelope: ResourceEnvelope,
     template: PinnedExecutionTemplateRef,
     objective: String,
     input: Value,
@@ -288,6 +469,39 @@ pub(super) async fn run_execution_template_target(
     let compiled_plan = compiled.compiled.ok_or_else(|| {
         TerminalError::new_with_code(422, "experiment execution template was rejected")
     })?;
+    let usage_boundary = latest_direct_sequence(ctx, effective.session_id, session_store).await?;
+    let reservation_key = resources::direct_target_reservation_key(request.run_uid);
+    let admission = resources::reserve_run(
+        ctx,
+        scope,
+        request.run_uid,
+        ExperimentResourceComponent::Target,
+        reservation_key.clone(),
+        resource_envelope.limits,
+        pool,
+    )
+    .await?;
+    if let Some(denial) = resources::reservation_denial(&admission)? {
+        finalize_run_status(
+            ctx,
+            scope,
+            request.run_uid,
+            ExperimentRunStatus::Failed,
+            Some(denial.message.clone()),
+            pool,
+        )
+        .await?;
+        return run_status_response(
+            ctx,
+            ExperimentRunStatusRequest {
+                tenant_id: request.tenant_id,
+                run_uid: request.run_uid,
+            },
+            pool,
+            session_store,
+        )
+        .await;
+    }
 
     let start_call =
         ctx.service_client::<ExecutionClient>()
@@ -308,33 +522,114 @@ pub(super) async fn run_execution_template_target(
                 run_input: compiled.run_input,
                 source_provenance: compiled.source_provenance,
             }));
-    let started = with_identity_headers(start_call, &request.identity)
+    let started = match with_identity_headers(start_call, &request.identity)
         .call()
-        .await?
-        .into_inner();
+        .await
+    {
+        Ok(started) => started.into_inner(),
+        Err(error) => {
+            resources::reconcile_run(
+                ctx,
+                scope,
+                request.run_uid,
+                reservation_key,
+                worst_case_usage(resource_envelope.limits),
+                pool,
+            )
+            .await?;
+            return Err(error.into());
+        }
+    };
     let execution_run_uid = started.run.run_uid;
     let attach_pool = pool.clone();
-    ctx.run(|| async move {
-        attach_execution_run(attach_pool, scope, request.run_uid, execution_run_uid)
-            .await
-            .map(Json::from)
-    })
-    .name("experiment_attach_execution_run")
-    .await?;
+    let attached = ctx
+        .run(|| async move {
+            attach_execution_run(attach_pool, scope, request.run_uid, execution_run_uid)
+                .await
+                .map(Json::from)
+        })
+        .name("experiment_attach_execution_run")
+        .await;
+    if let Err(error) = attached {
+        resources::reconcile_run(
+            ctx,
+            scope,
+            request.run_uid,
+            reservation_key,
+            worst_case_usage(resource_envelope.limits),
+            pool,
+        )
+        .await?;
+        return Err(error.into());
+    }
     ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
-    forward_pending_child_cancellation(ctx, &scope, request.run_uid, pool).await?;
+    if let Err(error) = forward_pending_child_cancellation(ctx, &scope, request.run_uid, pool).await
+    {
+        resources::reconcile_run(
+            ctx,
+            scope,
+            request.run_uid,
+            reservation_key,
+            worst_case_usage(resource_envelope.limits),
+            pool,
+        )
+        .await?;
+        return Err(error);
+    }
     tracing::Span::current().set_attribute(
         "moa.experiment.execution_run_uid",
         execution_run_uid.to_string(),
     );
 
-    let (status, error) = wait_for_execution_outcome(
+    let (status, error) = match wait_for_execution_outcome(
         ctx,
         &request.identity,
         request.tenant_id,
         effective.contact_id,
         effective.session_id,
         execution_run_uid,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            resources::reconcile_run(
+                ctx,
+                scope,
+                request.run_uid,
+                reservation_key,
+                worst_case_usage(resource_envelope.limits),
+                pool,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let usage =
+        match load_direct_target_usage(ctx, effective.session_id, usage_boundary, session_store)
+            .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                resources::reconcile_run(
+                    ctx,
+                    scope,
+                    request.run_uid,
+                    reservation_key,
+                    worst_case_usage(resource_envelope.limits),
+                    pool,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+    resources::reconcile_run(
+        ctx,
+        scope,
+        request.run_uid,
+        reservation_key,
+        usage.as_experiment_usage(1),
+        pool,
     )
     .await?;
     finalize_run_status(ctx, scope, request.run_uid, status, error, pool).await?;
@@ -503,6 +798,162 @@ fn admit_caller_named_execution_session(
         .into());
     }
     Ok(contact_id)
+}
+
+async fn wait_for_direct_turn(
+    ctx: &WorkflowContext<'_>,
+    identity: &moa_core::traits::Identity,
+    session_id: SessionId,
+    turn_id: String,
+    envelope: &ResourceEnvelope,
+) -> Result<Option<TurnOutcome>, HandlerError> {
+    let now = durable_utc_now(ctx, "experiment_run_target_wait_started_at").await?;
+    let timeout = envelope
+        .time_remaining(now)
+        .unwrap_or(EXECUTION_TARGET_WAIT_TIMEOUT);
+    if timeout.is_zero() {
+        return Ok(None);
+    }
+    let (awakeable_id, completion) = ctx.awakeable::<String>();
+    let attached = with_identity_headers(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .attach_turn_waiter(Json::from(AttachSessionTurnWaiterInput {
+                turn_id: turn_id.clone(),
+                awakeable_id: awakeable_id.clone(),
+            })),
+        identity,
+    )
+    .call()
+    .await?
+    .into_inner();
+    if let Some(outcome) = attached.outcome {
+        return Ok(Some(outcome));
+    }
+
+    restate_sdk::select! {
+        outcome = completion => {
+            let raw = outcome?;
+            let outcome = serde_json::from_str(&raw).map_err(|error| {
+                TerminalError::new(format!(
+                    "failed to deserialize direct experiment turn outcome: {error}"
+                ))
+            })?;
+            Ok(Some(outcome))
+        },
+        _ = ctx.sleep(timeout) => {
+            with_identity_headers(
+                ctx.object_client::<SessionClient>(session_id.to_string())
+                    .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
+                        turn_id,
+                        awakeable_id,
+                    })),
+                identity,
+            )
+            .call()
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+async fn load_direct_target_usage(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    boundary: u64,
+    session_store: &Arc<PostgresSessionStore>,
+) -> Result<DirectTargetUsage, HandlerError> {
+    let store = session_store.clone();
+    Ok(ctx
+        .run(|| async move {
+            let events = store
+                .get_events(
+                    session_id,
+                    EventRange {
+                        from_seq: Some(boundary.saturating_add(1)),
+                        event_types: Some(vec![EventType::BrainResponse, EventType::ToolCall]),
+                        ..EventRange::default()
+                    },
+                )
+                .await
+                .map_err(moa_error_to_handler_error)?;
+            Ok::<_, HandlerError>(Json::from(direct_target_usage(&events)))
+        })
+        .name("experiment_run_load_target_usage")
+        .await?
+        .into_inner())
+}
+
+async fn latest_direct_sequence(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    session_store: &Arc<PostgresSessionStore>,
+) -> Result<u64, HandlerError> {
+    let store = session_store.clone();
+    Ok(ctx
+        .run(|| async move {
+            let events = store
+                .get_events(session_id, EventRange::recent(1))
+                .await
+                .map_err(moa_error_to_handler_error)?;
+            Ok::<_, HandlerError>(Json::from(
+                events
+                    .last()
+                    .map(|record| record.sequence_num)
+                    .unwrap_or_default(),
+            ))
+        })
+        .name("experiment_run_load_target_sequence")
+        .await?
+        .into_inner())
+}
+
+fn direct_target_usage(events: &[EventRecord]) -> DirectTargetUsage {
+    events
+        .iter()
+        .fold(DirectTargetUsage::default(), |mut usage, record| {
+            usage.input_tokens = usage
+                .input_tokens
+                .saturating_add(u64::try_from(record.event.input_tokens()).unwrap_or(u64::MAX));
+            usage.output_tokens = usage
+                .output_tokens
+                .saturating_add(u64::try_from(record.event.output_tokens()).unwrap_or(u64::MAX));
+            usage.cost_cents = usage
+                .cost_cents
+                .saturating_add(u64::from(record.event.cost_cents()));
+            match record.event.event_type() {
+                EventType::BrainResponse => {
+                    usage.model_calls = usage.model_calls.saturating_add(1);
+                }
+                EventType::ToolCall => {
+                    usage.tool_calls = usage.tool_calls.saturating_add(1);
+                }
+                _ => {}
+            }
+            usage
+        })
+}
+
+fn worst_case_usage(amounts: ResourceAmounts) -> ExperimentResourceUsage {
+    ExperimentResourceUsage {
+        input_tokens: amounts.tokens,
+        output_tokens: 0,
+        amounts,
+    }
+}
+
+fn run_status_for_turn_outcome(outcome: &TurnOutcome) -> (ExperimentRunStatus, Option<String>) {
+    match outcome.kind {
+        TurnOutcomeKind::Completed => (ExperimentRunStatus::Completed, None),
+        TurnOutcomeKind::Cancelled => (ExperimentRunStatus::Cancelled, None),
+        TurnOutcomeKind::Failed => (ExperimentRunStatus::Failed, Some(outcome.message.clone())),
+        TurnOutcomeKind::Accepted { .. } => (
+            ExperimentRunStatus::Failed,
+            Some(
+                "resource-bounded direct experiment unexpectedly admitted durable execution"
+                    .to_string(),
+            ),
+        ),
+    }
 }
 
 async fn finalize_run_status(
@@ -1302,5 +1753,26 @@ mod tests {
                 Some(ExperimentRunStatus::Failed)
             );
         }
+    }
+
+    #[test]
+    fn bounded_direct_turn_never_treats_a_detached_execution_as_complete_offline() {
+        // Pins: the direct reservation covers one bounded Session child. If that
+        // child ever escapes into detached durable execution, the run fails closed
+        // instead of reconciling early and reporting success while billing continues.
+        let outcome = TurnOutcome {
+            turn_id: "turn-direct-budget".to_string(),
+            kind: TurnOutcomeKind::Accepted {
+                execution_run_uid: Uuid::from_u128(9),
+            },
+            message: "accepted".to_string(),
+        };
+        let (status, error) = run_status_for_turn_outcome(&outcome);
+        assert_eq!(status, ExperimentRunStatus::Failed);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("resource-bounded"))
+        );
     }
 }

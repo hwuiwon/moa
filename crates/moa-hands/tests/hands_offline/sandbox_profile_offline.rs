@@ -4,6 +4,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use moa_config::{CloudHandsConfig, MoaConfig, SandboxProfileConfig, SecurityProfile};
+use moa_core::types::action_policy::CallOrigin;
 use moa_core::{
     error::MoaError,
     traits::HandProvider,
@@ -51,10 +52,12 @@ fn spec(tier: SandboxTier, profile: SandboxProfile) -> HandSpec {
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
         "test-capabilities-v1",
     )
     .expect("test policy resolution should succeed");
     HandSpec {
+        budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,
         env: std::collections::HashMap::new(),
@@ -299,16 +302,28 @@ fn route_layers_come_from_config_and_are_always_named_offline() {
     // the unauthored one leaves it exactly as the deployment declared it.
     let tenant = SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset);
     let agent = SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset);
-    let tightened =
-        resolve_effective_sandbox_profile(&deployment, &tenant, &agent, &authored, "cap-1")
-            .expect("resolve with authored route");
+    let tightened = resolve_effective_sandbox_profile(
+        &deployment,
+        &tenant,
+        &agent,
+        &authored,
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
+        "cap-1",
+    )
+    .expect("resolve with authored route");
     assert_eq!(tightened.profile().egress, EgressPolicy::DenyAll);
     assert_eq!(tightened.profile().idle_timeout, seconds(120));
     assert_eq!(tightened.sources().route, "e2b-route-v1");
 
-    let untightened =
-        resolve_effective_sandbox_profile(&deployment, &tenant, &agent, &unauthored, "cap-1")
-            .expect("resolve with unauthored route");
+    let untightened = resolve_effective_sandbox_profile(
+        &deployment,
+        &tenant,
+        &agent,
+        &unauthored,
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
+        "cap-1",
+    )
+    .expect("resolve with unauthored route");
     assert_eq!(untightened.profile().egress, EgressPolicy::Unrestricted);
     assert_ne!(
         untightened.profile_hash(),

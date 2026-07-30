@@ -10,7 +10,7 @@ use moa_core::{
     error::MoaError, error::Result, types::hands::EffectiveSandboxProfile,
     types::hands::HandHandle, types::hands::HandSpec, types::hands::HandStatus,
     types::hands::SandboxFile, types::hands::SandboxTier, types::identifiers::TenantId,
-    types::session::SessionMeta,
+    types::resource::ResourceBudget, types::session::SessionMeta,
 };
 use moa_observability::{current_turn_root_span, record_sandbox_provision_duration};
 use tracing::Instrument;
@@ -392,6 +392,22 @@ impl ToolRouter {
         session: &SessionMeta,
         worker_id: Option<&str>,
     ) -> Result<HandHandle> {
+        self.get_or_provision_hand_within(route, session, worker_id, ResourceBudget::UNBOUNDED)
+            .await
+    }
+
+    /// Provisions or reuses a hand on behalf of a run with `budget` left.
+    ///
+    /// The budget is stamped onto the [`HandSpec`], so a provider that can push
+    /// a deadline into the sandbox itself sees the run's clock, not only the
+    /// sandbox's much longer lifetime.
+    pub(super) async fn get_or_provision_hand_within(
+        &self,
+        route: &HandRoute,
+        session: &SessionMeta,
+        worker_id: Option<&str>,
+        budget: ResourceBudget,
+    ) -> Result<HandHandle> {
         let provider = route.provider.as_str();
         let tier_label = route.tier.as_str();
         let span = sandbox_provision_span("get_or_provision_hand", provider, tier_label);
@@ -421,14 +437,14 @@ impl ToolRouter {
                     validated
                 } else {
                     self.get_or_provision_durable_hand(
-                        route, session, worker_id, key, &effective, &policy,
+                        route, session, worker_id, key, &effective, &policy, budget,
                     )
                     .await?
                 }
             } else if let Some(handle) = self.active_hands.read().await.get(&key) {
                 handle.clone()
             } else {
-                self.provision_uncached_hand(route, session, key, &effective)
+                self.provision_uncached_hand(route, session, key, &effective, budget)
                     .await?
             };
             record_span.record("moa.sandbox.id", hand_id(&handle));
@@ -544,6 +560,7 @@ impl ToolRouter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn get_or_provision_durable_hand(
         &self,
         route: &HandRoute,
@@ -552,6 +569,7 @@ impl ToolRouter {
         key: String,
         effective: &EffectiveSandboxProfile,
         policy: &HandLeasePolicy,
+        budget: ResourceBudget,
     ) -> Result<HandHandle> {
         let provider = route.provider.as_str();
         let scope = worker_id.unwrap_or_default();
@@ -621,7 +639,7 @@ impl ToolRouter {
                     }
                 }
                 match self
-                    .provision_uncached_hand(route, session, key.clone(), effective)
+                    .provision_uncached_hand(route, session, key.clone(), effective, budget)
                     .await
                 {
                     Ok(handle) => {
@@ -792,6 +810,7 @@ impl ToolRouter {
         session: &SessionMeta,
         key: String,
         effective: &EffectiveSandboxProfile,
+        budget: ResourceBudget,
     ) -> Result<HandHandle> {
         let provider = route.provider.as_str();
         let tier = route.tier;
@@ -820,6 +839,7 @@ impl ToolRouter {
                     env: HashMap::new(),
                     workspace_mount,
                     effective_profile: effective.clone(),
+                    budget,
                 })
                 .await?;
             let cold_start = started_at.elapsed();
@@ -1019,7 +1039,7 @@ fn lease_expired(lease: &HandLease) -> bool {
 /// Returns whether a persisted lease was provisioned under exactly `policy`.
 ///
 /// The comparison is on the policy identity hash alone, which already covers
-/// the six-dimension profile, all four source revisions, and the provider's
+/// the six-dimension profile, all five source revisions, and the provider's
 /// capability revision. A lease with no persisted policy — only the legacy rows
 /// V000359 marked stale — never matches.
 fn lease_matches_policy(lease: &HandLease, policy: &HandLeasePolicy) -> bool {

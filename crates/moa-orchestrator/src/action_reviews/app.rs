@@ -556,6 +556,7 @@ mod tests {
                 session_id: SessionId::new(),
                 trusted_sandbox_manifest: None,
                 worker_id: None,
+                resource_budget: Default::default(),
             },
             execution_task_trace_context: None,
             decided_by: None,
@@ -601,6 +602,7 @@ mod tests {
                 session_id: SessionId::new(),
                 trusted_sandbox_manifest: None,
                 worker_id: None,
+                resource_budget: Default::default(),
             },
             execution_task_trace_context: None,
             decided_by: Some("admin".to_string()),
@@ -633,6 +635,7 @@ mod tests {
             session_id: SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
+            resource_budget: Default::default(),
         };
 
         let error =

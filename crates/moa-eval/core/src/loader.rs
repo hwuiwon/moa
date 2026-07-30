@@ -32,13 +32,17 @@ pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
     validate_agent_config(path, config)
 }
 
+/// Rejects a suite document this build cannot execute exactly as authored.
+///
+/// Version and assertion-registry validation happen here, at load time, so a
+/// suite that would fail closed on every case never reaches the scheduler.
 fn validate_suite(path: &Path, suite: TestSuite) -> Result<TestSuite> {
-    if suite.name.trim().is_empty() {
-        return Err(Error::InvalidConfig(format!(
-            "suite file {} is missing [suite].name",
-            path.display()
-        )));
-    }
+    suite.validate().map_err(|error| match error {
+        Error::InvalidConfig(message) => {
+            Error::InvalidConfig(format!("suite file {}: {message}", path.display()))
+        }
+        other => other,
+    })?;
     Ok(suite)
 }
 

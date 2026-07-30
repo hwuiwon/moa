@@ -11,7 +11,7 @@ use moa_core::{
     types::action_policy::ActionReviewOwner, types::action_policy::CapabilityProvenance,
     types::action_policy::ExecutionTaskOrigin, types::channel::Channel,
     types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::identifiers::ToolCallId,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::resource::ResourceBudget,
     types::security::ToolCapabilityId, types::session::SessionMeta,
     types::tools::SecuredToolOutput, types::tools::ToolCallRequest, types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef,
@@ -134,6 +134,8 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) origin: GovernedInvocationOrigin<'a>,
     /// Capability-level provenance, independent of execution-task ownership.
     pub(crate) capability_provenance: Option<&'a CapabilityProvenance>,
+    /// Downward-only resource slice that bounds the eventual tool dispatch.
+    pub(crate) resource_budget: ResourceBudget,
 }
 
 /// Completed governed tool invocation result.
@@ -280,6 +282,17 @@ pub(crate) async fn invoke_governed_tool(
     }
 
     if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
+        if let Some(output) = bounded_review_refusal(&request, &invocation) {
+            append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
+            return Ok(GovernedInvocationOutcome::Completed(Box::new(
+                completed_result(
+                    request.tool_id,
+                    invocation,
+                    output,
+                    GovernedInvocationDisposition::Denied,
+                ),
+            )));
+        }
         return request_action_review(ctx, request, invocation, prepared_action).await;
     }
 
@@ -292,6 +305,18 @@ pub(crate) async fn invoke_governed_tool(
         channel_adapters,
     )
     .await
+}
+
+fn bounded_review_refusal(
+    request: &GovernedInvocationRequest<'_>,
+    invocation: &ToolInvocation,
+) -> Option<ToolOutput> {
+    (!request.resource_budget.is_unbounded()).then(|| {
+        denied_tool_output(format!(
+            "Tool {} requires admin review, which a resource-bounded turn cannot detach.",
+            invocation.name
+        ))
+    })
 }
 
 async fn request_action_review(
@@ -508,6 +533,7 @@ fn tool_call_request(
             | GovernedInvocationOrigin::ExecutionTask { .. } => None,
             GovernedInvocationOrigin::Worker { worker_id, .. } => Some(worker_id.to_string()),
         },
+        resource_budget: request.resource_budget,
     }
 }
 
@@ -688,9 +714,9 @@ mod tests {
 
     use super::{
         ActionReviewOwner, GovernedInvocationDisposition, GovernedInvocationEventPlan,
-        GovernedInvocationOrigin, GovernedInvocationRequest, completed_result,
-        owns_root_session_tool_events, pending_review_output, prepare_action_review_request,
-        tool_call_request,
+        GovernedInvocationOrigin, GovernedInvocationRequest, bounded_review_refusal,
+        completed_result, owns_root_session_tool_events, pending_review_output,
+        prepare_action_review_request, tool_call_request,
     };
     use crate::delegation::storage_user_id;
 
@@ -740,6 +766,7 @@ mod tests {
             trusted_sandbox_manifest: None,
             origin,
             capability_provenance: None,
+            resource_budget: Default::default(),
         }
     }
 
@@ -778,6 +805,64 @@ mod tests {
             policy_request.idempotency_key.as_deref(),
             Some("provider-tool-1")
         );
+    }
+
+    #[test]
+    fn governed_tool_request_preserves_the_turn_resource_budget() {
+        // Pins: the Session-owned resource slice reaches ToolExecutor on the wire;
+        // dropping it here would make the budget-aware Hands path unbounded again.
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let mut request = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-budget",
+                generation: 1,
+            },
+        );
+        request.resource_budget = moa_core::types::resource::ResourceBudget::new(
+            None,
+            Some(moa_core::types::resource::ResourceAmounts {
+                tool_calls: 1,
+                ..moa_core::types::resource::ResourceAmounts::ZERO
+            }),
+        );
+
+        let durable = tool_call_request(&request, &tool_call.invocation);
+        assert_eq!(durable.resource_budget, request.resource_budget);
+    }
+
+    #[test]
+    fn bounded_turn_refuses_to_detach_an_admin_review() {
+        // Pins: a reviewed action cannot outlive the target reservation that
+        // admitted it and execute later as unaccounted experiment work.
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let mut request = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-review-budget",
+                generation: 1,
+            },
+        );
+        request.resource_budget = moa_core::types::resource::ResourceBudget::new(
+            None,
+            Some(moa_core::types::resource::ResourceAmounts {
+                tool_calls: 1,
+                ..moa_core::types::resource::ResourceAmounts::ZERO
+            }),
+        );
+
+        let output = bounded_review_refusal(&request, &tool_call.invocation)
+            .expect("bounded review must be refused before enqueue");
+        assert!(output.is_error);
+        assert!(output.to_text().contains("cannot detach"));
     }
 
     #[test]

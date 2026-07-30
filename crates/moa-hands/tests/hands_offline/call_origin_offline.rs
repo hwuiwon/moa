@@ -300,22 +300,19 @@ async fn a_trial_owned_session_loses_the_connector_on_a_production_router_offlin
 }
 
 #[tokio::test]
-async fn an_experiment_origin_call_keeps_run_scoped_sandbox_capabilities_offline() {
-    // Pins: the origin ceiling removes production reach without disarming the
-    // trial. Sandbox writes and reads — the run-scoped fixture capabilities a
-    // trial exists to exercise — still execute end to end under the same origin
-    // that refuses the connector above.
+async fn an_experiment_origin_fails_closed_on_the_host_tier_offline() {
+    // Pins: an experiment binds deny-all egress, and direct host execution
+    // cannot enforce that posture. Admission therefore refuses the call before
+    // provisioning or writing the fixture instead of widening trial policy to
+    // keep the host tier usable.
     let dir = tempdir().expect("sandbox dir");
     let router = ToolRouter::new_local(dir.path())
         .await
         .expect("local router")
         .with_call_origin(trial_origin());
-    // One session, so both calls resolve the same provisioned fixture sandbox.
-    let session = session();
-
-    router
+    let error = router
         .execute_authorized(
-            &session,
+            &session(),
             &identity(),
             &ToolInvocation {
                 id: None,
@@ -326,23 +323,37 @@ async fn an_experiment_origin_call_keeps_run_scoped_sandbox_capabilities_offline
             None,
         )
         .await
-        .expect("a trial may write inside its own fixture workspace");
+        .expect_err("host execution must not serve deny-all experiment traffic");
+    assert!(
+        matches!(&error, moa_core::error::MoaError::Unsupported(message)
+            if message.contains("deny_all") && message.contains("egress")),
+        "admission must name the unenforceable deny-all posture: {error:?}"
+    );
+    assert!(
+        !dir.path().join("fixture.txt").exists(),
+        "refused experiment work must not perform its side effect"
+    );
+}
 
-    let read = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
-                id: None,
-                name: "file_read".to_string(),
-                input: json!({ "path": "fixture.txt" }),
-            },
-            ToolCallId::new(),
-            None,
-        )
-        .await
-        .expect("a trial may read inside its own fixture workspace");
-    assert!(read.safe_output.to_text().contains("trial fixture"));
+#[tokio::test]
+async fn generated_code_still_binds_deny_all_egress_offline() {
+    // Pins: narrowing the experiment layer did not narrow the generated-code layer.
+    // `DenyAll` is what the plan states for model-generated code, and it remains
+    // part of the resolved profile rather than a check some dispatch path performs.
+    use moa_core::types::hands::{EgressPolicy, OriginPolicyRevision};
+
+    assert_eq!(
+        OriginPolicyRevision::of(CallOrigin::GeneratedCode)
+            .profile()
+            .egress,
+        EgressPolicy::DenyAll,
+        "generated code must still be network-isolated by its origin layer"
+    );
+    assert_eq!(
+        OriginPolicyRevision::of(trial_origin()).profile().egress,
+        EgressPolicy::DenyAll,
+        "an experiment must be network-isolated by its origin layer"
+    );
 }
 
 #[tokio::test]
@@ -356,6 +367,7 @@ async fn an_over_limit_bash_timeout_never_reaches_the_executor_offline() {
         .await
         .expect("local hand provider");
     let spec = moa_core::types::hands::HandSpec {
+        budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: moa_core::types::hands::SandboxTier::Local,
         image: None,
         env: std::collections::HashMap::new(),
@@ -374,6 +386,12 @@ async fn an_over_limit_bash_timeout_never_reaches_the_executor_offline() {
             ),
             &moa_core::types::hands::SandboxPolicySnapshot::builtin(
                 moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+            ),
+            // Production here on purpose: this fixture proves the *session*
+            // origin is what withdraws the capability, so the sandbox spec must
+            // not be the thing doing the restricting.
+            &moa_core::types::hands::SandboxPolicySnapshot::origin(
+                moa_core::types::action_policy::CallOrigin::Production,
             ),
             &moa_hands::LOCAL_HAND_CAPABILITIES.revision,
         )

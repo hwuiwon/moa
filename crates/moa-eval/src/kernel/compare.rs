@@ -1,11 +1,34 @@
 //! Paired report comparison utilities shared by eval suites.
+//!
+//! The comparison keeps two layers. The reported per-metric aggregates,
+//! paired cluster-bootstrap intervals, and the exact McNemar test on the direct
+//! binary outcome are unchanged. On top of them, every compared metric now
+//! carries a declared [`MetricDefinition`] and produces a three-way
+//! PASS/REGRESSION/INCONCLUSIVE decision against a predeclared non-inferiority
+//! margin, combined by an intersection-union gate.
+//!
+//! Probes are nested inside users, so the binary gate uses a cluster-aware
+//! matched risk difference rather than a pair-independent closed form, and
+//! McNemar stays a zero-difference diagnostic.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use moa_eval_core::decision::{
+    GateOutcome, MetricDecision, RegressionDeclaration, holm_regression_family,
+    intersection_union_gate,
+};
+use moa_eval_core::metric::{
+    ConfidenceMethod, Estimand, Estimator, GateKind, HypothesisFamily, MetricClass,
+    MetricDefinition, MetricDirection, MetricUnit, ResamplingPlan,
+};
 use serde::{Deserialize, Serialize};
 
+use super::stats::{
+    PairedBinaryObservation, PairedGateError, PairedNumericObservation,
+    evaluate_paired_binary_gate, evaluate_paired_numeric_gate,
+};
 use super::{
     BinaryProbeOutcome, BootstrapConfig, ClusterBootstrapReport, ClusterObservation,
     PairedComparison, RetrievalCoreMetrics, benjamini_hochberg, cluster_bootstrap_mean_by_user,
@@ -64,6 +87,36 @@ pub enum CompareReportsError {
         /// Probe ids present in candidate but not baseline.
         missing_in_baseline: Vec<String>,
     },
+    /// One report repeats a probe identity, so map-based pairing would discard rows.
+    #[error("{label} report repeats probe ids {probe_ids:?}; paired comparison refused")]
+    DuplicateProbeIds {
+        /// Logical report label.
+        label: &'static str,
+        /// Repeated probe ids.
+        probe_ids: Vec<String>,
+    },
+    /// The same probe id names different user clusters across reports.
+    #[error(
+        "probe {probe_id} user mismatch ({baseline} vs {candidate}); paired comparison refused"
+    )]
+    ProbeUserMismatch {
+        /// Probe id whose cluster identity changed.
+        probe_id: String,
+        /// Baseline user id.
+        baseline: String,
+        /// Candidate user id.
+        candidate: String,
+    },
+    /// A required direct binary outcome is absent from one or both reports.
+    #[error(
+        "required all_expected_found_at_4 outcomes are missing; baseline: {baseline:?}; candidate: {candidate:?}"
+    )]
+    MissingBinaryOutcomes {
+        /// Probe ids missing the outcome in the baseline report.
+        baseline: Vec<String>,
+        /// Probe ids missing the outcome in the candidate report.
+        candidate: Vec<String>,
+    },
     /// Reports use different final cutoffs.
     #[error("final_k mismatch ({baseline} vs {candidate}); paired comparison refused")]
     FinalKMismatch {
@@ -72,6 +125,9 @@ pub enum CompareReportsError {
         /// Candidate final cutoff.
         candidate: usize,
     },
+    /// A declared metric gate could not decide the paired observations.
+    #[error(transparent)]
+    Gate(#[from] PairedGateError),
 }
 
 impl CompareReportsError {
@@ -83,8 +139,42 @@ impl CompareReportsError {
             Self::CorpusMismatch { .. }
                 | Self::SeedMismatch { .. }
                 | Self::ProbeSetMismatch { .. }
+                | Self::DuplicateProbeIds { .. }
+                | Self::ProbeUserMismatch { .. }
+                | Self::MissingBinaryOutcomes { .. }
                 | Self::FinalKMismatch { .. }
         )
+    }
+}
+
+/// Declared gate policy applied to every compared retrieval metric.
+///
+/// Margins are in utility units: the largest paired degradation the platform
+/// tolerates before a change is called a regression. They are policy, so they
+/// are declared here rather than inferred from the data being judged.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalGatePolicy {
+    /// Tolerated paired regression for numeric rank/recall metrics.
+    pub numeric_margin: f64,
+    /// Tolerated paired regression for the direct binary outcome.
+    pub binary_margin: f64,
+    /// One-sided alpha for every bound.
+    pub alpha: f64,
+    /// Minimum independent user clusters required for a population claim.
+    pub min_independent_users: usize,
+    /// Family-wise alpha for the reverse regression hypotheses.
+    pub regression_family_alpha: f64,
+}
+
+impl Default for RetrievalGatePolicy {
+    fn default() -> Self {
+        Self {
+            numeric_margin: 0.02,
+            binary_margin: 0.03,
+            alpha: 0.025,
+            min_independent_users: 12,
+            regression_family_alpha: 0.05,
+        }
     }
 }
 
@@ -99,6 +189,14 @@ pub struct EvalReportComparison {
     pub metrics: Vec<MetricComparison>,
     /// Directly observed binary comparisons after BH correction.
     pub mcnemar: Vec<PairedComparison>,
+    /// Gate policy the decisions were made under.
+    pub gate_policy: RetrievalGatePolicy,
+    /// Three-way decision per declared metric.
+    pub decisions: Vec<MetricDecision>,
+    /// Intersection-union decision over the required metrics.
+    pub gate: GateOutcome,
+    /// Holm-corrected reverse regression hypotheses.
+    pub regression_family: Vec<RegressionDeclaration>,
 }
 
 impl EvalReportComparison {
@@ -134,6 +232,24 @@ impl EvalReportComparison {
                 direct.treatment_only_successes,
                 direct.p_value,
                 direct.adjusted_p_value
+            ));
+        }
+        out.push_str(&format!(
+            "gate: {:?} ({})\n",
+            self.gate.decision, self.gate.rationale
+        ));
+        for decision in &self.decisions {
+            out.push_str(&format!(
+                "decision {:<24} {:?}  delta {:+.4} ci[{:+.4},{:+.4}] margin {:.4} support {}/{} {}\n",
+                decision.metric_id,
+                decision.decision,
+                decision.utility_delta,
+                decision.lower_bound,
+                decision.upper_bound,
+                decision.practical_margin,
+                decision.support.independent_units,
+                decision.support.required_independent_units,
+                decision.rationale
             ));
         }
         out
@@ -191,6 +307,21 @@ pub fn compare_eval_reports_with_config(
     candidate_json: &str,
     bootstrap_config: BootstrapConfig,
 ) -> Result<EvalReportComparison, CompareReportsError> {
+    compare_eval_reports_with_policy(
+        baseline_json,
+        candidate_json,
+        bootstrap_config,
+        RetrievalGatePolicy::default(),
+    )
+}
+
+/// Compares two JSON report bodies under an explicit gate policy.
+pub fn compare_eval_reports_with_policy(
+    baseline_json: &str,
+    candidate_json: &str,
+    bootstrap_config: BootstrapConfig,
+    policy: RetrievalGatePolicy,
+) -> Result<EvalReportComparison, CompareReportsError> {
     let baseline: ComparableReport =
         serde_json::from_str(baseline_json).map_err(|source| CompareReportsError::ParseReport {
             label: "baseline",
@@ -202,13 +333,14 @@ pub fn compare_eval_reports_with_config(
             source,
         }
     })?;
-    compare_reports(baseline, candidate, bootstrap_config)
+    compare_reports(baseline, candidate, bootstrap_config, policy)
 }
 
 fn compare_reports(
     baseline: ComparableReport,
     candidate: ComparableReport,
     bootstrap_config: BootstrapConfig,
+    policy: RetrievalGatePolicy,
 ) -> Result<EvalReportComparison, CompareReportsError> {
     validate_pairing(&baseline, &candidate)?;
     let baseline_by_probe = baseline.probe_map();
@@ -222,30 +354,124 @@ fn compare_reports(
         0.05,
     );
 
-    let metrics = COMPARED_METRICS
-        .iter()
-        .map(|metric| {
-            let interval = cluster_bootstrap_mean_by_user(
-                metric.name(),
-                &paired_delta_observations(
-                    &baseline_by_probe,
-                    &candidate_by_probe,
-                    *metric,
-                    baseline.final_k,
-                    candidate.final_k,
-                ),
-                bootstrap_config,
-            );
-            metric_comparison(*metric, &baseline.metrics, &candidate.metrics, &interval)
-        })
-        .collect();
+    let mut metrics = Vec::with_capacity(COMPARED_METRICS.len());
+    let mut decisions = Vec::with_capacity(COMPARED_METRICS.len() + 1);
+    for metric in COMPARED_METRICS {
+        let paired = paired_numeric_observations(
+            &baseline_by_probe,
+            &candidate_by_probe,
+            *metric,
+            baseline.final_k,
+            candidate.final_k,
+        );
+        let interval = cluster_bootstrap_mean_by_user(
+            metric.name(),
+            &delta_observations(&paired),
+            bootstrap_config,
+        );
+        metrics.push(metric_comparison(
+            *metric,
+            &baseline.metrics,
+            &candidate.metrics,
+            &interval,
+        ));
+        let definition = numeric_metric_definition(metric.name(), bootstrap_config, policy);
+        decisions.push(evaluate_paired_numeric_gate(&definition, &paired)?.decision);
+    }
+
+    let binary_definition = binary_metric_definition(bootstrap_config, policy);
+    let binary_observations = paired_binary_observations(&baseline_by_probe, &candidate_by_probe);
+    decisions.push(evaluate_paired_binary_gate(&binary_definition, &binary_observations)?.decision);
+
+    let gate = intersection_union_gate(&decisions);
+    let regression_family = holm_regression_family(&decisions, policy.regression_family_alpha);
 
     Ok(EvalReportComparison {
         corpus_id: baseline.manifest.corpus_id,
         probes_paired: baseline_by_probe.len(),
         metrics,
         mcnemar,
+        gate_policy: policy,
+        decisions,
+        gate,
+        regression_family,
     })
+}
+
+/// Declares a paired numeric retrieval metric.
+///
+/// Probes are nested inside users, so the independent unit is the user and the
+/// interval is a user-cluster percentile bootstrap on the paired delta — the
+/// same estimator the retrieval comparison already reported, now bound to a
+/// declared margin, alpha, and support floor.
+fn numeric_metric_definition(
+    metric_id: &str,
+    bootstrap_config: BootstrapConfig,
+    policy: RetrievalGatePolicy,
+) -> MetricDefinition {
+    MetricDefinition {
+        id: metric_id.to_string(),
+        direction: MetricDirection::HigherIsBetter,
+        estimand: Estimand {
+            class: MetricClass::PairedNumeric,
+            summary: format!("mean candidate-minus-baseline {metric_id} per probe"),
+            target_population: "seeded retrieval corpus users".to_string(),
+        },
+        unit: MetricUnit::Proportion,
+        independent_unit: "user".to_string(),
+        cluster_key: Some("user_id".to_string()),
+        paired_key: Some("probe_id".to_string()),
+        estimator: Estimator::MeanPairedDelta,
+        practical_margin: Some(policy.numeric_margin),
+        alpha: policy.alpha,
+        confidence_method: ConfidenceMethod::ClusterPairedDeltaBootstrap(ResamplingPlan {
+            resamples: bootstrap_config.resamples,
+            seed: bootstrap_config.seed,
+            min_independent_units: policy.min_independent_users,
+        }),
+        acceptable_alternative: Some(0.0),
+        unacceptable_alternative: Some(-2.0 * policy.numeric_margin),
+        gate_kind: GateKind::RequiredNonInferiority,
+        hypothesis_family: HypothesisFamily::Primary,
+    }
+}
+
+/// Declares the direct binary retrieval outcome.
+///
+/// The outcomes are clustered inside users, so the gate uses a cluster-aware
+/// matched risk difference. The exact McNemar test reported alongside is a
+/// zero-difference diagnostic and cannot decide this margin.
+fn binary_metric_definition(
+    bootstrap_config: BootstrapConfig,
+    policy: RetrievalGatePolicy,
+) -> MetricDefinition {
+    MetricDefinition {
+        id: DIRECT_BINARY_METRIC.to_string(),
+        direction: MetricDirection::HigherIsBetter,
+        estimand: Estimand {
+            class: MetricClass::PairedBinary,
+            summary: "matched risk difference in all-expected-found rate".to_string(),
+            target_population: "seeded retrieval corpus users".to_string(),
+        },
+        unit: MetricUnit::Proportion,
+        independent_unit: "user".to_string(),
+        cluster_key: Some("user_id".to_string()),
+        paired_key: Some("probe_id".to_string()),
+        estimator: Estimator::MatchedRiskDifference,
+        practical_margin: Some(policy.binary_margin),
+        alpha: policy.alpha,
+        confidence_method: ConfidenceMethod::ClusterMatchedRiskDifferenceBootstrap(
+            ResamplingPlan {
+                resamples: bootstrap_config.resamples,
+                seed: bootstrap_config.seed,
+                min_independent_units: policy.min_independent_users,
+            },
+        ),
+        acceptable_alternative: Some(0.0),
+        unacceptable_alternative: Some(-2.0 * policy.binary_margin),
+        gate_kind: GateKind::RequiredNonInferiority,
+        hypothesis_family: HypothesisFamily::Primary,
+    }
 }
 
 fn validate_pairing(
@@ -271,6 +497,21 @@ fn validate_pairing(
         });
     }
 
+    let baseline_duplicates = baseline.duplicate_probe_ids();
+    if !baseline_duplicates.is_empty() {
+        return Err(CompareReportsError::DuplicateProbeIds {
+            label: "baseline",
+            probe_ids: baseline_duplicates,
+        });
+    }
+    let candidate_duplicates = candidate.duplicate_probe_ids();
+    if !candidate_duplicates.is_empty() {
+        return Err(CompareReportsError::DuplicateProbeIds {
+            label: "candidate",
+            probe_ids: candidate_duplicates,
+        });
+    }
+
     let baseline_probe_ids = baseline.probe_ids();
     let candidate_probe_ids = candidate.probe_ids();
     if baseline_probe_ids != candidate_probe_ids {
@@ -283,6 +524,42 @@ fn validate_pairing(
                 .difference(&baseline_probe_ids)
                 .cloned()
                 .collect(),
+        });
+    }
+
+    let baseline_by_probe = baseline.probe_map();
+    let candidate_by_probe = candidate.probe_map();
+    for (probe_id, baseline_probe) in &baseline_by_probe {
+        let candidate_probe = candidate_by_probe
+            .get(probe_id)
+            .expect("probe sets were validated before identity comparison");
+        if baseline_probe.user_id != candidate_probe.user_id {
+            return Err(CompareReportsError::ProbeUserMismatch {
+                probe_id: probe_id.clone(),
+                baseline: baseline_probe.user_id.clone(),
+                candidate: candidate_probe.user_id.clone(),
+            });
+        }
+    }
+
+    let mut baseline_missing = baseline
+        .probe_results
+        .iter()
+        .filter(|probe| probe.all_expected_found_at_4.is_none())
+        .map(|probe| probe.probe_id.clone())
+        .collect::<Vec<_>>();
+    let mut candidate_missing = candidate
+        .probe_results
+        .iter()
+        .filter(|probe| probe.all_expected_found_at_4.is_none())
+        .map(|probe| probe.probe_id.clone())
+        .collect::<Vec<_>>();
+    baseline_missing.sort();
+    candidate_missing.sort();
+    if !baseline_missing.is_empty() || !candidate_missing.is_empty() {
+        return Err(CompareReportsError::MissingBinaryOutcomes {
+            baseline: baseline_missing,
+            candidate: candidate_missing,
         });
     }
     Ok(())
@@ -312,13 +589,13 @@ fn metric_comparison(
     }
 }
 
-fn paired_delta_observations(
+fn paired_numeric_observations(
     baseline_by_probe: &BTreeMap<String, ComparableProbeResult>,
     candidate_by_probe: &BTreeMap<String, ComparableProbeResult>,
     metric: ComparedMetric,
     baseline_final_k: usize,
     candidate_final_k: usize,
-) -> Vec<ClusterObservation> {
+) -> Vec<PairedNumericObservation> {
     baseline_by_probe
         .iter()
         .filter_map(|(probe_id, baseline_probe)| {
@@ -327,11 +604,48 @@ fn paired_delta_observations(
                 .expect("probe sets were validated before comparison");
             let baseline_value = metric.probe_value(baseline_probe, baseline_final_k)?;
             let candidate_value = metric.probe_value(candidate_probe, candidate_final_k)?;
-            Some(ClusterObservation {
-                user_id: baseline_probe.user_id.clone(),
-                probe_id: probe_id.clone(),
-                value: candidate_value - baseline_value,
+            Some(PairedNumericObservation {
+                cluster_id: baseline_probe.user_id.clone(),
+                pair_id: probe_id.clone(),
+                baseline: baseline_value,
+                candidate: candidate_value,
             })
+        })
+        .collect()
+}
+
+/// Projects paired observations to the per-probe deltas the interval uses.
+fn delta_observations(paired: &[PairedNumericObservation]) -> Vec<ClusterObservation> {
+    paired
+        .iter()
+        .map(|observation| ClusterObservation {
+            user_id: observation.cluster_id.clone(),
+            probe_id: observation.pair_id.clone(),
+            value: observation.candidate - observation.baseline,
+        })
+        .collect()
+}
+
+fn paired_binary_observations(
+    baseline_by_probe: &BTreeMap<String, ComparableProbeResult>,
+    candidate_by_probe: &BTreeMap<String, ComparableProbeResult>,
+) -> Vec<PairedBinaryObservation> {
+    baseline_by_probe
+        .iter()
+        .map(|(probe_id, baseline_probe)| {
+            let candidate_probe = candidate_by_probe
+                .get(probe_id)
+                .expect("probe sets were validated before comparison");
+            PairedBinaryObservation {
+                cluster_id: baseline_probe.user_id.clone(),
+                pair_id: probe_id.clone(),
+                baseline: baseline_probe
+                    .all_expected_found_at_4
+                    .expect("binary outcomes were validated before comparison"),
+                candidate: candidate_probe
+                    .all_expected_found_at_4
+                    .expect("binary outcomes were validated before comparison"),
+            }
         })
         .collect()
 }
@@ -341,13 +655,11 @@ fn direct_binary_outcomes(
 ) -> Vec<BinaryProbeOutcome> {
     probes
         .values()
-        .filter_map(|probe| {
-            probe
+        .map(|probe| BinaryProbeOutcome {
+            probe_id: probe.probe_id.clone(),
+            success: probe
                 .all_expected_found_at_4
-                .map(|success| BinaryProbeOutcome {
-                    probe_id: probe.probe_id.clone(),
-                    success,
-                })
+                .expect("binary outcomes were validated before comparison"),
         })
         .collect()
 }
@@ -373,6 +685,17 @@ impl ComparableReport {
             .iter()
             .map(|probe| (probe.probe_id.clone(), probe.clone()))
             .collect()
+    }
+
+    fn duplicate_probe_ids(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut duplicates = BTreeSet::new();
+        for probe in &self.probe_results {
+            if !seen.insert(probe.probe_id.as_str()) {
+                duplicates.insert(probe.probe_id.clone());
+            }
+        }
+        duplicates.into_iter().collect()
     }
 }
 
@@ -577,6 +900,78 @@ mod tests {
                 missing_in_candidate,
                 missing_in_baseline
             } if missing_in_candidate == ["probe-b"] && missing_in_baseline == ["probe-c"]
+        ));
+    }
+
+    #[test]
+    fn compare_reports_rejects_duplicate_probe_ids_before_mapping() {
+        // Pins: duplicate rows cannot be silently collapsed by probe_map.
+        let baseline = report_with_metrics(
+            vec![
+                probe_json("probe-a", "user-a", &["fact"], Vec::new(), Some(true)),
+                probe_json("probe-a", "user-a", &["fact"], Vec::new(), Some(false)),
+            ],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+        let candidate = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                Vec::new(),
+                Some(true),
+            )],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+
+        let error = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect_err("duplicate probe identity must fail");
+
+        assert!(error.is_pairing_error());
+        assert!(matches!(
+            error,
+            CompareReportsError::DuplicateProbeIds {
+                label: "baseline",
+                probe_ids
+            } if probe_ids == ["probe-a"]
+        ));
+    }
+
+    #[test]
+    fn compare_reports_rejects_probe_user_identity_mismatch() {
+        // Pins: a probe cannot move between independent user clusters and remain paired.
+        let baseline = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                Vec::new(),
+                Some(true),
+            )],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+        let candidate = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-b",
+                &["fact"],
+                Vec::new(),
+                Some(true),
+            )],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+
+        let error = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect_err("probe cluster identity mismatch must fail");
+
+        assert!(error.is_pairing_error());
+        assert!(matches!(
+            error,
+            CompareReportsError::ProbeUserMismatch {
+                probe_id,
+                baseline,
+                candidate
+            } if probe_id == "probe-a" && baseline == "user-a" && candidate == "user-b"
         ));
     }
 
@@ -835,8 +1230,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_binary_comparison_excludes_none_outcomes_without_recomputation() {
-        // Pins: missing direct observations are excluded rather than inferred from retrieved candidates.
+    fn direct_binary_comparison_rejects_incomplete_required_outcomes() {
+        // Pins: a required binary gate cannot disappear or shrink when either
+        // report omits direct outcomes.
         let baseline = report_with_metrics(
             vec![
                 probe_json("probe-none", "user-a", &["fact"], Vec::new(), None),
@@ -866,15 +1262,17 @@ mod tests {
             MetricValues::new(0.0, 0.0, 0.0),
         );
 
-        let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
-            .expect("paired reports should compare");
-        let direct = &comparison.mcnemar[0];
+        let error = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect_err("missing required binary outcomes must fail");
 
-        assert_eq!(direct.total_pairs, 1);
-        assert_eq!(direct.both_successes, 0);
-        assert_eq!(direct.both_failures, 0);
-        assert_eq!(direct.control_only_successes, 0);
-        assert_eq!(direct.treatment_only_successes, 1);
+        assert!(error.is_pairing_error());
+        assert!(matches!(
+            error,
+            CompareReportsError::MissingBinaryOutcomes {
+                baseline,
+                candidate
+            } if baseline == ["probe-none"] && candidate == ["probe-candidate-none", "probe-none"]
+        ));
     }
 
     #[test]

@@ -120,13 +120,21 @@ pub async fn build_agent_environment(
     agent_config: &AgentConfig,
     temp_dir: &Path,
 ) -> Result<AgentEnvironment> {
+    let llm_provider = resolve_agent_llm_provider(base_config, agent_config)?;
+    build_agent_environment_with_provider(base_config, agent_config, temp_dir, llm_provider).await
+}
+
+/// Resolves the provider selected by an agent config without constructing an environment.
+pub(crate) fn resolve_agent_llm_provider(
+    base_config: &MoaConfig,
+    agent_config: &AgentConfig,
+) -> Result<Arc<dyn LLMProvider>> {
     let provider_registry = ProviderRegistry::from_config(base_config, None)?;
     let requested_model = agent_config
         .model
         .as_deref()
         .unwrap_or(base_config.models.main.as_str());
-    let llm_provider = provider_registry.provider_for_model(Some(requested_model))?;
-    build_agent_environment_with_provider(base_config, agent_config, temp_dir, llm_provider).await
+    Ok(provider_registry.provider_for_model(Some(requested_model))?)
 }
 
 /// Builds an isolated agent environment using an explicit provider instance.

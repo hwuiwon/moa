@@ -1,13 +1,21 @@
 //! Effective sandbox policy resolution and provider capability admission.
 //!
-//! Four layers decide what a sandbox may consume: the deployment configuration,
+//! Five layers decide what a sandbox may consume: the deployment configuration,
 //! the tenant's current authored policy, the agent policy pinned on the
-//! session, and the hand route serving the tool. This module is the one place
-//! they are combined, and the only place an [`EffectiveSandboxProfile`] is
-//! produced. Resolution is a restrictive intersection, so no layer can widen
-//! what another bounded, and every layer contributes a named revision to the
-//! resulting policy identity hash — including the layers MOA contributes when
-//! no one authored one.
+//! session, the hand route serving the tool, and the provenance of the call
+//! being served. This module is the one place they are combined, and the only
+//! place an [`EffectiveSandboxProfile`] is produced. Resolution is a
+//! restrictive intersection, so no layer can widen what another bounded, and
+//! every layer contributes a named revision to the resulting policy identity
+//! hash — including the layers MOA contributes when no one authored one.
+//!
+//! The origin layer is what binds a generated-code or experiment-trial sandbox
+//! to [`moa_core::types::hands::EgressPolicy::DenyAll`]. Expressing it as a
+//! policy layer rather than as a check somewhere in dispatch means the
+//! restriction is in the resolved profile, is admitted against the serving
+//! provider's capabilities before anything is provisioned, and is part of the
+//! sandbox's policy identity — so a production sandbox can never be reused to
+//! serve generated code or an experiment trial.
 //!
 //! Resolution is followed immediately by admission against the serving
 //! provider's [`HandProviderCapabilities`]. A provider that cannot enforce a
@@ -136,12 +144,16 @@ impl ToolRouter {
         let capabilities = self.provider_capabilities(&route.provider)?;
         let tenant = self.tenant_sandbox_policy(session.tenant_id).await?;
         let agent = agent_sandbox_policy(session)?;
+        // The composition of the router's deployment-level origin ceiling and
+        // the session's durable origin, so neither can be widened by the other.
+        let origin = SandboxPolicySnapshot::origin(self.effective_call_origin(session));
 
         let effective = resolve_effective_sandbox_profile(
             &self.deployment_sandbox_policy,
             &tenant,
             &agent,
             &route.policy,
+            &origin,
             &capabilities.revision,
         )?;
         capabilities.admit(
@@ -192,6 +204,7 @@ fn agent_sandbox_policy(session: &SessionMeta) -> Result<SandboxPolicySnapshot> 
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use moa_core::types::action_policy::CallOrigin;
     use moa_core::types::hands::{
         BuiltinPolicyRevision, HandSpec, SandboxPolicySnapshot, SandboxProfile, SandboxTier,
         resolve_effective_sandbox_profile,
@@ -205,10 +218,12 @@ pub(crate) mod test_support {
             &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
             &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
             &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+            &SandboxPolicySnapshot::origin(CallOrigin::Production),
             "test-capabilities-v1",
         )
         .expect("test policy resolution should succeed");
         HandSpec {
+            budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
             sandbox_tier: tier,
             image: None,
             env: std::collections::HashMap::new(),

@@ -102,7 +102,7 @@ impl HandLeaseStatus {
 /// The exact sandbox policy identity one lease was provisioned under.
 ///
 /// Persisted alongside the handle so recovery can recompute today's policy and
-/// compare hashes. Any change to the profile, to any of the four source
+/// compare hashes. Any change to the profile, to any of the five source
 /// revisions, or to the provider's capability revision changes `profile_hash`,
 /// which is what prevents a sandbox from being reused under a policy it was
 /// never admitted for.
@@ -112,7 +112,7 @@ pub struct HandLeasePolicy {
     pub profile: SandboxProfile,
     /// The `sha256:`-prefixed policy identity hash.
     pub profile_hash: String,
-    /// The four contributing policy-layer revisions.
+    /// The five contributing policy-layer revisions.
     pub sources: SandboxPolicySources,
     /// The serving provider's capability revision.
     pub capability_revision: String,
@@ -309,11 +309,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 session_id, worker_id, tenant_id, provider, tier, status, generation,
                 idle_expires_at, hard_expires_at, profile, profile_hash,
                 source_deployment_revision, source_tenant_revision,
-                source_agent_revision, source_route_revision, capability_revision,
-                reap_attempts, reap_not_before
+                source_agent_revision, source_route_revision, source_origin_revision,
+                capability_revision, reap_attempts, reap_not_before
             )
             VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14, 0, NULL)
+                    $10, $11, $12, $13, $14, $15, 0, NULL)
             ON CONFLICT (session_id, worker_id, provider) DO UPDATE
             SET tenant_id = EXCLUDED.tenant_id,
                 tier = EXCLUDED.tier,
@@ -328,6 +328,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 source_tenant_revision = EXCLUDED.source_tenant_revision,
                 source_agent_revision = EXCLUDED.source_agent_revision,
                 source_route_revision = EXCLUDED.source_route_revision,
+                source_origin_revision = EXCLUDED.source_origin_revision,
                 capability_revision = EXCLUDED.capability_revision,
                 reap_attempts = 0,
                 reap_not_before = NULL
@@ -350,6 +351,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(&policy.sources.tenant)
         .bind(&policy.sources.agent)
         .bind(&policy.sources.route)
+        .bind(&policy.sources.origin)
         .bind(&policy.capability_revision)
         .fetch_optional(&self.pool)
         .await
@@ -550,7 +552,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
 pub(super) const LEASE_COLUMNS: &str = "session_id, worker_id, tenant_id, provider, tier, handle, \
      status, generation, created_at, updated_at, idle_expires_at, hard_expires_at, profile, \
      profile_hash, source_deployment_revision, source_tenant_revision, source_agent_revision, \
-     source_route_revision, capability_revision";
+     source_route_revision, source_origin_revision, capability_revision";
 
 pub(super) fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
     Ok(HandLease {
@@ -602,6 +604,12 @@ fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<Hand
     let route = row
         .try_get::<Option<String>, _>("source_route_revision")
         .map_err(map_sqlx_error)?;
+    // Absent on rows written before V000372 introduced the origin layer. Those
+    // rows carry an incomplete policy identity, so the destructure below treats
+    // them exactly as V000359's legacy rows: stale, never reusable.
+    let origin = row
+        .try_get::<Option<String>, _>("source_origin_revision")
+        .map_err(map_sqlx_error)?;
     let capability_revision = row
         .try_get::<Option<String>, _>("capability_revision")
         .map_err(map_sqlx_error)?;
@@ -613,6 +621,7 @@ fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<Hand
         Some(tenant),
         Some(agent),
         Some(route),
+        Some(origin),
         Some(capability_revision),
     ) = (
         profile,
@@ -621,6 +630,7 @@ fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<Hand
         tenant,
         agent,
         route,
+        origin,
         capability_revision,
     )
     else {
@@ -634,6 +644,7 @@ fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<Hand
             tenant,
             agent,
             route,
+            origin,
         },
         capability_revision,
     }))
@@ -647,6 +658,7 @@ pub(super) fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 pub(crate) mod test_support {
     use std::num::NonZeroU64;
 
+    use moa_core::types::action_policy::CallOrigin;
     use moa_core::types::hands::{
         BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
         SandboxPolicySnapshot, SandboxProfile, resolve_effective_sandbox_profile,
@@ -683,6 +695,7 @@ pub(crate) mod test_support {
             &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
             &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
             &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+            &SandboxPolicySnapshot::origin(CallOrigin::Production),
             capability_revision,
         )
         .expect("test resolution should succeed");

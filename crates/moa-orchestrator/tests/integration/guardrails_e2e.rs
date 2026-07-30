@@ -278,6 +278,7 @@ async fn run_turn(
                 model: None,
                 contact: None,
                 max_turns: None,
+                resource_budget: Default::default(),
                 execution_template: None,
             },
             None,

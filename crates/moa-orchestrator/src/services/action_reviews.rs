@@ -754,6 +754,7 @@ mod tests {
             session_id: moa_core::types::identifiers::SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
+            resource_budget: Default::default(),
         };
 
         let request = execution_task_review_request(Some(origin), &call)

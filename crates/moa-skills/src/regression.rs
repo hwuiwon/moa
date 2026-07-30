@@ -1,8 +1,12 @@
 //! Skill regression suite source generation and comparison helpers.
 
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use moa_core::{error::MoaError, error::Result, types::identifiers::TenantId};
+use moa_eval_core::assertion::{AssertionCategory, AssertionSpec, EvaluatorRef, GateEffect};
+use moa_eval_core::evaluators::{
+    ORDERED_ACTIONS_EVALUATOR_ID, REQUIRED_ACTIONS_EVALUATOR_ID, TEXT_MATCH_EVALUATOR_ID,
+};
 use moa_eval_core::{ExpectedOutput, SuiteOracle, TestCase, TestSuite};
 
 use crate::evidence::{EvidenceSource, SanitizedLearningEvidence};
@@ -94,6 +98,7 @@ pub fn compare_scores(
 fn build_generated_suite(skill_name: &str, evidence: &SanitizedLearningEvidence) -> TestSuite {
     let case_name = slugify_case_name(&extract_task_input(evidence));
     let (contains, oracle) = extract_expected_output(evidence);
+    let trajectory = successful_tool_trajectory(evidence);
     TestSuite {
         name: format!("{skill_name}-regression"),
         description: Some(format!("Auto-generated regression suite for {skill_name}")),
@@ -104,11 +109,7 @@ fn build_generated_suite(skill_name: &str, evidence: &SanitizedLearningEvidence)
                 case_name
             },
             input: extract_task_input(evidence),
-            expected_output: Some(ExpectedOutput {
-                contains,
-                ..ExpectedOutput::default()
-            }),
-            expected_trajectory: Some(evidence.tool_trajectory()),
+            assertions: generated_assertions(contains, &trajectory),
             oracle: Some(oracle),
             timeout_seconds: Some(DEFAULT_SUITE_TIMEOUT_SECONDS),
             tags: vec!["skill".to_string(), "auto-generated".to_string()],
@@ -117,7 +118,85 @@ fn build_generated_suite(skill_name: &str, evidence: &SanitizedLearningEvidence)
         }],
         default_timeout_seconds: DEFAULT_SUITE_TIMEOUT_SECONDS,
         tags: vec!["skill".to_string(), skill_name.to_string()],
+        ..TestSuite::default()
     }
+}
+
+fn successful_tool_trajectory(evidence: &SanitizedLearningEvidence) -> Vec<String> {
+    let successful_tool_ids = evidence
+        .entries_from(EvidenceSource::ToolResult)
+        .filter(|entry| entry.success() == Some(true) && !entry.is_error())
+        .filter_map(|entry| entry.tool_id())
+        .collect::<HashSet<_>>();
+
+    evidence
+        .entries_from(EvidenceSource::ToolInput)
+        .filter(|entry| {
+            entry
+                .tool_id()
+                .is_some_and(|tool_id| successful_tool_ids.contains(&tool_id))
+        })
+        .filter_map(|entry| entry.tool_name().map(str::to_string))
+        .collect()
+}
+
+/// Builds the typed assertions for one generated regression case.
+///
+/// Two things changed when the generic LCS trajectory gate was deleted, and
+/// both are deliberate:
+///
+/// - the recorded tool set becomes a **blocking** `required_actions` assertion
+///   over the *distinct* tools the source session actually used successfully.
+///   That is what "the skill still does the work" means, and it does not
+///   punish a candidate for reaching the same result by a different route;
+/// - the recorded *order* becomes a **diagnostic** `ordered_actions` assertion.
+///   The source session's exact ordering is one observation of one run, not a
+///   requirement, so it is reported for drift triage and never gates.
+fn generated_assertions(contains: Vec<String>, trajectory: &[String]) -> Vec<AssertionSpec> {
+    let mut assertions = Vec::new();
+    if !contains.is_empty() {
+        assertions.push(AssertionSpec {
+            id: "response-carries-source-facts".to_string(),
+            category: AssertionCategory::Communication,
+            gate_effect: GateEffect::Blocking,
+            evaluator: EvaluatorRef::deterministic(TEXT_MATCH_EVALUATOR_ID, 1),
+            config: serde_json::to_value(ExpectedOutput {
+                contains,
+                ..ExpectedOutput::default()
+            })
+            .unwrap_or_default(),
+        });
+    }
+
+    let mut distinct = trajectory.to_vec();
+    distinct.sort();
+    distinct.dedup();
+    if !distinct.is_empty() {
+        assertions.push(AssertionSpec {
+            id: "recorded-tools-were-used".to_string(),
+            category: AssertionCategory::Action,
+            gate_effect: GateEffect::Blocking,
+            evaluator: EvaluatorRef::deterministic(REQUIRED_ACTIONS_EVALUATOR_ID, 1),
+            config: serde_json::json!({
+                "actions": distinct
+                    .iter()
+                    .map(|name| serde_json::json!({ "name": name }))
+                    .collect::<Vec<_>>(),
+            }),
+        });
+    }
+
+    if trajectory.len() >= 2 {
+        assertions.push(AssertionSpec {
+            id: "recorded-tool-order".to_string(),
+            category: AssertionCategory::Action,
+            gate_effect: GateEffect::Diagnostic,
+            evaluator: EvaluatorRef::deterministic(ORDERED_ACTIONS_EVALUATOR_ID, 1),
+            config: serde_json::json!({ "sequence": trajectory }),
+        });
+    }
+
+    assertions
 }
 
 /// Derives the case's `contains` expectations and records which oracle produced
@@ -540,6 +619,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use moa_eval_core::types::TEST_CASE_SCHEMA_VERSION;
 
     fn record(session: SessionId, sequence: u64, event: Event) -> EventRecord {
         EventRecord {
@@ -841,6 +921,128 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn generated_actions_include_only_successful_tool_calls() {
+        // Pins: generated action requirements join calls to terminal results by
+        // tool ID. A failed result and a durable ToolError are evidence of work
+        // attempted, not work the candidate must reproduce successfully.
+        let session = SessionId(Uuid::now_v7());
+        let bash_id = ToolCallId::new();
+        let failed_result_id = ToolCallId::new();
+        let tool_error_id = ToolCallId::new();
+        let file_read_id = ToolCallId::new();
+        let tool_call = |sequence, tool_id, tool_name: &str| {
+            record(
+                session,
+                sequence,
+                Event::ToolCall {
+                    tool_id,
+                    provider_tool_use_id: None,
+                    provider_thought_signature: None,
+                    tool_name: tool_name.to_string(),
+                    input: serde_json::json!({ "input": tool_name }),
+                    hand_id: None,
+                },
+            )
+        };
+        let tool_result = |sequence, tool_id, tool_name: &str, success| {
+            record(
+                session,
+                sequence,
+                Event::ToolResult {
+                    tool_id,
+                    provider_tool_use_id: None,
+                    output: ToolOutput::text(
+                        format!("{tool_name} output"),
+                        Duration::from_millis(1),
+                    ),
+                    original_output_tokens: None,
+                    success,
+                    duration_ms: 1,
+                    assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                    capability: moa_core::types::security::ToolCapabilityId::builtin(tool_name),
+                },
+            )
+        };
+        let events = vec![
+            record(
+                session,
+                1,
+                Event::UserMessage {
+                    text: "inspect and deploy".to_string(),
+                    attachments: Vec::<Attachment>::new(),
+                },
+            ),
+            tool_call(2, bash_id, "bash"),
+            tool_result(3, bash_id, "bash", true),
+            tool_call(4, failed_result_id, "http"),
+            tool_result(5, failed_result_id, "http", false),
+            tool_call(6, tool_error_id, "deploy"),
+            record(
+                session,
+                7,
+                Event::ToolError {
+                    tool_id: tool_error_id,
+                    provider_tool_use_id: None,
+                    tool_name: "deploy".to_string(),
+                    error: "deployment rejected".to_string(),
+                    retryable: false,
+                },
+            ),
+            tool_call(8, file_read_id, "file_read"),
+            tool_result(9, file_read_id, "file_read", true),
+            record(
+                session,
+                10,
+                Event::BrainResponse {
+                    text: "Inspection completed.".to_string(),
+                    thought_signature: None,
+                    model: ModelId::new("scripted-model"),
+                    model_tier: ModelTier::Auxiliary,
+                    input_tokens_uncached: 8,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 8,
+                    cost_cents: 0,
+                    duration_ms: 1,
+                    llm_ttft_ms: None,
+                },
+            ),
+        ];
+        let evidence = crate::evidence::sanitize_for_tests(&events).await;
+
+        let suite = build_generated_suite("successful-tools", &evidence);
+        let assertions = &suite.cases[0].assertions;
+        let required = assertions
+            .iter()
+            .find(|spec| spec.evaluator.id == REQUIRED_ACTIONS_EVALUATOR_ID)
+            .expect("successful calls produce a required-actions assertion");
+        let required_names = required.config["actions"]
+            .as_array()
+            .expect("required actions array")
+            .iter()
+            .map(|action| {
+                action["name"]
+                    .as_str()
+                    .expect("required action name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let ordered = assertions
+            .iter()
+            .find(|spec| spec.evaluator.id == ORDERED_ACTIONS_EVALUATOR_ID)
+            .expect("two successful calls produce an ordered-actions diagnostic");
+
+        assert_eq!(
+            required_names,
+            vec!["bash".to_string(), "file_read".to_string()]
+        );
+        assert_eq!(
+            ordered.config["sequence"],
+            serde_json::json!(["bash", "file_read"])
+        );
+    }
+
     #[test]
     fn number_does_not_ground_against_longer_number_substring() {
         // Pins: word-boundary grounding — bare "42" in the response is not
@@ -858,9 +1060,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_toml_round_trips_with_grounded_oracle() {
+    async fn generated_toml_round_trips_with_typed_assertions() {
         // Pins: the generated suite TOML parses back through the suite type with
-        // the grounded facts and oracle marker preserved.
+        // its declared schema version, the grounded facts as a blocking text
+        // assertion, and the recorded order as a non-blocking diagnostic.
         let evidence = segment(
             "close the ticket",
             &["closed ticket #77 in 12ms"],
@@ -877,16 +1080,84 @@ mod tests {
 
         let suite: TestSuite =
             toml::from_str(&generated.source_toml).expect("generated suite is valid TOML");
+        suite
+            .validate()
+            .expect("a generated suite must satisfy the assertion registry");
+        assert_eq!(suite.schema_version, TEST_CASE_SCHEMA_VERSION);
         let case = suite.cases.first().expect("one generated case");
 
         assert_eq!(case.oracle, Some(SuiteOracle::GroundedFacts));
-        let contains = &case
-            .expected_output
-            .as_ref()
-            .expect("case has expected output")
-            .contains;
-        assert!(contains.contains(&"#77".to_string()), "{contains:?}");
-        assert!(contains.contains(&"12ms".to_string()), "{contains:?}");
-        assert!(case.expected_trajectory.is_some());
+        let text = case
+            .assertions
+            .iter()
+            .find(|spec| spec.category == AssertionCategory::Communication)
+            .expect("case carries a text assertion");
+        assert_eq!(text.gate_effect, GateEffect::Blocking);
+        let expected: ExpectedOutput =
+            serde_json::from_value(text.config.clone()).expect("text config is ExpectedOutput");
+        assert!(
+            expected.contains.contains(&"#77".to_string()),
+            "{:?}",
+            expected.contains
+        );
+        assert!(
+            expected.contains.contains(&"12ms".to_string()),
+            "{:?}",
+            expected.contains
+        );
+
+        let required = case
+            .assertions
+            .iter()
+            .find(|spec| spec.evaluator.id == REQUIRED_ACTIONS_EVALUATOR_ID)
+            .expect("case carries a required-action assertion");
+        assert_eq!(required.gate_effect, GateEffect::Blocking);
+        let ordered = case
+            .assertions
+            .iter()
+            .find(|spec| spec.evaluator.id == ORDERED_ACTIONS_EVALUATOR_ID);
+        assert!(
+            ordered.is_none_or(|spec| spec.gate_effect == GateEffect::Diagnostic),
+            "the recorded order is one observation, never a gate"
+        );
+    }
+
+    #[test]
+    fn a_single_tool_session_emits_no_ordering_assertion() {
+        // Pins: an ordering claim needs at least two actions to constrain, so a
+        // one-tool session does not manufacture a vacuous one.
+        let assertions = generated_assertions(vec!["fact".to_string()], &["bash".to_string()]);
+
+        assert!(
+            !assertions
+                .iter()
+                .any(|spec| spec.evaluator.id == ORDERED_ACTIONS_EVALUATOR_ID)
+        );
+        assert!(
+            assertions
+                .iter()
+                .any(|spec| spec.evaluator.id == REQUIRED_ACTIONS_EVALUATOR_ID)
+        );
+    }
+
+    #[test]
+    fn repeated_tools_collapse_into_one_required_action() {
+        // Pins: the old LCS gate punished a candidate for calling bash twice
+        // instead of three times. The required-action assertion asks whether the
+        // tool was used at all, not how many times the source session used it.
+        let assertions = generated_assertions(
+            Vec::new(),
+            &["bash".to_string(), "bash".to_string(), "bash".to_string()],
+        );
+
+        let required = assertions
+            .iter()
+            .find(|spec| spec.evaluator.id == REQUIRED_ACTIONS_EVALUATOR_ID)
+            .expect("required-action assertion");
+        let actions = required.config["actions"]
+            .as_array()
+            .expect("actions array");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["name"], serde_json::json!("bash"));
     }
 }

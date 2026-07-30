@@ -10,16 +10,28 @@ use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_config::MoaConfig;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
-    events::Event, events::EventType, traits::SessionStore, types::action_policy::ActionRuleScope,
-    types::action_policy::CallOrigin, types::agent::AgentSessionSelection, types::channel::Channel,
-    types::completion::CompletionRequest, types::contact::SessionActorRef,
-    types::context::ContextMessage, types::events_stream::EventRange,
-    types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
-    types::identifiers::TenantId, types::session::SessionMeta, types::session::SessionStatus,
+    events::Event,
+    events::EventType,
+    traits::SessionStore,
+    types::action_policy::ActionRuleScope,
+    types::action_policy::CallOrigin,
+    types::agent::AgentSessionSelection,
+    types::channel::Channel,
+    types::completion::{CompletionRequest, CompletionResponse},
+    types::contact::SessionActorRef,
+    types::context::ContextMessage,
+    types::events_stream::EventRange,
+    types::events_stream::EventRecord,
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::TenantId,
+    types::session::SessionMeta,
+    types::session::SessionStatus,
 };
 use moa_experiments::model::{
-    ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
-    ExperimentVariant, NewExperimentTrial,
+    ExperimentResourceComponent, ExperimentResourceUsage, ExperimentTarget, ExperimentTrialRecord,
+    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant, MICRO_USD_PER_CENT,
+    NewExperimentTrial,
 };
 use moa_experiments::plan::{PlanSimulationSelection, select_simulation};
 use moa_experiments::store::ExperimentStore;
@@ -40,14 +52,15 @@ use uuid::Uuid;
 use crate::lineage::ScoreLineageHandle;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
-use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
+use crate::services::llm_gateway::compute_cost_cents;
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
 };
 use crate::workflows::errors::{bad_request, handler_error_message, moa_error_to_handler_error};
 use crate::workflows::experiment_cancel::{
     K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
-    forward_pending_child_cancellation, has_pending_cancellation,
+    forward_child_cancellation_signal, forward_pending_child_cancellation,
+    has_pending_cancellation,
 };
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
@@ -55,6 +68,7 @@ use crate::workflows::experiment_errors::{
 use moa_core::types::experiments::ExperimentCancelSignal;
 
 mod finalize;
+pub(crate) mod resources;
 mod status;
 mod target_execution;
 mod trial_simulator;
@@ -73,6 +87,7 @@ const K_TRIAL_UID: &str = "trial_uid";
 const K_TRIAL_KEY: &str = "trial_key";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
+const K_CANCEL_SIGNAL_PROMISE: &str = "cancel_signal";
 
 /// Workflow input for one behavior-lab simulator trial.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,7 +299,12 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentTrialRun", "request_cancel");
-        forward_child_cancellation(&ctx, signal.into_inner()).await
+        let signal = signal.into_inner();
+        // Wake the trial body as well as forwarding to its current child. The
+        // child link can be absent while the simulator provider is in flight,
+        // and forwarding alone would leave that paid call running.
+        ctx.resolve_promise(K_CANCEL_SIGNAL_PROMISE, Json::from(signal.clone()));
+        forward_child_cancellation(&ctx, signal).await
     }
 }
 

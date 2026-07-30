@@ -608,6 +608,7 @@ fn collect_held_out_pool(
     }
 
     let suite = (!cases.is_empty()).then(|| TestSuite {
+        schema_version: moa_eval_core::types::TEST_CASE_SCHEMA_VERSION,
         name: "held-out-pool".to_string(),
         description: Some(
             "Pooled held-out suites from prior revisions and sibling sessions".to_string(),
@@ -868,16 +869,13 @@ fn summarize_regression_run(run: &EvalRun) -> SkillRegressionSummary {
 }
 
 fn result_score(result: &EvalResult) -> f64 {
-    if result.scores.is_empty() {
-        return match result.status {
-            EvalStatus::Passed | EvalStatus::Skipped => 1.0,
-            EvalStatus::Failed | EvalStatus::Error | EvalStatus::Timeout => 0.0,
-        };
-    }
-
     let mut total = 0.0;
     let mut count = 0usize;
-    for score in &result.scores {
+    for score in result
+        .scores
+        .iter()
+        .filter(|score| score.gate.is_blocking())
+    {
         match &score.value {
             EvalScoreValue::Numeric(value) => {
                 total += *value;
@@ -892,7 +890,10 @@ fn result_score(result: &EvalResult) -> f64 {
     }
 
     if count == 0 {
-        1.0
+        match result.status {
+            EvalStatus::Passed | EvalStatus::Skipped => 1.0,
+            EvalStatus::Failed | EvalStatus::Error | EvalStatus::Timeout => 0.0,
+        }
     } else {
         total / count as f64
     }
@@ -1205,6 +1206,7 @@ mod tests {
         },
         identifiers::TenantId,
     };
+    use moa_eval_core::{EvalResult, EvalScore, EvalScoreValue, EvalStatus};
     use moa_execution::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog};
     use moa_hands::ToolRegistry;
     use serde_json::json;
@@ -1214,7 +1216,7 @@ mod tests {
     use super::{
         RegressionExecutionInput, SkillTemplateCompileRequest, StoredSuiteContribution,
         SuiteContributionKind, collect_held_out_pool, compile_skill_execution_template,
-        generated_suite_contribution, resolve_regression_execution_input,
+        generated_suite_contribution, resolve_regression_execution_input, result_score,
     };
 
     fn contribution(
@@ -1229,6 +1231,55 @@ mod tests {
             source_session_id: Some(uuid::Uuid::now_v7()),
             source_experience_id: Some(uuid::Uuid::now_v7()),
         }
+    }
+
+    #[test]
+    fn diagnostic_scores_cannot_change_skill_regression_acceptance_score() {
+        // Pins: reporting-only scores never raise or lower the score used for
+        // skill acceptance. With no numeric/boolean blocking score, terminal
+        // run status remains the source of truth.
+        let passed_with_diagnostic_failure = EvalResult {
+            status: EvalStatus::Passed,
+            scores: vec![EvalScore::diagnostic(
+                "ordered_actions",
+                "path_similarity",
+                EvalScoreValue::Numeric(0.0),
+                None,
+            )],
+            ..EvalResult::default()
+        };
+        let failed_with_diagnostic_success = EvalResult {
+            status: EvalStatus::Failed,
+            scores: vec![EvalScore::diagnostic(
+                "ordered_actions",
+                "path_similarity",
+                EvalScoreValue::Boolean(true),
+                None,
+            )],
+            ..EvalResult::default()
+        };
+        let blocking_success_with_diagnostic_failure = EvalResult {
+            status: EvalStatus::Passed,
+            scores: vec![
+                EvalScore::gating(
+                    "required_actions",
+                    "recorded-tools-were-used",
+                    EvalScoreValue::Boolean(true),
+                    None,
+                ),
+                EvalScore::diagnostic(
+                    "ordered_actions",
+                    "recorded-tool-order",
+                    EvalScoreValue::Boolean(false),
+                    None,
+                ),
+            ],
+            ..EvalResult::default()
+        };
+
+        assert_eq!(result_score(&passed_with_diagnostic_failure), 1.0);
+        assert_eq!(result_score(&failed_with_diagnostic_success), 0.0);
+        assert_eq!(result_score(&blocking_success_with_diagnostic_failure), 1.0);
     }
 
     #[test]

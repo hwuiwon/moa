@@ -20,11 +20,11 @@ impl Evaluator for ToolSuccessEvaluator {
         let total = result.trajectory.len();
         let rate = success_count as f64 / total as f64;
 
-        Ok(vec![EvalScore {
-            evaluator: self.name().to_string(),
-            name: "tool_success_rate".to_string(),
-            value: EvalScoreValue::Numeric(rate),
-            comment: Some(format!("{success_count}/{total} succeeded")),
-        }])
+        Ok(vec![EvalScore::gating(
+            self.name(),
+            "tool_success_rate",
+            EvalScoreValue::Numeric(rate),
+            Some(format!("{success_count}/{total} succeeded")),
+        )])
     }
 }

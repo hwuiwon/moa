@@ -32,6 +32,8 @@ use crate::model::{
     ExperimentSimulatorConfig, ExperimentTarget, ExperimentVariant, NewExperimentTrial,
 };
 
+pub mod admission;
+
 /// Default target-agent turn cap for plan-expanded simulator trials.
 pub(crate) const DEFAULT_PLAN_TRIAL_MAX_TURNS: u32 = 8;
 

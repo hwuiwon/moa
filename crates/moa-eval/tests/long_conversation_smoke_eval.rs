@@ -1,4 +1,10 @@
 //! Smoke tests for committed long-conversation recorded scenarios.
+//!
+//! The raised depth limit is for clippy specifically: this binary instantiates the
+//! full scenario-runner future over the typed assertion and evidence model, and the
+//! resulting nesting exceeds clippy's default query depth even though `cargo check`
+//! resolves it fine.
+#![recursion_limit = "256"]
 
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;

@@ -256,6 +256,7 @@ fn start_turn_request(
         model: None,
         contact: None,
         max_turns: None,
+        resource_budget: Default::default(),
         execution_template: None,
     })
 }
@@ -275,6 +276,7 @@ fn queue_message_request(
         model: None,
         contact: None,
         max_turns: None,
+        resource_budget: Default::default(),
         execution_template: None,
     })
 }

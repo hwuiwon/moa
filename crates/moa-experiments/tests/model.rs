@@ -1,17 +1,85 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
+use moa_core::types::resource::{ResourceAmounts, ResourceEnvelope};
 use moa_core::{
     types::action_policy::ActionRuleScope, types::channel::Attachment,
     types::execution_planning::PinnedExecutionTemplateRef, types::identifiers::ModelId,
     types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_experiments::model::{
+    ExperimentResourceEnvelope, ExperimentResourceUsage, ExperimentResourceUsageError,
     ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget,
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
 };
 use serde_json::json;
 use std::collections::BTreeSet;
 use uuid::Uuid;
+
+/// A bounded envelope for record round-trip fixtures.
+///
+/// Stated explicitly rather than borrowed from a production ceiling: these tests
+/// pin serialization, so the numbers must not move when a platform limit does.
+fn fixture_experiment_envelope() -> ExperimentResourceEnvelope {
+    let limits = ResourceAmounts {
+        cost_micro_usd: 1_000_000,
+        tokens: 100_000,
+        turns: 8,
+        model_calls: 16,
+        tool_calls: 32,
+    };
+    ExperimentResourceEnvelope::new(limits, limits, moa_test_support::fixtures::pg_now())
+}
+
+fn fixture_run_envelope() -> ExperimentResourceEnvelope {
+    fixture_experiment_envelope()
+}
+
+fn fixture_trial_envelope() -> ResourceEnvelope {
+    fixture_experiment_envelope().trial_envelope()
+}
+
+#[test]
+fn resource_usage_requires_token_split_to_match_metered_total_offline() {
+    // Pins: reconciliation cannot commit a token total inconsistent with its input/output evidence.
+    let usage = ExperimentResourceUsage {
+        input_tokens: 7,
+        output_tokens: 5,
+        amounts: ResourceAmounts {
+            tokens: 13,
+            ..ResourceAmounts::ZERO
+        },
+    };
+
+    assert_eq!(
+        usage.validate(),
+        Err(ExperimentResourceUsageError::TokenTotalMismatch {
+            input_tokens: 7,
+            output_tokens: 5,
+            recorded_tokens: 13,
+        })
+    );
+}
+
+#[test]
+fn resource_usage_rejects_overflowing_token_split_offline() {
+    // Pins: a saturated token total cannot hide overflow in the input/output evidence.
+    let usage = ExperimentResourceUsage {
+        input_tokens: u64::MAX,
+        output_tokens: 1,
+        amounts: ResourceAmounts {
+            tokens: u64::MAX,
+            ..ResourceAmounts::ZERO
+        },
+    };
+
+    assert_eq!(
+        usage.validate(),
+        Err(ExperimentResourceUsageError::TokenSplitOverflow {
+            input_tokens: u64::MAX,
+            output_tokens: 1,
+        })
+    );
+}
 
 #[test]
 fn agent_loop_target_round_trips_through_public_model_offline() {
@@ -187,6 +255,7 @@ fn trial_record_round_trips_through_public_model_offline() {
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::from(Uuid::now_v7()),
         },
+        resource_envelope: fixture_trial_envelope(),
         trial_uid: Uuid::now_v7(),
         run_uid: Uuid::now_v7(),
         trial_key: "scenario-a/persona-b/baseline".to_string(),
@@ -249,6 +318,8 @@ fn record_for_target(
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::from(Uuid::now_v7()),
         },
+        plan_artifact_uid: None,
+        resource_envelope: fixture_run_envelope(),
         run_uid: Uuid::now_v7(),
         name: "experiment run".to_string(),
         target_kind,

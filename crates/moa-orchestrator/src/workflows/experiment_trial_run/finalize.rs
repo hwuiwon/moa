@@ -405,6 +405,7 @@ mod tests {
 
     fn trial() -> ExperimentTrialRecord {
         ExperimentTrialRecord {
+            resource_envelope: super::resources::fixture_trial_envelope(),
             scope: ActionRuleScope::Tenant {
                 tenant_id: TenantId(Uuid::from_u128(1)),
             },

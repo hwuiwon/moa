@@ -14,7 +14,7 @@ use tracing::Instrument;
 
 use super::dispatch::McpDispatch;
 use super::lifecycle::{hand_id, scope_key};
-use super::{HandRoute, ToolExecution, ToolRouter};
+use super::{HandRoute, ToolCallScope, ToolExecution, ToolRouter};
 
 const MAX_TOOL_RETRIES: u32 = 3;
 const MAX_TOOL_REPROVISIONS: u32 = 2;
@@ -42,6 +42,10 @@ enum RecoveryStage {
     AfterUncertainExecution,
 }
 
+fn is_terminal_resource_error(error: &MoaError) -> bool {
+    matches!(error, MoaError::Cancelled | MoaError::BudgetExhausted(_))
+}
+
 impl ToolRouter {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_authorized_with_recovery_inner(
@@ -52,6 +56,7 @@ impl ToolRouter {
         invocation: &ToolInvocation,
         tool_call_id: ToolCallId,
         active_canary: Option<&str>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         let registry = self.registry();
         let Some(registered_tool) = registry.tools.get(&invocation.name) else {
@@ -79,12 +84,12 @@ impl ToolRouter {
                         invocation,
                         &registered_tool.definition,
                         active_canary,
-                        None,
+                        scope,
                     )
                     .await;
                 Ok(match result {
                     Ok(secured) => secured,
-                    Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
+                    Err(error) if is_terminal_resource_error(&error) => return Err(error),
                     Err(error) => Self::secure_router_output(
                         capability,
                         active_canary,
@@ -101,6 +106,7 @@ impl ToolRouter {
                     &registered_tool.definition,
                     routes,
                     active_canary,
+                    scope,
                 )
                 .await
             }
@@ -119,6 +125,7 @@ impl ToolRouter {
                         tool_call_id,
                     },
                     active_canary,
+                    scope,
                 )
                 .await
             }
@@ -134,6 +141,7 @@ impl ToolRouter {
         tool_definition: &ToolDefinition,
         routes: &[HandRoute],
         active_canary: Option<&str>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         let routes = self.ordered_hand_routes(session, worker_id, routes).await?;
         let mut route_index = 0_usize;
@@ -143,15 +151,22 @@ impl ToolRouter {
         let mut consecutive_gateway_failures = 0_u32;
 
         loop {
+            // Re-asked on every attempt, not once at entry: recovery retries and
+            // re-provisions, so a run cancelled or expired mid-recovery must
+            // stop here rather than paying for one more sandbox.
+            scope.admit()?;
             let route = routes[route_index].clone();
             let provider = route.provider.as_str();
             let provider_impl = self.providers.get(provider).cloned().ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
             let next_route = routes.get(route_index + 1);
-            let hand = match self.get_or_provision_hand(&route, session, worker_id).await {
+            let hand = match self
+                .get_or_provision_hand_within(&route, session, worker_id, scope.budget)
+                .await
+            {
                 Ok(hand) => hand,
-                Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
+                Err(error) if is_terminal_resource_error(&error) => return Err(error),
                 Err(error) => {
                     let class = classify_tool_error(&error, consecutive_timeouts);
                     if self
@@ -234,7 +249,7 @@ impl ToolRouter {
                     continue;
                 }
                 Err(error) => {
-                    if matches!(error, MoaError::Cancelled) {
+                    if is_terminal_resource_error(&error) {
                         return Err(error);
                     }
                     let mut class = provider_impl
@@ -321,7 +336,7 @@ impl ToolRouter {
                     provider,
                     &hand,
                     active_canary,
-                    None,
+                    scope,
                 )
                 .await
             {
@@ -330,7 +345,7 @@ impl ToolRouter {
                         .await;
                     return Ok(output);
                 }
-                Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
+                Err(error) if is_terminal_resource_error(&error) => return Err(error),
                 Err(error) => {
                     let mut class = provider_impl
                         .classify_error(&hand, &error, consecutive_timeouts)
@@ -489,6 +504,7 @@ impl ToolRouter {
         tool_definition: &ToolDefinition,
         dispatch: McpDispatch<'_>,
         active_canary: Option<&str>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         let mut retry_attempts = 0_u32;
         let mut reprovisions = 0_u32;
@@ -497,21 +513,25 @@ impl ToolRouter {
         let server_name = dispatch.server_name;
 
         loop {
+            // Re-asked per attempt: an expired run must stop retrying an
+            // outbound connector rather than working through its retry budget.
+            scope.admit()?;
             // Every attempt re-resolves the tenant's credential under the same
             // durable tool-call identity, so a retry replays one credential audit
             // row rather than appending one per attempt.
             match self
-                .execute_mcp_once(
+                .execute_mcp_once_with_scope(
                     session,
                     invocation,
                     tool_definition,
                     dispatch,
                     active_canary,
+                    scope,
                 )
                 .await
             {
                 Ok(output) => return Ok(output),
-                Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
+                Err(error) if is_terminal_resource_error(&error) => return Err(error),
                 Err(error) => {
                     let mut class = classify_tool_error(&error, consecutive_timeouts);
                     if matches!(class, ToolFailureClass::Retryable { .. })

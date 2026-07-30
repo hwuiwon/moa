@@ -4,7 +4,10 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
-use moa_artifacts::simulation::{ExperimentTargetKind, experiment_plan_response_schema};
+use moa_artifacts::simulation::{
+    ExperimentTargetKind, MAX_PLAN_TRIAL_COST_CENTS, MAX_PLAN_TRIAL_TOKENS,
+    experiment_plan_response_schema,
+};
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::traits::Identity;
 use moa_core::{
@@ -21,6 +24,7 @@ use moa_core::{
     types::experiments::{ExperimentCancelSignal, ExperimentScorecard},
     types::identifiers::ModelId,
     types::identifiers::TenantId,
+    types::resource::ResourceAmounts,
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
@@ -52,10 +56,11 @@ use crate::eligibility::{
 };
 use crate::evidence::TrialScoreTarget;
 use crate::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTrialRecord,
-    ExperimentTrialStatus, ExperimentVariant, NewExperimentRun,
+    ExperimentResourceEnvelope, ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget,
+    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant, MICRO_USD_PER_CENT,
+    NewExperimentRun,
 };
-use crate::plan::project_plan_run;
+use crate::plan::{PlanMatrixShape, plan_matrix_shape, project_plan_run};
 use crate::scores::{
     ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
     TrialScoreSummary, VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
@@ -75,6 +80,9 @@ pub enum ExperimentAppError {
     /// Requested experiment data was not visible in the requested scope.
     #[error("{0}")]
     NotFound(String),
+    /// An admission quota refused the run before any row or dispatch existed.
+    #[error("{0}")]
+    QuotaExceeded(String),
     /// Experiment application state could not be serialized.
     #[error("serialization error: {0}")]
     Serialization(String),
@@ -246,9 +254,13 @@ pub async fn admit_run(
                 scorecard: run_inputs.scorecard,
                 idempotency_key: request.idempotency_key,
                 created_by_identity: identity_payload(identity.clone())?,
+                plan_artifact_uid: run_inputs.plan_artifact_uid,
+                expected_trials: run_inputs.expected_trials,
+                resource_envelope: run_inputs.resource_envelope,
             },
         )
-        .await?;
+        .await
+        .map_err(admission_app_error)?;
     record_experiment_run(run.status.as_str(), run.target_kind.as_str());
 
     Ok(AdmittedExperimentRun {
@@ -728,6 +740,121 @@ struct ExperimentRunInputs {
     scorecard: ExperimentScorecard,
     artifact_revision_uids: Vec<Uuid>,
     plan_revision_uid: Option<Uuid>,
+    plan_artifact_uid: Option<Uuid>,
+    expected_trials: u64,
+    resource_envelope: ExperimentResourceEnvelope,
+}
+
+/// Longest a behavior-lab run may stay live before its envelope expires.
+///
+/// The parent plan workflow already refuses to wait longer than this for child
+/// progress, so a run that outlives it is stuck rather than working, and every
+/// further reservation it makes is spend with nothing to show for it.
+const EXPERIMENT_RUN_DEADLINE_HOURS: i64 = 24;
+
+/// Worst-case model calls one simulated turn may issue.
+///
+/// One call generates the simulator message. The target's worst case includes
+/// input guardrail, routing, response loop, output guardrail, and assessment.
+const EXPERIMENT_MODEL_CALLS_PER_TURN: u64 = 6;
+
+/// Worst-case governed tool calls one simulated turn may issue.
+///
+/// A target turn can fan out into tool and sandbox work; this is the ceiling one
+/// turn is allowed to reserve against, not an expectation.
+const EXPERIMENT_TOOL_CALLS_PER_TURN: u64 = 16;
+
+/// Turns a run without a plan is allowed to reserve for.
+const EXPERIMENT_DIRECT_RUN_TURNS: u64 = 16;
+
+/// Derives the durable envelope a plan-backed run executes inside.
+///
+/// Cost comes from the plan's own declared budget, converted from authored cents
+/// into the integer micro-USD the runtime ledger meters. Token, turn, model-call
+/// and tool-call ceilings are projected from the bounded matrix shape with
+/// checked arithmetic, because a wrapped projection would understate the budget
+/// and admit unbounded paid work.
+fn plan_resource_envelope(
+    definition: &moa_artifacts::simulation::ExperimentPlanDefinition,
+    shape: &PlanMatrixShape,
+    now: chrono::DateTime<Utc>,
+) -> Result<ExperimentResourceEnvelope> {
+    let trials = u64::from(shape.total_trials).max(1);
+    let trial_turns = u64::from(
+        definition
+            .simulation
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.max_turns)
+            .max()
+            .unwrap_or(0),
+    )
+    .max(1);
+
+    let trial_cost_micro_usd = u64::from(
+        definition
+            .budget
+            .max_trial_cents
+            .unwrap_or(definition.budget.max_total_cents),
+    )
+    .saturating_mul(MICRO_USD_PER_CENT);
+    let trial_tokens = u64::from(
+        definition
+            .budget
+            .max_trial_tokens
+            .unwrap_or(definition.budget.max_total_tokens.unwrap_or(u32::MAX)),
+    );
+    let trial_limits = ResourceAmounts {
+        cost_micro_usd: trial_cost_micro_usd,
+        tokens: trial_tokens,
+        turns: trial_turns,
+        model_calls: trial_turns.saturating_mul(EXPERIMENT_MODEL_CALLS_PER_TURN),
+        tool_calls: trial_turns.saturating_mul(EXPERIMENT_TOOL_CALLS_PER_TURN),
+    };
+
+    // The run total is the plan's declared budget, never the per-trial ceiling
+    // multiplied out: a plan that declares a small total must not gain a larger
+    // one by declaring many trials.
+    let run_cost_micro_usd =
+        u64::from(definition.budget.max_total_cents).saturating_mul(MICRO_USD_PER_CENT);
+    let run_tokens = u64::from(definition.budget.max_total_tokens.unwrap_or(u32::MAX));
+    let run_limits = trial_limits
+        .checked_mul(trials)
+        .map(|projected| ResourceAmounts {
+            cost_micro_usd: run_cost_micro_usd,
+            tokens: run_tokens,
+            ..projected
+        })
+        .ok_or_else(|| {
+            bad_request("experiment plan resource projection overflowed before admission")
+        })?;
+
+    Ok(ExperimentResourceEnvelope::new(
+        run_limits,
+        trial_limits,
+        now + chrono::Duration::hours(EXPERIMENT_RUN_DEADLINE_HOURS),
+    ))
+}
+
+/// Derives the envelope for a run admitted without a plan.
+///
+/// A direct run is one target with no declared budget of its own, so it inherits
+/// the platform's per-trial ceilings. That is deliberately the smaller envelope:
+/// an unbudgeted run should be the cheapest thing the platform will run, not the
+/// most expensive.
+fn direct_resource_envelope(now: chrono::DateTime<Utc>) -> ExperimentResourceEnvelope {
+    let limits = ResourceAmounts {
+        cost_micro_usd: u64::from(MAX_PLAN_TRIAL_COST_CENTS).saturating_mul(MICRO_USD_PER_CENT),
+        tokens: u64::from(MAX_PLAN_TRIAL_TOKENS),
+        turns: EXPERIMENT_DIRECT_RUN_TURNS,
+        model_calls: EXPERIMENT_DIRECT_RUN_TURNS.saturating_mul(EXPERIMENT_MODEL_CALLS_PER_TURN),
+        tool_calls: EXPERIMENT_DIRECT_RUN_TURNS.saturating_mul(EXPERIMENT_TOOL_CALLS_PER_TURN),
+    };
+    ExperimentResourceEnvelope::new(
+        limits,
+        limits,
+        now + chrono::Duration::hours(EXPERIMENT_RUN_DEADLINE_HOURS),
+    )
 }
 
 fn single_target_run_inputs(
@@ -758,6 +885,11 @@ fn single_target_run_inputs(
         variant,
         scorecard,
         plan_revision_uid: None,
+        plan_artifact_uid: None,
+        // A direct run drives exactly one target and mints no trial rows, so it
+        // adds a run slot and no trial load.
+        expected_trials: 0,
+        resource_envelope: direct_resource_envelope(Utc::now()),
     })
 }
 
@@ -817,6 +949,8 @@ async fn plan_run_inputs(
             "plan revision must contain an experiment_plan definition",
         ));
     };
+    let shape = plan_matrix_shape(definition).map_err(bad_request_from)?;
+    let resource_envelope = plan_resource_envelope(definition, &shape, Utc::now())?;
     let mut projection = project_plan_run(definition, plan_revision_uid, &plan.name, run_name)
         .map_err(bad_request_from)?;
     if !agent_revision_variants.is_empty() {
@@ -839,6 +973,9 @@ async fn plan_run_inputs(
         scorecard: projection.scorecard,
         artifact_revision_uids: projection.artifact_revision_uids,
         plan_revision_uid: Some(projection.plan_revision_uid),
+        plan_artifact_uid: Some(plan.artifact_uid),
+        expected_trials: u64::from(shape.total_trials),
+        resource_envelope,
     })
 }
 
@@ -1507,6 +1644,20 @@ fn bad_request(message: impl Into<String>) -> ExperimentAppError {
     ExperimentAppError::BadRequest(message.into())
 }
 
+/// Separates an admission refusal from an infrastructure fault on the run-insert
+/// path.
+///
+/// The store decides quotas inside the transaction that inserts the run, so the
+/// refusal can only reach the caller as a store error. Every validation error
+/// that path can produce is a full quota, and it must not be reported as a
+/// server fault a caller would retry into the same full quota.
+fn admission_app_error(error: MoaError) -> ExperimentAppError {
+    match error {
+        MoaError::ValidationError(message) => ExperimentAppError::QuotaExceeded(message),
+        other => ExperimentAppError::Moa(other),
+    }
+}
+
 fn serialization_error(message: impl Into<String>) -> ExperimentAppError {
     ExperimentAppError::Serialization(message.into())
 }
@@ -1531,6 +1682,22 @@ mod tests {
 
     use super::*;
     use crate::model::{ExperimentSimulatorConfig, ExperimentTrialStopReason};
+
+    #[test]
+    fn direct_envelope_prices_every_bounded_model_stage_offline() {
+        // Pins: a direct target reserves enough model-call capacity for the same
+        // bounded pipeline as a simulated turn, rather than only the visible answer.
+        let envelope = direct_resource_envelope(
+            Utc.timestamp_opt(1_700_000_000, 0)
+                .single()
+                .expect("fixed timestamp"),
+        );
+        assert_eq!(
+            envelope.run_limits.model_calls,
+            EXPERIMENT_DIRECT_RUN_TURNS.saturating_mul(EXPERIMENT_MODEL_CALLS_PER_TURN)
+        );
+        assert_eq!(EXPERIMENT_MODEL_CALLS_PER_TURN, 6);
+    }
 
     #[test]
     fn plan_generation_request_keeps_description_out_of_system_prompt() {
@@ -1721,9 +1888,17 @@ mod tests {
         );
     }
 
+    /// Envelope for record fixtures, derived through the production helper so a
+    /// fixture cannot drift into a ceiling the platform would never admit.
+    fn fixture_resource_envelope() -> ExperimentResourceEnvelope {
+        direct_resource_envelope(moa_test_support::fixtures::pg_now())
+    }
+
     fn completed_run_record(tenant_id: TenantId) -> ExperimentRunRecord {
         ExperimentRunRecord {
             scope: ActionRuleScope::Tenant { tenant_id },
+            plan_artifact_uid: None,
+            resource_envelope: fixture_resource_envelope(),
             run_uid: fixture_uuid(1),
             name: "support escalation comparison".to_string(),
             target_kind: ExperimentTargetKind::AgentLoop,
@@ -1768,6 +1943,7 @@ mod tests {
             scope: ActionRuleScope::Tenant {
                 tenant_id: tenant_id_from_str("workspace-a"),
             },
+            resource_envelope: fixture_resource_envelope().trial_envelope(),
             trial_uid: fixture_uuid(30),
             run_uid,
             trial_key: "scenario/persona/profile/candidate/0".to_string(),

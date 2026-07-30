@@ -475,6 +475,17 @@ output, citations, failures, and gaps to the owning session. The session starts
 at most one deduplicated synthesis turn for the originating user sequence; it
 does not ingest every raw map output or poll the run through the root model.
 
+Behavior-lab execution uses the same reserve-before-dispatch rule. A direct
+`ExperimentRun` reserves its persisted run envelope with a root-level
+reservation before starting its Session or Execution child, waits for terminal
+evidence, and reconciles observed session usage. A planned
+`ExperimentTrialRun` reserves each simulator and target coordinate separately.
+The admitted target slice is carried through `Session` admission into
+`TurnExecution`, `LLMGateway`, and `ToolExecutor`; loop, model, tool, and
+deadline gates may narrow it but never widen it. Bounded turns cannot detach
+durable execution, spawn workers, or enqueue an admin review until those child
+paths can receive a non-duplicating sub-reservation.
+
 The deterministic and sampled validation of these claims is defined in
 [Execution Honesty Evaluation](eval/execution-honesty.md). Those checks consume
 the same persisted projection, task rows, planning audits, and bounded session

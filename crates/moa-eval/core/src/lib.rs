@@ -1,13 +1,18 @@
 //! Production-safe evaluation contracts and scoring helpers.
 
 pub mod admission;
+pub mod assertion;
 pub mod conversation_cost;
+pub mod decision;
 pub mod engine;
 pub mod error;
 pub mod evaluator;
 pub mod evaluators;
+pub mod evidence;
 pub mod loader;
+pub mod metric;
 pub mod plan;
+pub mod reliability;
 pub mod replay;
 pub mod resource_report;
 pub mod results;

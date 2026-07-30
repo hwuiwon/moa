@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "example-suite"
 description = "A small smoke suite for the moa-eval scaffold"
 default_timeout_seconds = 90
@@ -9,9 +10,20 @@ name = "basic-greeting"
 input = "Say hello to the user."
 timeout_seconds = 30
 tags = ["chat"]
-expected_trajectory = []
 
-[cases.expected_output]
+# A case states what must hold, and every claim names the registered evaluator that
+# decides it. `blocking` claims gate the run; `diagnostic` ones only report.
+[[cases.assertions]]
+id = "greets-the-user"
+category = "communication"
+gate_effect = "blocking"
+
+[cases.assertions.evaluator]
+id = "text_match"
+version = 1
+determinism = "deterministic"
+
+[cases.assertions.config]
 contains = ["hello"]
 not_contains = ["error"]
 facts = ["the assistant greeted the user"]
@@ -21,11 +33,35 @@ name = "staging-deploy-plan"
 input = "Deploy the app to staging and verify health."
 timeout_seconds = 120
 tags = ["deployment", "staging"]
-expected_trajectory = ["bash", "bash", "bash"]
 
-[cases.expected_output]
+[[cases.assertions]]
+id = "reports-staging-health"
+category = "communication"
+gate_effect = "blocking"
+
+[cases.assertions.evaluator]
+id = "text_match"
+version = 1
+determinism = "deterministic"
+
+[cases.assertions.config]
 contains = ["staging", "health"]
 facts = ["the response mentions deployment verification"]
+
+# Required actions are order-free on purpose: the run must have used these tools,
+# but any order that reaches the same state passes.
+[[cases.assertions]]
+id = "ran-the-deploy-commands"
+category = "action"
+gate_effect = "blocking"
+
+[cases.assertions.evaluator]
+id = "required_actions"
+version = 1
+determinism = "deterministic"
+
+[[cases.assertions.config.actions]]
+name = "bash"
 
 [cases.metadata]
 requires_action_review = true
@@ -35,6 +71,16 @@ name = "incident-triage"
 input = "Investigate the checkout latency spike."
 tags = ["incident", "ops"]
 
-[cases.expected_output]
+[[cases.assertions]]
+id = "names-the-latency-symptom"
+category = "communication"
+gate_effect = "blocking"
+
+[cases.assertions.evaluator]
+id = "text_match"
+version = 1
+determinism = "deterministic"
+
+[cases.assertions.config]
 contains = ["latency"]
 not_contains = ["ignore"]

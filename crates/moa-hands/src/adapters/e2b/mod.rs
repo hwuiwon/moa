@@ -528,7 +528,11 @@ impl HandProvider for E2BHandProvider {
         match supported_capability_for_tool(tool, E2B_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
                 let params = bash::BashToolInput::parse(input)?;
-                let timeout = params.timeout(DEFAULT_COMMAND_TIMEOUT, None);
+                // This adapter implements only the unbounded `execute`, so no run
+                // deadline reaches it: both the sandbox lifetime and the run
+                // budget are absent here. Opting E2B into `execute_bounded` is
+                // what would carry them.
+                let timeout = params.timeout(DEFAULT_COMMAND_TIMEOUT, None, None);
                 self.execute_bash(sandbox_id, &sandbox, &params.cmd, timeout)
                     .await
             }

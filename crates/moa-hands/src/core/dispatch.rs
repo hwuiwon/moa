@@ -6,7 +6,7 @@ use std::time::Instant;
 use moa_core::{
     error::MoaError, error::Result, traits::Identity, types::completion::ToolInvocation,
     types::hands::HandHandle, types::hands::HandStatus, types::identifiers::ToolCallId,
-    types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::resource::DeadlineGuard, types::security::ToolCapabilityId, types::session::SessionMeta,
     types::tools::SecuredToolOutput, types::tools::ToolDefinition, types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
@@ -21,7 +21,7 @@ use super::policy::validate_tool_invocation;
 use super::telemetry::{
     record_tool_execution_result, record_tool_invocation_metadata, tool_execution_span,
 };
-use super::{DEFAULT_PROVIDER_NAME, HandRoute, ToolExecution, ToolRouter};
+use super::{DEFAULT_PROVIDER_NAME, HandRoute, ToolCallScope, ToolExecution, ToolRouter};
 
 /// Everything one MCP dispatch needs beyond the invocation and its definition.
 ///
@@ -113,14 +113,13 @@ impl ToolRouter {
         tool_call_id: ToolCallId,
         active_canary: Option<&str>,
     ) -> Result<SecuredToolOutput> {
-        self.execute_authorized_with_cancel(
+        self.execute_authorized_within(
             session,
             caller_identity,
             invocation,
             tool_call_id,
             active_canary,
-            None,
-            None,
+            ToolCallScope::unbounded(),
         )
         .await
     }
@@ -137,10 +136,40 @@ impl ToolRouter {
         cancel_token: Option<&CancellationToken>,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<SecuredToolOutput> {
+        self.execute_authorized_within(
+            session,
+            caller_identity,
+            invocation,
+            tool_call_id,
+            active_canary,
+            ToolCallScope::from_tokens(cancel_token, hard_cancel_token),
+        )
+        .await
+    }
+
+    /// Executes an already-authorized tool invocation inside one caller scope.
+    ///
+    /// This is the deadline-aware entry point: `scope` carries the cancellation
+    /// tokens *and* the run's remaining budget, and is checked before any work
+    /// is prepared, any sandbox is provisioned, and any provider is called.
+    pub async fn execute_authorized_within(
+        &self,
+        session: &SessionMeta,
+        caller_identity: &Identity,
+        invocation: &ToolInvocation,
+        tool_call_id: ToolCallId,
+        active_canary: Option<&str>,
+        scope: ToolCallScope<'_>,
+    ) -> Result<SecuredToolOutput> {
         let tool_span = tool_execution_span(session, invocation);
 
         let instrument_tool_span = tool_span.clone();
         async move {
+            // Asked first, before policy preparation and before the registry
+            // lookup: a scope that is already dead must not provision a sandbox,
+            // open an MCP connection, or run a built-in, and every one of those
+            // happens below this line.
+            scope.admit()?;
             let started_at = Instant::now();
             let prepared = self.prepare_invocation(session, invocation).await?;
             let registry = self.registry();
@@ -161,8 +190,7 @@ impl ToolRouter {
                     invocation,
                     tool_call_id,
                     active_canary,
-                    cancel_token,
-                    hard_cancel_token,
+                    scope,
                 )
                 .await;
             record_tool_execution_result(
@@ -192,10 +220,40 @@ impl ToolRouter {
         tool_call_id: ToolCallId,
         active_canary: Option<&str>,
     ) -> Result<SecuredToolOutput> {
+        self.execute_authorized_with_recovery_within(
+            session,
+            caller_identity,
+            worker_id,
+            invocation,
+            tool_call_id,
+            active_canary,
+            ToolCallScope::unbounded(),
+        )
+        .await
+    }
+
+    /// Durable-path counterpart of [`ToolRouter::execute_authorized_within`].
+    ///
+    /// Retry and re-provisioning make this the path where an expired run does
+    /// the most damage: without a scope, a failing tool keeps re-provisioning
+    /// sandboxes and re-dispatching long after the run that asked for it was
+    /// cancelled.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_authorized_with_recovery_within(
+        &self,
+        session: &SessionMeta,
+        caller_identity: &Identity,
+        worker_id: Option<&str>,
+        invocation: &ToolInvocation,
+        tool_call_id: ToolCallId,
+        active_canary: Option<&str>,
+        scope: ToolCallScope<'_>,
+    ) -> Result<SecuredToolOutput> {
         let tool_span = tool_execution_span(session, invocation);
 
         let instrument_tool_span = tool_span.clone();
         async move {
+            scope.admit()?;
             let started_at = Instant::now();
             let registry = self.registry();
             let registered_tool = registry
@@ -230,6 +288,7 @@ impl ToolRouter {
                     invocation,
                     tool_call_id,
                     active_canary,
+                    scope,
                 )
                 .await;
             record_tool_execution_result(
@@ -252,8 +311,7 @@ impl ToolRouter {
         invocation: &ToolInvocation,
         tool_call_id: ToolCallId,
         active_canary: Option<&str>,
-        cancel_token: Option<&CancellationToken>,
-        hard_cancel_token: Option<&CancellationToken>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         let registry = self.registry();
         let registered_tool = registry
@@ -268,7 +326,7 @@ impl ToolRouter {
                     invocation,
                     &registered_tool.definition,
                     active_canary,
-                    cancel_token,
+                    scope,
                 )
                 .await
             }
@@ -283,7 +341,7 @@ impl ToolRouter {
                     &registered_tool.definition,
                     route,
                     active_canary,
-                    hard_cancel_token,
+                    scope,
                 )
                 .await
             }
@@ -292,7 +350,7 @@ impl ToolRouter {
                 remote_tool_name,
                 ..
             } => {
-                self.execute_mcp_once_with_cancel(
+                self.execute_mcp_once_with_scope(
                     session,
                     invocation,
                     &registered_tool.definition,
@@ -302,7 +360,7 @@ impl ToolRouter {
                         tool_call_id,
                     },
                     active_canary,
-                    hard_cancel_token.or(cancel_token),
+                    scope,
                 )
                 .await
             }
@@ -317,7 +375,7 @@ impl ToolRouter {
         invocation: &ToolInvocation,
         tool_definition: &ToolDefinition,
         active_canary: Option<&str>,
-        cancel_token: Option<&CancellationToken>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         let registry = self.registry();
         let registered_tool = registry
@@ -339,12 +397,18 @@ impl ToolRouter {
             tool_call_id: invocation.id.as_deref(),
             lineage: self.lineage.as_ref(),
             session_store: self.session_store.as_deref(),
-            cancel_token,
+            cancel_token: scope.cancel_token,
+            budget: scope.budget,
             memory_tool_executor: memory_tool_executor.as_deref(),
             memory_retrieval_executor: memory_retrieval_executor.as_deref(),
         };
         let capability = registered_tool.execution.capability_id(&invocation.name);
-        let output = tool.execute(&invocation.input, &ctx).await?;
+        // Built-ins are in-process, so the scope's own deadline is a real
+        // enforcement point: expiry cancels the shared token the tool is holding
+        // rather than only dropping this future.
+        let output = self
+            .run_within_scope(scope, tool.execute(&invocation.input, &ctx))
+            .await?;
         Ok(self
             .secure_and_budget(
                 session,
@@ -357,6 +421,33 @@ impl ToolRouter {
             .await)
     }
 
+    /// Runs `future` bounded by one caller scope.
+    ///
+    /// The scope's token is used directly rather than a child: the budget's
+    /// deadline is the *run's* deadline, so when it expires everything under
+    /// that run must stop, not just the future this call happens to hold. That
+    /// is the difference between propagating a deadline and merely observing
+    /// one.
+    pub(super) async fn run_within_scope<F, T>(
+        &self,
+        scope: ToolCallScope<'_>,
+        future: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        if scope.budget.deadline.is_none() && scope.effective_cancel_token().is_none() {
+            return future.await;
+        }
+        let token = scope
+            .effective_cancel_token()
+            .cloned()
+            .unwrap_or_else(CancellationToken::new);
+        DeadlineGuard::from_budget(token, scope.budget)
+            .run(future)
+            .await?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_hand_once(
         &self,
@@ -366,10 +457,14 @@ impl ToolRouter {
         tool_definition: &ToolDefinition,
         route: &HandRoute,
         active_canary: Option<&str>,
-        hard_cancel_token: Option<&CancellationToken>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
+        // Provisioning is itself paid work — a cold container, a remote
+        // workspace — so the scope is re-checked here rather than only at the
+        // dispatch entry point, which may have admitted seconds ago.
+        scope.admit()?;
         let hand = self
-            .get_or_provision_hand(route, session, worker_id)
+            .get_or_provision_hand_within(route, session, worker_id, scope.budget)
             .await?;
         self.execute_hand_on_handle(
             session,
@@ -379,7 +474,7 @@ impl ToolRouter {
             &route.provider,
             &hand,
             active_canary,
-            hard_cancel_token,
+            scope,
         )
         .await
     }
@@ -398,8 +493,9 @@ impl ToolRouter {
         provider: &str,
         hand: &HandHandle,
         active_canary: Option<&str>,
-        hard_cancel_token: Option<&CancellationToken>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
+        scope.admit()?;
         let provider_impl = self
             .providers
             .get(provider)
@@ -417,17 +513,29 @@ impl ToolRouter {
                 MoaError::ProviderError("local provider missing from tool router".to_string())
             })?;
             local_provider
-                .execute_with_cancel(hand, &invocation.name, &serialized_input, hard_cancel_token)
+                .execute_bounded(
+                    hand,
+                    &invocation.name,
+                    &serialized_input,
+                    scope.effective_cancel_token(),
+                    scope.budget,
+                )
                 .await?
-        } else if let Some(hard_cancel_token) = hard_cancel_token {
-            tokio::select! {
-                result = provider_impl.execute(hand, &invocation.name, &serialized_input) => result?,
-                _ = hard_cancel_token.cancelled() => return Err(MoaError::Cancelled),
-            }
         } else {
-            provider_impl
-                .execute(hand, &invocation.name, &serialized_input)
-                .await?
+            // Remote sandbox providers get the budget so they can push a
+            // deadline into the execution target; the scope still bounds the
+            // call from this side, so a provider that ignores the budget cannot
+            // outlive the run either way.
+            self.run_within_scope(
+                scope,
+                provider_impl.execute_within(
+                    hand,
+                    &invocation.name,
+                    &serialized_input,
+                    scope.budget,
+                ),
+            )
+            .await?
         };
 
         // Keyed on the logical tool, not on `provider`: a fallback from one
@@ -445,51 +553,31 @@ impl ToolRouter {
             .await)
     }
 
-    pub(super) async fn execute_mcp_once(
+    pub(super) async fn execute_mcp_once_with_scope(
         &self,
         session: &SessionMeta,
         invocation: &ToolInvocation,
         tool_definition: &ToolDefinition,
         dispatch: McpDispatch<'_>,
         active_canary: Option<&str>,
-    ) -> Result<SecuredToolOutput> {
-        self.execute_mcp_once_with_cancel(
-            session,
-            invocation,
-            tool_definition,
-            dispatch,
-            active_canary,
-            None,
-        )
-        .await
-    }
-
-    async fn execute_mcp_once_with_cancel(
-        &self,
-        session: &SessionMeta,
-        invocation: &ToolInvocation,
-        tool_definition: &ToolDefinition,
-        dispatch: McpDispatch<'_>,
-        active_canary: Option<&str>,
-        cancel_token: Option<&CancellationToken>,
+        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         const MCP_DISPATCH_METHOD: &str = "tools/call";
         let server_name = dispatch.server_name;
+        let cancel_token = scope.effective_cancel_token();
         let span = mcp_dispatch_span(server_name, MCP_DISPATCH_METHOD);
         let record_span = span.clone();
         async move {
+            scope.admit()?;
             let started_at = Instant::now();
             let server = self.mcp_servers.get(server_name).ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown MCP server: {server_name}"))
             })?;
-            let client = if let Some(cancel_token) = cancel_token {
-                tokio::select! {
-                    client = self.mcp_client(server_name) => client?,
-                    _ = cancel_token.cancelled() => return Err(MoaError::Cancelled),
-                }
-            } else {
-                self.mcp_client(server_name).await?
-            };
+            // Connecting is the expensive part of a cold MCP dispatch, so the
+            // scope bounds the handshake as well as the call.
+            let client = self
+                .run_within_scope(scope, self.mcp_client(server_name))
+                .await?;
             // Data-class egress governance: before the payload leaves the trust
             // boundary, classify the serialized tool arguments against this
             // server's `allowed_data_classes` allowlist. Fails closed — a
@@ -512,12 +600,15 @@ impl ToolRouter {
                 )
                 .await?;
             let tool_invocation_id = dispatch.tool_call_id.to_string();
-            let output = client
-                .call_tool(
-                    dispatch.remote_tool_name,
-                    invocation.input.clone(),
-                    Some(&tool_invocation_id),
-                    cancel_token,
+            let output = self
+                .run_within_scope(
+                    scope,
+                    client.call_tool(
+                        dispatch.remote_tool_name,
+                        invocation.input.clone(),
+                        Some(&tool_invocation_id),
+                        cancel_token,
+                    ),
                 )
                 .await?;
             record_span.record(
@@ -614,6 +705,8 @@ mod egress_dispatch_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::ToolCallScope;
 
     use moa_config::McpServerConfig;
     use moa_core::types::security::SensitivityClass;
@@ -810,12 +903,13 @@ mod egress_dispatch_tests {
 
         let session = session();
         let error = router
-            .execute_mcp_once(
+            .execute_mcp_once_with_scope(
                 &session,
                 &tool_invocation(),
                 &external_tool_definition(),
                 deployment_dispatch(),
                 None,
+                ToolCallScope::unbounded(),
             )
             .await
             .expect_err("restricted payload to a default-allowlist server must be blocked");
@@ -847,12 +941,13 @@ mod egress_dispatch_tests {
 
         let session = session();
         let secured = router
-            .execute_mcp_once(
+            .execute_mcp_once_with_scope(
                 &session,
                 &tool_invocation(),
                 &external_tool_definition(),
                 deployment_dispatch(),
                 None,
+                ToolCallScope::unbounded(),
             )
             .await
             .expect("an allowlisted class must dispatch to the MCP server");
@@ -873,12 +968,13 @@ mod egress_dispatch_tests {
 
         let session = session();
         let error = router
-            .execute_mcp_once(
+            .execute_mcp_once_with_scope(
                 &session,
                 &tool_invocation(),
                 &external_tool_definition(),
                 deployment_dispatch(),
                 None,
+                ToolCallScope::unbounded(),
             )
             .await
             .expect_err("MCP dispatch without a guard must fail closed");

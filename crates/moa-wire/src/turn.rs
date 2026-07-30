@@ -13,6 +13,7 @@ use moa_core::{
     types::execution_planning::{ExecutionRouteSummary, ExecutionTemplateInvocation},
     types::identifiers::AgentSignalId,
     types::identifiers::SessionId,
+    types::resource::ResourceBudget,
 };
 use moa_core::{
     types::tools::TrustedSandboxFileManifestRef, types::worker::state::WorkerProgressSummary,
@@ -82,6 +83,9 @@ pub struct RunTurnRequest {
     /// Optional turn-iteration cap for this request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Downward-only resource slice that bounds this turn and its tool dispatches.
+    #[serde(default)]
+    pub resource_budget: ResourceBudget,
     /// What initiated this turn. Defaults to a user message, the common path.
     #[serde(default)]
     pub trigger: TurnTrigger,
@@ -302,6 +306,9 @@ pub struct StartTurnRequest {
     /// Optional turn-iteration cap for this request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Downward-only resource slice that bounds this turn and its tool dispatches.
+    #[serde(default)]
+    pub resource_budget: ResourceBudget,
     /// Exact structured pinned-template invocation for this user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_template: Option<ExecutionTemplateInvocation>,
@@ -376,6 +383,7 @@ impl StartTurnRequest {
             "max_turns",
             self.max_turns.map(u32::to_be_bytes).as_ref(),
         );
+        absorb_json_field(&mut hasher, "resource_budget", &Some(self.resource_budget));
         absorb_json_field(&mut hasher, "execution_template", &self.execution_template);
         absorb_json_field(&mut hasher, "reply_to", &self.reply_to);
         AdmissionRequestHash(*hasher.finalize().as_bytes())
@@ -387,7 +395,7 @@ impl StartTurnRequest {
 /// Bumping the version deliberately invalidates every stored admission hash: an
 /// in-flight retry then reads as a hash conflict rather than silently matching a
 /// fingerprint computed over a different field set.
-pub const ADMISSION_REQUEST_HASH_DOMAIN: &str = "moa.session.admission.request.v1";
+pub const ADMISSION_REQUEST_HASH_DOMAIN: &str = "moa.session.admission.request.v2";
 
 /// Canonical fingerprint of one admission request's semantic fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,6 +496,9 @@ pub struct QueueMessageRequest {
     /// Optional turn-iteration cap for this request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Downward-only resource slice that bounds this turn and its tool dispatches.
+    #[serde(default)]
+    pub resource_budget: ResourceBudget,
     /// Exact structured pinned-template invocation for this user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_template: Option<ExecutionTemplateInvocation>,
@@ -509,6 +520,7 @@ impl From<QueueMessageRequest> for StartTurnRequest {
             model: request.model,
             contact: request.contact,
             max_turns: request.max_turns,
+            resource_budget: request.resource_budget,
             execution_template: request.execution_template,
         }
     }
@@ -578,6 +590,9 @@ pub struct PendingMessage {
     /// Optional turn-iteration cap for this queued request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Downward-only resource slice preserved while this request is queued.
+    #[serde(default)]
+    pub resource_budget: ResourceBudget,
     /// Exact structured pinned-template invocation preserved while queued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_template: Option<ExecutionTemplateInvocation>,
@@ -991,6 +1006,7 @@ mod tests {
             model: None,
             contact: None,
             max_turns: None,
+            resource_budget: ResourceBudget::UNBOUNDED,
             execution_template: None,
         }
     }
@@ -1048,6 +1064,14 @@ mod tests {
         changed_model.model = Some("model-b".to_string());
         let mut changed_max_turns = hash_request();
         changed_max_turns.max_turns = Some(3);
+        let mut changed_resource_budget = hash_request();
+        changed_resource_budget.resource_budget = ResourceBudget::new(
+            None,
+            Some(moa_core::types::resource::ResourceAmounts {
+                model_calls: 1,
+                ..moa_core::types::resource::ResourceAmounts::ZERO
+            }),
+        );
         let mut changed_reply_to = hash_request();
         changed_reply_to.reply_to = Some(MessageReplyTarget::ExecutionInput {
             run_uid: uuid::Uuid::from_u128(9),
@@ -1086,6 +1110,7 @@ mod tests {
             changed_text.canonical_request_hash(None),
             changed_model.canonical_request_hash(None),
             changed_max_turns.canonical_request_hash(None),
+            changed_resource_budget.canonical_request_hash(None),
             changed_reply_to.canonical_request_hash(None),
             changed_template.canonical_request_hash(None),
             one_attachment.canonical_request_hash(None),

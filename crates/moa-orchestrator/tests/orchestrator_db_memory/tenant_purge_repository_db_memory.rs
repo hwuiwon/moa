@@ -1207,11 +1207,16 @@ async fn seed_experiment_score_provenance(
     .expect("seed experiment score run");
 
     sqlx::query(
-        "INSERT INTO moa.experiment_run (
+        r#"INSERT INTO moa.experiment_run (
              run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
-             scorecard, score_run_id, artifact_revision_uids, created_by_identity
+             scorecard, score_run_id, artifact_revision_uids, created_by_identity,
+             resource_envelope
          ) VALUES ($1, $2, NULL, 'purge experiment', 'agent_loop', 'completed', '{}'::jsonb,
-                   '{}'::jsonb, '{}'::jsonb, $3, '{}', '{}'::jsonb)",
+                   '{}'::jsonb, '{}'::jsonb, $3, '{}', '{}'::jsonb,
+                   '{"version": 1,
+                     "run_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "trial_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb)"#,
     )
     .bind(run_uid)
     .bind(&partition)
@@ -1221,11 +1226,15 @@ async fn seed_experiment_score_provenance(
     .expect("seed experiment run");
 
     sqlx::query(
-        "INSERT INTO moa.experiment_trial (
+        r#"INSERT INTO moa.experiment_trial (
              trial_uid, run_uid, storage_partition_id, user_id, trial_key, status, target_kind,
-             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id
+             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id,
+             resource_envelope
          ) VALUES ($1, $2, $3, NULL, 'purge/0', 'completed', 'agent_loop', 'baseline', $4,
-                   '{}'::jsonb, 'sim-model', $5)",
+                   '{}'::jsonb, 'sim-model', $5,
+                   '{"version": 1,
+                     "limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "deadline": "1970-01-01T00:00:00Z"}'::jsonb)"#,
     )
     .bind(trial_uid)
     .bind(run_uid)
@@ -1235,6 +1244,24 @@ async fn seed_experiment_score_provenance(
     .execute(pool)
     .await
     .expect("seed experiment trial");
+
+    // Seeded so the purge catalog entry for the reservation ledger is exercised
+    // rather than merely present: without a row here, deleting that registration
+    // would change nothing observable.
+    sqlx::query(
+        r#"INSERT INTO moa.experiment_resource_reservation (
+             reservation_uid, run_uid, trial_uid, storage_partition_id, user_id,
+             reservation_key, component, state, reserved
+         ) VALUES ($1, $2, $3, $4, NULL, 'purge/reservation/0', 'target', 'open',
+                   '{"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0}'::jsonb)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(run_uid)
+    .bind(trial_uid)
+    .bind(&partition)
+    .execute(pool)
+    .await
+    .expect("seed experiment resource reservation");
 
     let score_id = Uuid::new_v4();
     let score_ts = chrono::Utc::now();

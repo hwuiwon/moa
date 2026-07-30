@@ -348,6 +348,13 @@ schema = "moa"
 owner = "moa-experiments"
 
 [[table]]
+name = "experiment_resource_reservation"
+schema = "moa"
+owner = "moa-experiments"
+readers = ["moa-orchestrator"]
+notes = "Durable reserve-then-reconcile ledger rows for Behavior Lab run and trial resource supervision."
+
+[[table]]
 name = "execution_planning_context"
 schema = "moa"
 owner = "moa-execution"

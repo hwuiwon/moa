@@ -9,12 +9,13 @@
 //! `serde(default)`: a profile that fails to say something does not
 //! deserialize.
 //!
-//! Four policy layers each contribute a [`SandboxPolicySnapshot`] — deployment
+//! Five policy layers each contribute a [`SandboxPolicySnapshot`] — deployment
 //! configuration, the tenant's current configuration, the agent snapshot pinned
-//! on the session, and the hand route serving the tool. They are combined by
-//! [`resolve_effective_sandbox_profile`] into one [`EffectiveSandboxProfile`]
-//! whose limits are the restrictive intersection of all four, and whose
-//! [`EffectiveSandboxProfile::profile_hash`] covers the profile, all four source
+//! on the session, the hand route serving the tool, and the provenance of the
+//! call itself. They are combined by [`resolve_effective_sandbox_profile`] into
+//! one [`EffectiveSandboxProfile`] whose limits are the restrictive
+//! intersection of all five, and whose
+//! [`EffectiveSandboxProfile::profile_hash`] covers the profile, all five source
 //! revisions, and the serving provider's capability revision. That hash is the
 //! sandbox's policy identity: it is persisted on the durable lease and
 //! recomputed on recovery, so a sandbox provisioned under one policy can never
@@ -29,6 +30,8 @@ use serde_canonical_json::CanonicalFormatter;
 use sha2::{Digest, Sha256};
 
 use crate::error::{MoaError, Result};
+use crate::types::action_policy::CallOrigin;
+use crate::types::resource::ResourceBudget;
 
 /// Sandbox isolation tier for a hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -614,6 +617,79 @@ impl SandboxProfile {
             max_lifetime: LifetimeLimit::Unbounded,
         }
     }
+
+    /// The profile that bounds nothing except outbound network access.
+    ///
+    /// Used by the origin policy layer for provenance classes that may compute
+    /// inside a sandbox but must reach nothing outside it. Restricting by this
+    /// profile is what turns "generated code invokes no MOA capability" into a
+    /// network fact rather than an admission-list promise: it composes with the
+    /// other four layers exactly like any authored policy, and a provider that
+    /// cannot enforce `DenyAll` egress refuses the sandbox instead of serving a
+    /// host-network one.
+    #[must_use]
+    pub fn deny_all_egress() -> Self {
+        Self {
+            egress: EgressPolicy::DenyAll,
+            ..Self::unrestricted()
+        }
+    }
+}
+
+/// Stable revision of the origin policy layer for one [`CallOrigin`].
+///
+/// The origin layer is never absent: every session states a provenance, so this
+/// is an authored layer with a named revision rather than an identity
+/// placeholder.
+///
+/// Experiment trials and generated code both bind `DenyAll` egress here. A
+/// provider tier that cannot enforce that restriction must refuse admission;
+/// in particular, experiment traffic cannot fall back to host execution merely
+/// because that tier is otherwise convenient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginPolicyRevision {
+    /// Ordinary tenant traffic: the layer restricts nothing on its own.
+    Production,
+    /// An eval-owned experiment trial: deny-all egress.
+    Experiment,
+    /// Model-generated code executing inside a sandbox: deny-all egress.
+    GeneratedCode,
+}
+
+impl OriginPolicyRevision {
+    /// Returns the origin layer a call provenance contributes.
+    #[must_use]
+    pub const fn of(origin: CallOrigin) -> Self {
+        match origin {
+            CallOrigin::Production => Self::Production,
+            CallOrigin::Experiment { .. } => Self::Experiment,
+            CallOrigin::GeneratedCode => Self::GeneratedCode,
+        }
+    }
+
+    /// Returns the stable, non-empty revision string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "origin-production",
+            Self::Experiment => "origin-experiment-deny-all",
+            Self::GeneratedCode => "origin-generated-code-deny-all",
+        }
+    }
+
+    /// Returns the profile this origin declares.
+    ///
+    /// Experiment trials and generated code both restrict sandbox egress. Host
+    /// tiers that cannot enforce deny-all fail closed during capability
+    /// admission.
+    #[must_use]
+    pub fn profile(self) -> SandboxProfile {
+        match self {
+            Self::Production => SandboxProfile::unrestricted(),
+            Self::Experiment | Self::GeneratedCode => SandboxProfile::deny_all_egress(),
+        }
+    }
 }
 
 impl SandboxPolicySnapshot {
@@ -623,6 +699,21 @@ impl SandboxPolicySnapshot {
         Self {
             revision: revision.as_str().to_string(),
             profile: SandboxProfile::unrestricted(),
+        }
+    }
+
+    /// Builds the sandbox policy layer one call provenance contributes.
+    ///
+    /// A trial or generated-code sandbox binds [`EgressPolicy::DenyAll`] here,
+    /// so the restriction is part of the resolved profile and of the policy
+    /// identity hash — not a check some later dispatch path has to remember to
+    /// run.
+    #[must_use]
+    pub fn origin(origin: CallOrigin) -> Self {
+        let revision = OriginPolicyRevision::of(origin);
+        Self {
+            revision: revision.as_str().to_string(),
+            profile: revision.profile(),
         }
     }
 
@@ -658,7 +749,7 @@ impl<'de> Deserialize<'de> for SandboxPolicySnapshot {
     }
 }
 
-/// The four policy-layer revisions that produced an effective profile.
+/// The five policy-layer revisions that produced an effective profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPolicySources {
@@ -670,6 +761,15 @@ pub struct SandboxPolicySources {
     pub agent: String,
     /// Serving hand route revision.
     pub route: String,
+    /// Provenance of the call the sandbox serves.
+    ///
+    /// Every revision in this struct is hash-significant, and this one is the
+    /// newest: adding it moved every policy identity hash exactly once. That is
+    /// the intended consequence rather than a migration hazard — a lease
+    /// provisioned before the origin layer existed no longer matches the policy
+    /// that resolves today, so it is replaced instead of being reinterpreted
+    /// under a layer it was never admitted for.
+    pub origin: String,
 }
 
 /// Identity payload hashed into [`EffectiveSandboxProfile::profile_hash`].
@@ -705,7 +805,7 @@ impl EffectiveSandboxProfile {
         &self.profile
     }
 
-    /// Returns the four contributing policy-layer revisions.
+    /// Returns the five contributing policy-layer revisions.
     #[must_use]
     pub fn sources(&self) -> &SandboxPolicySources {
         &self.sources
@@ -767,10 +867,10 @@ fn hash_identity(canonical: &str) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
-/// Resolves the four policy layers plus provider capability revision into one
+/// Resolves the five policy layers plus provider capability revision into one
 /// effective profile.
 ///
-/// The resolved limits are the restrictive intersection of all four layers, so
+/// The resolved limits are the restrictive intersection of all five layers, so
 /// no layer can widen another. Every layer is required: a missing layer is an
 /// error, never an inferred unrestricted policy.
 pub fn resolve_effective_sandbox_profile(
@@ -778,6 +878,7 @@ pub fn resolve_effective_sandbox_profile(
     tenant: &SandboxPolicySnapshot,
     agent: &SandboxPolicySnapshot,
     route: &SandboxPolicySnapshot,
+    origin: &SandboxPolicySnapshot,
     capability_revision: &str,
 ) -> Result<EffectiveSandboxProfile> {
     if capability_revision.trim().is_empty() {
@@ -790,13 +891,15 @@ pub fn resolve_effective_sandbox_profile(
         .clone()
         .restrict(tenant.profile.clone())
         .restrict(agent.profile.clone())
-        .restrict(route.profile.clone());
+        .restrict(route.profile.clone())
+        .restrict(origin.profile.clone());
     profile.validate()?;
     let sources = SandboxPolicySources {
         deployment: deployment.revision.clone(),
         tenant: tenant.revision.clone(),
         agent: agent.revision.clone(),
         route: route.revision.clone(),
+        origin: origin.revision.clone(),
     };
     let capability_revision = capability_revision.trim().to_string();
     let canonical = canonical_identity_json(&profile, &sources, &capability_revision)?;
@@ -1108,6 +1211,21 @@ pub struct HandSpec {
     pub workspace_mount: Option<PathBuf>,
     /// The one resolved policy every provider must honor or reject.
     pub effective_profile: EffectiveSandboxProfile,
+    /// What the run that asked for this sandbox may still spend inside it.
+    ///
+    /// This is deliberately separate from
+    /// [`SandboxProfile::max_lifetime`]. The profile bounds *the sandbox*: how
+    /// long the container may exist, enforced by the provider or the durable
+    /// reaper. The budget bounds *the run*: the caller's absolute deadline and
+    /// remaining token/cost allowance, which can expire long before the sandbox
+    /// does and belongs to nobody the reaper knows about. Without it a cancelled
+    /// or expired run's command keeps executing inside a perfectly healthy
+    /// sandbox until the sandbox's own, much longer, lifetime runs out.
+    ///
+    /// Defaults to [`ResourceBudget::UNBOUNDED`] so a caller that has no run
+    /// budget states that explicitly rather than by omission.
+    #[serde(default)]
+    pub budget: ResourceBudget,
 }
 
 /// One trusted file to install into a provisioned sandbox.
@@ -1454,7 +1572,7 @@ mod tests {
 
     #[test]
     fn effective_profile_hash_covers_every_source_and_capability_revision() {
-        // Pins: all four policy-layer revisions and the provider capability
+        // Pins: all five policy-layer revisions and the provider capability
         // revision are hash-significant, so changing any one of them changes
         // the sandbox's policy identity.
         let base = resolve_effective_sandbox_profile(
@@ -1462,22 +1580,37 @@ mod tests {
             &snapshot("tenant-1", unrestricted_profile()),
             &snapshot("agent-1", unrestricted_profile()),
             &snapshot("route-1", unrestricted_profile()),
+            &snapshot("origin-1", unrestricted_profile()),
             "cap-1",
         )
         .expect("resolve base");
 
-        for (deployment, tenant, agent, route, capability) in [
-            ("deploy-2", "tenant-1", "agent-1", "route-1", "cap-1"),
-            ("deploy-1", "tenant-2", "agent-1", "route-1", "cap-1"),
-            ("deploy-1", "tenant-1", "agent-2", "route-1", "cap-1"),
-            ("deploy-1", "tenant-1", "agent-1", "route-2", "cap-1"),
-            ("deploy-1", "tenant-1", "agent-1", "route-1", "cap-2"),
+        for (deployment, tenant, agent, route, origin, capability) in [
+            (
+                "deploy-2", "tenant-1", "agent-1", "route-1", "origin-1", "cap-1",
+            ),
+            (
+                "deploy-1", "tenant-2", "agent-1", "route-1", "origin-1", "cap-1",
+            ),
+            (
+                "deploy-1", "tenant-1", "agent-2", "route-1", "origin-1", "cap-1",
+            ),
+            (
+                "deploy-1", "tenant-1", "agent-1", "route-2", "origin-1", "cap-1",
+            ),
+            (
+                "deploy-1", "tenant-1", "agent-1", "route-1", "origin-2", "cap-1",
+            ),
+            (
+                "deploy-1", "tenant-1", "agent-1", "route-1", "origin-1", "cap-2",
+            ),
         ] {
             let changed = resolve_effective_sandbox_profile(
                 &snapshot(deployment, unrestricted_profile()),
                 &snapshot(tenant, unrestricted_profile()),
                 &snapshot(agent, unrestricted_profile()),
                 &snapshot(route, unrestricted_profile()),
+                &snapshot(origin, unrestricted_profile()),
                 capability,
             )
             .expect("resolve changed");
@@ -1494,11 +1627,92 @@ mod tests {
             &snapshot("tenant-1", unrestricted_profile()),
             &snapshot("agent-1", unrestricted_profile()),
             &snapshot("route-1", unrestricted_profile()),
+            &snapshot("origin-1", unrestricted_profile()),
             "cap-1",
         )
         .expect("resolve repeat");
         assert_eq!(repeat.profile_hash(), base.profile_hash());
         assert!(base.profile_hash().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn generated_code_and_experiments_bind_deny_all_egress_with_distinct_identities() {
+        // Pins: the origin layer is a real policy layer, not a label.
+        // Experiment trials and generated code both bind `DenyAll`, while their
+        // distinct revisions prevent a sandbox admitted for one provenance
+        // from being reused for the other.
+        let resolve = |origin: CallOrigin| {
+            resolve_effective_sandbox_profile(
+                &snapshot("deploy-1", unrestricted_profile()),
+                &snapshot("tenant-1", unrestricted_profile()),
+                &snapshot("agent-1", unrestricted_profile()),
+                &snapshot("route-1", unrestricted_profile()),
+                &SandboxPolicySnapshot::origin(origin),
+                "cap-1",
+            )
+            .expect("resolve")
+        };
+        let trial = CallOrigin::Experiment {
+            run_uid: uuid::Uuid::nil(),
+            trial_uid: None,
+        };
+
+        let production = resolve(CallOrigin::Production);
+        assert_eq!(production.profile().egress, EgressPolicy::Unrestricted);
+        assert_eq!(production.sources().origin, "origin-production");
+
+        let generated = resolve(CallOrigin::GeneratedCode);
+        assert_eq!(
+            generated.profile().egress,
+            EgressPolicy::DenyAll,
+            "generated-code sandboxes must resolve to deny-all egress"
+        );
+
+        let experiment = resolve(trial);
+        assert_eq!(
+            experiment.profile().egress,
+            EgressPolicy::DenyAll,
+            "experiment sandboxes must resolve to deny-all egress"
+        );
+        assert_eq!(experiment.sources().origin, "origin-experiment-deny-all");
+
+        // Every origin is hash-significant even where two share a profile: the
+        // revision string differs, so the resolved identities cannot collide.
+        for (label, hash) in [
+            ("generated code", generated.profile_hash()),
+            ("experiment", experiment.profile_hash()),
+        ] {
+            assert_ne!(
+                hash,
+                production.profile_hash(),
+                "the {label} origin layer must be hash-significant"
+            );
+        }
+        assert_ne!(
+            generated.profile_hash(),
+            experiment.profile_hash(),
+            "a trial sandbox must never be reusable to serve generated code"
+        );
+    }
+
+    #[test]
+    fn a_permissive_origin_layer_cannot_widen_a_denied_one() {
+        // Pins: the origin layer participates in the same restrictive
+        // intersection as the other four. A production origin composed with a
+        // tenant that denied egress still denies it.
+        let resolved = resolve_effective_sandbox_profile(
+            &snapshot("deploy-1", unrestricted_profile()),
+            &snapshot(
+                "tenant-1",
+                profile(EgressPolicy::DenyAll, seconds(60), seconds(120)),
+            ),
+            &snapshot("agent-1", unrestricted_profile()),
+            &snapshot("route-1", unrestricted_profile()),
+            &SandboxPolicySnapshot::origin(CallOrigin::Production),
+            "cap-1",
+        )
+        .expect("resolve");
+        assert_eq!(resolved.profile().egress, EgressPolicy::DenyAll);
     }
 
     #[test]
@@ -1510,6 +1724,7 @@ mod tests {
             &snapshot("tenant-1", unrestricted_profile()),
             &snapshot("agent-1", unrestricted_profile()),
             &snapshot("route-1", unrestricted_profile()),
+            &snapshot("origin-1", unrestricted_profile()),
             "cap-1",
         )
         .expect("resolve");
@@ -1539,6 +1754,7 @@ mod tests {
                 &snapshot("tenant-1", unrestricted_profile()),
                 &snapshot("agent-1", unrestricted_profile()),
                 &snapshot("route-1", unrestricted_profile()),
+                &snapshot("origin-1", unrestricted_profile()),
                 "   ",
             )
             .is_err()

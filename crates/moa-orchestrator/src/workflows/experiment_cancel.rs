@@ -143,6 +143,21 @@ pub(crate) async fn forward_pending_child_cancellation(
     let Some(signal) = load_cancel_signal(ctx, scope, run_uid, pool).await? else {
         return Ok(false);
     };
+    forward_child_cancellation_signal(ctx, &signal).await?;
+    Ok(true)
+}
+
+/// Forwards one cancellation signal to whichever child this workflow started.
+///
+/// Split out from the pending-signal path so a locally-decided stop — a trial that
+/// has run past its envelope deadline — can cancel the child it is waiting on
+/// without first persisting an operator cancellation it never received. The child
+/// target is resolved from this workflow's own journaled keys, so a replay forwards
+/// to the same child rather than re-deciding from live state.
+pub(crate) async fn forward_child_cancellation_signal(
+    ctx: &WorkflowContext<'_>,
+    signal: &ExperimentCancelSignal,
+) -> Result<(), HandlerError> {
     let session_id = ctx
         .get::<Json<SessionId>>(K_SESSION_ID)
         .await?
@@ -161,13 +176,13 @@ pub(crate) async fn forward_pending_child_cancellation(
         session_id,
         execution_run_uid,
     ) else {
-        return Ok(true);
+        return Ok(());
     };
     match target {
         ChildCancelTarget::Session(session_id) => {
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
-                    .request_cancel(Json::from(signal.reason)),
+                    .request_cancel(Json::from(signal.reason.clone())),
                 &signal.identity,
             )
             .send();
@@ -187,7 +202,7 @@ pub(crate) async fn forward_pending_child_cancellation(
                             session_id,
                             run_uid,
                         },
-                        reason: signal.reason,
+                        reason: signal.reason.clone(),
                     },
                 )),
                 &signal.identity,
@@ -195,7 +210,7 @@ pub(crate) async fn forward_pending_child_cancellation(
             .send();
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 async fn load_cancel_signal(

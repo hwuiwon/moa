@@ -7,10 +7,23 @@ use moa_core::types::action_policy::ActionPolicyEffect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::assertion::AssertionSpec;
+
+/// Schema version of the [`TestCase`] model.
+///
+/// Version 2 replaced the untyped `expected_output`/`expected_trajectory` pair
+/// with [`TestCase::assertions`]. There is deliberately no compatibility
+/// deserializer: a suite document that does not declare this exact version is
+/// rejected by [`crate::loader::load_suite`], because a silently-ignored v1
+/// expectation block would turn into a vacuous pass.
+pub const TEST_CASE_SCHEMA_VERSION: u32 = 2;
+
 /// A complete test suite with multiple test cases.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "TestSuiteDocument", from = "TestSuiteDocument")]
 pub struct TestSuite {
+    /// Case-model schema version the document declares.
+    pub schema_version: u32,
     /// Stable suite name.
     pub name: String,
     /// Optional human-readable description.
@@ -23,10 +36,56 @@ pub struct TestSuite {
     pub tags: Vec<String>,
 }
 
-/// A single test case: input plus evaluation expectations.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+impl Default for TestSuite {
+    fn default() -> Self {
+        Self {
+            schema_version: TEST_CASE_SCHEMA_VERSION,
+            name: String::new(),
+            description: None,
+            cases: Vec::new(),
+            default_timeout_seconds: 0,
+            tags: Vec::new(),
+        }
+    }
+}
+
+impl TestSuite {
+    /// Rejects a suite this build cannot execute exactly as authored.
+    ///
+    /// Checks the declared schema version, the suite name, and every case's
+    /// assertion set against the built-in evaluator registry, so an unusable
+    /// suite is refused before it can burn a provider call.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.schema_version != TEST_CASE_SCHEMA_VERSION {
+            return Err(crate::Error::InvalidConfig(format!(
+                "suite '{}' declares case schema version {} but this build requires {}",
+                self.name, self.schema_version, TEST_CASE_SCHEMA_VERSION
+            )));
+        }
+        if self.name.trim().is_empty() {
+            return Err(crate::Error::InvalidConfig(
+                "suite is missing [suite].name".to_string(),
+            ));
+        }
+        let registry = crate::assertion::builtin_registry();
+        for case in &self.cases {
+            registry.check_case(case)?;
+        }
+        Ok(())
+    }
+}
+
+/// A single test case: input plus the typed assertions it claims.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TestCaseDocument", into = "TestCaseDocument")]
 pub struct TestCase {
+    /// Case-model schema version, stamped from the suite header on load.
+    ///
+    /// Not serialized: the version is a document-level fact carried by
+    /// `[suite].schema_version`, and duplicating it per case would let the two
+    /// disagree.
+    #[serde(skip)]
+    pub schema_version: u32,
     /// Case execution kind.
     #[serde(skip_serializing_if = "TestCaseKind::is_single")]
     pub kind: TestCaseKind,
@@ -34,27 +93,136 @@ pub struct TestCase {
     pub name: String,
     /// User input sent to the agent.
     pub input: String,
-    /// Flexible expected-output rules.
-    pub expected_output: Option<ExpectedOutput>,
-    /// Expected tool-call trajectory, in order.
-    pub expected_trajectory: Option<Vec<String>>,
     /// Per-case timeout override in seconds.
     pub timeout_seconds: Option<u64>,
     /// Tags applied to this case.
     pub tags: Vec<String>,
-    /// Arbitrary case metadata.
-    pub metadata: HashMap<String, Value>,
-    /// Which oracle produced the `expected_output` expectations, when the case
-    /// was machine-generated. Reporting distinguishes fact-grounded cases from
+    /// Which oracle produced the case's text assertions, when the case was
+    /// machine-generated. Reporting distinguishes fact-grounded cases from
     /// keyword-fallback cases; execution treats both identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<SuiteOracle>,
+    /// Arbitrary case metadata.
+    pub metadata: HashMap<String, Value>,
+    /// Typed assertions this case claims, evaluated against captured evidence.
+    ///
+    /// Each entry names a server-registered evaluator and hands it pure JSON
+    /// parameters. A case can never carry an executable oracle.
+    pub assertions: Vec<AssertionSpec>,
     /// Long-conversation case details when `kind = "long"`.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub long: Option<LongTestCase>,
 }
 
-/// Provenance of a generated case's expected-output expectations.
+impl Default for TestCase {
+    fn default() -> Self {
+        Self {
+            schema_version: TEST_CASE_SCHEMA_VERSION,
+            kind: TestCaseKind::default(),
+            name: String::new(),
+            input: String::new(),
+            timeout_seconds: None,
+            tags: Vec::new(),
+            oracle: None,
+            metadata: HashMap::new(),
+            assertions: Vec::new(),
+            long: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct TestCaseDocument {
+    #[serde(skip_serializing_if = "TestCaseKind::is_single")]
+    kind: TestCaseKind,
+    name: String,
+    input: String,
+    timeout_seconds: Option<u64>,
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oracle: Option<SuiteOracle>,
+    metadata: HashMap<String, Value>,
+    assertions: Vec<AssertionSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal_card: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scripted_user: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secondary_session: Option<SecondaryLongSession>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expectations: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<LongConversationMode>,
+}
+
+impl From<TestCaseDocument> for TestCase {
+    fn from(value: TestCaseDocument) -> Self {
+        let has_long_fields = value.goal_card.is_some()
+            || value.transcript.is_some()
+            || value.scripted_user.is_some()
+            || value.secondary_session.is_some()
+            || value.expectations.is_some()
+            || value.mode.is_some();
+        let long = has_long_fields.then(|| LongTestCase {
+            goal_card: value.goal_card,
+            transcript: value.transcript.unwrap_or_default(),
+            scripted_user: value.scripted_user,
+            secondary_session: value.secondary_session,
+            expectations: value.expectations.unwrap_or_default(),
+            mode: value.mode.unwrap_or_default(),
+        });
+        Self {
+            schema_version: TEST_CASE_SCHEMA_VERSION,
+            kind: value.kind,
+            name: value.name,
+            input: value.input,
+            timeout_seconds: value.timeout_seconds,
+            tags: value.tags,
+            oracle: value.oracle,
+            metadata: value.metadata,
+            assertions: value.assertions,
+            long,
+        }
+    }
+}
+
+impl From<TestCase> for TestCaseDocument {
+    fn from(value: TestCase) -> Self {
+        let (goal_card, transcript, scripted_user, secondary_session, expectations, mode) =
+            match value.long {
+                Some(long) => (
+                    long.goal_card,
+                    Some(long.transcript),
+                    long.scripted_user,
+                    long.secondary_session,
+                    Some(long.expectations),
+                    Some(long.mode),
+                ),
+                None => (None, None, None, None, None, None),
+            };
+        Self {
+            kind: value.kind,
+            name: value.name,
+            input: value.input,
+            timeout_seconds: value.timeout_seconds,
+            tags: value.tags,
+            oracle: value.oracle,
+            metadata: value.metadata,
+            assertions: value.assertions,
+            goal_card,
+            transcript,
+            scripted_user,
+            secondary_session,
+            expectations,
+            mode,
+        }
+    }
+}
+
+/// Provenance of a generated case's text assertions.
 ///
 /// Auto-generated skill regression cases derive their `contains` expectations
 /// from session events. This records which extraction strategy produced them so
@@ -218,22 +386,27 @@ pub enum LongSessionInterleaving {
     Phased,
 }
 
-/// Expected-output rules for an agent response.
+/// Response-text rules: the parameter block of the `text_match` evaluator.
 ///
-/// Every field below is a hard requirement: the `output_match` evaluator emits a
-/// diagnostic fractional score plus an `output_match_required` boolean gate, and
-/// any unmet rule (a missing required fragment, a present exclusion, a regex or
-/// exact mismatch) fails the scenario regardless of the fractional score.
+/// This is response-text matching and nothing else. It cannot express an
+/// environment or action oracle, which is exactly why those live in their own
+/// assertion categories instead of being smuggled in here.
+///
+/// Every field is a hard all-of requirement: any unmet rule (a missing required
+/// fragment, a present exclusion, a regex or exact mismatch) fails the
+/// assertion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExpectedOutput {
     /// Response text must contain all of these fragments (required, all-of).
     pub contains: Vec<String>,
     /// Response text must not contain any of these fragments (required exclusion).
     pub not_contains: Vec<String>,
     /// Regular expression the response must match when set (required).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub regex: Option<String>,
     /// Exact response text the agent must return when set (required).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exact: Option<String>,
     /// Key facts that must all appear in the response (required, all-of).
     pub facts: Vec<String>,
@@ -326,9 +499,13 @@ struct TestSuiteDocument {
     cases: Vec<TestCase>,
 }
 
+/// Suite header. `schema_version` has no serde default beyond the container
+/// zero, so a legacy document that never declared one deserializes to `0` and
+/// is rejected by [`TestSuite::validate`] instead of being reinterpreted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct TestSuiteHeader {
+    schema_version: u32,
     name: String,
     description: Option<String>,
     default_timeout_seconds: u64,
@@ -337,10 +514,21 @@ struct TestSuiteHeader {
 
 impl From<TestSuiteDocument> for TestSuite {
     fn from(value: TestSuiteDocument) -> Self {
+        let schema_version = value.suite.schema_version;
         Self {
+            schema_version,
             name: value.suite.name,
             description: value.suite.description,
-            cases: value.cases,
+            // Stamp the document version onto every case so a case can never
+            // disagree with the file it came from.
+            cases: value
+                .cases
+                .into_iter()
+                .map(|case| TestCase {
+                    schema_version,
+                    ..case
+                })
+                .collect(),
             default_timeout_seconds: value.suite.default_timeout_seconds,
             tags: value.suite.tags,
         }
@@ -351,6 +539,7 @@ impl From<TestSuite> for TestSuiteDocument {
     fn from(value: TestSuite) -> Self {
         Self {
             suite: TestSuiteHeader {
+                schema_version: value.schema_version,
                 name: value.name,
                 description: value.description,
                 default_timeout_seconds: value.default_timeout_seconds,
@@ -405,6 +594,42 @@ impl From<AgentConfig> for AgentConfigDocument {
                 permissions: value.permissions,
                 metadata: value.metadata,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestSuite;
+
+    #[test]
+    fn test_case_rejects_legacy_and_unknown_fields() {
+        // Pins: stale v1 expectations and misspelled case keys cannot deserialize
+        // into a case with an empty assertion list and vacuously pass.
+        for unknown_field in [
+            "expected_output = { contains = [\"needle\"] }",
+            "expected_trajectory = []",
+            "assertion = []",
+        ] {
+            let document = format!(
+                r#"
+[suite]
+schema_version = 2
+name = "strict-cases"
+
+[[cases]]
+name = "case-a"
+input = "hello"
+{unknown_field}
+"#
+            );
+
+            let error = toml::from_str::<TestSuite>(&document)
+                .expect_err("unknown case fields must be rejected");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "unexpected error for {unknown_field}: {error}"
+            );
         }
     }
 }

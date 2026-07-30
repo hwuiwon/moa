@@ -172,6 +172,7 @@ async fn run_live_case(
                 model: Some(model.as_str().to_string()),
                 contact: None,
                 max_turns: None,
+                resource_budget: Default::default(),
                 execution_template: None,
             },
             None,

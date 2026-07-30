@@ -220,6 +220,9 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
             .insert_run(
                 &scope,
                 NewExperimentRun {
+                    plan_artifact_uid: None,
+                    expected_trials: 1,
+                    resource_envelope: fixture_experiment_envelope(),
                     name: "contact-scoped-template-experiment".to_string(),
                     target: target.clone(),
                     variant: variant.clone(),
@@ -765,4 +768,23 @@ definition:
               initial_backoff_ms: 0
               max_backoff_ms: 0
 "#
+}
+
+/// Bounded experiment envelope for fixtures in this test binary.
+///
+/// Stated locally rather than pulled from a platform ceiling so a change to a
+/// production limit cannot silently retune what this test exercises.
+fn fixture_experiment_envelope() -> moa_experiments::model::ExperimentResourceEnvelope {
+    let limits = moa_core::types::resource::ResourceAmounts {
+        cost_micro_usd: 1_000_000,
+        tokens: 100_000,
+        turns: 8,
+        model_calls: 16,
+        tool_calls: 32,
+    };
+    moa_experiments::model::ExperimentResourceEnvelope::new(
+        limits,
+        limits,
+        moa_test_support::fixtures::pg_now() + chrono::Duration::hours(24),
+    )
 }

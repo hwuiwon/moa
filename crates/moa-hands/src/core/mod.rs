@@ -19,19 +19,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use moa_config::McpServerConfig;
 use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
 use moa_core::{
-    traits::HandProvider, traits::MemoryRetrievalExecutor, traits::MemoryToolExecutor,
-    traits::SessionStore, types::action_policy::CallOrigin, types::hands::HandHandle,
-    types::hands::SandboxFile, types::hands::SandboxPolicySnapshot, types::identifiers::TenantId,
+    error::MoaError, error::Result, traits::HandProvider, traits::MemoryRetrievalExecutor,
+    traits::MemoryToolExecutor, traits::SessionStore, types::action_policy::CallOrigin,
+    types::hands::HandHandle, types::hands::SandboxFile, types::hands::SandboxPolicySnapshot,
+    types::identifiers::TenantId, types::resource::ResourceBudget,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
     UnmatchedPermissionPattern,
 };
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapters::local::LocalHandProvider;
 use crate::adapters::mcp::MCPClient;
@@ -51,6 +54,127 @@ pub use registration::{
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Everything one tool dispatch needs to know about the scope that asked for it.
+///
+/// The two tokens and the budget answer different questions and none of them
+/// substitutes for the others. `cancel_token` is the session's cooperative
+/// stop; `hard_cancel_token` is the harder stop that also kills work already
+/// running inside a sandbox; `budget` is what the *run* may still spend,
+/// which is a bound nobody downstream can otherwise see. A sandbox provisioned
+/// with a two-hour lifetime happily runs a five-minute command for a turn whose
+/// deadline passed thirty seconds ago, because the sandbox's clock and the
+/// run's clock are unrelated — the budget is the only thing that connects them.
+///
+/// [`Copy`] on purpose: it is threaded through provisioning, dispatch, retry,
+/// and executor layers, and no layer may widen or mutate what it was handed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolCallScope<'a> {
+    /// Cooperative session cancellation, when the caller has one.
+    pub cancel_token: Option<&'a CancellationToken>,
+    /// Hard cancellation that also terminates in-sandbox work.
+    pub hard_cancel_token: Option<&'a CancellationToken>,
+    /// What the calling run may still spend on this dispatch.
+    pub budget: ResourceBudget,
+}
+
+impl<'a> ToolCallScope<'a> {
+    /// A scope that bounds nothing: no tokens and no budget.
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self {
+            cancel_token: None,
+            hard_cancel_token: None,
+            budget: ResourceBudget::UNBOUNDED,
+        }
+    }
+
+    /// Builds a scope from the cancellation tokens a caller already holds.
+    #[must_use]
+    pub const fn from_tokens(
+        cancel_token: Option<&'a CancellationToken>,
+        hard_cancel_token: Option<&'a CancellationToken>,
+    ) -> Self {
+        Self {
+            cancel_token,
+            hard_cancel_token,
+            budget: ResourceBudget::UNBOUNDED,
+        }
+    }
+
+    /// Returns this scope narrowed by `budget`.
+    #[must_use]
+    pub fn with_budget(self, budget: ResourceBudget) -> Self {
+        Self {
+            budget: self.budget.restrict(budget),
+            ..self
+        }
+    }
+
+    /// Returns the token in-sandbox work must observe, preferring the hard one.
+    #[must_use]
+    pub const fn effective_cancel_token(&self) -> Option<&'a CancellationToken> {
+        match self.hard_cancel_token {
+            Some(token) => Some(token),
+            None => self.cancel_token,
+        }
+    }
+
+    /// Returns whether either token has already been cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .is_some_and(CancellationToken::is_cancelled)
+            || self
+                .hard_cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+    }
+
+    /// Pre-dispatch gate: may this scope start a tool call at `now`?
+    ///
+    /// Asked *before* policy preparation, sandbox provisioning, and provider
+    /// dispatch, so a cancelled or expired scope executes exactly zero tools
+    /// and provisions exactly zero sandboxes. Racing the execution future
+    /// against the token in a `select!` cannot pin this: the execution branch is
+    /// still polled, and a fast built-in or a cached sandbox can win the race.
+    pub fn admit_at(&self, now: DateTime<Utc>) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(MoaError::Cancelled);
+        }
+        if self
+            .budget
+            .remaining
+            .is_some_and(|remaining| remaining.tool_calls == 0)
+        {
+            return Err(MoaError::BudgetExhausted(
+                "tool dispatch refused: no tool calls remain".to_string(),
+            ));
+        }
+        if self.budget.deadline_passed(now) {
+            return Err(MoaError::BudgetExhausted(format!(
+                "tool dispatch refused: run deadline {} has passed",
+                self.budget
+                    .deadline
+                    .map_or_else(|| "<unset>".to_string(), |deadline| deadline.to_rfc3339())
+            )));
+        }
+        Ok(())
+    }
+
+    /// Pre-dispatch gate against the current wall clock. See [`Self::admit_at`].
+    pub fn admit(&self) -> Result<()> {
+        self.admit_at(Utc::now())
+    }
+
+    /// Returns the wall-clock time this dispatch may still run for.
+    ///
+    /// `None` means the run states no deadline, never "no time left": an
+    /// expired run yields `Some(Duration::ZERO)`, which executors refuse.
+    #[must_use]
+    pub fn run_deadline(&self, now: DateTime<Utc>) -> Option<Duration> {
+        self.budget.time_remaining(now)
+    }
+}
 
 /// One immutable publication of the executable registry and its prompt schemas.
 struct ToolCatalogSnapshot {
@@ -141,4 +265,33 @@ pub struct ToolRouter {
     sandbox_root: Option<PathBuf>,
     tool_output: ToolOutputConfig,
     tool_budgets: ToolBudgetConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moa_core::types::resource::ResourceAmounts;
+
+    #[test]
+    fn bounded_scope_refuses_a_zero_tool_call_allowance_offline() {
+        // Pins: receiving a target resource slice is an enforcement boundary,
+        // not only a deadline hint passed through to the sandbox.
+        let scope = ToolCallScope::unbounded().with_budget(ResourceBudget::new(
+            None,
+            Some(ResourceAmounts {
+                cost_micro_usd: 1,
+                tokens: 1,
+                turns: 1,
+                model_calls: 1,
+                tool_calls: 0,
+            }),
+        ));
+
+        let error = scope
+            .admit_at(Utc::now())
+            .expect_err("zero tool-call capacity must fail before dispatch");
+        assert!(
+            matches!(error, MoaError::BudgetExhausted(message) if message.contains("no tool calls"))
+        );
+    }
 }

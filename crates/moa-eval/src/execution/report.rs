@@ -158,6 +158,11 @@ pub struct ExecutionEvalAggregateMetrics {
     /// Number of cases that could not validly complete.
     pub impossible_cases: u64,
     /// Number of impossible cases observed as completed.
+    ///
+    /// This is the authoritative false-success signal for the lane. It is derived
+    /// only from typed completion guards and durable run state, never from wording
+    /// in a generated response, so it stays valid regardless of how a run phrased
+    /// its answer.
     pub execution_false_completions: u64,
     /// Contract omissions divided by contract cases.
     pub contract_omission_rate: Option<f64>,
@@ -193,11 +198,23 @@ pub struct ExecutionEvalAggregateMetrics {
     pub classifier_cost_microusd_per_routed_turn: Option<f64>,
     /// Mean classifier latency in milliseconds per classifier-attempted route.
     pub classifier_latency_ms_per_routed_turn: Option<f64>,
-    /// Single-run success rate for repeated live cases.
+    /// Mean over logical cases of `moa_eval_core::reliability::pass_any_at_k` at `k = 1`.
+    ///
+    /// Computed per logical case and only then averaged; successes are never pooled
+    /// across cases. At `k = 1` the combinatorial estimator collapses to each case's
+    /// observed success rate.
     pub pass_at_1: Option<f64>,
-    /// Fraction of live cases that pass every repeated run.
+    /// Mean over logical cases of `moa_eval_core::reliability::pass_all_at_k` at `k = repetitions`.
+    ///
+    /// At `k = n` this is the fraction of cases whose every repetition passed. Only
+    /// independent repetitions may feed it; shared-prefix or branched rollouts are
+    /// refused by the shared estimator.
     pub pass_all_k: Option<f64>,
-    /// Population variance of binary repeated-run pass outcomes.
+    /// Population variance `p * (1 - p)` of the pooled repetition outcomes.
+    ///
+    /// This deliberately pools individual repetition rows to describe outcome spread.
+    /// It is not the uncertainty of [`Self::pass_at_1`] across cases; the case-level
+    /// view is the reliability curve emitted beside this report.
     pub pass_variance: Option<f64>,
     /// Cost per successful case in micro-US-dollars.
     pub cost_per_success_microusd: Option<f64>,
@@ -284,9 +301,16 @@ pub struct ExecutionEvalReport {
     pub lane: ExecutionEvalLane,
     /// Exact lowercase SHA-256 hashes for every checked-in or generated corpus.
     pub corpus_hashes: BTreeMap<String, String>,
-    /// Deterministic corpus or bootstrap seeds.
+    /// Corpus and bootstrap seeds, recorded as provenance only.
+    ///
+    /// A seed fixes case selection, ordering, and resampling so a report can be
+    /// reproduced. It does not make a sampled provider deterministic, which is why
+    /// the lane records several independent repetitions per case.
     pub seeds: Vec<u64>,
     /// Number of independent outcomes recorded per logical case.
+    ///
+    /// Independence is what licenses the combinatorial reliability estimators;
+    /// repetitions that branch from a shared prefix do not qualify.
     pub repetitions: u32,
     /// Calibration status governing any semantic judge metrics.
     pub judge_calibration_status: ExecutionJudgeCalibrationStatus,

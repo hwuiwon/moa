@@ -1,21 +1,100 @@
-//! Event-log collection helpers for eval trajectories, responses, and aggregate metrics.
+//! Event-log collection helpers for eval trajectories, responses, evidence, and
+//! aggregate metrics.
+//!
+//! The collector produces two different things from one event stream, and the
+//! difference matters. [`TrajectoryStep`]s are a lossy human-readable path
+//! summary used for triage. The [`EvidenceEnvelope`] is the typed, ordered
+//! record that assertions are actually settled against: invocations with their
+//! real arguments and outcomes, approval requests and decisions in the order
+//! they happened, conversation history, and lineage references.
+//!
+//! When content capture is disabled the envelope is marked truncated, because
+//! evidence assembled from blanked-out payloads must fail closed rather than
+//! quietly assert nothing.
 
 use moa_core::{
-    events::Event, types::events_stream::EventRecord, types::identifiers::ToolCallId,
-    types::model::TokenPricing,
+    events::Event, types::action_policy::ActionReviewDecision, types::events_stream::EventRecord,
+    types::identifiers::ToolCallId, types::model::TokenPricing,
+};
+use moa_eval_core::evidence::{
+    ActionKind, ActionOutcome, EvidenceEnvelope, EvidenceSubject, HistoryRole,
 };
 use moa_eval_core::{EvalMetrics, TrajectoryStep};
 use std::collections::HashMap;
+use uuid::Uuid;
 
-/// Collected response, trajectory, and metrics extracted from persisted session events.
+/// Collected response, trajectory, evidence, and metrics extracted from
+/// persisted session events.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct CollectedExecution {
     /// Final aggregated assistant response text, when content capture is enabled.
     pub response: Option<String>,
     /// Observed tool-call trajectory.
     pub trajectory: Vec<TrajectoryStep>,
+    /// Ordered evidence entries awaiting a run subject.
+    pub evidence: Vec<EvidenceEntry>,
+    /// Whether the capture was complete.
+    pub capture_truncated: Option<String>,
     /// Aggregate usage and latency metrics.
     pub metrics: EvalMetrics,
+}
+
+impl CollectedExecution {
+    /// Builds the versioned evidence envelope for one run subject.
+    pub fn to_evidence(&self, subject: EvidenceSubject) -> EvidenceEnvelope {
+        let mut builder = EvidenceEnvelope::builder(subject).source("session_event_log");
+        if let Some(reason) = &self.capture_truncated {
+            builder = builder.truncated(reason.clone());
+        }
+        for entry in &self.evidence {
+            builder = match entry {
+                EvidenceEntry::Action {
+                    kind,
+                    name,
+                    arguments,
+                    outcome,
+                } => builder.action(*kind, name.clone(), arguments.clone(), *outcome),
+                EvidenceEntry::History { role, text } => builder.history(*role, text.clone()),
+                EvidenceEntry::Lineage { kind, reference } => {
+                    builder.lineage(kind.clone(), reference.clone())
+                }
+            };
+        }
+        if let Some(response) = &self.response {
+            builder = builder.response(response.clone());
+        }
+        builder.build()
+    }
+}
+
+/// One ordered observation destined for the evidence envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EvidenceEntry {
+    /// An invocation or approval fact.
+    Action {
+        /// What the entry represents.
+        kind: ActionKind,
+        /// Action or approval subject name.
+        name: String,
+        /// Structured arguments.
+        arguments: serde_json::Value,
+        /// Terminal outcome.
+        outcome: ActionOutcome,
+    },
+    /// A conversation record.
+    History {
+        /// Speaker role.
+        role: HistoryRole,
+        /// Recorded text.
+        text: String,
+    },
+    /// A lineage reference.
+    Lineage {
+        /// Lineage category.
+        kind: String,
+        /// Stable reference.
+        reference: String,
+    },
 }
 
 /// Aggregates persisted session events into eval-friendly execution artifacts.
@@ -23,11 +102,15 @@ pub(crate) struct CollectedExecution {
 pub struct TrajectoryCollector {
     steps: Vec<TrajectoryStep>,
     tool_indices: HashMap<ToolCallId, usize>,
+    evidence: Vec<EvidenceEntry>,
+    evidence_indices: HashMap<ToolCallId, usize>,
+    review_tools: HashMap<Uuid, String>,
     response_chunks: Vec<String>,
     metrics: EvalMetrics,
     pricing: Option<TokenPricing>,
     capture_content: bool,
     content_max_bytes: usize,
+    content_truncated: bool,
 }
 
 impl TrajectoryCollector {
@@ -40,11 +123,15 @@ impl TrajectoryCollector {
         Self {
             steps: Vec::new(),
             tool_indices: HashMap::new(),
+            evidence: Vec::new(),
+            evidence_indices: HashMap::new(),
+            review_tools: HashMap::new(),
             response_chunks: Vec::new(),
             metrics: EvalMetrics::default(),
             pricing,
             capture_content,
             content_max_bytes,
+            content_truncated: false,
         }
     }
 
@@ -59,12 +146,22 @@ impl TrajectoryCollector {
             } => {
                 let step_index = self.steps.len();
                 self.tool_indices.insert(*tool_id, step_index);
+                let input_summary = self.render_json(input);
                 self.steps.push(TrajectoryStep {
                     tool_name: tool_name.clone(),
-                    input_summary: self.render_json(input),
+                    input_summary,
                     output_summary: String::new(),
                     success: false,
                     duration_ms: 0,
+                });
+                // The evidence ledger keeps the *real* arguments, not a
+                // truncated preview, because action assertions match on them.
+                self.evidence_indices.insert(*tool_id, self.evidence.len());
+                self.evidence.push(EvidenceEntry::Action {
+                    kind: ActionKind::Invocation,
+                    name: tool_name.clone(),
+                    arguments: input.clone(),
+                    outcome: ActionOutcome::Failed,
                 });
                 self.metrics.tool_call_count += 1;
             }
@@ -82,6 +179,14 @@ impl TrajectoryCollector {
                     step.success = *success;
                     step.duration_ms = *duration_ms;
                 }
+                self.set_action_outcome(
+                    tool_id,
+                    if *success {
+                        ActionOutcome::Succeeded
+                    } else {
+                        ActionOutcome::Failed
+                    },
+                );
             }
             Event::ToolError { tool_id, error, .. } => {
                 let step_index = self.ensure_step(tool_id);
@@ -90,7 +195,78 @@ impl TrajectoryCollector {
                     step.output_summary = output_summary;
                     step.success = false;
                 }
+                self.set_action_outcome(tool_id, ActionOutcome::Failed);
                 self.metrics.tool_error_count += 1;
+            }
+            Event::ActionReviewRequested {
+                review_id,
+                envelope,
+                ..
+            } => {
+                self.review_tools
+                    .insert(*review_id, envelope.tool_name.clone());
+                self.evidence.push(EvidenceEntry::Action {
+                    kind: ActionKind::ApprovalRequested,
+                    name: envelope.tool_name.clone(),
+                    arguments: serde_json::json!({ "review_id": review_id }),
+                    outcome: ActionOutcome::Recorded,
+                });
+            }
+            Event::ActionReviewDecided {
+                review_id,
+                decision,
+                ..
+            } => {
+                let name = self
+                    .review_tools
+                    .get(review_id)
+                    .cloned()
+                    .unwrap_or_else(|| review_id.to_string());
+                self.evidence.push(EvidenceEntry::Action {
+                    kind: match decision {
+                        ActionReviewDecision::Cleared => ActionKind::ApprovalGranted,
+                        ActionReviewDecision::Denied { .. } => ActionKind::ApprovalDenied,
+                    },
+                    name,
+                    arguments: serde_json::json!({ "review_id": review_id }),
+                    outcome: ActionOutcome::Recorded,
+                });
+            }
+            Event::ActionReviewTimedOut { review_id, .. } => {
+                let name = self
+                    .review_tools
+                    .get(review_id)
+                    .cloned()
+                    .unwrap_or_else(|| review_id.to_string());
+                // A review that expired is not an approval. Recording it as a
+                // denial keeps an approval-ordering assertion fail-closed.
+                self.evidence.push(EvidenceEntry::Action {
+                    kind: ActionKind::ApprovalDenied,
+                    name,
+                    arguments: serde_json::json!({ "review_id": review_id, "timed_out": true }),
+                    outcome: ActionOutcome::Recorded,
+                });
+            }
+            Event::UserMessage { text, .. } => {
+                if self.capture_content {
+                    let text = self.capture_text(text);
+                    self.evidence.push(EvidenceEntry::History {
+                        role: HistoryRole::User,
+                        text,
+                    });
+                }
+            }
+            Event::MemoryRead { path, .. } => {
+                self.evidence.push(EvidenceEntry::Lineage {
+                    kind: "memory_read".to_string(),
+                    reference: path.clone(),
+                });
+            }
+            Event::MemoryWrite { path, .. } => {
+                self.evidence.push(EvidenceEntry::Lineage {
+                    kind: "memory_write".to_string(),
+                    reference: path.clone(),
+                });
             }
             Event::BrainResponse {
                 text,
@@ -101,8 +277,12 @@ impl TrajectoryCollector {
             } => {
                 let input_tokens = event.input_tokens();
                 if self.capture_content && !text.trim().is_empty() {
-                    self.response_chunks
-                        .push(truncate(text, self.content_max_bytes));
+                    let text = self.capture_text(text);
+                    self.response_chunks.push(text.clone());
+                    self.evidence.push(EvidenceEntry::History {
+                        role: HistoryRole::Assistant,
+                        text,
+                    });
                 }
                 self.metrics.input_tokens += input_tokens;
                 self.metrics.output_tokens += *output_tokens;
@@ -119,6 +299,18 @@ impl TrajectoryCollector {
         }
     }
 
+    fn set_action_outcome(&mut self, tool_id: &ToolCallId, outcome: ActionOutcome) {
+        let Some(index) = self.evidence_indices.get(tool_id).copied() else {
+            return;
+        };
+        if let Some(EvidenceEntry::Action {
+            outcome: recorded, ..
+        }) = self.evidence.get_mut(index)
+        {
+            *recorded = outcome;
+        }
+    }
+
     /// Processes a complete ordered event stream.
     pub fn process_events(&mut self, events: &[EventRecord]) {
         for record in events {
@@ -128,6 +320,21 @@ impl TrajectoryCollector {
 
     /// Consumes the collector and returns the final collected execution payload.
     pub(crate) fn finish(self) -> CollectedExecution {
+        // Content capture off means the response and history observations were
+        // never recorded. That is a partial view, and the envelope says so.
+        let capture_truncated = if !self.capture_content {
+            Some(
+                "content capture is disabled, so response and history observations were not recorded"
+                    .to_string(),
+            )
+        } else if self.content_truncated {
+            Some(
+                "one or more captured content payloads exceeded content_max_bytes and were truncated"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         CollectedExecution {
             response: if self.response_chunks.is_empty() {
                 None
@@ -135,6 +342,8 @@ impl TrajectoryCollector {
                 Some(self.response_chunks.join("\n\n"))
             },
             trajectory: self.steps,
+            evidence: self.evidence,
+            capture_truncated,
             metrics: self.metrics,
         }
     }
@@ -150,20 +359,27 @@ impl TrajectoryCollector {
         index
     }
 
-    fn render_json(&self, value: &serde_json::Value) -> String {
+    fn render_json(&mut self, value: &serde_json::Value) -> String {
         if !self.capture_content {
             return String::new();
         }
 
         let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-        truncate(&text, self.content_max_bytes)
+        self.capture_text(&text)
     }
 
-    fn render_text(&self, value: &str) -> String {
+    fn render_text(&mut self, value: &str) -> String {
         if !self.capture_content {
             return String::new();
         }
 
+        self.capture_text(value)
+    }
+
+    fn capture_text(&mut self, value: &str) -> String {
+        if self.content_max_bytes != 0 && value.len() > self.content_max_bytes {
+            self.content_truncated = true;
+        }
         truncate(value, self.content_max_bytes)
     }
 }
@@ -201,11 +417,20 @@ fn truncate(text: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use std::time::Duration;
 
     use moa_core::{
         events::Event, types::identifiers::ToolCallId, types::model::TokenPricing,
         types::tools::ToolOutput,
+    };
+    use moa_eval_core::{
+        TestCase,
+        assertion::{
+            AssertionCategory, AssertionSpec, EvaluatorRef, GateEffect, builtin_registry,
+            evaluate_assertions,
+        },
+        evidence::EvidenceSubject,
     };
     use serde_json::json;
 
@@ -266,5 +491,90 @@ mod tests {
         assert_eq!(collected.metrics.total_tokens, 150);
         assert!(collected.metrics.cost_dollars > 0.0);
         assert_eq!(collected.response.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn truncated_forbidden_tail_fails_assertions_closed() {
+        // Pins: a forbidden phrase beyond the capture boundary cannot disappear
+        // and turn a blocking not-contains assertion into a pass.
+        let forbidden = "forbidden-tail";
+        let response = format!("{}{forbidden}", "safe-prefix ".repeat(64));
+        let mut collector = TrajectoryCollector::new(None, true, 64);
+        collector.process_event(&Event::BrainResponse {
+            text: response,
+            thought_signature: None,
+            model: moa_core::types::identifiers::ModelId::new("mock"),
+            model_tier: moa_core::types::provider::ModelTier::Main,
+            input_tokens_uncached: 0,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 0,
+            cost_cents: 0,
+            duration_ms: 0,
+            llm_ttft_ms: None,
+        });
+        let collected = collector.finish();
+        assert!(
+            !collected
+                .response
+                .as_deref()
+                .expect("response was captured")
+                .contains(forbidden)
+        );
+
+        let evidence = collected.to_evidence(EvidenceSubject {
+            case: "forbidden-tail".to_string(),
+            case_schema_version: moa_eval_core::types::TEST_CASE_SCHEMA_VERSION,
+            agent_config: "mock".to_string(),
+            run_label: "1".to_string(),
+        });
+        let case = TestCase {
+            name: "forbidden-tail".to_string(),
+            assertions: vec![AssertionSpec {
+                id: "no-forbidden-tail".to_string(),
+                category: AssertionCategory::Communication,
+                gate_effect: GateEffect::Blocking,
+                evaluator: EvaluatorRef::deterministic("text_match", 1),
+                config: json!({ "not_contains": [forbidden] }),
+            }],
+            ..TestCase::default()
+        };
+
+        let outcomes = evaluate_assertions(builtin_registry(), &case, Some(&evidence));
+        assert_eq!(outcomes.len(), 1);
+        assert!(!outcomes[0].passed);
+        assert!(outcomes[0].diagnostic.contains("evidence is truncated"));
+    }
+
+    #[test]
+    fn queued_message_is_not_duplicated_as_user_history() {
+        // Pins: enqueueing and later delivering one message records one user turn.
+        let text = "hello".to_string();
+        let mut collector = TrajectoryCollector::new(None, true, 1_024);
+        collector.process_event(&Event::QueuedMessage {
+            text: text.clone(),
+            attachments: Vec::new(),
+            queued_at: Utc::now(),
+        });
+        collector.process_event(&Event::UserMessage {
+            text,
+            attachments: Vec::new(),
+        });
+
+        let collected = collector.finish();
+        let user_entries = collected
+            .evidence
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    super::EvidenceEntry::History {
+                        role: moa_eval_core::evidence::HistoryRole::User,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(user_entries, 1);
     }
 }

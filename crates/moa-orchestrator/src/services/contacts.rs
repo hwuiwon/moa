@@ -721,6 +721,7 @@ impl Contacts for ContactsImpl {
                     model: request.model,
                     contact: None,
                     max_turns: request.max_turns,
+                    resource_budget: Default::default(),
                     execution_template: None,
                 })),
             &identity,

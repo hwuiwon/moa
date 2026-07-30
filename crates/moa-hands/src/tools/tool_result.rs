@@ -661,6 +661,7 @@ mod tests {
         };
         let caller_identity = test_identity(session.tenant_id);
         let ctx = ToolContext {
+            budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
             session: &session,
             caller_identity: &caller_identity,
             tool_call_id: None,
@@ -712,6 +713,7 @@ mod tests {
         };
         let caller_identity = test_identity(session.tenant_id);
         let ctx = ToolContext {
+            budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
             session: &session,
             caller_identity: &caller_identity,
             tool_call_id: None,

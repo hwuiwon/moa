@@ -83,12 +83,12 @@ impl Evaluator for ThresholdEvaluator {
 }
 
 fn limit_score(evaluator: &str, name: &str, passed: bool, comment: String) -> EvalScore {
-    EvalScore {
-        evaluator: evaluator.to_string(),
-        name: name.to_string(),
-        value: EvalScoreValue::Boolean(passed),
-        comment: Some(comment),
-    }
+    EvalScore::gating(
+        evaluator,
+        name,
+        EvalScoreValue::Boolean(passed),
+        Some(comment),
+    )
 }
 
 #[cfg(test)]

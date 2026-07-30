@@ -153,7 +153,10 @@ impl ExperimentRun for ExperimentRunImpl {
         if request.run_uid.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "experiment run id mismatch").into());
         }
-        let scope = load_run_scope(&ctx, request.tenant_id, request.run_uid, &self.pool).await?;
+        let admitted_run =
+            load_run_record(&ctx, request.tenant_id, request.run_uid, &self.pool).await?;
+        let scope = admitted_run.scope;
+        let run_envelope = admitted_run.resource_envelope.run_envelope();
 
         ctx.set(K_RUN_UID, Json(request.run_uid));
         ctx.set(K_TENANT_ID, Json(request.tenant_id));
@@ -178,6 +181,7 @@ impl ExperimentRun for ExperimentRunImpl {
             &ctx,
             request.clone(),
             scope,
+            run_envelope,
             self.config.as_ref(),
             &self.pool,
             &self.session_store,
@@ -250,20 +254,21 @@ impl ExperimentRun for ExperimentRunImpl {
         let signal = signal.into_inner();
         // Single-target runs drive a child Session or Execution directly.
         forward_child_cancellation(&ctx, signal.clone()).await?;
-        // Plan runs fan cancellation out to every active trial workflow so their
-        // own child targets stop even while the main run loop is blocked waiting
-        // on a child completion signal.
-        fan_out_cancellation_to_active_trials(&ctx, signal, &self.pool).await?;
+        // The service atomically marks every active trial cancelled before it
+        // signals this workflow. Fan out from that persisted post-cancel state
+        // so a crash between the database commit and this handler cannot make
+        // the child workflows disappear from the cancellation projection.
+        fan_out_cancellation_to_cancelled_trials(&ctx, signal, &self.pool).await?;
         Ok(())
     }
 }
 
-/// Signals `request_cancel` on every active trial workflow of this run.
+/// Signals `request_cancel` on every cancelled trial workflow of this run.
 ///
-/// Loads the run's trials and forwards cancellation to those still occupying a
-/// dispatch slot (`Dispatched`/`Running`), i.e. those with a live trial workflow
-/// to stop. The signal is idempotent and best-effort.
-async fn fan_out_cancellation_to_active_trials(
+/// The cancellation transaction has already projected active trials to
+/// `Cancelled`, so this must select that persisted state rather than the former
+/// `Dispatched`/`Running` states. The signal is idempotent and best-effort.
+async fn fan_out_cancellation_to_cancelled_trials(
     ctx: &SharedWorkflowContext<'_>,
     signal: ExperimentCancelSignal,
     pool: &sqlx::PgPool,
@@ -282,7 +287,7 @@ async fn fan_out_cancellation_to_active_trials(
     else {
         return Ok(());
     };
-    for trial_key in load_active_trial_keys(ctx, tenant_id, run_uid, pool).await? {
+    for trial_key in load_cancelled_trial_keys(ctx, tenant_id, run_uid, pool).await? {
         crate::restate_identity::replay_safe_request(
             ctx.workflow_client::<ExperimentTrialRunClient>(trial_workflow_key(
                 run_uid, &trial_key,
@@ -294,8 +299,8 @@ async fn fan_out_cancellation_to_active_trials(
     Ok(())
 }
 
-/// Reads the deterministic keys of trials that currently hold a dispatch slot.
-async fn load_active_trial_keys(
+/// Reads the deterministic keys of trials projected cancelled by the service.
+async fn load_cancelled_trial_keys(
     ctx: &SharedWorkflowContext<'_>,
     tenant_id: TenantId,
     run_uid: Uuid,
@@ -317,20 +322,25 @@ async fn load_active_trial_keys(
                 .map_err(moa_error_to_handler_error)?;
             let keys = trials
                 .into_iter()
-                .filter(|trial| plan_expansion::trial_status_occupies_dispatch_slot(trial.status))
+                .filter(|trial| trial_status_needs_cancel_forward(trial.status))
                 .map(|trial| trial.trial_key)
                 .collect::<Vec<_>>();
             Ok::<_, HandlerError>(Json::from(keys))
         })
-        .name("experiment_run_active_trial_keys")
+        .name("experiment_run_cancelled_trial_keys")
         .await?
         .into_inner())
+}
+
+const fn trial_status_needs_cancel_forward(status: ExperimentTrialStatus) -> bool {
+    matches!(status, ExperimentTrialStatus::Cancelled)
 }
 
 async fn run_experiment_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
+    run_envelope: moa_core::types::resource::ResourceEnvelope,
     config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
@@ -352,6 +362,7 @@ async fn run_experiment_target(
                 ctx,
                 request,
                 scope,
+                run_envelope,
                 prompt,
                 agent,
                 model,
@@ -373,6 +384,7 @@ async fn run_experiment_target(
                 ctx,
                 request,
                 scope,
+                run_envelope,
                 template,
                 objective,
                 input,
@@ -406,12 +418,12 @@ async fn persist_run_status(
     Ok(())
 }
 
-async fn load_run_scope(
+async fn load_run_record(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
     run_uid: Uuid,
     pool: &sqlx::PgPool,
-) -> Result<ActionRuleScope, HandlerError> {
+) -> Result<ExperimentRunRecord, HandlerError> {
     let pool = pool.clone();
     Ok(ctx
         .run(|| async move {
@@ -420,9 +432,9 @@ async fn load_run_scope(
                 .await
                 .map_err(moa_error_to_handler_error)?
                 .ok_or_else(|| run_not_found(run_uid))
-                .map(|run| Json::from(run.scope))
+                .map(Json::from)
         })
-        .name("experiment_load_run_scope")
+        .name("experiment_load_run_record")
         .await?
         .into_inner())
 }
@@ -599,6 +611,21 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_fanout_uses_post_transaction_trial_status() {
+        // Pins: cancel_run_and_active_trials persists Cancelled before the
+        // workflow signal, so fan-out cannot search for the old active states.
+        assert!(trial_status_needs_cancel_forward(
+            ExperimentTrialStatus::Cancelled
+        ));
+        assert!(!trial_status_needs_cancel_forward(
+            ExperimentTrialStatus::Dispatched
+        ));
+        assert!(!trial_status_needs_cancel_forward(
+            ExperimentTrialStatus::Running
+        ));
+    }
+
+    #[test]
     fn aggregate_status_completes_empty_plan_expansion() {
         // Pins: an empty runtime expansion cannot leave the parent polling forever.
         assert_eq!(
@@ -617,6 +644,8 @@ mod tests {
             scope: ActionRuleScope::Tenant {
                 tenant_id: TenantId::new(),
             },
+            resource_envelope:
+                crate::workflows::experiment_trial_run::resources::fixture_trial_envelope(),
             trial_uid: Uuid::now_v7(),
             run_uid: fixture_uuid(100),
             trial_key: trial_key.to_string(),

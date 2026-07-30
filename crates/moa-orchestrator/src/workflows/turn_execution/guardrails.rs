@@ -3,12 +3,13 @@
 use moa_core::{
     events::Event, types::agent::AgentContext, types::completion::CompletionResponse,
     types::guardrails::GuardrailDecision, types::guardrails::GuardrailDirection,
-    types::identifiers::SessionId, types::provider::ModelTier, types::session::SessionMeta,
+    types::identifiers::SessionId, types::provider::ModelTier, types::resource::ResourceBudget,
+    types::session::SessionMeta,
 };
 use moa_wire::turn::{TurnOutcomeKind, TurnPhase};
 use restate_sdk::prelude::*;
 
-use crate::services::llm_gateway::LLMGatewayClient;
+use crate::services::llm_gateway::{BoundedCompletionRequest, LLMGatewayClient};
 use crate::turn_driver::{guardrails as driver_guardrails, progress as driver_progress};
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::turn_events::append_session_event;
@@ -22,6 +23,7 @@ pub(super) async fn evaluate_input_guardrail(
     session_id: SessionId,
     meta: &SessionMeta,
     user_message: &str,
+    resource_budget: ResourceBudget,
 ) -> Result<Option<BodyOutcome>, HandlerError> {
     let Some(agent_context) = meta.agent_context.as_ref() else {
         return Ok(None);
@@ -52,7 +54,10 @@ pub(super) async fn evaluate_input_guardrail(
     );
     let response = crate::restate_identity::replay_safe_request(
         ctx.service_client::<LLMGatewayClient>()
-            .complete(Json::from(guardrail_request)),
+            .complete_bounded(Json::from(BoundedCompletionRequest {
+                request: guardrail_request,
+                budget: super::per_model_call_budget(resource_budget),
+            })),
     )
     .call()
     .await?
@@ -111,6 +116,7 @@ pub(super) async fn visible_response_after_output_guardrail(
     session_id: SessionId,
     meta: &SessionMeta,
     response: &CompletionResponse,
+    resource_budget: ResourceBudget,
 ) -> Result<(CompletionResponse, bool), HandlerError> {
     if response.text.is_empty() {
         return Ok((response.clone(), false));
@@ -145,7 +151,10 @@ pub(super) async fn visible_response_after_output_guardrail(
     );
     let judge_response = crate::restate_identity::replay_safe_request(
         ctx.service_client::<LLMGatewayClient>()
-            .complete(Json::from(guardrail_request)),
+            .complete_bounded(Json::from(BoundedCompletionRequest {
+                request: guardrail_request,
+                budget: super::per_model_call_budget(resource_budget),
+            })),
     )
     .call()
     .await?

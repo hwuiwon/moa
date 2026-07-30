@@ -23,6 +23,7 @@ fn run_turn_request(trigger: TurnTrigger) -> RunTurnRequest {
         attachments: Vec::new(),
         model: None,
         max_turns: None,
+        resource_budget: Default::default(),
         trigger,
         child_signal_id: None,
         execution_template: None,

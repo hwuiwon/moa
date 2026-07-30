@@ -12,7 +12,7 @@ pub use core::{
     ActionOrigin, HandLeaseReaper, HandLeaseReaperConfig, HandRoute, MCP_TOOL_REFERENCE_PREFIX,
     McpCatalogRefresh, McpConnectorHealth, PostgresExpiredHandLeaseClaims,
     PostgresTenantSandboxPolicyStore, PreparedActionInvocation, TenantSandboxPolicyStore,
-    ToolExecution, ToolRegistry, ToolRouter, deployment_sandbox_policy,
+    ToolCallScope, ToolExecution, ToolRegistry, ToolRouter, deployment_sandbox_policy,
     local_development_sandbox_policy, mcp_tool_reference, route_sandbox_policy,
     spawn_mcp_catalog_refresh,
 };

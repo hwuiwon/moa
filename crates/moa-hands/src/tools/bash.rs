@@ -82,17 +82,19 @@ fn process_output(
 ///
 /// `remaining_lifetime` is the time left on the sandbox this call runs inside,
 /// or `None` when the sandbox was provisioned with a deliberately unbounded
-/// maximum lifetime.
+/// maximum lifetime. `run_deadline` is the separate, usually much shorter, time
+/// left on the *run* that asked for the command.
 pub async fn execute_local(
     sandbox_dir: &Path,
     input: &str,
     default_timeout: Duration,
     remaining_lifetime: Option<Duration>,
+    run_deadline: Option<Duration>,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params = BashToolInput::parse(input)?;
-    let timeout = params.timeout(default_timeout, remaining_lifetime);
-    reject_exhausted_lifetime(timeout)?;
+    let timeout = params.timeout(default_timeout, remaining_lifetime, run_deadline);
+    reject_exhausted_budget(timeout, remaining_lifetime, run_deadline)?;
     let started_at = Instant::now();
 
     let mut command = Command::new(&*LOGIN_SHELL);
@@ -141,18 +143,21 @@ pub async fn execute_local(
 ///
 /// `remaining_lifetime` is the time left on the container this call runs
 /// inside, or `None` when it was provisioned with a deliberately unbounded
-/// maximum lifetime.
+/// maximum lifetime. `run_deadline` is the separate, usually much shorter, time
+/// left on the *run* that asked for the command.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_docker(
     container_id: &str,
     workspace_root: &str,
     input: &str,
     default_timeout: Duration,
     remaining_lifetime: Option<Duration>,
+    run_deadline: Option<Duration>,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params = BashToolInput::parse(input)?;
-    let timeout = params.timeout(default_timeout, remaining_lifetime);
-    reject_exhausted_lifetime(timeout)?;
+    let timeout = params.timeout(default_timeout, remaining_lifetime, run_deadline);
+    reject_exhausted_budget(timeout, remaining_lifetime, run_deadline)?;
     let started_at = Instant::now();
 
     let mut command = Command::new("docker");
@@ -261,24 +266,33 @@ impl BashToolInput {
 
     /// Returns the duration this call may run for.
     ///
-    /// Three bounds apply and the smallest wins: the caller's own request, the
-    /// deployment's default tool timeout, and `remaining_lifetime` — the time
-    /// left on the sandbox this call runs inside. The third is what stops an
-    /// in-policy 300-second command from outliving the sandbox that a reaper is
-    /// about to destroy underneath it, leaving a process nothing owns.
+    /// Four bounds apply and the smallest wins: the caller's own request, the
+    /// deployment's default tool timeout, `remaining_lifetime` — the time left
+    /// on the sandbox this call runs inside — and `run_deadline`, the time left
+    /// on the run or trial that asked for the command.
+    ///
+    /// The last two are genuinely different clocks and neither implies the
+    /// other. `remaining_lifetime` stops an in-policy 300-second command from
+    /// outliving the sandbox a reaper is about to destroy underneath it.
+    /// `run_deadline` stops the opposite failure: a perfectly healthy
+    /// two-hour sandbox happily running a five-minute command for a turn whose
+    /// deadline passed thirty seconds ago. Nothing about the sandbox knows the
+    /// run expired, so without this bound the command runs to completion and
+    /// bills the work anyway.
     #[must_use]
     pub fn timeout(
         &self,
         default_timeout: Duration,
         remaining_lifetime: Option<Duration>,
+        run_deadline: Option<Duration>,
     ) -> Duration {
         let requested = self
             .timeout_secs
             .map_or(default_timeout, BashTimeoutSecs::duration);
-        match remaining_lifetime {
-            Some(remaining) => requested.min(remaining),
-            None => requested,
-        }
+        [remaining_lifetime, run_deadline]
+            .into_iter()
+            .flatten()
+            .fold(requested, Duration::min)
     }
 }
 
@@ -293,18 +307,42 @@ pub fn remaining_lifetime(deadline: Option<DateTime<Utc>>, now: DateTime<Utc>) -
     Some((deadline - now).to_std().unwrap_or(Duration::ZERO))
 }
 
-/// Refuses a call that has no sandbox lifetime left to run inside.
+/// Refuses a call whose sandbox or run budget leaves no time to execute.
 ///
 /// Starting a command with a zero budget would report a `timed out after 0s`
 /// failure that reads like the command's own fault. The sandbox being out of
 /// time is a different fact and is named as one.
-fn reject_exhausted_lifetime(timeout: Duration) -> Result<()> {
-    if timeout.is_zero() {
+fn reject_exhausted_budget(
+    timeout: Duration,
+    remaining_lifetime: Option<Duration>,
+    run_deadline: Option<Duration>,
+) -> Result<()> {
+    if !timeout.is_zero() {
+        return Ok(());
+    }
+    // Which clock ran out changes what the caller should do — provision a new
+    // sandbox, or stop the run entirely — so the two are reported as different
+    // errors rather than one ambiguous "out of time". The run deadline is
+    // checked first: when both are exhausted, the run being over is the fact
+    // that makes re-provisioning pointless.
+    if run_deadline.is_some_and(|remaining| remaining.is_zero()) {
+        return Err(MoaError::BudgetExhausted(
+            "run deadline has passed; no time remains to run a command".to_string(),
+        ));
+    }
+    if remaining_lifetime.is_some_and(|remaining| remaining.is_zero()) {
         return Err(MoaError::ToolError(
             "sandbox lifetime is exhausted; no time remains to run a command".to_string(),
         ));
     }
-    Ok(())
+    // Neither clock is out, so a zero timeout means the deployment default was
+    // itself zero. Blaming the sandbox here would send the caller to reprovision
+    // a sandbox that is perfectly healthy.
+    Err(MoaError::ValidationError(
+        "resolved command timeout is zero with no exhausted deadline; \
+         the configured default timeout is invalid"
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -343,7 +381,7 @@ mod tests {
         assert_eq!(
             BashToolInput::parse(r#"{"cmd":"true","timeout_secs":300}"#)
                 .expect("the exact bound is in policy")
-                .timeout(Duration::from_secs(300), None),
+                .timeout(Duration::from_secs(300), None, None),
             Duration::from_secs(300)
         );
         assert!(BashToolInput::parse(r#"{"cmd":"true","timeout_secs":301}"#).is_err());
@@ -363,12 +401,16 @@ mod tests {
             .expect("an in-policy timeout parses");
 
         assert_eq!(
-            params.timeout(Duration::from_secs(300), Some(Duration::from_secs(30))),
+            params.timeout(
+                Duration::from_secs(300),
+                Some(Duration::from_secs(30)),
+                None
+            ),
             Duration::from_secs(30),
             "the sandbox lifetime is the binding constraint"
         );
         assert_eq!(
-            params.timeout(Duration::from_secs(300), None),
+            params.timeout(Duration::from_secs(300), None, None),
             Duration::from_secs(300),
             "an unbounded-lifetime sandbox leaves the request in force"
         );
@@ -378,11 +420,11 @@ mod tests {
         let defaulted =
             BashToolInput::parse(r#"{"cmd":"true"}"#).expect("an absent timeout parses");
         assert_eq!(
-            defaulted.timeout(Duration::from_secs(120), Some(Duration::from_secs(5))),
+            defaulted.timeout(Duration::from_secs(120), Some(Duration::from_secs(5)), None),
             Duration::from_secs(5)
         );
         assert_eq!(
-            defaulted.timeout(Duration::from_secs(120), None),
+            defaulted.timeout(Duration::from_secs(120), None, None),
             Duration::from_secs(120)
         );
     }
@@ -390,7 +432,7 @@ mod tests {
     #[test]
     fn an_expired_sandbox_reports_zero_remaining_rather_than_no_deadline() {
         // Pins: the two absent-looking states stay distinct. A sandbox past its
-        // deadline yields `Some(ZERO)` — which `reject_exhausted_lifetime`
+        // deadline yields `Some(ZERO)` — which `reject_exhausted_budget`
         // refuses — while an unbounded sandbox yields `None`, which does not.
         let now = Utc::now();
         assert_eq!(remaining_lifetime(None, now), None);

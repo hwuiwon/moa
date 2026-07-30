@@ -1,7 +1,10 @@
 //! Deterministic model-loop planning helpers for turn workflows.
 
 use moa_config::SessionLimitsConfig;
-use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
+use moa_core::types::{
+    execution_planning::{ExecutionRouteDecision, ExecutionStrategy},
+    resource::ResourceBudget,
+};
 
 use crate::workflows::turn_responsiveness::{
     ModelLoopClass, ToolBudgetState, effective_delegation_turn_cap, effective_tool_cap,
@@ -15,6 +18,8 @@ pub(crate) struct RootLoopPlanRequest<'a> {
     pub(crate) route: &'a ExecutionRouteDecision,
     /// Caller-supplied turn cap.
     pub(crate) request_max_turns: Option<u32>,
+    /// Downward-only resource slice admitted for this turn.
+    pub(crate) resource_budget: ResourceBudget,
 }
 
 /// Inputs for planning one worker turn loop.
@@ -52,6 +57,20 @@ impl TurnLoopPlan {
     /// Creates a fresh one-way delegation cap escalation for this turn.
     pub(crate) fn turn_cap_escalation(&self) -> TurnCapEscalation {
         TurnCapEscalation::new(self.max_turns, self.delegation_max_turns)
+    }
+
+    /// Narrows loop and tool caps to a caller-admitted resource slice.
+    fn within(mut self, budget: ResourceBudget) -> Self {
+        let Some(remaining) = budget.remaining else {
+            return self;
+        };
+        let model_turns = remaining.turns.min(remaining.model_calls);
+        let model_turns = usize::try_from(model_turns).unwrap_or(usize::MAX);
+        let tool_calls = usize::try_from(remaining.tool_calls).unwrap_or(usize::MAX);
+        self.max_turns = self.max_turns.min(model_turns);
+        self.delegation_max_turns = self.delegation_max_turns.min(model_turns);
+        self.max_tool_calls = self.max_tool_calls.min(tool_calls);
+        self
     }
 }
 
@@ -111,12 +130,15 @@ pub(crate) fn root_loop_plan(
             return None;
         }
     };
-    Some(loop_plan(
-        request.request_max_turns,
-        class,
-        Some(request.route.clone()),
-        session_limits,
-    ))
+    Some(
+        loop_plan(
+            request.request_max_turns,
+            class,
+            Some(request.route.clone()),
+            session_limits,
+        )
+        .within(request.resource_budget),
+    )
 }
 
 /// Builds a deterministic loop plan for a delegated worker turn.
@@ -157,7 +179,10 @@ fn loop_plan(
 #[cfg(test)]
 mod tests {
     use moa_config::SessionLimitsConfig;
-    use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
+    use moa_core::types::{
+        execution_planning::{ExecutionRouteDecision, ExecutionStrategy},
+        resource::{ResourceAmounts, ResourceBudget},
+    };
 
     use super::{
         RootLoopPlanRequest, TurnCapEscalation, WorkerLoopPlanRequest, root_loop_plan,
@@ -175,6 +200,7 @@ mod tests {
                     rationale: "The request only needs a response.".to_string(),
                 },
                 request_max_turns: None,
+                resource_budget: ResourceBudget::UNBOUNDED,
             },
             &limits,
         )
@@ -193,6 +219,7 @@ mod tests {
                     rationale: "The work fits a bounded interactive loop.".to_string(),
                 },
                 request_max_turns: None,
+                resource_budget: ResourceBudget::UNBOUNDED,
             },
             &limits,
         )
@@ -217,6 +244,7 @@ mod tests {
                     rationale: "The work fits a bounded interactive loop.".to_string(),
                 },
                 request_max_turns: None,
+                resource_budget: ResourceBudget::UNBOUNDED,
             },
             &limits,
         )
@@ -227,6 +255,39 @@ mod tests {
             limits.max_model_turns_delegation as usize
         );
         assert!(plan.delegation_max_turns > plan.max_turns);
+    }
+
+    #[test]
+    fn root_loop_plan_never_widens_an_admitted_resource_slice() {
+        // Pins: an experiment child gets one target turn and a small tool allowance;
+        // Session configuration and delegation escalation cannot widen either cap.
+        let limits = SessionLimitsConfig::default();
+        let route = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            rationale: "bounded experiment target".to_string(),
+        };
+        let plan = root_loop_plan(
+            RootLoopPlanRequest {
+                route: &route,
+                request_max_turns: None,
+                resource_budget: ResourceBudget::new(
+                    None,
+                    Some(ResourceAmounts {
+                        cost_micro_usd: 1_000,
+                        tokens: 1_000,
+                        turns: 1,
+                        model_calls: 2,
+                        tool_calls: 3,
+                    }),
+                ),
+            },
+            &limits,
+        )
+        .expect("inline route should construct a loop");
+
+        assert_eq!(plan.max_turns, 1);
+        assert_eq!(plan.delegation_max_turns, 1);
+        assert_eq!(plan.max_tool_calls, 3);
     }
 
     #[test]
@@ -280,6 +341,7 @@ mod tests {
                     RootLoopPlanRequest {
                         route: &route,
                         request_max_turns: None,
+                        resource_budget: ResourceBudget::UNBOUNDED,
                     },
                     &limits,
                 )

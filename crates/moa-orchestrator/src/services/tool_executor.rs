@@ -15,7 +15,7 @@ use moa_core::{
     types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
     types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{ToolCallScope, ToolRouter};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -240,13 +240,14 @@ impl ToolExecutorImpl {
             .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
             .await;
         self.router
-            .execute_authorized_with_recovery(
+            .execute_authorized_with_recovery_within(
                 session,
                 &request.caller_identity,
                 hand_scope,
                 &invocation,
                 request.tool_call_id,
                 request.active_canary.as_deref(),
+                ToolCallScope::unbounded().with_budget(request.resource_budget),
             )
             .await
     }
@@ -1327,6 +1328,7 @@ mod tests {
             session_id: SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
+            resource_budget: Default::default(),
         }
     }
 
@@ -1528,6 +1530,7 @@ mod tests {
             session_id: SessionId::new(),
             trusted_sandbox_manifest: Some(manifest),
             worker_id,
+            resource_budget: Default::default(),
         }
     }
 

@@ -171,6 +171,7 @@ impl SessionTarget for RemoteTarget {
                     model: Some(self.model.to_string()),
                     contact: None,
                     max_turns: None,
+                    resource_budget: Default::default(),
                     execution_template: None,
                 },
                 Some(client_message_id.as_str()),

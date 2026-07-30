@@ -50,6 +50,7 @@ pub fn start_turn_request(text: impl Into<String>) -> StartTurnRequest {
         model: None,
         contact: None,
         max_turns: None,
+        resource_budget: Default::default(),
         execution_template: None,
     }
 }

@@ -6,10 +6,10 @@
 mod support;
 
 use moa_core::events::Event;
-use moa_eval_core::{
-    EvalResult, EvalStatus, Evaluator, OutputMatchEvaluator, TestSuite, TrajectoryMatchEvaluator,
-    TrajectoryStep, score_is_failure,
-};
+use moa_eval_core::assertion::{AssertionOutcome, builtin_registry, evaluate_assertions};
+use moa_eval_core::evidence::{ActionKind, ActionOutcome, EvidenceEnvelope, EvidenceSubject};
+use moa_eval_core::types::TEST_CASE_SCHEMA_VERSION;
+use moa_eval_core::{EvalResult, EvalStatus, TestSuite, TrajectoryStep};
 use moa_skills::evidence::SanitizedLearningEvidence;
 use moa_skills::format::parse_skill_markdown;
 use moa_skills::regression::{
@@ -100,18 +100,20 @@ async fn generated_regression_suite_runs_green_against_the_skill_canonical_traje
         .expect("generated suite has one regression case");
 
     let canonical = canonical_result(case.name.clone(), &loaded.events);
-    let canonical_scores = run_suite_case(case, &canonical).await;
+    let canonical_outcomes = run_suite_case(case, &canonical);
     assert!(
-        !canonical_scores.is_empty(),
-        "output and trajectory evaluators should both score the generated case"
+        !canonical_outcomes.is_empty(),
+        "the generated case must author at least one evaluated assertion"
     );
     assert!(
-        !canonical_scores.iter().any(score_is_failure),
-        "the generated suite must pass against the skill's canonical trajectory, got failing \
-         scores: {:?}",
-        canonical_scores
+        !canonical_outcomes
             .iter()
-            .filter(|score| score_is_failure(score))
+            .any(AssertionOutcome::is_gate_failure),
+        "the generated suite must pass against the skill's canonical trajectory, got failing \
+         assertions: {:?}",
+        canonical_outcomes
+            .iter()
+            .filter(|outcome| outcome.is_gate_failure())
             .collect::<Vec<_>>()
     );
 
@@ -123,10 +125,12 @@ async fn generated_regression_suite_runs_green_against_the_skill_canonical_traje
         trajectory: Vec::new(),
         ..EvalResult::default()
     };
-    let drifted_scores = run_suite_case(case, &drifted).await;
+    let drifted_outcomes = run_suite_case(case, &drifted);
     assert!(
-        drifted_scores.iter().any(score_is_failure),
-        "the generated suite must fail against a drifted run, got scores: {drifted_scores:?}"
+        drifted_outcomes
+            .iter()
+            .any(AssertionOutcome::is_gate_failure),
+        "the generated suite must fail against a drifted run, got: {drifted_outcomes:?}"
     );
 }
 
@@ -141,7 +145,7 @@ fn canonical_result(
         Event::BrainResponse { text, .. } => Some(text.clone()),
         _ => None,
     });
-    let trajectory = events
+    let trajectory: Vec<TrajectoryStep> = events
         .iter()
         .filter_map(|record| match &record.event {
             Event::ToolCall { tool_name, .. } => Some(TrajectoryStep {
@@ -154,34 +158,46 @@ fn canonical_result(
             _ => None,
         })
         .collect();
+    // The assertions are evaluated against persisted evidence, so a canonical run
+    // has to carry the response text and the ordered action ledger the generator
+    // authored its claims about.
+    let mut builder = EvidenceEnvelope::builder(EvidenceSubject {
+        case: test_case.clone(),
+        case_schema_version: TEST_CASE_SCHEMA_VERSION,
+        agent_config: "canonical".to_string(),
+        run_label: "canonical".to_string(),
+    })
+    .source("skill_regression_fixture");
+    if let Some(text) = &response {
+        builder = builder.response(text.clone());
+    }
+    for step in &trajectory {
+        builder = builder.action(
+            ActionKind::Invocation,
+            step.tool_name.clone(),
+            serde_json::Value::Null,
+            ActionOutcome::Succeeded,
+        );
+    }
+
     EvalResult {
         test_case,
         status: EvalStatus::Passed,
         response,
         trajectory,
+        evidence: Some(builder.build()),
         ..EvalResult::default()
     }
 }
 
-/// Runs the output and trajectory evaluators the generated suite relies on.
-async fn run_suite_case(
-    case: &moa_eval_core::TestCase,
-    result: &EvalResult,
-) -> Vec<moa_eval_core::EvalScore> {
-    let evaluators: [Box<dyn Evaluator>; 2] = [
-        Box::new(OutputMatchEvaluator),
-        Box::new(TrajectoryMatchEvaluator),
-    ];
-    let mut scores = Vec::new();
-    for evaluator in &evaluators {
-        scores.extend(
-            evaluator
-                .evaluate(case, result)
-                .await
-                .expect("evaluator scores the generated case"),
-        );
-    }
-    scores
+/// Evaluates the generated case's assertions, which is the path that gates promotion.
+///
+/// Deliberately not the legacy `OutputMatchEvaluator`/`TrajectoryMatchEvaluator`
+/// pair: those now emit `GateEffect::Diagnostic` coverage and path-similarity
+/// signals, so a suite scored only through them can never fail and would make this
+/// a tautological test of the promotion gate.
+fn run_suite_case(case: &moa_eval_core::TestCase, result: &EvalResult) -> Vec<AssertionOutcome> {
+    evaluate_assertions(builtin_registry(), case, result.evidence.as_ref())
 }
 
 /// Sanitizes a loaded fixture session into the evidence the suite generator takes.

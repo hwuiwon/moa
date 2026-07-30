@@ -33,6 +33,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::error::MoaError;
+
 /// Wire-format version of the resource envelope, reservation, and ledger
 /// contracts defined in this module.
 ///
@@ -170,6 +172,22 @@ impl ResourceAmounts {
         })
     }
 
+    /// Returns the dimension-wise minimum of two points.
+    ///
+    /// This is the restrictive intersection used when a child scope narrows a
+    /// parent allowance: no combination of layers can hand back more than the
+    /// tightest one already permitted.
+    #[must_use]
+    pub fn restrict(&self, other: &Self) -> Self {
+        Self {
+            cost_micro_usd: self.cost_micro_usd.min(other.cost_micro_usd),
+            tokens: self.tokens.min(other.tokens),
+            turns: self.turns.min(other.turns),
+            model_calls: self.model_calls.min(other.model_calls),
+            tool_calls: self.tool_calls.min(other.tool_calls),
+        }
+    }
+
     /// Subtracts `other`, flooring each dimension at zero.
     #[must_use]
     pub fn saturating_sub(&self, other: &Self) -> Self {
@@ -257,6 +275,120 @@ impl ResourceEnvelope {
     pub fn time_remaining(&self, now: DateTime<Utc>) -> Option<StdDuration> {
         self.deadline
             .map(|deadline| (deadline - now).to_std().unwrap_or(StdDuration::ZERO))
+    }
+}
+
+/// The slice of an envelope one in-flight dispatch may still spend.
+///
+/// This is the value that threads a budget *downwards*, through layers that
+/// hold no ledger of their own: a hand provision, a tool executor, a sandbox
+/// command. It is deliberately [`Copy`] and free of interior mutability so it
+/// can sit in a [`crate::types::hands::HandSpec`], cross an `async_trait`
+/// boundary, and be re-derived per attempt without any layer being able to
+/// widen it or hand it back changed.
+///
+/// `None` in either field means *unbounded in that dimension*, which is not the
+/// same as zero: `remaining: Some(ResourceAmounts::ZERO)` says "nothing left to
+/// spend", while `remaining: None` says "no metered allowance applies here".
+/// Collapsing the two would turn an unmetered call into a refused one, or —
+/// far worse — an exhausted one into an unlimited one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceBudget {
+    /// Absolute wall-clock deadline, or `None` when unbounded.
+    pub deadline: Option<DateTime<Utc>>,
+    /// Allowance left in every metered dimension, or `None` when unmetered.
+    pub remaining: Option<ResourceAmounts>,
+}
+
+impl ResourceBudget {
+    /// A budget that bounds nothing: no deadline and no metered allowance.
+    pub const UNBOUNDED: Self = Self {
+        deadline: None,
+        remaining: None,
+    };
+
+    /// Creates a budget from an optional deadline and optional allowance.
+    #[must_use]
+    pub const fn new(deadline: Option<DateTime<Utc>>, remaining: Option<ResourceAmounts>) -> Self {
+        Self {
+            deadline,
+            remaining,
+        }
+    }
+
+    /// Creates an unmetered budget bounded only by an absolute deadline.
+    #[must_use]
+    pub const fn until(deadline: DateTime<Utc>) -> Self {
+        Self {
+            deadline: Some(deadline),
+            remaining: None,
+        }
+    }
+
+    /// Returns whether this budget bounds nothing at all.
+    #[must_use]
+    pub const fn is_unbounded(&self) -> bool {
+        self.deadline.is_none() && self.remaining.is_none()
+    }
+
+    /// Returns whether the absolute deadline has been reached at `now`.
+    ///
+    /// The deadline is exclusive, matching [`ResourceEnvelope::deadline_passed`]:
+    /// work may start strictly before it, never at or after it.
+    #[must_use]
+    pub fn deadline_passed(&self, now: DateTime<Utc>) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+
+    /// Returns the time left before the deadline, or `None` when unbounded.
+    ///
+    /// An already-passed deadline yields `Some(Duration::ZERO)`, never `None`:
+    /// "out of time" and "no deadline" must not collapse into one value, or an
+    /// expired scope would run unbounded.
+    #[must_use]
+    pub fn time_remaining(&self, now: DateTime<Utc>) -> Option<StdDuration> {
+        self.deadline
+            .map(|deadline| (deadline - now).to_std().unwrap_or(StdDuration::ZERO))
+    }
+
+    /// Returns the first dimension `request` would overspend, when metered.
+    #[must_use]
+    pub fn first_exceeding(&self, request: &ResourceAmounts) -> Option<ResourceKind> {
+        self.remaining
+            .and_then(|remaining| request.first_exceeding(&remaining))
+    }
+
+    /// Narrows this budget by another: the earlier deadline and the smaller
+    /// allowance in every dimension.
+    ///
+    /// A `None` on either side is the identity element, so restricting an
+    /// unbounded budget by a bounded one yields the bounded one.
+    #[must_use]
+    pub fn restrict(self, other: Self) -> Self {
+        let deadline = match (self.deadline, other.deadline) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        };
+        let remaining = match (self.remaining, other.remaining) {
+            (Some(left), Some(right)) => Some(left.restrict(&right)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        };
+        Self {
+            deadline,
+            remaining,
+        }
+    }
+
+    /// Builds the budget a ledger snapshot still permits.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &ResourceLedgerSnapshot) -> Self {
+        Self {
+            deadline: snapshot.deadline,
+            remaining: Some(snapshot.remaining),
+        }
     }
 }
 
@@ -530,6 +662,15 @@ impl SharedResourceLedger {
         self.with(|ledger| ledger.snapshot())
     }
 
+    /// Returns the [`ResourceBudget`] this ledger still permits.
+    ///
+    /// This is the hand-off point between the ledger (which admits work) and the
+    /// dispatch tree (which must not outlive what was admitted).
+    #[must_use]
+    pub fn budget(&self) -> ResourceBudget {
+        ResourceBudget::from_snapshot(&self.snapshot())
+    }
+
     fn with<T>(&self, action: impl FnOnce(&mut ResourceLedger) -> T) -> T {
         let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         action(&mut guard)
@@ -546,14 +687,23 @@ impl SharedResourceLedger {
 #[derive(Debug, Clone)]
 pub struct DeadlineGuard {
     cancel: CancellationToken,
-    deadline: Option<DateTime<Utc>>,
+    budget: ResourceBudget,
 }
 
 impl DeadlineGuard {
     /// Binds a deadline to an existing cancellation token.
     #[must_use]
     pub const fn new(cancel: CancellationToken, deadline: Option<DateTime<Utc>>) -> Self {
-        Self { cancel, deadline }
+        Self {
+            cancel,
+            budget: ResourceBudget::new(deadline, None),
+        }
+    }
+
+    /// Binds a full [`ResourceBudget`] to an existing cancellation token.
+    #[must_use]
+    pub const fn from_budget(cancel: CancellationToken, budget: ResourceBudget) -> Self {
+        Self { cancel, budget }
     }
 
     /// Creates a guard with a fresh token and no deadline.
@@ -561,7 +711,7 @@ impl DeadlineGuard {
     pub fn unbounded() -> Self {
         Self {
             cancel: CancellationToken::new(),
-            deadline: None,
+            budget: ResourceBudget::UNBOUNDED,
         }
     }
 
@@ -574,7 +724,16 @@ impl DeadlineGuard {
     /// Returns the effective deadline, when one is set.
     #[must_use]
     pub const fn deadline(&self) -> Option<DateTime<Utc>> {
-        self.deadline
+        self.budget.deadline
+    }
+
+    /// Returns the `Copy` budget this scope may still spend.
+    ///
+    /// This is what layers below the guard carry: they cannot cancel the scope,
+    /// only observe how much of it is left.
+    #[must_use]
+    pub const fn budget(&self) -> ResourceBudget {
+        self.budget
     }
 
     /// Derives a narrower guard: a child token plus the earlier of the two
@@ -584,14 +743,15 @@ impl DeadlineGuard {
     /// sibling work alone.
     #[must_use]
     pub fn child(&self, deadline: Option<DateTime<Utc>>) -> Self {
-        let deadline = match (self.deadline, deadline) {
-            (Some(outer), Some(inner)) => Some(outer.min(inner)),
-            (Some(outer), None) => Some(outer),
-            (None, inner) => inner,
-        };
+        self.child_budget(ResourceBudget::new(deadline, None))
+    }
+
+    /// Derives a narrower guard from a child token and a restricted budget.
+    #[must_use]
+    pub fn child_budget(&self, budget: ResourceBudget) -> Self {
         Self {
             cancel: self.cancel.child_token(),
-            deadline,
+            budget: self.budget.restrict(budget),
         }
     }
 
@@ -606,20 +766,40 @@ impl DeadlineGuard {
         self.cancel.cancel();
     }
 
-    /// Runs `future` under the deadline and cancellation token.
+    /// Synchronous pre-dispatch gate: may this scope start paid work at `now`?
     ///
-    /// On expiry the token is cancelled *before* the error is returned, so
-    /// cooperating work stops rather than being orphaned.
-    pub async fn run<F>(&self, future: F) -> Result<F::Output, ResourceError>
-    where
-        F: Future,
-    {
+    /// This is what makes "a cancelled scope dispatches nothing" a property
+    /// rather than a race. Racing a provider call against a token in a
+    /// `select!` still polls the call, and a fast provider can complete before
+    /// the cancelled branch is chosen; asking first cannot. An expired deadline
+    /// also cancels the token here, so siblings that are only watching the
+    /// token still unwind.
+    pub fn admit_at(&self, now: DateTime<Utc>) -> Result<(), ResourceError> {
         if self.cancel.is_cancelled() {
             return Err(ResourceError::Cancelled);
         }
+        if let Some(deadline) = self.budget.deadline
+            && self.budget.deadline_passed(now)
+        {
+            self.cancel.cancel();
+            return Err(ResourceError::DeadlineExceeded { deadline });
+        }
+        Ok(())
+    }
 
-        let deadline = self.deadline;
-        tokio::pin!(future);
+    /// Pre-dispatch gate against the current wall clock. See [`Self::admit_at`].
+    pub fn admit(&self) -> Result<(), ResourceError> {
+        self.admit_at(Utc::now())
+    }
+
+    /// Resolves as soon as this scope is cancelled or its deadline expires.
+    ///
+    /// This is the primitive a streaming loop selects on: it never resolves
+    /// while the scope is live, and expiry cancels the shared token *before*
+    /// returning, so a producer task the caller is about to drop has already
+    /// been told to stop instead of being silently orphaned.
+    pub async fn cancelled_or_expired(&self) -> ResourceError {
+        let deadline = self.budget.deadline;
         let expiry = async move {
             match deadline {
                 Some(deadline) => {
@@ -634,14 +814,30 @@ impl DeadlineGuard {
         tokio::pin!(expiry);
 
         tokio::select! {
-            output = &mut future => Ok(output),
-            () = self.cancel.cancelled() => Err(ResourceError::Cancelled),
+            () = self.cancel.cancelled() => ResourceError::Cancelled,
             () = &mut expiry => {
                 self.cancel.cancel();
-                Err(ResourceError::DeadlineExceeded {
+                ResourceError::DeadlineExceeded {
                     deadline: deadline.unwrap_or_else(Utc::now),
-                })
+                }
             }
+        }
+    }
+
+    /// Runs `future` under the deadline and cancellation token.
+    ///
+    /// On expiry the token is cancelled *before* the error is returned, so
+    /// cooperating work stops rather than being orphaned.
+    pub async fn run<F>(&self, future: F) -> Result<F::Output, ResourceError>
+    where
+        F: Future,
+    {
+        self.admit()?;
+
+        tokio::pin!(future);
+        tokio::select! {
+            output = &mut future => Ok(output),
+            error = self.cancelled_or_expired() => Err(error),
         }
     }
 }
@@ -703,14 +899,41 @@ pub enum ResourceError {
     },
 }
 
+impl From<ResourceError> for MoaError {
+    /// Projects a resource refusal onto the shared runtime error.
+    ///
+    /// Cancellation stays cancellation. Everything else — an expired deadline,
+    /// an exhausted dimension, an overflowed projection — maps to
+    /// [`MoaError::BudgetExhausted`], which
+    /// [`crate::error::classify_tool_error`] already treats as fatal. That is
+    /// the point: none of these are transient, and a retry loop that read them
+    /// as retryable would keep dispatching paid work the ledger already
+    /// refused. Malformed contract inputs are caller mistakes and surface as
+    /// validation errors instead.
+    fn from(error: ResourceError) -> Self {
+        match error {
+            ResourceError::Cancelled => Self::Cancelled,
+            ResourceError::DeadlineExceeded { .. }
+            | ResourceError::Exhausted { .. }
+            | ResourceError::Overflow { .. }
+            | ResourceError::EmptyReservation => Self::BudgetExhausted(error.to_string()),
+            ResourceError::UnsupportedVersion { .. }
+            | ResourceError::UnknownReservation { .. }
+            | ResourceError::InvalidCost { .. } => Self::ValidationError(error.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadlineGuard, ReconcileOutcome, ResourceAmounts, ResourceEnvelope, ResourceError,
-        ResourceKind, ResourceLedger, SharedResourceLedger,
+        DeadlineGuard, ReconcileOutcome, ResourceAmounts, ResourceBudget, ResourceEnvelope,
+        ResourceError, ResourceKind, ResourceLedger, SharedResourceLedger,
     };
+    use crate::error::MoaError;
     use chrono::{Duration, Utc};
     use std::sync::Arc;
+    use std::time::Duration as StdDuration;
     use tokio_util::sync::CancellationToken;
 
     fn amounts(
@@ -965,6 +1188,206 @@ mod tests {
             .await
             .expect_err("cancelled scope");
         assert!(matches!(error, ResourceError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn an_expired_deadline_never_polls_immediately_ready_work() {
+        // Pins: the synchronous admission check runs before `select!` can poll a
+        // fast work future. Repeating the immediate-ready race mutation-checks
+        // the old implementation, whose randomly selected work branch could
+        // perform a side effect after the deadline.
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        for _ in 0..64 {
+            let guard = DeadlineGuard::new(
+                CancellationToken::new(),
+                Some(Utc::now() - Duration::seconds(1)),
+            );
+            let polls_in_future = Arc::clone(&polls);
+            let error = guard
+                .run(async move {
+                    polls_in_future.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await
+                .expect_err("an expired deadline must refuse work before polling it");
+
+            assert!(matches!(error, ResourceError::DeadlineExceeded { .. }));
+            assert!(guard.is_cancelled(), "expiry must cancel the shared scope");
+        }
+
+        assert_eq!(
+            polls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "expired work must not perform even an immediately-ready side effect"
+        );
+    }
+
+    #[test]
+    fn an_unmetered_budget_is_not_an_exhausted_one() {
+        // Pins: `remaining: None` and `remaining: Some(ZERO)` stay distinct.
+        // Collapsing them would either refuse every unmetered call or, far
+        // worse, admit an exhausted one as unlimited.
+        let unmetered = ResourceBudget::UNBOUNDED;
+        let exhausted = ResourceBudget::new(None, Some(ResourceAmounts::ZERO));
+        let one_call = amounts(0, 0, 0, 1, 0);
+
+        assert_eq!(unmetered.first_exceeding(&one_call), None);
+        assert_eq!(
+            exhausted.first_exceeding(&one_call),
+            Some(ResourceKind::ModelCalls)
+        );
+        assert!(unmetered.is_unbounded());
+        assert!(!exhausted.is_unbounded());
+    }
+
+    #[test]
+    fn restricting_a_budget_only_ever_tightens_it() {
+        // Pins: the intersection takes the earlier deadline and the smaller
+        // allowance in every dimension, and an unbounded side is the identity
+        // element rather than a widening one.
+        let now = Utc::now();
+        let outer = ResourceBudget::new(
+            Some(now + Duration::seconds(60)),
+            Some(amounts(1_000, 500, 4, 8, 16)),
+        );
+        let inner = ResourceBudget::new(
+            Some(now + Duration::seconds(5)),
+            Some(amounts(9_000, 100, 9, 2, 99)),
+        );
+
+        let narrowed = outer.restrict(inner);
+        assert_eq!(narrowed.deadline, Some(now + Duration::seconds(5)));
+        assert_eq!(narrowed.remaining, Some(amounts(1_000, 100, 4, 2, 16)));
+
+        // A wider sibling cannot widen an already-bounded scope.
+        let wider = ResourceBudget::new(
+            Some(now + Duration::seconds(600)),
+            Some(amounts(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX)),
+        );
+        assert_eq!(outer.restrict(wider), outer);
+        assert_eq!(ResourceBudget::UNBOUNDED.restrict(outer), outer);
+        assert_eq!(outer.restrict(ResourceBudget::UNBOUNDED), outer);
+    }
+
+    #[test]
+    fn an_expired_budget_reports_zero_time_left_rather_than_no_deadline() {
+        let now = Utc::now();
+        assert_eq!(ResourceBudget::UNBOUNDED.time_remaining(now), None);
+        assert_eq!(
+            ResourceBudget::until(now - Duration::seconds(1)).time_remaining(now),
+            Some(StdDuration::ZERO)
+        );
+        assert_eq!(
+            ResourceBudget::until(now + Duration::seconds(30)).time_remaining(now),
+            Some(StdDuration::from_secs(30))
+        );
+        // The deadline is exclusive: exactly at it is already too late.
+        assert!(ResourceBudget::until(now).deadline_passed(now));
+        assert!(!ResourceBudget::until(now).deadline_passed(now - Duration::milliseconds(1)));
+    }
+
+    #[test]
+    fn a_ledger_hands_down_exactly_what_it_still_permits() {
+        let ledger = SharedResourceLedger::from_envelope(ResourceEnvelope::new(
+            amounts(0, 0, 0, 4, 0),
+            None,
+        ))
+        .expect("ledger");
+        assert_eq!(ledger.budget().remaining, Some(amounts(0, 0, 0, 4, 0)));
+
+        let reservation = ledger
+            .try_reserve(amounts(0, 0, 0, 3, 0), Utc::now())
+            .expect("reservation fits");
+        assert_eq!(
+            ledger.budget().remaining,
+            Some(amounts(0, 0, 0, 1, 0)),
+            "an outstanding reservation is already spent from the downstream budget"
+        );
+        ledger
+            .reconcile(reservation, amounts(0, 0, 0, 1, 0))
+            .expect("reconcile");
+        assert_eq!(ledger.budget().remaining, Some(amounts(0, 0, 0, 3, 0)));
+    }
+
+    #[test]
+    fn admission_refuses_a_cancelled_or_expired_scope_without_awaiting() {
+        // Pins: the pre-dispatch gate is a synchronous question, so a caller
+        // cannot dispatch and then "lose the race" to a cancellation branch.
+        let now = Utc::now();
+        let live = DeadlineGuard::new(CancellationToken::new(), Some(now + Duration::seconds(10)));
+        assert!(live.admit_at(now).is_ok());
+
+        let cancelled = DeadlineGuard::unbounded();
+        cancelled.cancel();
+        assert_eq!(cancelled.admit_at(now), Err(ResourceError::Cancelled));
+
+        let expired = DeadlineGuard::new(CancellationToken::new(), Some(now));
+        assert!(matches!(
+            expired.admit_at(now),
+            Err(ResourceError::DeadlineExceeded { .. })
+        ));
+        assert!(
+            expired.is_cancelled(),
+            "an expired deadline must cancel the shared token, not merely refuse the caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_never_resolves_while_the_scope_is_live() {
+        let guard = DeadlineGuard::new(
+            CancellationToken::new(),
+            Some(Utc::now() + Duration::seconds(30)),
+        );
+        let result =
+            tokio::time::timeout(StdDuration::from_millis(30), guard.cancelled_or_expired()).await;
+        assert!(result.is_err(), "a live scope must not report cancellation");
+        assert!(!guard.is_cancelled());
+
+        guard.cancel();
+        assert_eq!(guard.cancelled_or_expired().await, ResourceError::Cancelled);
+    }
+
+    #[test]
+    fn resource_refusals_project_onto_fatal_runtime_errors() {
+        // Pins: an exhausted or expired scope must not look retryable to the
+        // shared tool/turn retry classifiers, or a refused dispatch would be
+        // reattempted until the budget it already exceeded is billed again.
+        assert!(matches!(
+            MoaError::from(ResourceError::Cancelled),
+            MoaError::Cancelled
+        ));
+        for error in [
+            ResourceError::DeadlineExceeded {
+                deadline: Utc::now(),
+            },
+            ResourceError::Exhausted {
+                kind: ResourceKind::Tokens,
+                requested: 2,
+                remaining: 1,
+                limit: 3,
+            },
+            ResourceError::Overflow {
+                kind: ResourceKind::Tokens,
+            },
+            ResourceError::EmptyReservation,
+        ] {
+            let mapped = MoaError::from(error);
+            assert!(
+                matches!(mapped, MoaError::BudgetExhausted(_)),
+                "expected a budget refusal, got {mapped:?}"
+            );
+            assert!(matches!(
+                crate::error::classify_tool_error(&mapped, 0),
+                crate::error::ToolFailureClass::Fatal { .. }
+            ));
+        }
+        assert!(matches!(
+            MoaError::from(ResourceError::UnsupportedVersion {
+                version: 9,
+                supported: 1
+            }),
+            MoaError::ValidationError(_)
+        ));
     }
 
     #[test]

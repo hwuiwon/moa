@@ -57,6 +57,7 @@ use crate::support::{
 mod support;
 
 const K_PROBE_ATTACHED: &str = "attached";
+const SCRIPTED_MODEL: &str = "scripted-loadtest";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionTurnWaiterProbeInput {
@@ -282,17 +283,26 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
         let store = ExperimentStore::new(pool.clone());
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
         let run = store
-            .insert_run(&scope, new_parent_run(&identity, agent_revision_uid))
+            .insert_run(
+                &scope,
+                new_parent_run(
+                    &identity,
+                    agent_revision_uid,
+                    SCRIPTED_MODEL,
+                    fixture_experiment_envelope(),
+                ),
+            )
             .await
             .context("seed parent experiment run")?;
-        let plan_revision_uid = publish_trial_plan(&pool, &scope, agent_revision_uid).await?;
-        let trial = new_trial(run.run_uid, plan_revision_uid);
+        let plan_revision_uid =
+            publish_trial_plan(&pool, &scope, agent_revision_uid, SCRIPTED_MODEL).await?;
+        let trial = new_trial(run.run_uid, plan_revision_uid, SCRIPTED_MODEL);
         let trial_key = trial.trial_key.clone();
         let workflow_request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
             trial: trial.clone(),
-            target: agent_loop_target(agent_revision_uid),
-            variant: baseline_variant(),
+            target: agent_loop_target(agent_revision_uid, SCRIPTED_MODEL),
+            variant: baseline_variant(SCRIPTED_MODEL),
             identity: identity.clone(),
             completion_awakeable_id: None,
         };
@@ -426,7 +436,8 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
             .context("connect to test Postgres")?;
         let store = ExperimentStore::new(pool.clone());
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
-        let plan_revision_uid = publish_trial_plan(&pool, &scope, agent_revision_uid).await?;
+        let plan_revision_uid =
+            publish_trial_plan(&pool, &scope, agent_revision_uid, SCRIPTED_MODEL).await?;
         let template_revision_uid = publish_execution_template(&pool, &scope).await?;
         let template = PinnedExecutionTemplateRef {
             skill_ref: "skill://experiment-trial-output".to_string(),
@@ -996,12 +1007,21 @@ fn summarize_events(events: &[EventRecord]) -> String {
         .join(", ")
 }
 
-fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimentRun {
+fn new_parent_run(
+    identity: &Identity,
+    agent_revision_uid: Uuid,
+    model: &str,
+    resource_envelope: moa_experiments::model::ExperimentResourceEnvelope,
+) -> NewExperimentRun {
     NewExperimentRun {
+        plan_artifact_uid: None,
+        expected_trials: 1,
+        resource_envelope,
         name: "scripted trial workflow".to_string(),
-        target: serde_json::from_value(agent_loop_target(agent_revision_uid))
+        target: serde_json::from_value(agent_loop_target(agent_revision_uid, model))
             .expect("target fixture should parse"),
-        variant: serde_json::from_value(baseline_variant()).expect("variant fixture should parse"),
+        variant: serde_json::from_value(baseline_variant(model))
+            .expect("variant fixture should parse"),
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
@@ -1048,6 +1068,7 @@ async fn publish_trial_plan(
     pool: &PgPool,
     scope: &ActionRuleScope,
     agent_revision_uid: Uuid,
+    model: &str,
 ) -> Result<Uuid> {
     let source = format!(
         r#"
@@ -1085,8 +1106,8 @@ definition:
         config:
           prompt: Start behavior-lab simulation.
           agent_revision_uid: "{agent_revision_uid}"
-    simulator_model: scripted-loadtest
-    target_model: scripted-loadtest
+    simulator_model: {model}
+    target_model: {model}
     parallelism: 1
     trials_per_combination: 1
     budget:
@@ -1128,7 +1149,7 @@ async fn publish_artifact_revision(
     Ok(published.revision_uid)
 }
 
-fn new_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentTrial {
+fn new_trial(run_uid: Uuid, plan_revision_uid: Uuid, model: &str) -> NewExperimentTrial {
     NewExperimentTrial {
         run_uid,
         trial_key: "scripted-multiturn-agent-loop".to_string(),
@@ -1141,33 +1162,33 @@ fn new_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentTrial {
         data_bundle_ids: Vec::new(),
         artifact_revision_uids: Vec::new(),
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new("scripted-loadtest"),
+            model: ModelId::new(model),
             temperature: Some(0.0),
             max_turns: 2,
             token_budget: Some(1_000),
             metadata: json!({ "fixture": "experiment_trial_run_e2e" }),
         },
-        target_model: Some(ModelId::new("scripted-loadtest")),
+        target_model: Some(ModelId::new(model)),
         seed: Some("scripted-trial-seed".to_string()),
         score_run_id: Uuid::now_v7(),
     }
 }
 
-fn agent_loop_target(agent_revision_uid: Uuid) -> Value {
+fn agent_loop_target(agent_revision_uid: Uuid, model: &str) -> Value {
     json!({
         "kind": "agent_loop",
         "prompt": "Run the delayed-order support behavior trial.",
         "session_id": null,
         "agent": { "revision_uid": agent_revision_uid },
-        "model": "scripted-loadtest",
+        "model": model,
         "attachments": []
     })
 }
 
-fn baseline_variant() -> Value {
+fn baseline_variant(model: &str) -> Value {
     json!({
         "name": "baseline",
-        "model": "scripted-loadtest",
+        "model": model,
         "artifact_revision_uids": [],
         "skill_refs": [],
         "execution_template": null,
@@ -1203,6 +1224,9 @@ fn new_execution_template_parent_run(
     variant: Value,
 ) -> NewExperimentRun {
     NewExperimentRun {
+        plan_artifact_uid: None,
+        expected_trials: 1,
+        resource_envelope: fixture_experiment_envelope(),
         name: "execution-template trial workflow".to_string(),
         target: serde_json::from_value(target).expect("execution-template target should parse"),
         variant: serde_json::from_value(variant).expect("execution-template variant should parse"),
@@ -1403,16 +1427,16 @@ fn billed_live_lane_enabled() -> bool {
 /// Failing loudly here is the point: a live lane that silently degraded to a
 /// scripted provider would report a green billed smoke without ever having
 /// exercised a real model.
-fn require_live_provider_credential() -> Result<(&'static str, String)> {
-    for name in [
-        "MOA_ANTHROPIC_API_KEY",
-        "MOA_OPENAI_API_KEY",
-        "MOA_GOOGLE_API_KEY",
+fn require_live_provider_credential() -> Result<(&'static str, String, &'static str)> {
+    for (name, model) in [
+        ("MOA_ANTHROPIC_API_KEY", "claude-sonnet-4-6"),
+        ("MOA_OPENAI_API_KEY", "gpt-5.4"),
+        ("MOA_GOOGLE_API_KEY", "gemini-3-flash-preview"),
     ] {
         if let Ok(value) = std::env::var(name)
             && !value.trim().is_empty()
         {
-            return Ok((name, value));
+            return Ok((name, value, model));
         }
     }
     bail!(
@@ -1421,8 +1445,98 @@ fn require_live_provider_credential() -> Result<(&'static str, String)> {
     )
 }
 
+/// Parses the operator-approved live-lane ceiling into the platform's exact
+/// micro-USD accounting unit.
+fn require_behavior_lab_budget_micro_usd() -> Result<u64> {
+    let raw = std::env::var("MOA_BEHAVIOR_LAB_BUDGET_USD")
+        .context("billed Behavior Lab lane requires MOA_BEHAVIOR_LAB_BUDGET_USD")?;
+    parse_behavior_lab_budget_micro_usd(&raw)
+}
+
+fn parse_behavior_lab_budget_micro_usd(value: &str) -> Result<u64> {
+    if value.is_empty() || value.matches('.').count() > 1 {
+        bail!("MOA_BEHAVIOR_LAB_BUDGET_USD must be a positive decimal USD amount");
+    }
+
+    let (whole, fractional) = value.split_once('.').unwrap_or((value, ""));
+    if (whole.is_empty() && fractional.is_empty())
+        || (!whole.is_empty() && !whole.bytes().all(|byte| byte.is_ascii_digit()))
+        || (!fractional.is_empty() && !fractional.bytes().all(|byte| byte.is_ascii_digit()))
+        || (value.contains('.') && fractional.is_empty())
+        || fractional.len() > 6
+    {
+        bail!(
+            "MOA_BEHAVIOR_LAB_BUDGET_USD must be a positive decimal USD amount \
+             with at most six fractional digits"
+        );
+    }
+
+    let whole_micro_usd = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<u64>()
+            .context("MOA_BEHAVIOR_LAB_BUDGET_USD whole-dollar amount is too large")?
+            .checked_mul(1_000_000)
+            .context("MOA_BEHAVIOR_LAB_BUDGET_USD is too large")?
+    };
+    let mut fractional_micro_usd = if fractional.is_empty() {
+        0
+    } else {
+        fractional
+            .parse::<u64>()
+            .context("MOA_BEHAVIOR_LAB_BUDGET_USD fractional amount is invalid")?
+    };
+    for _ in fractional.len()..6 {
+        fractional_micro_usd = fractional_micro_usd
+            .checked_mul(10)
+            .context("MOA_BEHAVIOR_LAB_BUDGET_USD is too large")?;
+    }
+    let budget_micro_usd = whole_micro_usd
+        .checked_add(fractional_micro_usd)
+        .context("MOA_BEHAVIOR_LAB_BUDGET_USD is too large")?;
+    if budget_micro_usd == 0 {
+        bail!("MOA_BEHAVIOR_LAB_BUDGET_USD must be greater than zero");
+    }
+    Ok(budget_micro_usd)
+}
+
+#[test]
+fn behavior_lab_budget_parser_binds_exact_micro_usd_offline() {
+    // Pins: live-lane authorization is bound to the exact resource envelope
+    // ceiling, without float rounding or acceptance of unsupported syntax.
+    assert_eq!(
+        parse_behavior_lab_budget_micro_usd("5").expect("whole dollars"),
+        5_000_000
+    );
+    assert_eq!(
+        parse_behavior_lab_budget_micro_usd("1.25").expect("fractional dollars"),
+        1_250_000
+    );
+    assert_eq!(
+        parse_behavior_lab_budget_micro_usd(".000001").expect("one micro-USD"),
+        1
+    );
+    for invalid in [
+        "",
+        "0",
+        "0.000000",
+        "0.0000001",
+        "1.",
+        "-1",
+        "1e3",
+        "NaN",
+        " 1",
+    ] {
+        assert!(
+            parse_behavior_lab_budget_micro_usd(invalid).is_err(),
+            "budget syntax should be rejected: {invalid:?}"
+        );
+    }
+}
+
 #[tokio::test]
-#[ignore = "billed: requires MOA_RUN_LIVE_E2E=1, MOA_RUN_LIVE_PROVIDER_TESTS=1, provider credentials, restate-server, Postgres, and OpenFGA"]
+#[ignore = "billed: requires MOA_RUN_LIVE_E2E=1, MOA_RUN_LIVE_PROVIDER_TESTS=1, MOA_BEHAVIOR_LAB_BUDGET_USD, provider credentials, restate-server, Postgres, and OpenFGA"]
 async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
     // Pins the one thing no deterministic lane can: that a trial driven by a REAL
     // model still lands complete, provenance-backed score rows before it reports
@@ -1437,8 +1551,9 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         return Ok(());
     }
     // Explicitly NOT a silent skip: the operator asked for the billed lane, so a
-    // missing credential is a failure rather than a pass.
-    let (credential_name, credential) = require_live_provider_credential()?;
+    // missing credential or budget is a failure rather than a pass.
+    let (credential_name, credential, model) = require_live_provider_credential()?;
+    let budget_micro_usd = require_behavior_lab_budget_micro_usd()?;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
@@ -1472,6 +1587,10 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         // makes the trial fail with `experiment_score_sink_not_durable` instead of
         // producing the score rows this test reads back.
         .env("MOA_LINEAGE_SINK", "postgres")
+        .env_remove("MOA_ANTHROPIC_API_KEY")
+        .env_remove("MOA_OPENAI_API_KEY")
+        .env_remove("MOA_GOOGLE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .env(credential_name, credential)
         .env_remove("MOA_PROVIDERS_OVERRIDE")
         .stdout(Stdio::null())
@@ -1487,17 +1606,26 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         let store = ExperimentStore::new(pool.clone());
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
         let run = store
-            .insert_run(&scope, new_parent_run(&identity, agent_revision_uid))
+            .insert_run(
+                &scope,
+                new_parent_run(
+                    &identity,
+                    agent_revision_uid,
+                    model,
+                    experiment_envelope(budget_micro_usd),
+                ),
+            )
             .await
             .context("seed parent experiment run")?;
-        let plan_revision_uid = publish_trial_plan(&pool, &scope, agent_revision_uid).await?;
-        let trial = new_trial(run.run_uid, plan_revision_uid);
+        let plan_revision_uid =
+            publish_trial_plan(&pool, &scope, agent_revision_uid, model).await?;
+        let trial = new_trial(run.run_uid, plan_revision_uid, model);
         let trial_key = trial.trial_key.clone();
         let request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
             trial,
-            target: agent_loop_target(agent_revision_uid),
-            variant: baseline_variant(),
+            target: agent_loop_target(agent_revision_uid, model),
+            variant: baseline_variant(model),
             identity: identity.clone(),
             completion_awakeable_id: None,
         };
@@ -1546,4 +1674,27 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
     let _ = orchestrator.kill();
     let _ = orchestrator.wait();
     result
+}
+
+/// Bounded experiment envelope for fixtures in this test binary.
+///
+/// Stated locally rather than pulled from a platform ceiling so a change to a
+/// production limit cannot silently retune what these tests exercise.
+fn fixture_experiment_envelope() -> moa_experiments::model::ExperimentResourceEnvelope {
+    experiment_envelope(1_000_000)
+}
+
+fn experiment_envelope(cost_micro_usd: u64) -> moa_experiments::model::ExperimentResourceEnvelope {
+    let limits = moa_core::types::resource::ResourceAmounts {
+        cost_micro_usd,
+        tokens: 100_000,
+        turns: 8,
+        model_calls: 16,
+        tool_calls: 32,
+    };
+    moa_experiments::model::ExperimentResourceEnvelope::new(
+        limits,
+        limits,
+        moa_test_support::fixtures::pg_now() + chrono::Duration::hours(24),
+    )
 }

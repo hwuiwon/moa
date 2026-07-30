@@ -31,12 +31,14 @@ use moa_core::types::resource::{
 use moa_core::{events::Event, traits::LLMProvider, types::events_stream::EventRange};
 use moa_eval_core::admission::{AdmittedRun, EvalAdmissionPolicy};
 use moa_eval_core::engine::{EngineOptions, EvalRun, RunSummary};
+use moa_eval_core::evidence::EvidenceSubject;
 use moa_eval_core::plan::EvalPlan;
 use moa_eval_core::resource_report::{RunResourceReport, usage_from_metrics};
 use moa_eval_core::{
     AgentConfig, Error, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
     TestSuite,
 };
+use moa_providers::CancellableLLMProvider;
 use opentelemetry::trace::TraceContextExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +49,7 @@ use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::long_conversation::transcript_runner::run_scenario_in_environment;
 use crate::plan::build_eval_plan;
 use crate::setup::{
-    AgentEnvironment, build_agent_environment, build_agent_environment_with_provider,
+    AgentEnvironment, build_agent_environment_with_provider, resolve_agent_llm_provider,
 };
 
 const DEFAULT_SINGLE_TIMEOUT_SECONDS: u64 = 300;
@@ -114,10 +116,9 @@ impl EvalEngine {
     pub async fn run_single(&self, case: &TestCase, config: &AgentConfig) -> Result<EvalResult> {
         let suite = TestSuite {
             name: format!("single:{}", case.name),
-            description: None,
             cases: vec![case.clone()],
             default_timeout_seconds: DEFAULT_SINGLE_TIMEOUT_SECONDS,
-            tags: Vec::new(),
+            ..TestSuite::default()
         };
         let run = self
             .run_suite_inner(&suite, std::slice::from_ref(config), None)
@@ -342,7 +343,7 @@ impl EvalEngine {
                 .await;
         }
 
-        let environment = match self.build_environment(config, llm_provider).await {
+        let environment = match self.build_environment(config, guard, llm_provider).await {
             Ok(environment) => environment,
             Err(error) => {
                 return Dispatch::NotStarted(build_error_result(
@@ -374,10 +375,19 @@ impl EvalEngine {
         .instrument(span);
 
         let mut dispatch = match guard.run(execution).await {
+            // Evidence is built here, before `cleanup_run_resources` below tears
+            // the workspace and database down. Nothing after this point can
+            // re-derive what the run did.
             Ok(Ok(execution)) => Dispatch::Completed(EvalResult {
                 test_case: case.name.clone(),
                 agent_config: config.name.clone(),
                 status: EvalStatus::Passed,
+                evidence: Some(execution.to_evidence(EvidenceSubject {
+                    case: case.name.clone(),
+                    case_schema_version: case.schema_version,
+                    agent_config: config.name.clone(),
+                    run_label: environment.session_id.to_string(),
+                })),
                 response: execution.response,
                 trajectory: execution.trajectory,
                 metrics: execution.metrics,
@@ -426,6 +436,7 @@ impl EvalEngine {
                 EvalStatus::Error,
             ));
         };
+        let llm_provider = case_provider(llm_provider, guard);
         let environment = match build_agent_environment_with_provider(
             &self.base_config,
             config,
@@ -474,24 +485,30 @@ impl EvalEngine {
     async fn build_environment(
         &self,
         config: &AgentConfig,
+        guard: &DeadlineGuard,
         llm_provider: Option<Arc<dyn LLMProvider>>,
     ) -> std::result::Result<AgentEnvironment, String> {
-        let built = match llm_provider {
-            Some(llm_provider) => {
-                build_agent_environment_with_provider(
-                    &self.base_config,
-                    config,
-                    &self.options.temp_dir,
-                    llm_provider,
-                )
-                .await
-            }
-            None => {
-                build_agent_environment(&self.base_config, config, &self.options.temp_dir).await
-            }
+        let llm_provider = match llm_provider {
+            Some(llm_provider) => llm_provider,
+            None => resolve_agent_llm_provider(&self.base_config, config)
+                .map_err(|error| error.to_string())?,
         };
+        let built = build_agent_environment_with_provider(
+            &self.base_config,
+            config,
+            &self.options.temp_dir,
+            case_provider(llm_provider, guard),
+        )
+        .await;
         built.map_err(|error| error.to_string())
     }
+}
+
+fn case_provider(
+    llm_provider: Arc<dyn LLMProvider>,
+    guard: &DeadlineGuard,
+) -> Arc<dyn LLMProvider> {
+    Arc::new(CancellableLLMProvider::new(llm_provider, guard.clone()))
 }
 
 /// One `(config, case)` pair with its already-validated wall-clock budget.
@@ -785,6 +802,10 @@ fn build_error_result(
     status: EvalStatus,
 ) -> EvalResult {
     EvalResult {
+        // An error or timeout captured no evidence and evaluated no assertion, so
+        // both are stated as absent rather than defaulted into a passing shape.
+        evidence: None,
+        assertions: Vec::new(),
         test_case: case.name.clone(),
         agent_config: config.name.clone(),
         status,
@@ -803,19 +824,21 @@ fn build_error_result(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration as StdDuration;
 
     use async_trait::async_trait;
+    use chrono::{Duration, Utc};
     use moa_config::MoaConfig;
     use moa_core::{
-        traits::LLMProvider, types::completion::CompletionRequest,
+        error::MoaError, traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
         types::completion::StopReason, types::completion::TokenUsage,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
-        types::resource::ResourceAmounts,
+        types::resource::DeadlineGuard, types::resource::ResourceAmounts,
     };
     use tempfile::tempdir;
 
-    use super::run_environment;
+    use super::{case_provider, run_environment};
     use crate::{EvalEngine, setup::build_agent_environment_with_provider};
     use moa_eval_core::admission::{AdmissionError, EvalAdmissionLimits};
     use moa_eval_core::{AgentConfig, EngineOptions, Error, EvalStatus, TestCase, TestSuite};
@@ -891,6 +914,75 @@ mod tests {
                 thought_signature: None,
             }))
         }
+    }
+
+    struct PendingProvider {
+        stopped: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for PendingProvider {
+        fn name(&self) -> &str {
+            "pending"
+        }
+
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            let _sentinel = CompletionDropSentinel(Arc::clone(&self.stopped));
+            std::future::pending::<()>().await;
+            unreachable!("the case deadline must drop the pending provider future")
+        }
+    }
+
+    struct CompletionDropSentinel(Arc<AtomicUsize>);
+
+    impl Drop for CompletionDropSentinel {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn case_provider_deadline_stops_pending_handshake_offline() {
+        // Pins: every provider injected into an eval environment is bound to the
+        // case guard. A provider stuck before it returns a stream must be dropped
+        // at the case deadline rather than outliving the reported timeout.
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let guard = DeadlineGuard::new(
+            CancellationToken::new(),
+            Some(Utc::now() + Duration::milliseconds(25)),
+        );
+        let provider = case_provider(
+            Arc::new(PendingProvider {
+                stopped: Arc::clone(&stopped),
+            }),
+            &guard,
+        );
+
+        let result = tokio::time::timeout(
+            StdDuration::from_secs(1),
+            provider.complete(CompletionRequest::new("never returns")),
+        )
+        .await
+        .expect("the case deadline must stop the pending provider handshake");
+        let error = result.expect_err("the case deadline must surface as an error");
+
+        assert!(
+            matches!(error, MoaError::BudgetExhausted(_)),
+            "got {error:?}"
+        );
+        assert!(guard.is_cancelled(), "deadline expiry cancels the case");
+        assert_eq!(
+            stopped.load(Ordering::SeqCst),
+            1,
+            "the pending provider future must be dropped"
+        );
     }
 
     fn suite_with(cases: Vec<TestCase>) -> TestSuite {

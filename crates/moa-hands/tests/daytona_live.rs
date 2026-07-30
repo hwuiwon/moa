@@ -11,6 +11,7 @@ use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 use futures_util::FutureExt;
 use moa_config::CloudHandsConfig;
 use moa_config::MoaConfig;
+use moa_core::types::action_policy::CallOrigin;
 use moa_core::types::identifiers::ToolCallId;
 use moa_core::{
     error::MoaError,
@@ -474,10 +475,12 @@ fn live_hand_spec(tier: moa_core::types::hands::SandboxTier) -> HandSpec {
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
         "live-capabilities-v1",
     )
     .expect("live policy resolution should succeed");
     HandSpec {
+        budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,
         env: std::collections::HashMap::new(),

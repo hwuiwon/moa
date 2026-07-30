@@ -64,6 +64,7 @@ fn tool_request(
         session_id,
         trusted_sandbox_manifest: None,
         worker_id: None,
+        resource_budget: Default::default(),
     }
 }
 
@@ -85,6 +86,7 @@ fn tool_request_with_provider_id(
         session_id,
         trusted_sandbox_manifest: None,
         worker_id: None,
+        resource_budget: Default::default(),
     }
 }
 

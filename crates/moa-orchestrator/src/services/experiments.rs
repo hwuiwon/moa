@@ -1,5 +1,6 @@
 //! Restate service for authorized live behavior experiment run metadata.
 
+use chrono::Utc;
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
@@ -202,8 +203,19 @@ impl Experiments for ExperimentsImpl {
         let admitted_session = target_session_requiring_authorization(Some(&accepted.target));
         if admitted_session != authorized_session
             && let Some(session_id) = admitted_session
+            && let Err(auth_error) = authorize_session_participant(&ctx, session_id).await
         {
-            authorize_session_participant(&ctx, session_id).await?;
+            let pool = self.pool.clone();
+            let tenant_id = accepted.response.tenant_id;
+            let run_uid = accepted.run_uid;
+            ctx.run(|| async move {
+                fail_admission_after_target_authz(pool, tenant_id, run_uid)
+                    .await
+                    .map(Json::from)
+            })
+            .name("experiments_fail_unauthorized_admission")
+            .await?;
+            return Err(auth_error);
         }
         let workflow_request = ExperimentRunWorkflowRequest {
             tenant_id: accepted.response.tenant_id,
@@ -562,6 +574,30 @@ async fn run_inner(
     admit_run(pool, request, identity)
         .await
         .map_err(experiment_app_error_to_handler_error)
+}
+
+async fn fail_admission_after_target_authz(
+    pool: sqlx::PgPool,
+    tenant_id: TenantId,
+    run_uid: uuid::Uuid,
+) -> Result<(), HandlerError> {
+    let store = ExperimentStore::new(pool);
+    let run = store
+        .load_run_for_workflow(tenant_id, run_uid)
+        .await
+        .map_err(moa_error_to_handler_error)?
+        .ok_or_else(|| TerminalError::new("admitted experiment run disappeared"))?;
+    store
+        .update_run_status(
+            &run.scope,
+            run_uid,
+            ExperimentRunStatus::Failed,
+            Some("admitted target session authorization failed".to_string()),
+            Some(Utc::now()),
+        )
+        .await
+        .map_err(moa_error_to_handler_error)?;
+    Ok(())
 }
 
 async fn list_inner(
@@ -1173,6 +1209,11 @@ fn experiment_app_error_to_handler_error(error: ExperimentAppError) -> HandlerEr
             TerminalError::new_with_code(400, message).into()
         }
         ExperimentAppError::NotFound(message) => TerminalError::new_with_code(404, message).into(),
+        // A full admission quota is a load condition, not a malformed request:
+        // the same bytes succeed once capacity frees up.
+        ExperimentAppError::QuotaExceeded(message) => {
+            TerminalError::new_with_code(429, message).into()
+        }
         ExperimentAppError::Serialization(message) => TerminalError::new(message).into(),
         ExperimentAppError::Moa(error) => moa_error_to_handler_error(error),
         ExperimentAppError::Scoring(error) => score_error_to_handler_error(error),

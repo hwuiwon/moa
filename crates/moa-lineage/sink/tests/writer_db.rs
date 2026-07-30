@@ -824,11 +824,20 @@ async fn seed_experiment_fixture(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO moa.experiment_run (
+        // A run states its resource envelope explicitly: V000371 dropped the
+        // backfill default so no new row can be admitted without a stated ceiling.
+        // This fixture only needs the sink's score provenance, so the ceiling is a
+        // valid zero envelope rather than a realistic budget.
+        r#"INSERT INTO moa.experiment_run (
              run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
-             scorecard, score_run_id, artifact_revision_uids, created_by_identity
+             scorecard, score_run_id, artifact_revision_uids, created_by_identity,
+             resource_envelope
          ) VALUES ($1, $2, NULL, 'sink fixture', 'agent_loop', 'running', '{}'::jsonb, '{}'::jsonb,
-                   '{}'::jsonb, $3, '{}', '{}'::jsonb)",
+                   '{}'::jsonb, $3, '{}', '{}'::jsonb,
+                   '{"version": 1,
+                     "run_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "trial_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb)"#,
     )
     .bind(fixture.run_uid)
     .bind(&fixture.storage_partition_id)
@@ -836,11 +845,15 @@ async fn seed_experiment_fixture(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO moa.experiment_trial (
+        r#"INSERT INTO moa.experiment_trial (
              trial_uid, run_uid, storage_partition_id, user_id, trial_key, status, target_kind,
-             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id
+             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id,
+             resource_envelope
          ) VALUES ($1, $2, $3, NULL, 'sink/0', 'running', 'agent_loop', 'baseline', $4,
-                   '{}'::jsonb, 'sim-model', $5)",
+                   '{}'::jsonb, 'sim-model', $5,
+                   '{"version": 1,
+                     "limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "deadline": "1970-01-01T00:00:00Z"}'::jsonb)"#,
     )
     .bind(fixture.trial_uid)
     .bind(fixture.run_uid)

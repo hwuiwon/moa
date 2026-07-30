@@ -470,6 +470,7 @@ async fn e2b_router_reuses_and_isolates() {
 /// inside a 10-minute hard lifetime, which is what both cloud providers can
 /// actually enforce.
 fn live_hand_spec(tier: moa_core::types::hands::SandboxTier) -> HandSpec {
+    use moa_core::types::action_policy::CallOrigin;
     use moa_core::types::hands::{
         BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
         SandboxPolicySnapshot, SandboxProfile, resolve_effective_sandbox_profile,
@@ -492,10 +493,12 @@ fn live_hand_spec(tier: moa_core::types::hands::SandboxTier) -> HandSpec {
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
         &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        &SandboxPolicySnapshot::origin(CallOrigin::Production),
         "live-capabilities-v1",
     )
     .expect("live policy resolution should succeed");
     HandSpec {
+        budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,
         env: std::collections::HashMap::new(),

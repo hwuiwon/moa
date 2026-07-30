@@ -94,6 +94,8 @@ suffixes as they are touched.
 | DB memory | `make test-db-memory` | Postgres with relational graph/vector state; per-test template-cloned databases, runs 4-wide |
 | Authz pentest | `make test-authz-pentest` | Postgres with graph/vector state; writes the pentest report |
 | Service E2E | `make test-service-e2e` | clean Postgres/OpenFGA/Restate/PII harness with deterministic providers |
+| Behavior Lab | `make test-behavior-lab` | service E2E harness; candidate-evaluation surface, unbilled |
+| Behavior Lab live | `make test-behavior-lab-live` | Behavior Lab harness plus billed provider credentials and an approved budget |
 | Provider E2E | `make test-provider-e2e` | service E2E harness plus live/billed provider credentials |
 
 The nextest profiles in `.config/nextest.toml` are mostly suffix-based. Keep
@@ -228,6 +230,47 @@ MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 make test-provider-e2e
 
 MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-eval
 ```
+
+### Behavior Lab Lanes
+
+The Behavior Lab is the contained candidate-evaluation surface: an
+`ExperimentRun`/`ExperimentTrialRun` executes a release candidate against a
+scripted environment and produces the scorecard that release gating consumes. Its
+binaries are scheduled by two named profiles, both invoked from
+`scripts/run-clean-e2e.sh --live` (so `make test-behavior-lab` is an alias for
+`make e2e-clean-live`). They are unbilled.
+
+| Profile | Binaries | Restate stack |
+| --- | --- | --- |
+| `behavior-lab-service-e2e` | `behavior_lab_simulation_e2e`, `experiment_agent_loop_e2e`, `experiment_trial_run_e2e`, `skill_learning_gate_e2e` | external: reads `MOA_RESTATE_INGRESS_URL`/`MOA_RESTATE_ADMIN_URL`, spawns its own orchestrator on reserved ports |
+| `behavior-lab-fixture-service-e2e` | `experiment_execution_service_e2e` | self-contained: `OrchestratorTestFixture::with_execution_fixture` starts its own containers and **fails** if `MOA_RESTATE_INGRESS_URL` is set |
+
+That split is why there are two profiles rather than one: the two halves need
+opposite environments, so the runner invokes the first with the ephemeral
+server's URLs exported and the second through
+`run_without_external_orchestrator`. Both run `test-threads = 1` and take the
+`service-e2e` group slot; every case holds `RESTATE_E2E_LOCK` or a dedicated
+fixture, and they share one Postgres database, OpenFGA store, and Valkey.
+
+`skill_learning_gate_e2e` needs Postgres and `provider-overrides` but no Restate.
+It sits in this lane because it evaluates a release candidate through the real
+eval engine before a skill can be accepted, which is the same gating surface.
+
+The billed trial-to-score smoke is excluded from `behavior-lab-service-e2e` and
+selected only by the `behavior-lab-live` profile, which requires authorization
+twice over plus an approved budget:
+
+```bash
+MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 MOA_BEHAVIOR_LAB_BUDGET_USD=5 \
+  make test-behavior-lab-live
+```
+
+The runner refuses that flag before creating any container or database when the
+authorization flags are missing, when `MOA_BEHAVIOR_LAB_BUDGET_USD` is absent or
+not a positive USD amount with at most six decimal places, or when no provider
+credential is present. The test itself stays `#[ignore]`d, re-checks its own
+flags, and binds that approved amount to the run and trial's exact micro-USD
+resource ceiling.
 
 Postmark messaging e2e coverage is ignored by default and reads local `.env`
 values directly. Use `POSTMARK_SERVER_API_TOKEN=POSTMARK_API_TEST` for
