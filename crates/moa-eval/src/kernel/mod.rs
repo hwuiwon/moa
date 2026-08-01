@@ -3,7 +3,10 @@
 //! Kernel modules may not import memory-suite or future suite modules. Suites
 //! depend on this layer for common metrics, statistics, and report comparison.
 
+pub mod cohorts;
 pub mod compare;
+pub mod contamination;
+pub mod controls;
 pub mod core_metrics;
 pub mod cost;
 pub mod counting;

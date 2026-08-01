@@ -112,6 +112,18 @@ async fn purge_relational_transaction(
     }
     let storage_partition_id =
         moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id.into()).to_string();
+    sqlx::query(
+        r#"
+        SELECT
+            pg_catalog.set_config('moa.tenant_id', $1, true),
+            pg_catalog.set_config('moa.storage_partition_id', $2, true)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(&storage_partition_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("scope tenant purge transaction: {error}"))?;
     if moa_memory_vector::sync::has_active_vector_sync_claims_in_tx(
         &mut tx,
         &storage_partition_id,
@@ -543,6 +555,10 @@ async fn delete_tenant_rows(
         "DELETE FROM moa.experiment_trial WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run_artifact_revision WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run WHERE storage_partition_id = $1",
+        // Fidelity studies restrict deletion of their immutable policy revision,
+        // so evidence is removed before the certified policy registry row.
+        "DELETE FROM moa.simulator_fidelity_study WHERE storage_partition_id = $1",
+        "DELETE FROM moa.simulator_policy WHERE storage_partition_id = $1",
         "DELETE FROM analytics.score_run WHERE storage_partition_id = $1",
         // Learning-derived attribution goes before everything it references:
         // `learning_candidates`, the artifact revision/file rows, and the
@@ -558,6 +574,10 @@ async fn delete_tenant_rows(
         "DELETE FROM learning_candidate_source WHERE storage_partition_id = $1",
         "DELETE FROM moa.skill_embedding WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact_file WHERE storage_partition_id = $1",
+        // Release control owns its exact-partition erasure seam. It deletes the
+        // pointer before opening the append-only audit hatch, then removes both
+        // audit tables without granting raw DML to the application role.
+        "SELECT moa.purge_artifact_release_partition($1)",
         "UPDATE moa.artifact SET latest_revision_uid = NULL WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact_revision WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact WHERE storage_partition_id = $1",
@@ -598,6 +618,13 @@ async fn delete_tenant_rows(
         )
         .collect::<Vec<_>>();
     for step in &purge_steps {
+        let release_control = step.cleanup_sql == "SELECT moa.purge_artifact_release_partition($1)";
+        if release_control {
+            sqlx::query("SET LOCAL ROLE moa_app")
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| format!("assume application role for release purge: {error}"))?;
+        }
         let query = sqlx::query(step.cleanup_sql);
         let query = match step.binding {
             PurgeBinding::Tenant => query.bind(tenant_id),
@@ -607,6 +634,19 @@ async fn delete_tenant_rows(
             .execute(&mut **tx)
             .await
             .map_err(|error| format!("purge {}: {error}", step.table))?;
+        if release_control {
+            sqlx::query("RESET ROLE")
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| format!("restore tenant purge role: {error}"))?;
+            let role_restored: bool = sqlx::query_scalar("SELECT current_user = session_user")
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|error| format!("verify tenant purge role restoration: {error}"))?;
+            if !role_restored {
+                return Err("release purge left the transaction in the application role".into());
+            }
+        }
     }
 
     let session_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE tenant_id = $1")
@@ -672,6 +712,9 @@ fn purge_step(binding: PurgeBinding, cleanup_sql: &'static str) -> PurgeStep {
     let table = match words.first().copied() {
         Some("DELETE") => words.get(2).copied(),
         Some("UPDATE") => words.get(1).copied(),
+        Some("SELECT") if cleanup_sql == "SELECT moa.purge_artifact_release_partition($1)" => {
+            Some("moa.artifact_serving_pointer")
+        }
         _ => None,
     }
     .unwrap_or("<invalid-purge-step>");
@@ -806,6 +849,17 @@ async fn assert_catalog_coverage(
             "moa.kek",
             "moa.legal_hold",
             "moa.tenant_purge_operations",
+            // Deleted together through `moa.purge_artifact_release_partition`;
+            // the pointer table is represented by the executable purge step.
+            "moa.artifact_release_eval_overlay",
+            "moa.artifact_release_attempt",
+            "moa.artifact_release_fixture",
+            "moa.artifact_release_dispatch_outbox",
+            "moa.artifact_release_case_pack",
+            "moa.artifact_activation_audit",
+            "moa.artifact_activation_attestation",
+            "moa.artifact_release_candidate",
+            "moa.artifact_release_policy",
             "public.authz_outbox",
             "public.tenants",
             // Owned by the durable credential vault, which removes them in the
@@ -927,8 +981,14 @@ pub(super) async fn load_external_vector_uid_page(
 
 #[cfg(test)]
 mod tests {
+    use moa_artifacts::document::ArtifactDocument;
+    use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
+    use moa_artifacts::release::TenantScope;
     use moa_authz::FgaConfig;
+    use moa_core::types::action_policy::ActionRuleScope;
+    use moa_core::types::identifiers::TenantId;
     use moa_test_support::postgres::bootstrap_test_db;
+    use serde_json::json;
 
     use super::*;
 
@@ -969,6 +1029,70 @@ mod tests {
         )
         .await
         .expect("start durable tenant destruction fence");
+    }
+
+    async fn seed_activated_skill(
+        pool: &sqlx::PgPool,
+        tenant_id: Uuid,
+        label: &str,
+    ) -> (Uuid, Uuid, Uuid) {
+        let tenant_id = TenantId::from(tenant_id);
+        let scope = ActionRuleScope::Tenant { tenant_id };
+        let name = format!("purge-{label}-{}", Uuid::now_v7());
+        let document: ArtifactDocument = serde_json::from_value(json!({
+            "api_version": "moa.artifact/v1",
+            "kind": "skill",
+            "metadata": {
+                "name": name,
+                "description": "tenant purge activation fixture",
+                "tags": []
+            },
+            "definition": {
+                "type": "skill",
+                "spec": {
+                    "instructions": { "path": "SKILL.md" },
+                    "inputs": { "type": "object" },
+                    "outputs": { "type": "object" }
+                }
+            }
+        }))
+        .expect("purge activation fixture document should decode");
+        let source = document
+            .to_yaml()
+            .expect("purge activation fixture should serialize");
+        let registry = ArtifactRegistry::new(pool.clone());
+        let draft = registry
+            .create_draft(
+                &scope,
+                NewArtifactDraft {
+                    document: &document,
+                    source_format: "yaml",
+                    source_text: source.as_bytes(),
+                    files: &[NewArtifactFile::new(
+                        "SKILL.md",
+                        b"# Purge fixture\n".to_vec(),
+                    )],
+                },
+            )
+            .await
+            .expect("purge activation fixture draft should persist");
+        let activated = moa_artifacts::test_fixtures::activate_revision(
+            pool,
+            TenantScope::new(tenant_id),
+            moa_artifacts::release::ActivationTarget::SkillVisibility {
+                artifact_uid: draft.artifact_uid,
+            },
+            draft.revision_uid,
+        )
+        .await
+        .expect("purge activation fixture should activate through the real gate");
+        let serving = registry
+            .load_serving(&scope, moa_artifacts::document::ArtifactKind::Skill, &name)
+            .await
+            .expect("purge activation fixture serving lookup should succeed")
+            .expect("purge activation fixture should serve");
+        assert_eq!(serving.revision_uid, draft.revision_uid);
+        (draft.artifact_uid, draft.revision_uid, activated.audit_uid)
     }
 
     #[tokio::test]
@@ -1035,6 +1159,120 @@ mod tests {
             "operator".to_string(),
             format!("tenant:{tenant_id}"),
         )));
+    }
+
+    #[tokio::test]
+    async fn relational_purge_removes_activation_history_without_opening_neighbor_audit_db() {
+        // Pins: append-only activation evidence is deletable only by the
+        // transaction-local purge hatch for the exact tenant partition. The release
+        // rows are explicitly removed before their artifact parents, and an
+        // adjacent tenant's candidate, pointer, and audit survive unchanged.
+        let test_db = bootstrap_test_db()
+            .await
+            .expect("bootstrap activation-history purge db");
+        let pool = test_db.store().pool();
+        let purged_tenant = Uuid::new_v4();
+        let neighbor_tenant = Uuid::new_v4();
+        seed_tenant(pool, purged_tenant, Uuid::new_v4()).await;
+        seed_tenant(pool, neighbor_tenant, Uuid::new_v4()).await;
+        let (purged_artifact, purged_revision, purged_audit) =
+            seed_activated_skill(pool, purged_tenant, "target").await;
+        let (neighbor_artifact, neighbor_revision, neighbor_audit) =
+            seed_activated_skill(pool, neighbor_tenant, "neighbor").await;
+
+        let ordinary_delete =
+            sqlx::query("DELETE FROM moa.artifact_activation_audit WHERE audit_uid = $1")
+                .bind(purged_audit)
+                .execute(pool)
+                .await;
+        assert!(
+            ordinary_delete.is_err(),
+            "normal SQL must not bypass the append-only activation-audit guard"
+        );
+
+        let mut wrong_partition = pool
+            .begin()
+            .await
+            .expect("begin wrong-partition maintenance attempt");
+        sqlx::query(
+            "SELECT set_config(\
+                'moa.artifact_activation_audit_maintenance_partition', $1, true\
+            )",
+        )
+        .bind(purged_tenant.to_string())
+        .execute(&mut *wrong_partition)
+        .await
+        .expect("set exact target partition for maintenance attempt");
+        let neighbor_delete =
+            sqlx::query("DELETE FROM moa.artifact_activation_audit WHERE audit_uid = $1")
+                .bind(neighbor_audit)
+                .execute(&mut *wrong_partition)
+                .await;
+        assert!(
+            neighbor_delete.is_err(),
+            "a maintenance hatch for one partition must not authorize a neighbor delete"
+        );
+        wrong_partition
+            .rollback()
+            .await
+            .expect("rollback rejected maintenance attempt");
+
+        let operation_id = format!("tenant-purge-{purged_tenant}");
+        start_test_destruction(pool, purged_tenant, &operation_id).await;
+        assert_eq!(
+            purge_relational(pool, &offline_fga(), purged_tenant, &operation_id)
+                .await
+                .expect("purge should erase activated release state"),
+            RelationalPurgeOutcome::Committed
+        );
+
+        for (table, id_column, id) in [
+            ("moa.artifact_activation_audit", "audit_uid", purged_audit),
+            (
+                "moa.artifact_release_candidate",
+                "revision_uid",
+                purged_revision,
+            ),
+            (
+                "moa.artifact_serving_pointer",
+                "artifact_uid",
+                purged_artifact,
+            ),
+            ("moa.artifact", "artifact_uid", purged_artifact),
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT count(*) FROM {table} WHERE {id_column} = $1"
+            ))
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count purged release row");
+            assert_eq!(count, 0, "purge left a row in {table}");
+        }
+
+        for (table, id_column, id) in [
+            ("moa.artifact_activation_audit", "audit_uid", neighbor_audit),
+            (
+                "moa.artifact_release_candidate",
+                "revision_uid",
+                neighbor_revision,
+            ),
+            (
+                "moa.artifact_serving_pointer",
+                "artifact_uid",
+                neighbor_artifact,
+            ),
+            ("moa.artifact", "artifact_uid", neighbor_artifact),
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT count(*) FROM {table} WHERE {id_column} = $1"
+            ))
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count neighboring release row");
+            assert_eq!(count, 1, "purge changed neighbor state in {table}");
+        }
     }
 
     #[tokio::test]

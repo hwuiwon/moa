@@ -610,6 +610,13 @@ fn validate_catalog(catalog: &ExecutionCapabilityCatalog, report: &mut Execution
                 "capability description must not be empty",
             );
         }
+        if capability.contract_revision.trim().is_empty() {
+            report.error(
+                "empty_capability_contract_revision",
+                format!("{path}.contract_revision"),
+                "capability contract revision must not be empty",
+            );
+        }
         validate_capability_source(capability, &path, report);
         if capability.estimate.tasks != 1 {
             report.error(

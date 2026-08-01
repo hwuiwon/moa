@@ -3355,8 +3355,10 @@ dependencies = [
 name = "moa-artifacts"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "jsonschema",
+ "moa-artifacts",
  "moa-core",
  "moa-db",
  "moa-session",
@@ -3767,11 +3769,13 @@ dependencies = [
 name = "moa-experiments"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
  "chrono",
  "moa-artifacts",
  "moa-core",
  "moa-db",
+ "moa-eval-core",
  "moa-memory-pii",
  "moa-observability",
  "moa-scoring",

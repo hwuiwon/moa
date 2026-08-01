@@ -80,6 +80,8 @@ struct AgentDeployInput {
     installation_uid: Uuid,
     /// Exact published agent revision UUID to deploy.
     revision_uid: Uuid,
+    /// Single-use attestation returned by the artifact release decision.
+    attestation_uid: Uuid,
     /// Optional human-readable reason recorded on the deployment.
     reason: Option<String>,
 }
@@ -181,7 +183,7 @@ impl Server {
         .await
     }
 
-    /// Install and initially deploy an exact published configurable-agent revision.
+    /// Create a non-serving installation for a configurable-agent artifact.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -224,7 +226,7 @@ impl Server {
         .await
     }
 
-    /// Deploy an exact published revision to one configurable-agent installation.
+    /// Deploy an exact release-ready revision to one configurable-agent installation.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,

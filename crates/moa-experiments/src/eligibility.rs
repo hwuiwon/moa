@@ -9,11 +9,19 @@
 //! This is Behavior Lab scorecard eligibility. It is not an agent deployment
 //! guard, and nothing here should be treated as one until a deployment path
 //! explicitly consumes it.
+//!
+//! Per-trial correctness is not the same as a group having enough evidence to
+//! block on. [`roll_up_group`] therefore also applies the shared support floor
+//! from [`moa_eval_core::decision`]: a group carrying fewer independent cases
+//! than the platform's minimum declarable support is reported as `Incomplete`
+//! rather than `Eligible`, however clean its single trial looked.
 
 use moa_core::types::experiments::{ExperimentScorecard, ScorecardRequirement};
 pub use moa_core::types::experiments::{
-    ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup,
+    ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup, ScorecardSupportStatus,
+    ScorecardSupportSummary,
 };
+use moa_eval_core::metric::MIN_DECLARABLE_INDEPENDENT_UNITS;
 use moa_scoring::ExperimentScoreRow;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -227,12 +235,28 @@ fn row_target_fragment(row: &ExperimentScoreRow) -> String {
 
 /// Rolls per-trial assessments up into one group eligibility.
 ///
-/// A group is only as eligible as its worst trial: one incomplete or ineligible
-/// trial in a scenario means the scenario has not proven itself.
+/// Two independent conditions must hold before a group is `Eligible`:
+///
+/// 1. every trial in it is `Eligible` — a group is only as good as its worst
+///    trial, so one incomplete or ineligible trial means the scenario has not
+///    proven itself; and
+/// 2. the supplied support summary carries at least [`group_support_floor`]
+///    independent modeled cases.
+///
+/// The second condition is why a single passing trial is `Incomplete`. One trial
+/// is below the point where any interval over trials exists, so a one-trial
+/// scorecard has too little support for a blocking eligibility decision; it is
+/// reported as "not enough evidence yet" rather than as proof, and an empty group
+/// is the degenerate case of the same rule.
+///
+/// Repetitions of one case add observations, not independent support. The caller
+/// therefore supplies support computed from modeled case identity instead of
+/// letting this generic rollup mistake trial count for independent units.
 #[must_use]
 pub fn roll_up_group(
     key: impl Into<String>,
     assessments: &[ScorecardEligibility],
+    support: ScorecardSupportSummary,
 ) -> ScorecardGroupRollup {
     let eligibility = assessments
         .iter()
@@ -240,15 +264,28 @@ pub fn roll_up_group(
         .fold(ScorecardEligibility::Eligible, ScorecardEligibility::worst);
     ScorecardGroupRollup {
         key: key.into(),
-        // A group with no trials has proven nothing, which is incomplete rather
-        // than vacuously eligible.
-        eligibility: if assessments.is_empty() {
-            ScorecardEligibility::Incomplete
-        } else {
+        eligibility: if !assessments.is_empty() && support.is_sufficient() {
             eligibility
+        } else {
+            eligibility.worst(ScorecardEligibility::Incomplete)
         },
         trials: assessments.len(),
+        support,
     }
+}
+
+/// Independent modeled cases a group needs before its rollup can be blocking-eligible.
+///
+/// This is deliberately the shared [`MIN_DECLARABLE_INDEPENDENT_UNITS`] floor
+/// from the eval decision contract rather than a second Behavior Lab constant:
+/// one number, declared once, so a tenant-facing scorecard and the internal gates
+/// cannot drift into disagreeing about what "enough" means. That constant is the
+/// mathematical floor below which a resampling interval has no meaning, which is
+/// exactly the claim being made here — not a power target, which a scorecard
+/// cannot declare on a tenant's behalf.
+#[must_use]
+pub const fn group_support_floor() -> usize {
+    MIN_DECLARABLE_INDEPENDENT_UNITS
 }
 
 /// Returns the evaluator error that makes a scorecard unrunnable, if any.
@@ -256,7 +293,8 @@ pub fn roll_up_group(
 /// # Errors
 ///
 /// Returns [`EvaluatorError`] when the scorecard names an evaluator, version,
-/// effect, or configuration this build cannot run.
+/// effect, or configuration this build cannot run, or when it requires scenario
+/// evidence that the trial runtime cannot durably supply yet.
 pub fn require_runnable_scorecard(scorecard: &ExperimentScorecard) -> Result<(), EvaluatorError> {
     validate_scorecard(scorecard)
 }
@@ -269,6 +307,10 @@ mod tests {
     use serde_json::json;
 
     const EVIDENCE_HASH: [u8; 32] = [7; 32];
+
+    fn support(independent_units: usize) -> ScorecardSupportSummary {
+        ScorecardSupportSummary::from_counts(independent_units, group_support_floor())
+    }
 
     fn scorecard() -> ExperimentScorecard {
         ExperimentScorecard::new(vec![
@@ -472,11 +514,59 @@ mod tests {
     }
 
     #[test]
+    fn scenario_scorecard_is_not_runnable_without_a_durable_evidence_producer_offline() {
+        // Pins: direct runs and plan-backed runs share this admission check.
+        // Neither may execute a scenario evaluator before trials persist the
+        // objective evidence it would consume.
+        let scorecard = ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "scenario_outcome".to_string(),
+            evaluator_version: "v1".to_string(),
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("structurally valid");
+
+        assert_eq!(
+            require_runnable_scorecard(&scorecard)
+                .expect_err("scenario scorecard must fail before execution"),
+            EvaluatorError::ScenarioEvaluationUnavailable
+        );
+    }
+
+    #[test]
+    fn a_single_trial_group_is_never_blocking_eligible_offline() {
+        // Pins: the support floor, not just per-trial correctness. One flawless
+        // trial is not enough evidence for blocking eligibility, and the floor
+        // comes from the shared decision contract rather than a Behavior Lab constant.
+        assert_eq!(group_support_floor(), MIN_DECLARABLE_INDEPENDENT_UNITS);
+        assert!(group_support_floor() > 1);
+
+        let single = roll_up_group("scenario-a", &[ScorecardEligibility::Eligible], support(1));
+        assert_eq!(single.eligibility, ScorecardEligibility::Incomplete);
+        assert_eq!(single.trials, 1);
+
+        let at_floor = roll_up_group(
+            "scenario-a",
+            &vec![ScorecardEligibility::Eligible; group_support_floor()],
+            support(group_support_floor()),
+        );
+        assert_eq!(at_floor.eligibility, ScorecardEligibility::Eligible);
+
+        // The floor never softens a worse verdict: an underpowered group whose
+        // rows are structurally invalid stays Invalid rather than becoming a
+        // reassuring "still waiting".
+        assert_eq!(
+            roll_up_group("scenario-a", &[ScorecardEligibility::Invalid], support(1),).eligibility,
+            ScorecardEligibility::Invalid
+        );
+    }
+
+    #[test]
     fn group_rollup_takes_the_worst_trial_and_refuses_to_be_vacuously_eligible_offline() {
         // Pins: a scenario is only as good as its worst trial, and a scenario with
         // no trials has proven nothing.
         assert_eq!(
-            roll_up_group("scenario-a", &[]).eligibility,
+            roll_up_group("scenario-a", &[], support(group_support_floor())).eligibility,
             ScorecardEligibility::Incomplete
         );
         assert_eq!(
@@ -485,7 +575,8 @@ mod tests {
                 &[
                     ScorecardEligibility::Eligible,
                     ScorecardEligibility::Eligible
-                ]
+                ],
+                support(group_support_floor()),
             )
             .eligibility,
             ScorecardEligibility::Eligible
@@ -497,7 +588,8 @@ mod tests {
                     ScorecardEligibility::Eligible,
                     ScorecardEligibility::Ineligible,
                     ScorecardEligibility::Incomplete,
-                ]
+                ],
+                support(group_support_floor()),
             )
             .eligibility,
             ScorecardEligibility::Incomplete
@@ -508,7 +600,8 @@ mod tests {
                 &[
                     ScorecardEligibility::Incomplete,
                     ScorecardEligibility::Invalid,
-                ]
+                ],
+                support(group_support_floor()),
             )
             .eligibility,
             ScorecardEligibility::Invalid

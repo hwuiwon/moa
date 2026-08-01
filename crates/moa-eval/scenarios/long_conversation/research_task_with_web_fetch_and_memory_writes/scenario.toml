@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "research_task_with_web_fetch_and_memory_writes"
 description = "Recorded research task with web-fetch-like evidence gathering, memory notes, cross-turn recall, and cited final answer."
 default_timeout_seconds = 60

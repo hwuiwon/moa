@@ -1,8 +1,9 @@
 //! Post-promotion skill-regression detection and rollback-proposal filing.
 //!
-//! Promotion is all-or-nothing and irreversible today: a skill that regresses
-//! after it is published only shows up as a slowly declining resolution rate.
-//! This module closes that loop deterministically and model-free. The pure
+//! Promotion is atomic, and reversal is an explicit reviewed transition: an
+//! accepted rollback archives the regressed revision and tombstones its serving
+//! pointer without restoring a predecessor. This module detects the need for
+//! that transition deterministically and model-free. The pure
 //! passes below compare a promoted skill's post-promotion resolution rate against
 //! a baseline — the same skill's pre-promotion rate for an improved skill, or an
 //! absolute floor for a newly created one — and, on regression, construct a
@@ -122,12 +123,11 @@ pub fn evaluate_regression(
 
 /// Files a rollback proposal per regression, bumping an existing open proposal.
 ///
-/// Exactly one open proposal is kept per `(tenant, skill)`: a regression whose
-/// skill already has an open (`Proposed` or `Evaluating`) proposal yields a
-/// [`RollbackFiling::Bump`] refreshing its evidence, and the bump is conditional
-/// on `Proposed`, so a proposal a reviewer already claimed (`Evaluating`) is left
-/// untouched and never duplicated. A skill with no open proposal yields a fresh
-/// [`RollbackFiling::New`] with a deterministic id.
+/// Exactly one open proposal is kept per serving generation. Re-observing that
+/// generation yields a [`RollbackFiling::Bump`], while a later reactivation of
+/// the same revision gets a fresh proposal and cannot inherit stale evidence.
+/// Bumps are conditional on `Proposed`, so an already claimed (`Evaluating`)
+/// proposal is left untouched.
 #[must_use]
 pub fn file_rollback_candidates(
     decisions: &[RollbackDecision],
@@ -136,31 +136,35 @@ pub fn file_rollback_candidates(
 ) -> Vec<RollbackFiling> {
     decisions
         .iter()
-        .map(|decision| {
-            match open_rollback_for_skill(open_candidates, &decision.promotion.skill_name) {
+        .map(
+            |decision| match open_rollback_for_promotion(open_candidates, &decision.promotion) {
                 Some(existing) => RollbackFiling::Bump(bump_update(existing, decision, now)),
                 None => RollbackFiling::New(Box::new(rollback_candidate(decision, now))),
-            }
-        })
+            },
+        )
         .collect()
 }
 
 /// Returns the deterministic candidate id for one skill's rollback proposal.
 ///
-/// A pure function of tenant, skill, and the promoted revision, so re-observing
-/// the same regression resolves to one candidate id across monitor runs.
+/// A pure function of tenant, skill, revision, and serving epoch, so re-observing
+/// one activation resolves to one id while a later reactivation cannot alias it.
 #[must_use]
 pub fn rollback_candidate_id(
     tenant_id: TenantId,
     skill_name: &str,
     promoted_revision_uid: Uuid,
+    activation_audit_uid: Uuid,
+    activated_pointer_version: i64,
 ) -> Uuid {
     let mut hasher = Sha256::new();
     for part in [
-        "moa.skill.rollback_proposal.v1",
+        "moa.skill.rollback_proposal.v2",
         &tenant_id.to_string(),
         skill_name,
         &promoted_revision_uid.to_string(),
+        &activation_audit_uid.to_string(),
+        &activated_pointer_version.to_string(),
     ] {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part.as_bytes());
@@ -173,9 +177,9 @@ pub fn rollback_candidate_id(
     Uuid::from_bytes(bytes)
 }
 
-fn open_rollback_for_skill<'a>(
+fn open_rollback_for_promotion<'a>(
     open_candidates: &'a [LearningCandidate],
-    skill_name: &str,
+    promotion: &RecentSkillPromotion,
 ) -> Option<&'a LearningCandidate> {
     open_candidates.iter().find(|candidate| {
         matches!(
@@ -186,7 +190,11 @@ fn open_rollback_for_skill<'a>(
                 .payload
                 .get("rollback_key")
                 .and_then(Value::as_str)
-                == Some(skill_name)
+                == Some(promotion.skill_name.as_str())
+            && candidate.payload.get("expected_transition_audit_uid")
+                == Some(&json!(promotion.activation_audit_uid))
+            && candidate.payload.get("expected_pointer_version")
+                == Some(&json!(promotion.activated_pointer_version))
     })
 }
 
@@ -201,6 +209,8 @@ fn evidence_payload(decision: &RollbackDecision) -> Value {
         "promoted_revision_uid": decision.promotion.promoted_revision_uid,
         "previous_revision_uid": decision.promotion.previous_revision_uid,
         "promotion_candidate_id": decision.promotion.promotion_candidate_id,
+        "expected_transition_audit_uid": decision.promotion.activation_audit_uid,
+        "expected_pointer_version": decision.promotion.activated_pointer_version,
         "regressed_operation": decision.promotion.operation,
         "post_resolution_rate": decision.post.rate,
         "post_samples": decision.post.samples,
@@ -234,6 +244,8 @@ fn rollback_candidate(decision: &RollbackDecision, now: DateTime<Utc>) -> Learni
             decision.promotion.tenant_id,
             &decision.promotion.skill_name,
             decision.promotion.promoted_revision_uid,
+            decision.promotion.activation_audit_uid,
+            decision.promotion.activated_pointer_version,
         ),
         tenant_id: decision.promotion.tenant_id,
         user_id: None,
@@ -437,6 +449,8 @@ mod tests {
             promoted_revision_uid: Uuid::from_u128(0xB2),
             previous_revision_uid: Some(Uuid::from_u128(0xC3)),
             promotion_candidate_id: Uuid::from_u128(0xD4),
+            activation_audit_uid: Uuid::from_u128(0xE5),
+            activated_pointer_version: 7,
             promoted_at: Utc::now(),
         }
     }
@@ -517,20 +531,29 @@ mod tests {
     }
 
     #[test]
-    fn rollback_candidate_id_is_stable_per_skill_and_revision() {
-        // Pins: the candidate id is a pure function of tenant, skill, and promoted
-        // revision, so the same regression resolves to one id across runs.
-        let first = rollback_candidate_id(tenant(), "deploy-runbook", Uuid::from_u128(0xB2));
-        let second = rollback_candidate_id(tenant(), "deploy-runbook", Uuid::from_u128(0xB2));
-        let other = rollback_candidate_id(tenant(), "deploy-runbook", Uuid::from_u128(0xB3));
+    fn rollback_candidate_id_is_stable_per_serving_generation() {
+        // Pins: retries for one activation resolve to one id, while a later
+        // activation of the same revision has a distinct rollback proposal.
+        let audit = Uuid::from_u128(0xE5);
+        let first =
+            rollback_candidate_id(tenant(), "deploy-runbook", Uuid::from_u128(0xB2), audit, 7);
+        let second =
+            rollback_candidate_id(tenant(), "deploy-runbook", Uuid::from_u128(0xB2), audit, 7);
+        let other = rollback_candidate_id(
+            tenant(),
+            "deploy-runbook",
+            Uuid::from_u128(0xB2),
+            Uuid::from_u128(0xE6),
+            8,
+        );
         assert_eq!(first, second);
-        assert_ne!(first, other, "a different revision yields a different id");
+        assert_ne!(first, other, "a later activation yields a different id");
     }
 
     #[test]
     fn new_regression_files_a_proposed_candidate_with_full_evidence() {
         // Pins: a first regression files a Proposed skill candidate carrying the
-        // revisions to archive and restore plus the observed rates.
+        // revision to archive, predecessor provenance, and the observed rates.
         let decision = evaluate_regression(
             &promotion(OPERATION_SKILL_IMPROVED),
             sample(0.5, 9),
@@ -572,6 +595,11 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(9)
         );
+        assert_eq!(
+            candidate.payload["expected_transition_audit_uid"],
+            json!(Uuid::from_u128(0xE5))
+        );
+        assert_eq!(candidate.payload["expected_pointer_version"], json!(7));
     }
 
     #[test]
@@ -599,6 +627,34 @@ mod tests {
         };
         assert_eq!(update.candidate_id, existing.id);
         assert_eq!(update.status, LearningCandidateStatus::Proposed);
+    }
+
+    #[test]
+    fn reactivated_revision_does_not_reuse_stale_rollback_proposal() {
+        // Pins: rollback proposals are scoped to a serving epoch, not only a
+        // revision id, so an ABA reactivation cannot inherit stale evidence.
+        let first = evaluate_regression(
+            &promotion(OPERATION_SKILL_CREATED),
+            sample(0.1, 8),
+            None,
+            &thresholds(),
+        )
+        .expect("first regression detected");
+        let existing =
+            match &file_rollback_candidates(std::slice::from_ref(&first), &[], Utc::now())[0] {
+                RollbackFiling::New(candidate) => (**candidate).clone(),
+                RollbackFiling::Bump(_) => panic!("first filing must be new"),
+            };
+        let mut reactivated = promotion(OPERATION_SKILL_CREATED);
+        reactivated.activation_audit_uid = Uuid::from_u128(0xE6);
+        reactivated.activated_pointer_version += 2;
+        let second = evaluate_regression(&reactivated, sample(0.1, 8), None, &thresholds())
+            .expect("reactivated revision regression detected");
+
+        assert!(matches!(
+            file_rollback_candidates(&[second], &[existing], Utc::now()).as_slice(),
+            [RollbackFiling::New(_)]
+        ));
     }
 
     #[test]

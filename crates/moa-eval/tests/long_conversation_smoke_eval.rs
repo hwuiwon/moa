@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_artifacts::document::ArtifactStatus;
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
@@ -30,8 +32,8 @@ use moa_eval_core::{
     TestCaseKind, TestSuite, load_suite,
 };
 use moa_security::parse_and_match_command;
+use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::SkillPackage;
-use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -944,19 +946,40 @@ async fn insert_eval_skill<T: AsRef<str>>(
         .map(|tag| tag.as_ref().to_string())
         .collect::<Vec<_>>();
     let skill_md = format!(
-        "---\nname: {name}\ndescription: >-\n  {}\nallowed-tools: file_write\nmetadata:\n  moa-tags: \"{}\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
+        "---\nname: {name}\ndescription: >-\n  {}\nmetadata:\n  moa-tags: \"{}\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
         indent_frontmatter_block(description),
         tag_values.join(", ")
     );
-    let registry = SkillRegistry::new(pool.clone());
-    registry
-        .upsert_by_name(NewSkill::from_package(
-            ActionRuleScope::Tenant {
-                tenant_id: tenant_id_from_storage_partition(storage_partition_id),
+    // The context pipeline resolves only serving skills, so the explicit test
+    // draft must be activated or the scenario stops measuring selection.
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id),
+    };
+    let package = SkillPackage::from_skill_markdown(skill_md).validate()?;
+    let document = skill_artifact_document_from_package(&package, ArtifactStatus::Draft)?;
+    let source_text = document.to_yaml()?;
+    let files = package
+        .files
+        .iter()
+        .map(|file| NewArtifactFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+            content_type: file.content_type.clone(),
+            executable: file.executable,
+        })
+        .collect::<Vec<_>>();
+    let draft = ArtifactRegistry::new(pool.clone())
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source_text.as_bytes(),
+                files: &files,
             },
-            SkillPackage::from_skill_markdown(skill_md),
-        ))
+        )
         .await?;
+    serve_seeded_skill(pool, scope, draft.artifact_uid, draft.revision_uid).await?;
     Ok(())
 }
 
@@ -1403,4 +1426,24 @@ fn is_compaction_request(request: &CompletionRequest) -> bool {
                 .content
                 .contains("New events to fold into the checkpoint")
         })
+}
+
+/// Activates a seeded skill revision so the context pipeline can resolve it.
+///
+/// Only a serving pointer makes the newly created fixture draft selectable.
+async fn serve_seeded_skill(
+    pool: &sqlx::PgPool,
+    scope: ActionRuleScope,
+    artifact_uid: uuid::Uuid,
+    revision_uid: uuid::Uuid,
+) -> TestResult {
+    let release_scope = moa_artifacts::release::TenantScope::from_action_rule_scope(&scope)?;
+    moa_artifacts::test_fixtures::activate_revision(
+        pool,
+        release_scope,
+        moa_artifacts::release::ActivationTarget::SkillVisibility { artifact_uid },
+        revision_uid,
+    )
+    .await?;
+    Ok(())
 }

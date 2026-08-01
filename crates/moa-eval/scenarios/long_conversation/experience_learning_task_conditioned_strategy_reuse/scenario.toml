@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "experience_learning_task_conditioned_strategy_reuse"
 description = "Phase one materializes experience learning; phase two reuses task-conditioned strategy evidence under a tight skill budget."
 default_timeout_seconds = 90

@@ -24,6 +24,7 @@ use moa_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -31,6 +32,7 @@ use crate::evaluator::validate_scorecard;
 use crate::model::{
     ExperimentSimulatorConfig, ExperimentTarget, ExperimentVariant, NewExperimentTrial,
 };
+use crate::simulator_policy::registry::ResolvedSimulatorPolicy;
 
 pub mod admission;
 
@@ -112,9 +114,6 @@ pub enum PlanExpansionError {
     /// Agent-loop variants require a target model.
     #[error("agent-loop experiment plans require target_model")]
     MissingTargetModel,
-    /// A simulator temperature value cannot be represented safely.
-    #[error("simulator_temperature must be a finite f32-compatible number")]
-    InvalidSimulatorTemperature,
     /// Execution-template variants require an exact pinned template.
     #[error("execution-template target variants require template")]
     MissingExecutionTemplate,
@@ -146,6 +145,12 @@ pub enum PlanExpansionError {
         field: &'static str,
         /// Missing ID.
         id: String,
+    },
+    /// An internal release case selection is empty, duplicated, or out of range.
+    #[error("artifact release case selection is invalid: {message}")]
+    InvalidReleaseCaseSelection {
+        /// Exact reason the sparse selection cannot be expanded.
+        message: String,
     },
 }
 
@@ -270,6 +275,19 @@ pub struct PlanMatrixShape {
     /// its own, evidence of what a run actually spent; a runtime cost ledger
     /// reconciles actual spend against it.
     pub declared_total_cost_cents: u32,
+}
+
+/// One sparse scenario/persona/profile tuple selected by an artifact release pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCaseSelection {
+    /// Scenario ID in the pinned plan.
+    pub scenario_id: String,
+    /// Persona ID in the pinned plan.
+    pub persona_id: String,
+    /// Profile ID in the pinned plan.
+    pub profile_id: String,
+    /// Paired repetitions emitted for every target variant.
+    pub repetitions: u32,
 }
 
 /// Trials one [`PlanTrialPager`] page may contain.
@@ -406,9 +424,10 @@ pub struct PlanTrialPager<'a> {
     definition: &'a ExperimentPlanDefinition,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
+    simulator_policy: &'a ResolvedSimulatorPolicy,
     shape: PlanMatrixShape,
     variants: Vec<PreparedVariant>,
-    scenario_data_bundle_ids: Vec<Vec<String>>,
+    cases: Vec<PreparedCase<'a>>,
     cursor: MatrixCursor,
     emitted: u32,
 }
@@ -417,16 +436,25 @@ pub struct PlanTrialPager<'a> {
 struct PreparedVariant {
     key: String,
     kind: ExperimentTargetKind,
-    temperature: Option<f32>,
     target: ExperimentTarget,
     payload: ExperimentVariant,
 }
 
+/// One validated case tuple resolved to its immutable plan blocks.
+struct PreparedCase<'a> {
+    scenario_index: usize,
+    persona_index: usize,
+    profile_index: usize,
+    scenario: &'a SimulationScenarioDefinition,
+    persona: &'a SimulationPersonaDefinition,
+    profile: &'a SimulationProfileDefinition,
+    repetitions: u32,
+    data_bundle_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct MatrixCursor {
-    scenario: usize,
-    persona: usize,
-    profile: usize,
+    case: usize,
     variant: usize,
     trial: u32,
 }
@@ -443,8 +471,62 @@ impl<'a> PlanTrialPager<'a> {
         run_uid: Uuid,
         plan_revision_uid: Uuid,
         definition: &'a ExperimentPlanDefinition,
+        simulator_policy: &'a ResolvedSimulatorPolicy,
     ) -> Result<Self, PlanExpansionError> {
         let shape = plan_matrix_shape(definition)?;
+        let cases = prepare_matrix_cases(definition);
+        Self::from_prepared(
+            run_uid,
+            plan_revision_uid,
+            definition,
+            simulator_policy,
+            shape,
+            cases,
+        )
+    }
+
+    /// Builds a pager for the sparse case tuples selected by a release pack.
+    ///
+    /// Normal Behavior Lab runs expand the plan's Cartesian product. Release
+    /// evaluation instead executes only the approved tuples, preserving each
+    /// case's own repetition count and pairing every target variant on the same
+    /// tuple and repetition index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is unrunnable, a selected block ID is not
+    /// present in the pinned plan, a tuple is duplicated, or the selected trial
+    /// count exceeds the normal plan limits.
+    pub fn new_selected(
+        run_uid: Uuid,
+        plan_revision_uid: Uuid,
+        definition: &'a ExperimentPlanDefinition,
+        simulator_policy: &'a ResolvedSimulatorPolicy,
+        selections: &[PlanCaseSelection],
+    ) -> Result<Self, PlanExpansionError> {
+        let (shape, cases) = prepare_selected_cases(definition, selections)?;
+        Self::from_prepared(
+            run_uid,
+            plan_revision_uid,
+            definition,
+            simulator_policy,
+            shape,
+            cases,
+        )
+    }
+
+    fn from_prepared(
+        run_uid: Uuid,
+        plan_revision_uid: Uuid,
+        definition: &'a ExperimentPlanDefinition,
+        simulator_policy: &'a ResolvedSimulatorPolicy,
+        shape: PlanMatrixShape,
+        cases: Vec<PreparedCase<'a>>,
+    ) -> Result<Self, PlanExpansionError> {
+        // Expansion is independently fail-closed. The run-admission path also
+        // projects this scorecard, but internal callers must not be able to mint
+        // trials for a plan the finalizer cannot evaluate.
+        let _ = plan_scorecard(definition)?;
         let variants = definition
             .target_variants
             .iter()
@@ -452,7 +534,6 @@ impl<'a> PlanTrialPager<'a> {
                 Ok(PreparedVariant {
                     key: variant.key.clone(),
                     kind: variant.kind,
-                    temperature: simulator_temperature(variant)?,
                     target: target_for_plan_variant(definition, variant)?,
                     payload: variant_payload_for_plan(
                         plan_revision_uid,
@@ -468,19 +549,14 @@ impl<'a> PlanTrialPager<'a> {
                 })
             })
             .collect::<Result<Vec<_>, PlanExpansionError>>()?;
-        let scenario_data_bundle_ids = definition
-            .simulation
-            .scenarios
-            .iter()
-            .map(|scenario| data_bundle_ids_for_scenario(definition, scenario))
-            .collect();
         Ok(Self {
             definition,
             run_uid,
             plan_revision_uid,
+            simulator_policy,
             shape,
             variants,
-            scenario_data_bundle_ids,
+            cases,
             cursor: MatrixCursor::default(),
             emitted: 0,
         })
@@ -508,7 +584,11 @@ impl<'a> PlanTrialPager<'a> {
 
     fn advance(&mut self) {
         self.cursor.trial += 1;
-        if self.cursor.trial < self.shape.trials_per_combination {
+        if self
+            .cases
+            .get(self.cursor.case)
+            .is_some_and(|case| self.cursor.trial < case.repetitions)
+        {
             return;
         }
         self.cursor.trial = 0;
@@ -517,17 +597,7 @@ impl<'a> PlanTrialPager<'a> {
             return;
         }
         self.cursor.variant = 0;
-        self.cursor.profile += 1;
-        if self.cursor.profile < self.definition.simulation.profiles.len() {
-            return;
-        }
-        self.cursor.profile = 0;
-        self.cursor.persona += 1;
-        if self.cursor.persona < self.definition.simulation.personas.len() {
-            return;
-        }
-        self.cursor.persona = 0;
-        self.cursor.scenario += 1;
+        self.cursor.case += 1;
     }
 }
 
@@ -539,18 +609,26 @@ impl Iterator for PlanTrialPager<'_> {
             return None;
         }
         let cursor = self.cursor;
-        let scenario = self.definition.simulation.scenarios.get(cursor.scenario)?;
-        let persona = self.definition.simulation.personas.get(cursor.persona)?;
-        let profile = self.definition.simulation.profiles.get(cursor.profile)?;
+        let case = self.cases.get(cursor.case)?;
+        let scenario = case.scenario;
+        let persona = case.persona;
+        let profile = case.profile;
         let variant = self.variants.get(cursor.variant)?;
         let trial_key = stable_trial_key(
-            (cursor.scenario, &scenario.id),
-            (cursor.persona, &persona.id),
-            (cursor.profile, &profile.id),
+            (case.scenario_index, &scenario.id),
+            (case.persona_index, &persona.id),
+            (case.profile_index, &profile.id),
             &variant.key,
             cursor.trial,
         );
         let plan_revision_uid = self.plan_revision_uid;
+        let paired_seed = stable_paired_seed(
+            (case.scenario_index, &scenario.id),
+            (case.persona_index, &persona.id),
+            (case.profile_index, &profile.id),
+            cursor.trial,
+            plan_revision_uid,
+        );
         let expanded = ExpandedPlanTrial {
             trial: NewExperimentTrial {
                 run_uid: self.run_uid,
@@ -561,21 +639,20 @@ impl Iterator for PlanTrialPager<'_> {
                 scenario_id: Some(scenario.id.clone()),
                 persona_id: Some(persona.id.clone()),
                 profile_id: Some(profile.id.clone()),
-                data_bundle_ids: self
-                    .scenario_data_bundle_ids
-                    .get(cursor.scenario)
-                    .cloned()
-                    .unwrap_or_default(),
+                data_bundle_ids: case.data_bundle_ids.clone(),
                 artifact_revision_uids: Vec::new(),
                 simulator: ExperimentSimulatorConfig {
-                    model: ModelId::new(self.definition.simulator_model.clone()),
-                    temperature: variant.temperature,
+                    policy: self.simulator_policy.clone(),
                     max_turns: DEFAULT_PLAN_TRIAL_MAX_TURNS,
                     token_budget: self.definition.budget.max_trial_tokens,
-                    metadata: json!({}),
                 },
                 target_model: self.definition.target_model.as_ref().map(ModelId::new),
-                seed: Some(format!("{trial_key}:{plan_revision_uid}")),
+                seed: self
+                    .simulator_policy
+                    .components
+                    .decoding
+                    .seeded
+                    .then_some(paired_seed),
                 score_run_id: deterministic_score_run_id(self.run_uid, &trial_key),
             },
             target: variant.target.clone(),
@@ -592,6 +669,142 @@ impl Iterator for PlanTrialPager<'_> {
     }
 }
 
+fn prepare_matrix_cases(definition: &ExperimentPlanDefinition) -> Vec<PreparedCase<'_>> {
+    let mut cases = Vec::new();
+    for (scenario_index, scenario) in definition.simulation.scenarios.iter().enumerate() {
+        let data_bundle_ids = data_bundle_ids_for_scenario(definition, scenario);
+        for (persona_index, persona) in definition.simulation.personas.iter().enumerate() {
+            for (profile_index, profile) in definition.simulation.profiles.iter().enumerate() {
+                cases.push(PreparedCase {
+                    scenario_index,
+                    persona_index,
+                    profile_index,
+                    scenario,
+                    persona,
+                    profile,
+                    repetitions: definition.trials_per_combination,
+                    data_bundle_ids: data_bundle_ids.clone(),
+                });
+            }
+        }
+    }
+    cases
+}
+
+fn prepare_selected_cases<'a>(
+    definition: &'a ExperimentPlanDefinition,
+    selections: &[PlanCaseSelection],
+) -> Result<(PlanMatrixShape, Vec<PreparedCase<'a>>), PlanExpansionError> {
+    let base = plan_matrix_shape(definition)?;
+    if selections.is_empty() {
+        return Err(PlanExpansionError::InvalidReleaseCaseSelection {
+            message: "at least one approved case is required".to_string(),
+        });
+    }
+
+    let mut tuples = BTreeSet::new();
+    let mut scenario_indexes = BTreeSet::new();
+    let mut persona_indexes = BTreeSet::new();
+    let mut profile_indexes = BTreeSet::new();
+    let mut cases = Vec::with_capacity(selections.len());
+    let mut repetitions = 0_u64;
+    let mut max_repetitions = 0_u32;
+    for selection in selections {
+        if !(1..=MAX_PLAN_TRIALS_PER_COMBINATION).contains(&selection.repetitions) {
+            return Err(PlanExpansionError::InvalidReleaseCaseSelection {
+                message: format!(
+                    "case `{}` repetitions must be between 1 and {MAX_PLAN_TRIALS_PER_COMBINATION}",
+                    selection.scenario_id
+                ),
+            });
+        }
+        let scenario_index = definition
+            .simulation
+            .scenarios
+            .iter()
+            .position(|value| value.id == selection.scenario_id)
+            .ok_or_else(|| unknown_id("scenario", &selection.scenario_id))?;
+        let persona_index = definition
+            .simulation
+            .personas
+            .iter()
+            .position(|value| value.id == selection.persona_id)
+            .ok_or_else(|| unknown_id("persona", &selection.persona_id))?;
+        let profile_index = definition
+            .simulation
+            .profiles
+            .iter()
+            .position(|value| value.id == selection.profile_id)
+            .ok_or_else(|| unknown_id("profile", &selection.profile_id))?;
+        if !tuples.insert((scenario_index, persona_index, profile_index)) {
+            return Err(PlanExpansionError::InvalidReleaseCaseSelection {
+                message: format!(
+                    "duplicate tuple `{}/{}/{}`",
+                    selection.scenario_id, selection.persona_id, selection.profile_id
+                ),
+            });
+        }
+        scenario_indexes.insert(scenario_index);
+        persona_indexes.insert(persona_index);
+        profile_indexes.insert(profile_index);
+        repetitions = repetitions
+            .checked_add(u64::from(selection.repetitions))
+            .ok_or(PlanExpansionError::TrialMatrixOverflow)?;
+        max_repetitions = max_repetitions.max(selection.repetitions);
+        let scenario = &definition.simulation.scenarios[scenario_index];
+        cases.push(PreparedCase {
+            scenario_index,
+            persona_index,
+            profile_index,
+            scenario,
+            persona: &definition.simulation.personas[persona_index],
+            profile: &definition.simulation.profiles[profile_index],
+            repetitions: selection.repetitions,
+            data_bundle_ids: data_bundle_ids_for_scenario(definition, scenario),
+        });
+    }
+    let total_trials = repetitions
+        .checked_mul(u64::from(base.target_variants))
+        .ok_or(PlanExpansionError::TrialMatrixOverflow)?;
+    if total_trials > u64::from(MAX_PLAN_TOTAL_TRIALS) {
+        return Err(PlanExpansionError::TrialMatrixTooLarge {
+            actual: total_trials,
+            limit: u64::from(MAX_PLAN_TOTAL_TRIALS),
+        });
+    }
+    let total_trials =
+        u32::try_from(total_trials).map_err(|_| PlanExpansionError::TrialMatrixOverflow)?;
+    Ok((
+        PlanMatrixShape {
+            scenarios: u32::try_from(scenario_indexes.len())
+                .map_err(|_| PlanExpansionError::TrialMatrixOverflow)?,
+            personas: u32::try_from(persona_indexes.len())
+                .map_err(|_| PlanExpansionError::TrialMatrixOverflow)?,
+            profiles: u32::try_from(profile_indexes.len())
+                .map_err(|_| PlanExpansionError::TrialMatrixOverflow)?,
+            target_variants: base.target_variants,
+            trials_per_combination: max_repetitions,
+            total_trials,
+            parallel_trials: definition.parallelism.min(total_trials),
+            provider_call_qps: base.provider_call_qps,
+            declared_total_cost_cents: base.declared_total_cost_cents,
+        },
+        cases,
+    ))
+}
+
+/// Resolves the bounded shape of an approved sparse release-case selection.
+///
+/// # Errors
+///
+/// Returns the same validation errors as [`PlanTrialPager::new_selected`].
+pub fn selected_plan_matrix_shape(
+    definition: &ExperimentPlanDefinition,
+    selections: &[PlanCaseSelection],
+) -> Result<PlanMatrixShape, PlanExpansionError> {
+    prepare_selected_cases(definition, selections).map(|(shape, _)| shape)
+}
+
 /// Expands a plan into every deterministic trial row it declares.
 ///
 /// Collects [`PlanTrialPager`] pages, so the returned vector is bounded by
@@ -605,8 +818,9 @@ pub fn expand_plan_trials(
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     definition: &ExperimentPlanDefinition,
+    simulator_policy: &ResolvedSimulatorPolicy,
 ) -> Result<Vec<ExpandedPlanTrial>, PlanExpansionError> {
-    let mut pager = PlanTrialPager::new(run_uid, plan_revision_uid, definition)?;
+    let mut pager = PlanTrialPager::new(run_uid, plan_revision_uid, definition, simulator_policy)?;
     let mut trials = Vec::with_capacity(pager.remaining() as usize);
     loop {
         let page = pager.next_page();
@@ -787,22 +1001,6 @@ fn require_range(
         });
     }
     Ok(())
-}
-
-fn simulator_temperature(
-    variant: &ExperimentTargetVariant,
-) -> Result<Option<f32>, PlanExpansionError> {
-    let Some(value) = variant.config.get("simulator_temperature") else {
-        return Ok(None);
-    };
-    let Some(value) = value.as_f64() else {
-        return Ok(None);
-    };
-    if value.is_finite() && value <= f64::from(f32::MAX) && value >= f64::from(f32::MIN) {
-        Ok(Some(value as f32))
-    } else {
-        Err(PlanExpansionError::InvalidSimulatorTemperature)
-    }
 }
 
 fn deterministic_score_run_id(run_uid: Uuid, trial_key: &str) -> Uuid {
@@ -1043,6 +1241,25 @@ fn stable_trial_key(
     )
 }
 
+fn stable_paired_seed(
+    scenario: (usize, &str),
+    persona: (usize, &str),
+    profile: (usize, &str),
+    trial_index: u32,
+    plan_revision_uid: Uuid,
+) -> String {
+    format!(
+        "s{:02}-{}/p{:02}-{}/u{:02}-{}/t{:03}:{plan_revision_uid}",
+        scenario.0 + 1,
+        key_part(scenario.1),
+        persona.0 + 1,
+        key_part(persona.1),
+        profile.0 + 1,
+        key_part(profile.1),
+        trial_index + 1,
+    )
+}
+
 fn key_part(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -1090,6 +1307,10 @@ mod tests {
     };
     use moa_core::types::experiments::{ScorecardEffect, ScorecardRequirement};
 
+    fn fixture_policy() -> ResolvedSimulatorPolicy {
+        crate::simulator_policy::test_support::resolved_policy()
+    }
+
     #[test]
     fn plan_expansion_refuses_a_plan_that_declares_no_scorecard_offline() {
         // Pins the second half of the `Option<ExperimentScorecard>` closure.
@@ -1135,12 +1356,53 @@ mod tests {
     }
 
     #[test]
+    fn plan_admission_refuses_scenario_gates_until_exact_evidence_is_durable_offline() {
+        // Pins: plan-backed run admission and trial expansion both stop before
+        // minting work when the scorecard asks for objective scenario evidence
+        // that the runtime cannot persist yet. Runtime completion must never be
+        // substituted for that missing evidence.
+        let definition = scenario_gated_plan();
+
+        let projection = project_plan_run(&definition, fixture_uuid(1), "plan", "run")
+            .expect_err("run admission must reject an unsupported scenario gate");
+        assert!(
+            matches!(
+                &projection,
+                PlanExpansionError::UnrunnableScorecard { message }
+                    if message.contains("trials do not persist objective scenario evidence")
+            ),
+            "unexpected admission error: {projection:?}"
+        );
+
+        let expansion = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect_err("trial expansion must independently reject the gate");
+        assert!(
+            matches!(
+                &expansion,
+                PlanExpansionError::UnrunnableScorecard { message }
+                    if message.contains("trials do not persist objective scenario evidence")
+            ),
+            "unexpected expansion error: {expansion:?}"
+        );
+    }
+
+    #[test]
     fn expand_plan_trials_uses_ids_without_copying_simulation_blocks_offline() {
         // Pins: plan fanout stores plan-local IDs and leaves simulator metadata semantic-free.
         let plan_revision_uid = fixture_uuid(1);
         let definition = fixture_plan();
-        let trials = expand_plan_trials(fixture_uuid(2), plan_revision_uid, &definition)
-            .expect("valid plan matrix expands");
+        let trials = expand_plan_trials(
+            fixture_uuid(2),
+            plan_revision_uid,
+            &definition,
+            &fixture_policy(),
+        )
+        .expect("valid plan matrix expands");
 
         let keys = trials
             .iter()
@@ -1163,7 +1425,7 @@ mod tests {
         assert!(trials.iter().all(|trial| {
             trial.trial.plan_revision_uid == plan_revision_uid
                 && trial.trial.artifact_revision_uids.is_empty()
-                && trial.trial.simulator.metadata == json!({})
+                && trial.trial.simulator.policy == fixture_policy()
                 && trial.trial.simulator.token_budget == Some(1_000)
         }));
         assert_eq!(trials[0].trial.scenario_id.as_deref(), Some("damaged-food"));
@@ -1177,9 +1439,9 @@ mod tests {
         let run_uid = fixture_uuid(2);
         let definition = fixture_plan();
 
-        let first = expand_plan_trials(run_uid, plan_revision_uid, &definition)
+        let first = expand_plan_trials(run_uid, plan_revision_uid, &definition, &fixture_policy())
             .expect("valid plan matrix expands");
-        let second = expand_plan_trials(run_uid, plan_revision_uid, &definition)
+        let second = expand_plan_trials(run_uid, plan_revision_uid, &definition, &fixture_policy())
             .expect("valid plan matrix expands again");
 
         let first_ids = first
@@ -1199,8 +1461,13 @@ mod tests {
         let mut definition = fixture_plan();
         definition.simulation.scenarios.clear();
 
-        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("empty scenarios should fail expansion");
+        let error = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect_err("empty scenarios should fail expansion");
 
         assert!(matches!(
             error,
@@ -1299,8 +1566,13 @@ mod tests {
         let mut definition = fixture_plan();
         definition.target_model = None;
 
-        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("agent-loop plan without target_model should fail expansion");
+        let error = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect_err("agent-loop plan without target_model should fail expansion");
 
         assert!(matches!(error, PlanExpansionError::MissingTargetModel));
     }
@@ -1312,8 +1584,13 @@ mod tests {
         definition.target_variants[0].kind = ExperimentTargetKind::ExecutionTemplate;
         definition.target_variants[0].config = json!({"objective": "Run the template."});
 
-        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("execution-template variant without template should fail expansion");
+        let error = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect_err("execution-template variant without template should fail expansion");
 
         assert!(matches!(
             error,
@@ -1334,8 +1611,13 @@ mod tests {
             "objective": "  \n",
         });
 
-        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("blank execution-template objective should fail expansion");
+        let error = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect_err("blank execution-template objective should fail expansion");
 
         assert!(matches!(
             error,
@@ -1393,21 +1675,30 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_out_of_range_simulator_temperature_offline() {
-        // Pins: a simulator_temperature that cannot be represented as a finite f32 is rejected
-        // before any trial row is emitted (JSON cannot carry NaN/Inf, so an out-of-f32-range
-        // finite value drives the same guard).
+    fn expand_plan_trials_does_not_allow_variant_config_to_override_policy_decoding_offline() {
+        // Pins: simulator decoding is certified policy state, not mutable target-variant config.
         let mut definition = fixture_plan();
         definition.target_variants[0].config =
             json!({"prompt": "start", "simulator_temperature": 1e40});
 
-        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("out-of-f32-range simulator temperature should fail expansion");
+        let trials = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect("variant metadata cannot alter simulator decoding");
 
-        assert!(matches!(
-            error,
-            PlanExpansionError::InvalidSimulatorTemperature
-        ));
+        assert_eq!(
+            trials[0]
+                .trial
+                .simulator
+                .policy
+                .components
+                .decoding
+                .temperature_milli,
+            200
+        );
     }
 
     #[test]
@@ -1418,8 +1709,13 @@ mod tests {
         definition.target_variants[0].config =
             json!({"prompt": "start", "agent": "not-a-selector"});
 
-        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("malformed agent selector should fail expansion");
+        let error = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect_err("malformed agent selector should fail expansion");
 
         assert!(matches!(
             error,
@@ -1662,7 +1958,8 @@ mod tests {
         // that no page ever exceeds the page bound, so a maximal matrix is
         // dispatched without ever holding 5_000 trials at once.
         let definition = fixture_matrix(50, 1, 1, 1, MAX_PLAN_TRIALS_PER_COMBINATION);
-        let mut pager = PlanTrialPager::new(fixture_uuid(2), fixture_uuid(1), &definition)
+        let policy = fixture_policy();
+        let mut pager = PlanTrialPager::new(fixture_uuid(2), fixture_uuid(1), &definition, &policy)
             .expect("a matrix at the ceiling pages");
         assert_eq!(pager.remaining(), MAX_PLAN_TOTAL_TRIALS);
 
@@ -1691,12 +1988,103 @@ mod tests {
         let unique = keys.iter().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), keys.len(), "trial keys must stay unique");
 
-        let eager = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect("the same matrix expands eagerly")
-            .into_iter()
-            .map(|trial| trial.trial.trial_key)
-            .collect::<Vec<_>>();
+        let eager = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect("the same matrix expands eagerly")
+        .into_iter()
+        .map(|trial| trial.trial.trial_key)
+        .collect::<Vec<_>>();
         assert_eq!(eager, keys, "paged order must match expanded order");
+    }
+
+    #[test]
+    fn plan_variants_share_the_same_simulator_seed_offline() {
+        // Pins: candidate and baseline variants differ only in the target under
+        // test. Their simulator randomness is paired by matrix coordinates and
+        // cannot drift merely because the variant key differs.
+        let definition = fixture_matrix(1, 1, 1, 2, 2);
+        let trials = expand_plan_trials(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &fixture_policy(),
+        )
+        .expect("expand paired variants");
+
+        assert_eq!(trials.len(), 4);
+        assert_eq!(trials[0].trial.seed, trials[2].trial.seed);
+        assert_eq!(trials[1].trial.seed, trials[3].trial.seed);
+        assert_ne!(trials[0].trial.seed, trials[1].trial.seed);
+        assert_ne!(trials[0].trial.trial_key, trials[2].trial.trial_key);
+    }
+
+    #[test]
+    fn release_case_selection_expands_only_approved_sparse_tuples_offline() {
+        // Pins: a release case pack selects exact tuples with per-case
+        // repetitions. It must not fall back to the plan's Cartesian matrix,
+        // and every candidate/control pair must retain the same simulator seed.
+        let definition = fixture_matrix(3, 2, 2, 2, 5);
+        let selections = vec![
+            PlanCaseSelection {
+                scenario_id: "scenario-0".to_string(),
+                persona_id: "persona-1".to_string(),
+                profile_id: "profile-0".to_string(),
+                repetitions: 1,
+            },
+            PlanCaseSelection {
+                scenario_id: "scenario-2".to_string(),
+                persona_id: "persona-0".to_string(),
+                profile_id: "profile-1".to_string(),
+                repetitions: 3,
+            },
+        ];
+        let policy = fixture_policy();
+        let mut pager = PlanTrialPager::new_selected(
+            fixture_uuid(2),
+            fixture_uuid(1),
+            &definition,
+            &policy,
+            &selections,
+        )
+        .expect("approved sparse selection");
+        assert_eq!(pager.shape().total_trials, 8);
+        let trials = pager.next_page();
+        assert_eq!(trials.len(), 8);
+        assert!(trials.iter().all(|trial| {
+            matches!(
+                (
+                    trial.trial.scenario_id.as_deref(),
+                    trial.trial.persona_id.as_deref(),
+                    trial.trial.profile_id.as_deref(),
+                ),
+                (Some("scenario-0"), Some("persona-1"), Some("profile-0"))
+                    | (Some("scenario-2"), Some("persona-0"), Some("profile-1"))
+            )
+        }));
+        assert_eq!(trials[0].trial.seed, trials[1].trial.seed);
+        for repetition in 0..3 {
+            assert_eq!(
+                trials[2 + repetition].trial.seed,
+                trials[5 + repetition].trial.seed
+            );
+        }
+
+        let duplicate = vec![selections[0].clone(), selections[0].clone()];
+        let policy = fixture_policy();
+        assert!(matches!(
+            PlanTrialPager::new_selected(
+                fixture_uuid(2),
+                fixture_uuid(1),
+                &definition,
+                &policy,
+                &duplicate,
+            ),
+            Err(PlanExpansionError::InvalidReleaseCaseSelection { .. })
+        ));
     }
 
     /// Builds a plan whose matrix has the requested dimensions.
@@ -1804,7 +2192,7 @@ mod tests {
                     ui: json!({}),
                 },
             ],
-            simulator_model: "gpt-5.1-mini".to_string(),
+            simulator_policy: fixture_policy().reference(),
             target_model: Some("gpt-5.1".to_string()),
             parallelism: 2,
             trials_per_combination: 2,
@@ -1826,6 +2214,20 @@ mod tests {
             learning_proposals: ExperimentLearningProposalSettings::default(),
             ui: json!({}),
         }
+    }
+
+    fn scenario_gated_plan() -> ExperimentPlanDefinition {
+        let mut definition = fixture_plan();
+        definition.scorecard = Some(
+            ExperimentScorecard::new(vec![ScorecardRequirement {
+                evaluator_id: "scenario_outcome".to_string(),
+                evaluator_version: "v1".to_string(),
+                config: json!({}),
+                effect: ScorecardEffect::Blocking,
+            }])
+            .expect("fixture scenario scorecard is valid"),
+        );
+        definition
     }
 
     fn fixture_uuid(last_byte: u8) -> Uuid {

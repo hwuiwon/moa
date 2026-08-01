@@ -15,10 +15,10 @@ use moa_core::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::ToolRouter;
 use super::normalization::{
     action_pattern_for, normalized_input_for, review_diffs_for, review_fields_for, summary_for,
 };
+use super::{ToolCatalogSnapshot, ToolRouter};
 
 /// Optional origin metadata attached to an action envelope.
 ///
@@ -133,7 +133,24 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<PreparedActionInvocation> {
-        let registry = self.registry();
+        let catalog = self.activated_catalog();
+        self.prepare_invocation_from_catalog(&catalog, session, invocation)
+            .await
+    }
+
+    /// Prepares policy from one caller-selected immutable catalog publication.
+    ///
+    /// Keeping the snapshot explicit lets prompt compilation, policy, retry
+    /// metadata, and dispatch all use the same governed tool contract even when
+    /// a background refresh publishes concurrently.
+    pub async fn prepare_invocation_from_catalog(
+        &self,
+        catalog: &ToolCatalogSnapshot,
+        session: &SessionMeta,
+        invocation: &ToolInvocation,
+    ) -> Result<PreparedActionInvocation> {
+        self.require_owned_catalog(catalog)?;
+        let registry = &catalog.registry;
         let registered_tool = registry
             .tools
             .get(&invocation.name)

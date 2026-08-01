@@ -16,13 +16,13 @@ pub const SYSTEM_DEFAULT_AGENT_REF: &str = "agent://system-default";
 /// Built-in global default agent policy hash.
 pub const SYSTEM_DEFAULT_AGENT_POLICY_HASH: &str = "system-default-agent-v1";
 
-/// Agent revision selection accepted by strict agent session creation.
+/// Agent selection shared by serving admission and eval-owned preview execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionSelection {
     /// Installed-agent deployment pointer to resolve and pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation_uid: Option<Uuid>,
-    /// Exact published agent revision for simulation or explicit preview sessions.
+    /// Exact agent revision for internal evaluation preview sessions only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_uid: Option<Uuid>,
 }
@@ -61,21 +61,13 @@ pub struct LockedToolRef {
     /// is hashed. Comparing this across agent revisions answers "is this the
     /// same tool", never "is this the same contract".
     ///
-    /// **There is no schema pin for turn-scoped tool loadouts today.** A
-    /// connector that changes a tool's schema mid-session changes what the
-    /// router will accept while the model keeps seeing the schema compiled into
-    /// its cached prompt prefix, and nothing here detects that. Execution *runs*
-    /// are pinned by a different mechanism — the authorization envelope matches
-    /// the whole `CapabilityReference`, whose version does cover the input
-    /// schema — so this gap is specific to conversational turns.
-    ///
-    /// Building the missing pin needs a session-scoped carrier for the compiled
-    /// loadout revision, and there are two ways to get one:
-    /// 1. Persist the revision on the session itself, which costs a migration
-    ///    and a session-store change but makes the pin independent of agents.
-    /// 2. Make this field a real schema hash by injecting the live tool catalog
-    ///    into agent resolution, which needs no migration but inverts a
-    ///    dependency so agent resolution reads the running tool router.
+    /// Governed contract pinning is deliberately separate from deployment
+    /// identity. Conversational completion requests carry the exact catalog pin
+    /// paired with their model-visible tools, while durable execution
+    /// capabilities carry their own contract revision. Policy evaluation and
+    /// dispatch compare those revisions with the immutable catalog snapshot they
+    /// use, so changing this identity hash into a second contract pin would only
+    /// duplicate the runtime source of truth.
     pub identity_hash: String,
     /// Optional provider or catalog namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]

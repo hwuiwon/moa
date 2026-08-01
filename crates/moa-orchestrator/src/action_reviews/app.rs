@@ -551,6 +551,7 @@ mod tests {
                 caller_identity: test_identity(),
                 provider_tool_use_id: Some("provider-tool-use".to_string()),
                 tool_name: "bash".to_string(),
+                expected_tool_contract_revision: "contract-v1".to_string(),
                 input: json!({"cmd": "printf ok"}),
                 active_canary: Some("canary-token".to_string()),
                 session_id: SessionId::new(),
@@ -578,6 +579,7 @@ mod tests {
         assert_ne!(tool_request.tool_call_id, original_tool_id);
         assert_eq!(tool_request.provider_tool_use_id, None);
         assert_eq!(tool_request.active_canary, None);
+        assert_eq!(tool_request.expected_tool_contract_revision, "contract-v1");
         assert_eq!(tool_request.tool_name, "bash");
         assert_eq!(tool_request.input, json!({"cmd": "printf ok"}));
     }
@@ -597,6 +599,7 @@ mod tests {
                 caller_identity: test_identity(),
                 provider_tool_use_id: None,
                 tool_name: "bash".to_string(),
+                expected_tool_contract_revision: "contract-v1".to_string(),
                 input: json!({}),
                 active_canary: None,
                 session_id: SessionId::new(),
@@ -630,6 +633,7 @@ mod tests {
             caller_identity: test_identity(),
             provider_tool_use_id: None,
             tool_name: "bash".to_string(),
+            expected_tool_contract_revision: "contract-v1".to_string(),
             input: json!({"cmd": "printf secret-canary"}),
             active_canary: Some("secret-canary".to_string()),
             session_id: SessionId::new(),

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Fixture helpers for tests in other crates. Enable through dev-dependencies only.
+test-support = []
+
 [dependencies]
+blake3.workspace = true
 chrono.workspace = true
 moa-core.workspace = true
 moa-db.workspace = true
@@ -21,6 +26,7 @@ uuid.workspace = true
 workspace-hack.workspace = true
 
 [dev-dependencies]
+moa-artifacts = { workspace = true, features = ["test-support"] }
 jsonschema = { version = "0.47.0", default-features = false }
 moa-session.workspace = true
 tokio.workspace = true

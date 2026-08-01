@@ -22,6 +22,7 @@ use moa_core::{
     types::tools::SecuredToolOutput,
     types::tools::ToolCallRequest,
 };
+use moa_hands::ToolCatalogPin;
 use moa_orchestrator::objects::tenant::TenantConfig;
 use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
 use moa_orchestrator::services::action_reviews::{
@@ -531,6 +532,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
     let review_id = Uuid::now_v7();
     let claimed_tool_call_id = Uuid::now_v7();
     let tool_call_id = ToolCallId::new();
+    let contract_revision = activated_contract_revision(&test, "bash").await?;
     let tool_request = ToolCallRequest {
         tool_call_id,
         caller_identity: test
@@ -540,6 +542,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
             .clone(),
         provider_tool_use_id: None,
         tool_name: "bash".to_string(),
+        expected_tool_contract_revision: contract_revision,
         input: json!({"cmd": command.clone()}),
         active_canary: None,
         session_id,
@@ -737,6 +740,7 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
     let test = fixture.isolated().await;
     let session_id = test.create_session("execution-task-no-root-events").await?;
     let tool_call_id = ToolCallId::new();
+    let contract_revision = activated_contract_revision(&test, "bash").await?;
     let output: SecuredToolOutput = test
         .client()
         .post_call(
@@ -751,6 +755,7 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
                         .clone(),
                     provider_tool_use_id: None,
                     tool_name: "bash".to_string(),
+                    expected_tool_contract_revision: contract_revision,
                     input: json!({"cmd": "printf execution-task-ok"}),
                     active_canary: None,
                     session_id,
@@ -1292,6 +1297,7 @@ async fn create_pending_bash_review(
     let meta = test.client().get_session(session_id).await?;
     let review_id = Uuid::new_v4();
     let tool_call_id = ToolCallId::new();
+    let contract_revision = activated_contract_revision(test, "bash").await?;
     let prepared: PreparedActionReview = test
         .client()
         .post_call(
@@ -1303,6 +1309,7 @@ async fn create_pending_bash_review(
                     name: "bash".to_string(),
                     input: json!({ "cmd": cmd }),
                 },
+                expected_tool_contract_revision: contract_revision.clone(),
                 review_id,
                 tool_call_id,
                 owner,
@@ -1327,6 +1334,7 @@ async fn create_pending_bash_review(
             .clone(),
         provider_tool_use_id: None,
         tool_name: "bash".to_string(),
+        expected_tool_contract_revision: contract_revision,
         input: json!({ "cmd": cmd }),
         active_canary: None,
         session_id,
@@ -1351,6 +1359,18 @@ async fn create_pending_bash_review(
         "stored review should keep the prepared id"
     );
     Ok((review_id, tool_call_id))
+}
+
+async fn activated_contract_revision(test: &IsolatedTest<'_>, tool_name: &str) -> Result<String> {
+    let catalog: ToolCatalogPin = test
+        .client()
+        .post_empty_call("/ToolExecutor/activated_tool_catalog")
+        .await
+        .context("load activated tool catalog")?;
+    catalog
+        .contract_revision(tool_name)
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("{tool_name} must exist in the activated tool catalog"))
 }
 
 async fn initialize_tenant(client: &TestApiClient, tenant_id: TenantId) -> Result<()> {

@@ -7,7 +7,7 @@ use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind};
 use crate::reference::{ArtifactRef, ReferenceResolution};
 use crate::registry::ArtifactRegistry;
 
-/// Resolves artifact references against visible published revisions.
+/// Resolves artifact references against what the tenant actually serves.
 pub struct ArtifactResolver {
     registry: ArtifactRegistry,
 }
@@ -44,12 +44,32 @@ impl ArtifactResolver {
     ) -> Result<bool> {
         match artifact_ref {
             ArtifactRef::Tool { .. } => Ok(true),
+            // A dependency resolves only when the tenant serves it. Skills answer
+            // from their type-owned serving pointer; other kinds retain their
+            // established published-revision lifecycle.
             ArtifactRef::Artifact { kind, name } => self
-                .registry
-                .load_visible_published(scope, kind.clone(), name)
+                .load_dependency(scope, kind.clone(), name)
                 .await
                 .map(|artifact| artifact.is_some()),
             ArtifactRef::Action { .. } => self.resolve_action(scope, artifact_ref).await,
+        }
+    }
+
+    async fn load_dependency(
+        &self,
+        scope: &ActionRuleScope,
+        kind: ArtifactKind,
+        name: &str,
+    ) -> Result<Option<crate::registry::StoredArtifactRevision>> {
+        match kind {
+            ArtifactKind::Skill | ArtifactKind::Action => {
+                self.registry.load_serving(scope, kind, name).await
+            }
+            _ => {
+                self.registry
+                    .load_visible_published(scope, kind, name)
+                    .await
+            }
         }
     }
 
@@ -62,8 +82,7 @@ impl ArtifactResolver {
             return Ok(false);
         };
         let Some(connector) = self
-            .registry
-            .load_visible_published(scope, ArtifactKind::Connector, connector)
+            .load_dependency(scope, ArtifactKind::Connector, connector)
             .await?
         else {
             return Ok(false);

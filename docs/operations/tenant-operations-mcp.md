@@ -79,15 +79,17 @@ raw event payloads.
 Artifact and learning tools are `artifacts_list`, `artifact_export`,
 `artifact_validate`, `artifact_import`, `artifact_publish`,
 `learning_candidate_get`, `learning_candidate_accept_skill`, and
-`learning_candidate_reject`. Import creates a draft; publish is a separate,
-destructive confirmation. Skills, execution-plan templates, agents, and experiment plans all
-use the generic artifact format, so MCP does not duplicate legacy skill import
-or export paths.
+`learning_candidate_reject`. `artifact_import` creates a draft. For non-skill
+artifacts, `artifact_publish` is a separate destructive confirmation. A skill
+draft never activates through generic publish: only
+`learning_candidate_accept_skill` may activate a learned candidate after its
+regression review. Skills still use the generic artifact format for draft
+authoring and inspection, so MCP does not duplicate legacy skill import paths.
 
 Execution tools are `capabilities_list`, `execution_runs_list`,
 `execution_run_status`, `execution_run_start`, `execution_run_cancel`,
 `execution_review_decide`, and `execution_signal`. Start accepts either a
-published `skill://...` reference with its exact revision, an objective, and
+an activated `skill://...` reference with its exact revision, an objective, and
 structured input; it enters the same origin-bound session admission path and
 accepts neither a compiled-plan identifier nor raw plan JSON. Status includes immutable goal coverage,
 reserved/actual budget, plan revision/provenance, aggregate progress, completion
@@ -128,7 +130,8 @@ clients do not need a second hard-coded schema catalog.
 |---|---|---|---|
 | Understand aggregate performance | `analytics_catalog` → `analytics_query` | — | Narrow with `sessions_list` |
 | Diagnose one session | `sessions_list` → `session_get` → `session_events_list` | — | `lineage_explain` |
-| Edit a skill, execution-plan template, agent, connector, action, or experiment plan | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` → `artifact_publish` | Run the relevant experiment |
+| Author or edit a skill draft without activating it | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` | Draft remains inactive; only a separately generated learned candidate can activate |
+| Edit a non-skill artifact: agent, connector, action, or experiment plan | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` → `artifact_publish` | Run the relevant experiment |
 | Review learned improvements | `learning_candidates_list` → `learning_candidate_get` | `learning_candidate_accept_skill` or `learning_candidate_reject` | `artifacts_list` plus an experiment |
 | Run durable typed work | `capabilities_list` and `execution_runs_list` | `execution_run_start`; when waiting, `execution_review_decide` or `execution_signal`; if necessary, `execution_run_cancel` | Poll `execution_run_status` |
 | Run a Behavior Lab experiment | `experiment_plan_generate` or artifact authoring | `experiment_run`; if necessary, `experiment_cancel` | `experiment_status`, `experiment_trials_list`, `experiment_trial_status`, `experiment_scores`, `experiment_compare` |

@@ -52,4 +52,8 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+# `test-support` exposes `activate_revision`, which the long-conversation scenarios
+# need: the context pipeline now resolves skills through serving pointers, so a
+# draft-only seed is invisible and the scenarios stop measuring what they pin.
+moa-artifacts = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

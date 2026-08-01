@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_artifacts::document::ArtifactStatus;
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError,
@@ -59,12 +61,14 @@ use moa_core::{
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
+use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::distiller::ExperienceDistillationInput;
 use moa_skills::evidence::{EvidenceScope, SanitizedLearningEvidence, SegmentNarrative};
 use moa_skills::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
-use moa_skills::registry::{NewSkill, Skill, SkillRegistry};
+use moa_skills::package::SkillPackage;
+use moa_skills::registry::{Skill, SkillRegistry};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde::Deserialize;
@@ -467,11 +471,50 @@ pub async fn seed_skill(
 ) -> moa_core::types::memory::SkillMetadata {
     let document = parse_skill_markdown(markdown).expect("parse seed skill");
     let rendered = render_skill_markdown(&document).expect("render seed skill");
-    let registry = SkillRegistry::new(test_db.store().pool().clone());
-    registry
-        .upsert_by_name(NewSkill::from_skill_markdown(scope, rendered))
+    // Seeding means "the tenant serves this skill", so the fixture explicitly
+    // activates its newly created draft.
+    let pool = test_db.store().pool().clone();
+    let package = SkillPackage::from_skill_markdown(rendered)
+        .validate()
+        .expect("seed skill package validates");
+    let artifact_document = skill_artifact_document_from_package(&package, ArtifactStatus::Draft)
+        .expect("seed skill artifact validates");
+    let source_text = artifact_document
+        .to_yaml()
+        .expect("seed skill artifact serializes");
+    let files = package
+        .files
+        .iter()
+        .map(|file| NewArtifactFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+            content_type: file.content_type.clone(),
+            executable: file.executable,
+        })
+        .collect::<Vec<_>>();
+    let draft = ArtifactRegistry::new(pool.clone())
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &artifact_document,
+                source_format: "yaml",
+                source_text: source_text.as_bytes(),
+                files: &files,
+            },
+        )
         .await
-        .expect("seed skill");
+        .expect("seed skill draft");
+    moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        moa_artifacts::release::TenantScope::from_action_rule_scope(&scope)
+            .expect("seed skills are tenant scoped"),
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .expect("activate seeded skill");
     skill_metadata_from_document(build_skill_path(&document.frontmatter.name), &document)
 }
 

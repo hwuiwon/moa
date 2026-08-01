@@ -278,11 +278,15 @@ impl Worker for WorkerImpl {
     ) -> Result<Json<WorkerTurnPreparation>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "prepare_turn");
+        let tool_catalog = self.tool_router.activated_catalog();
+        let tool_schemas = tool_catalog.tool_schema_snapshot();
+        let tool_catalog_pin = tool_catalog.pin().map_err(moa_error_to_handler_error)?;
         Ok(Json::from(
             prepare_turn_inner(
                 &mut ctx,
                 &self.providers,
-                &self.tool_router.tool_schema_snapshot(),
+                tool_schemas.as_ref(),
+                tool_catalog_pin,
                 &self.session_store,
             )
             .await?,
@@ -1198,6 +1202,7 @@ async fn prepare_turn_inner(
     ctx: &mut ObjectContext<'_>,
     providers: &ProviderRegistry,
     tool_schemas: &[serde_json::Value],
+    tool_catalog_pin: ToolCatalogPin,
     session_store: &Arc<dyn SessionStore>,
 ) -> Result<WorkerTurnPreparation, HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
@@ -1284,6 +1289,11 @@ async fn prepare_turn_inner(
     request
         .metadata
         .insert("_moa.worker_id".to_string(), json!(ctx.key().to_string()));
+    request.metadata.insert(
+        crate::tool_invocation::governed::TOOL_CATALOG_PIN_METADATA_KEY.to_string(),
+        serde_json::to_value(tool_catalog_pin)
+            .map_err(|error| TerminalError::new(format!("serialize tool catalog pin: {error}")))?,
+    );
     let session_meta = synthetic_session_meta(&state)?;
     state.persist(ctx);
 

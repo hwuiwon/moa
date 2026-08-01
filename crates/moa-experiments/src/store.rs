@@ -150,6 +150,7 @@ impl ExperimentStore {
                 "experiment expected trial count exceeds Postgres BIGINT".to_string(),
             )
         })?;
+        let simulator_policy = run.simulator_policy.as_ref().map(to_json).transpose()?;
         run.resource_envelope
             .validate()
             .map_err(map_resource_error)?;
@@ -215,11 +216,12 @@ impl ExperimentStore {
                 run_uid, storage_partition_id, user_id, name, target_kind, status,
                 target, variant, scorecard, score_run_id, session_id,
                 execution_run_uid, artifact_revision_uids, idempotency_key,
-                created_by_identity, plan_artifact_uid, expected_trials, resource_envelope
+                created_by_identity, plan_artifact_uid, expected_trials, resource_envelope,
+                simulator_policy
             )
             VALUES (
                 $1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17
+                $14, $15, $16, $17, $18
             )
             RETURNING {RUN_COLUMNS}
             "#
@@ -241,6 +243,7 @@ impl ExperimentStore {
         .bind(plan_artifact_uid)
         .bind(persisted_expected_trials)
         .bind(resource_envelope)
+        .bind(simulator_policy)
         .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -395,7 +398,7 @@ impl ExperimentStore {
         trial: NewExperimentTrial,
     ) -> MoaResult<ExperimentTrialRecord> {
         let parts = ScopeParts::from_scope(scope);
-        let simulator_model = trial.simulator.model.to_string();
+        let simulator_model = trial.simulator.policy.components.model.to_string();
         let simulator = to_json(&trial.simulator)?;
         let target_model = trial.target_model.as_ref().map(ToString::to_string);
         let score_run_id = trial.score_run_id;
@@ -1882,7 +1885,7 @@ impl RowExt for sqlx::postgres::PgRow {
 const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, target_kind, status, \
      target, variant, scorecard, score_run_id, session_id, execution_run_uid, \
      artifact_revision_uids, idempotency_key, created_by_identity, \
-     plan_artifact_uid, resource_envelope, error, \
+     plan_artifact_uid, resource_envelope, simulator_policy, error, \
      started_at, completed_at, created_at, updated_at";
 
 /// Column projection shared by every full experiment-trial load.
@@ -1935,6 +1938,10 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
         created_by_identity: row.col("created_by_identity")?,
         plan_artifact_uid: row.col("plan_artifact_uid")?,
         resource_envelope: from_json("resource_envelope", row.col("resource_envelope")?)?,
+        simulator_policy: row
+            .col::<Option<Value>>("simulator_policy")?
+            .map(|value| from_json("simulator_policy", value))
+            .transpose()?,
         error: row.col("error")?,
         created_at: row.col("created_at")?,
         started_at: row.col("started_at")?,

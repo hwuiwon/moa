@@ -10,13 +10,15 @@ use moa_core::{
     events::Event, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionReviewOwner, types::action_policy::CapabilityProvenance,
     types::action_policy::ExecutionTaskOrigin, types::channel::Channel,
-    types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::identifiers::ToolCallId, types::resource::ResourceBudget,
+    types::completion::CompletionRequest, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::identifiers::SessionId,
+    types::identifiers::ToolCallId, types::resource::ResourceBudget,
     types::security::ToolCapabilityId, types::session::SessionMeta,
     types::tools::SecuredToolOutput, types::tools::ToolCallRequest, types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef,
     types::worker::tool_schema::is_delegation_tool_name,
 };
+use moa_hands::{ToolCatalogDrift, ToolCatalogPin};
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
 use moa_security::{OutputClassification, classify_tool_output};
@@ -38,6 +40,26 @@ use crate::turn::util::{
     blocked_canary_tool_output, denied_tool_output, disallowed_tool_output, tool_input_leaks_canary,
 };
 use crate::workflows::turn_progress;
+
+/// Completion metadata key carrying the exact catalog pin used for tool schemas.
+pub(crate) const TOOL_CATALOG_PIN_METADATA_KEY: &str = "_moa.tools.catalog_pin";
+
+/// Decodes the catalog pin paired atomically with a completion request's tools.
+pub(crate) fn completion_tool_catalog_pin(
+    request: &CompletionRequest,
+) -> Result<ToolCatalogPin, HandlerError> {
+    let value = request
+        .metadata
+        .get(TOOL_CATALOG_PIN_METADATA_KEY)
+        .cloned()
+        .ok_or_else(|| TerminalError::new("completion request is missing its tool catalog pin"))?;
+    serde_json::from_value(value).map_err(|error| {
+        TerminalError::new(format!(
+            "completion request tool catalog pin is invalid: {error}"
+        ))
+        .into()
+    })
+}
 
 /// Workflow origin metadata for a governed tool invocation.
 ///
@@ -126,6 +148,8 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) tool_call: &'a ToolCallContent,
     /// Allowed tool names selected for this turn.
     pub(crate) allowed_tools: &'a BTreeSet<String>,
+    /// Exact governed contract revision that admitted this tool call.
+    pub(crate) expected_tool_contract_revision: Option<&'a str>,
     /// Active prompt-injection canary marker, when present.
     pub(crate) active_canary: Option<&'a str>,
     /// Trusted sandbox file manifest selected by the runtime that built this tool call.
@@ -167,6 +191,7 @@ impl GovernedInvocationResult {
                 | GovernedInvocationDisposition::Denied
                 | GovernedInvocationDisposition::CanaryBlocked
                 | GovernedInvocationDisposition::ReviewPending
+                | GovernedInvocationDisposition::CatalogDrift
         )
     }
 }
@@ -184,6 +209,8 @@ pub(crate) enum GovernedInvocationDisposition {
     CanaryBlocked,
     /// Tool call was queued for tenant-admin review.
     ReviewPending,
+    /// The governed tool contract that admitted the call is no longer active.
+    CatalogDrift,
     /// Tool call was executed through `ToolExecutor`.
     Executed,
 }
@@ -241,12 +268,41 @@ pub(crate) async fn invoke_governed_tool(
             invocation,
         });
     }
+    let Some(expected_tool_contract_revision) = request.expected_tool_contract_revision else {
+        return Err(TerminalError::new_with_code(
+            409,
+            format!(
+                "tool {} is missing its admitted governed contract revision",
+                invocation.name
+            ),
+        )
+        .into());
+    };
 
     append_tool_call_event(ctx, &request).await?;
 
+    if let Some(drift) =
+        current_tool_contract_drift(ctx, expected_tool_contract_revision, &invocation).await?
+    {
+        let output = catalog_drift_output(&invocation, &drift);
+        append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
+        return Ok(GovernedInvocationOutcome::Completed(Box::new(
+            completed_result(
+                request.tool_id,
+                invocation,
+                output,
+                GovernedInvocationDisposition::CatalogDrift,
+            ),
+        )));
+    }
+
     let prepared_action = crate::restate_identity::replay_safe_request(
         ctx.service_client::<ActionPolicyClient>()
-            .prepare_action_review(Json(prepare_action_review_request(&request, &invocation))),
+            .prepare_action_review(Json(prepare_action_review_request(
+                &request,
+                &invocation,
+                expected_tool_contract_revision,
+            ))),
     )
     .call()
     .await?
@@ -293,7 +349,14 @@ pub(crate) async fn invoke_governed_tool(
                 ),
             )));
         }
-        return request_action_review(ctx, request, invocation, prepared_action).await;
+        return request_action_review(
+            ctx,
+            request,
+            invocation,
+            prepared_action,
+            expected_tool_contract_revision,
+        )
+        .await;
     }
 
     execute_allowed_tool(
@@ -303,8 +366,82 @@ pub(crate) async fn invoke_governed_tool(
         session_limits,
         session_store,
         channel_adapters,
+        expected_tool_contract_revision,
     )
     .await
+}
+
+/// Returns how the invoked tool's governed contract moved since it was offered.
+///
+/// The expected revision comes from the same immutable snapshot that supplied
+/// the prompt schema, or from a durable execution capability. Checking before
+/// action policy prevents a rolling deployment from evaluating one policy while
+/// a different contract is eventually dispatched. `ToolExecutor` repeats the
+/// check against its own dispatch snapshot because it may run on another replica.
+async fn current_tool_contract_drift(
+    ctx: &WorkflowContext<'_>,
+    expected_revision: &str,
+    invocation: &ToolInvocation,
+) -> Result<Option<ToolCatalogDrift>, HandlerError> {
+    let activated = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ToolExecutorClient>()
+            .activated_tool_catalog(),
+    )
+    .call()
+    .await?
+    .into_inner();
+    Ok(tool_contract_drift(
+        expected_revision,
+        &activated,
+        &invocation.name,
+    ))
+}
+
+/// Compares one admitted tool contract with an activated catalog snapshot.
+///
+/// Scoped to the single invoked tool on purpose: an unrelated connector
+/// refreshing mid-turn moves the whole-catalog digest, and refusing this call for
+/// that would be a false positive that made every busy deployment unusable.
+fn tool_contract_drift(
+    expected_revision: &str,
+    activated: &ToolCatalogPin,
+    tool: &str,
+) -> Option<ToolCatalogDrift> {
+    match activated.contract_revision(tool) {
+        Some(activated_revision) if expected_revision != activated_revision => {
+            Some(ToolCatalogDrift::ContractMoved {
+                tool: tool.to_string(),
+                pinned_revision: expected_revision.to_string(),
+                activated_revision: activated_revision.to_string(),
+            })
+        }
+        None => Some(ToolCatalogDrift::Withdrawn {
+            tool: tool.to_string(),
+        }),
+        Some(_) => None,
+    }
+}
+
+/// Builds the model-visible refusal for a governed tool contract that moved.
+///
+/// Phrased so the model stops re-sending a call admitted under stale validation,
+/// policy, retry, output, ownership, or routing semantics.
+fn catalog_drift_output(invocation: &ToolInvocation, drift: &ToolCatalogDrift) -> ToolOutput {
+    let detail = match drift {
+        ToolCatalogDrift::Withdrawn { .. } => "it is no longer registered".to_string(),
+        ToolCatalogDrift::ContractMoved {
+            pinned_revision,
+            activated_revision,
+            ..
+        } => format!(
+            "its governed contract changed from revision {pinned_revision} to {activated_revision}"
+        ),
+    };
+    denied_tool_output(format!(
+        "Tool {} was not called because {detail}. Do not retry with the same arguments; \
+         the tool contract you were shown is stale.",
+        invocation.name
+    ))
 }
 
 fn bounded_review_refusal(
@@ -324,8 +461,9 @@ async fn request_action_review(
     request: GovernedInvocationRequest<'_>,
     invocation: ToolInvocation,
     prepared_action: PreparedActionReview,
+    expected_tool_contract_revision: &str,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
-    let tool_request = tool_call_request(&request, &invocation);
+    let tool_request = tool_call_request(&request, &invocation, expected_tool_contract_revision);
     if tool_input_leaks_canary(request.active_canary, &tool_request.input)
         .map_err(|error| TerminalError::new(format!("serialize tool input: {error}")))?
     {
@@ -370,6 +508,7 @@ async fn execute_allowed_tool(
     session_limits: &SessionLimitsConfig,
     session_store: Arc<PostgresSessionStore>,
     channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
+    expected_tool_contract_revision: &str,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     let span = tool_dispatch_span(&invocation.name);
     if !matches!(
@@ -387,7 +526,7 @@ async fn execute_allowed_tool(
         .await?;
     }
     let dispatch_started = Instant::now();
-    let tool_request = tool_call_request(&request, &invocation);
+    let tool_request = tool_call_request(&request, &invocation, expected_tool_contract_revision);
     let output = match request.origin {
         GovernedInvocationOrigin::ExecutionTask {
             run_uid,
@@ -488,6 +627,7 @@ fn secured_synthetic_output(invocation: &ToolInvocation, raw: ToolOutput) -> Sec
 fn prepare_action_review_request(
     request: &GovernedInvocationRequest<'_>,
     invocation: &ToolInvocation,
+    expected_tool_contract_revision: &str,
 ) -> PrepareActionReviewRequest {
     let default_provenance = match request.origin {
         GovernedInvocationOrigin::RootTurn { .. }
@@ -512,18 +652,21 @@ fn prepare_action_review_request(
             .cloned()
             .unwrap_or(default_provenance),
         idempotency_key: invocation.id.clone(),
+        expected_tool_contract_revision: expected_tool_contract_revision.to_owned(),
     }
 }
 
 fn tool_call_request(
     request: &GovernedInvocationRequest<'_>,
     invocation: &ToolInvocation,
+    expected_tool_contract_revision: &str,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id: request.tool_id,
         caller_identity: request.identity.clone(),
         provider_tool_use_id: invocation.id.clone(),
         tool_name: invocation.name.clone(),
+        expected_tool_contract_revision: expected_tool_contract_revision.to_owned(),
         input: invocation.input.clone(),
         active_canary: request.active_canary.map(ToOwned::to_owned),
         session_id: request.session_id,
@@ -694,6 +837,7 @@ mod tests {
     use moa_core::{
         traits::{Identity, IdentityType},
         types::action_policy::CapabilityProvenance,
+        types::completion::CompletionRequest,
         types::completion::ToolCallContent,
         types::completion::ToolInvocation,
         types::contact::ContactId,
@@ -708,15 +852,18 @@ mod tests {
         types::tools::TrustedSandboxFileEntry,
         types::tools::TrustedSandboxFileManifestRef,
     };
+    use moa_hands::{PinnedToolContract, PinnedToolOwner};
     use moa_test_support::fixtures::contact_ref_fixture;
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
         ActionReviewOwner, GovernedInvocationDisposition, GovernedInvocationEventPlan,
-        GovernedInvocationOrigin, GovernedInvocationRequest, bounded_review_refusal,
-        completed_result, owns_root_session_tool_events, pending_review_output,
-        prepare_action_review_request, tool_call_request,
+        GovernedInvocationOrigin, GovernedInvocationRequest, TOOL_CATALOG_PIN_METADATA_KEY,
+        ToolCatalogDrift, ToolCatalogPin, bounded_review_refusal, catalog_drift_output,
+        completed_result, completion_tool_catalog_pin, owns_root_session_tool_events,
+        pending_review_output, prepare_action_review_request, tool_call_request,
+        tool_contract_drift,
     };
     use crate::delegation::storage_user_id;
 
@@ -762,6 +909,7 @@ mod tests {
             tool_id: ToolCallId(Uuid::from_u128(30)),
             tool_call,
             allowed_tools,
+            expected_tool_contract_revision: Some("contract-v1"),
             active_canary: Some("canary"),
             trusted_sandbox_manifest: None,
             origin,
@@ -786,7 +934,8 @@ mod tests {
             },
         );
 
-        let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
+        let policy_request =
+            prepare_action_review_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(policy_request.session, session);
         assert_eq!(policy_request.invocation, tool_call.invocation);
@@ -801,6 +950,10 @@ mod tests {
             }
         );
         assert_eq!(policy_request.capability_provenance, Default::default());
+        assert_eq!(
+            policy_request.expected_tool_contract_revision,
+            "contract-v1"
+        );
         assert_eq!(
             policy_request.idempotency_key.as_deref(),
             Some("provider-tool-1")
@@ -831,7 +984,7 @@ mod tests {
             }),
         );
 
-        let durable = tool_call_request(&request, &tool_call.invocation);
+        let durable = tool_call_request(&request, &tool_call.invocation, "contract-v1");
         assert_eq!(durable.resource_budget, request.resource_budget);
     }
 
@@ -945,7 +1098,8 @@ mod tests {
             },
         );
 
-        let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
+        let policy_request =
+            prepare_action_review_request(&request, &tool_call.invocation, "contract-v1");
 
         assert!(
             matches!(
@@ -998,7 +1152,8 @@ mod tests {
         );
         request.capability_provenance = Some(&capability);
 
-        let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
+        let policy_request =
+            prepare_action_review_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(policy_request.session, session);
         assert_eq!(policy_request.invocation, tool_call.invocation);
@@ -1052,7 +1207,9 @@ mod tests {
 
         let prepared = [root, worker, execution]
             .iter()
-            .map(|request| prepare_action_review_request(request, &tool_call.invocation))
+            .map(|request| {
+                prepare_action_review_request(request, &tool_call.invocation, "contract-v1")
+            })
             .collect::<Vec<_>>();
 
         assert!(prepared.iter().all(|request| request.session == session));
@@ -1114,7 +1271,7 @@ mod tests {
             },
         );
 
-        let tool_request = tool_call_request(&request, &tool_call.invocation);
+        let tool_request = tool_call_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(tool_request.tool_call_id, request.tool_id);
         assert_eq!(
@@ -1128,6 +1285,7 @@ mod tests {
         assert_eq!(tool_request.caller_identity, *TEST_IDENTITY);
         assert_eq!(tool_request.trusted_sandbox_manifest, None);
         assert_eq!(tool_request.worker_id, None);
+        assert_eq!(tool_request.expected_tool_contract_revision, "contract-v1");
     }
 
     #[test]
@@ -1147,9 +1305,10 @@ mod tests {
             },
         );
 
-        let tool_request = tool_call_request(&request, &tool_call.invocation);
+        let tool_request = tool_call_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(tool_request.worker_id.as_deref(), Some("worker-1"));
+        assert_eq!(tool_request.expected_tool_contract_revision, "contract-v1");
     }
 
     #[test]
@@ -1168,7 +1327,7 @@ mod tests {
             },
         );
 
-        let tool_request = tool_call_request(&request, &tool_call.invocation);
+        let tool_request = tool_call_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(tool_request.worker_id, None);
     }
@@ -1201,7 +1360,7 @@ mod tests {
         );
         request.trusted_sandbox_manifest = Some(&manifest);
 
-        let tool_request = tool_call_request(&request, &tool_call.invocation);
+        let tool_request = tool_call_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(tool_request.trusted_sandbox_manifest, Some(manifest));
     }
@@ -1285,5 +1444,161 @@ mod tests {
             contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified);
         contact.permissions = json!({});
         contact
+    }
+
+    #[test]
+    fn completion_request_carries_the_exact_catalog_pin() {
+        // Pins: the model-visible tools and their governed revisions cross the
+        // provider boundary as one request instead of separate mutable reads.
+        let expected = pin(&[("file_read", "contract-v1")]);
+        let mut request = CompletionRequest::new("read it");
+        request.metadata.insert(
+            TOOL_CATALOG_PIN_METADATA_KEY.to_string(),
+            serde_json::to_value(&expected).expect("catalog pin should serialize"),
+        );
+
+        assert_eq!(
+            completion_tool_catalog_pin(&request).expect("catalog pin should decode"),
+            expected
+        );
+
+        request.metadata.remove(TOOL_CATALOG_PIN_METADATA_KEY);
+        let error = completion_tool_catalog_pin(&request)
+            .expect_err("a request without its catalog pin must fail closed");
+        let error = <restate_sdk::prelude::HandlerError as AsRef<
+            dyn std::error::Error + Send + Sync,
+        >>::as_ref(&error)
+        .to_string();
+        assert!(error.contains("missing"), "error: {error}");
+    }
+
+    fn pin(tools: &[(&str, &str)]) -> ToolCatalogPin {
+        ToolCatalogPin {
+            contract_hash: format!("hash-of-{}", tools.len()),
+            mcp_catalog_revision: "mcp-revision".to_string(),
+            tools: tools
+                .iter()
+                .map(|(tool, revision)| PinnedToolContract {
+                    tool: (*tool).to_string(),
+                    owner: PinnedToolOwner::Connector {
+                        server: "crm".to_string(),
+                    },
+                    contract_revision: (*revision).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_turn_only_refuses_a_tool_call_whose_own_contract_moved() {
+        // Pins: conversational turns now carry a contract pin, and it is scoped to
+        // the invoked tool. A tool whose revision is unchanged must dispatch even
+        // though the surrounding catalog moved — otherwise one unrelated connector
+        // refreshing would refuse every tool call on a busy deployment — while the
+        // invoked tool's own contract moving or being withdrawn must be refused.
+        let reference = moa_hands::mcp_tool_reference("crm", "lookup");
+        let other = moa_hands::mcp_tool_reference("crm", "search");
+
+        let pinned = pin(&[
+            (reference.as_str(), "schema-a"),
+            (other.as_str(), "schema-x"),
+        ]);
+        let unrelated_change = pin(&[
+            (reference.as_str(), "schema-a"),
+            (other.as_str(), "schema-y"),
+        ]);
+        assert_eq!(
+            tool_contract_drift(
+                pinned
+                    .contract_revision(&reference)
+                    .expect("reference is pinned"),
+                &unrelated_change,
+                &reference,
+            ),
+            None,
+            "an unrelated connector contract change must not refuse this tool"
+        );
+
+        let moved = pin(&[
+            (reference.as_str(), "schema-b"),
+            (other.as_str(), "schema-x"),
+        ]);
+        assert_eq!(
+            tool_contract_drift(
+                pinned
+                    .contract_revision(&reference)
+                    .expect("reference is pinned"),
+                &moved,
+                &reference,
+            ),
+            Some(ToolCatalogDrift::ContractMoved {
+                tool: reference.clone(),
+                pinned_revision: "schema-a".to_string(),
+                activated_revision: "schema-b".to_string(),
+            })
+        );
+
+        let withdrawn = pin(&[(other.as_str(), "schema-x")]);
+        assert_eq!(
+            tool_contract_drift(
+                pinned
+                    .contract_revision(&reference)
+                    .expect("reference is pinned"),
+                &withdrawn,
+                &reference,
+            ),
+            Some(ToolCatalogDrift::Withdrawn {
+                tool: reference.clone(),
+            })
+        );
+        assert_eq!(
+            tool_contract_drift("contract-not-offered", &pinned, &reference),
+            Some(ToolCatalogDrift::ContractMoved {
+                tool: reference.clone(),
+                pinned_revision: "contract-not-offered".to_string(),
+                activated_revision: "schema-a".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_catalog_drift_refusal_tells_the_model_its_contract_is_stale() {
+        // Pins: the refusal is actionable rather than a bare error. A model that
+        // retried the same arguments against a moved schema would loop, so the
+        // message names the revisions and forbids the retry, and the disposition
+        // is recorded as a denied tool for worker accounting.
+        let invocation = ToolInvocation {
+            id: Some("provider-tool-9".to_string()),
+            name: moa_hands::mcp_tool_reference("crm", "lookup"),
+            input: json!({}),
+        };
+        let output = catalog_drift_output(
+            &invocation,
+            &ToolCatalogDrift::ContractMoved {
+                tool: invocation.name.clone(),
+                pinned_revision: "schema-a".to_string(),
+                activated_revision: "schema-b".to_string(),
+            },
+        );
+
+        assert!(output.is_error);
+        let text = output.to_text();
+        assert!(
+            text.contains("schema-a") && text.contains("schema-b"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Do not retry with the same arguments"),
+            "{text}"
+        );
+
+        let result = completed_result(
+            ToolCallId::new(),
+            invocation,
+            output,
+            GovernedInvocationDisposition::CatalogDrift,
+        );
+        assert!(result.should_record_denied_worker_tool());
+        assert!(!result.should_record_segment_tool_use());
     }
 }

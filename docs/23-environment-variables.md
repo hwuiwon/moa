@@ -543,7 +543,7 @@ is no second observability enable flag.
 |---|---|---|---|
 | `MOA_LEARNING_EMBEDDINGS_EXPERIENCE_BATCH_SIZE` | `learning.embeddings.experience_batch_size` | 128 | Maximum number of `experience_records` embedded per backfill tick |
 | `MOA_LEARNING_EMBEDDINGS_EXPERIENCE_LOOKBACK_DAYS` | `learning.embeddings.experience_lookback_days` | 30 | Only `experience_records` created within this many days are eligible for embedding backfill |
-| `MOA_LEARNING_EMBEDDINGS_SKILL_BATCH_SIZE` | `learning.embeddings.skill_batch_size` | 64 | Maximum number of published Skill artifacts embedded per backfill tick |
+| `MOA_LEARNING_EMBEDDINGS_SKILL_BATCH_SIZE` | `learning.embeddings.skill_batch_size` | 64 | Maximum number of serving Skill artifacts embedded per backfill tick |
 | `MOA_LEARNING_RECURRENCE_CLUSTER_SIMILARITY` | `learning.recurrence.cluster_similarity` | 0.85 | Cosine-similarity threshold at which two exact-fingerprint groups merge into one semantic recurrence cluster |
 | `MOA_LEARNING_RECURRENCE_LOOKBACK_DAYS` | `learning.recurrence.lookback_days` | 30 | Lookback window, in days, over which recurring experiences are grouped |
 | `MOA_LEARNING_RECURRENCE_MAX_CANDIDATE_GROUPS` | `learning.recurrence.max_candidate_groups` | 200 | Upper bound on exact-fingerprint groups loaded per tenant per tick as clustering candidates |

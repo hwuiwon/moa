@@ -3,12 +3,13 @@
 use moa_core::{error::MoaError, error::Result, types::identifiers::TenantId};
 use moa_memory_graph::GraphStore;
 use moa_skills::lessons::{LessonContext, learn_lesson};
-use moa_skills::registry::{NewSkill, SkillRegistry};
+use moa_skills::package::SkillPackage;
+use moa_skills::registry::SkillRegistry;
 use moa_skills::render::{SkillRenderContext, render};
 use uuid::Uuid;
 
 use super::skill_graph::{
-    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, memory_scope, tenant_scope,
+    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, memory_scope, serve_skill_package, tenant_scope,
 };
 
 #[tokio::test]
@@ -20,12 +21,12 @@ async fn render_with_graph_lessons() -> Result<()> {
     let artifact_scope = tenant_scope(&workspace_name);
     let scope = memory_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
-    let skill_uid = registry
-        .upsert_by_name(NewSkill::from_skill_markdown(
-            artifact_scope,
-            DISTILLED_SKILL.to_string(),
-        ))
-        .await?;
+    let skill_uid = serve_skill_package(
+        store.pool(),
+        artifact_scope,
+        SkillPackage::from_skill_markdown(DISTILLED_SKILL.to_string()),
+    )
+    .await?;
     let lesson_ctx = LessonContext::for_app_role(graph_store(store.pool(), &scope));
 
     let lesson_uid = learn_lesson(
@@ -85,12 +86,12 @@ async fn render_dedups_active_duplicate_lessons() -> Result<()> {
     let artifact_scope = tenant_scope(&workspace_name);
     let scope = memory_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
-    let skill_uid = registry
-        .upsert_by_name(NewSkill::from_skill_markdown(
-            artifact_scope,
-            DISTILLED_SKILL.to_string(),
-        ))
-        .await?;
+    let skill_uid = serve_skill_package(
+        store.pool(),
+        artifact_scope,
+        SkillPackage::from_skill_markdown(DISTILLED_SKILL.to_string()),
+    )
+    .await?;
     let lesson_ctx = LessonContext::for_app_role(graph_store(store.pool(), &scope));
 
     // Same normalized summary, cosmetically different; both stay active.

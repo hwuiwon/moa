@@ -41,9 +41,9 @@ use crate::execution_execution_support::assertions::{
     journal_requests, journal_roles, planning_audits, sole_event_sequence,
 };
 use crate::execution_execution_support::fixtures::{
-    RouteFixture, SERVICE_TIMEOUT, await_active_execution_progress, await_execution_terminal,
-    await_run_started_event, await_session_settled, await_turn_outcome, execution_run_request,
-    list_execution_tasks, publish_skill, raw_events, route_classifier_completion,
+    RouteFixture, SERVICE_TIMEOUT, activate_skill, await_active_execution_progress,
+    await_execution_terminal, await_run_started_event, await_session_settled, await_turn_outcome,
+    execution_run_request, list_execution_tasks, raw_events, route_classifier_completion,
     seed_allow_policy, start_turn, start_turn_in_session,
 };
 
@@ -322,7 +322,7 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
         .create_session("execute-inline-instruction-skill")
         .await?;
     let session = test.client().get_session(session_id).await?;
-    let published = publish_skill(
+    let activated = activate_skill(
         &fixture,
         test.client(),
         session.tenant_id,
@@ -332,7 +332,7 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
     )
     .await?;
     assert_eq!(
-        published.skill_ref,
+        activated.skill_ref,
         ArtifactRef::artifact(ArtifactKind::Skill, INSTRUCTION_SKILL_NAME).to_string()
     );
     let started =
@@ -424,8 +424,8 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn published_skill_template_starts_without_plan_generation_service_e2e() -> Result<()> {
-    // Pins: an exact pinned published template bypasses the planner and enters canonical runtime.
+async fn activated_skill_template_starts_without_plan_generation_service_e2e() -> Result<()> {
+    // Pins: an exact pinned activated template bypasses the planner and enters canonical runtime.
     let fixture = OrchestratorTestFixture::with_execution_fixture(
         json!({
             "default": text_completion("unexpected scripted fallback"),
@@ -435,9 +435,9 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
     )
     .await?;
     let test = fixture.isolated().await;
-    let session_id = test.create_session("published-template").await?;
+    let session_id = test.create_session("activated-template").await?;
     let session = test.client().get_session(session_id).await?;
-    let published = publish_skill(
+    let activated = activate_skill(
         &fixture,
         test.client(),
         session.tenant_id,
@@ -453,8 +453,8 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
         "Produce the exact requested report from the pinned template.",
         Some(ExecutionTemplateInvocation {
             template: PinnedExecutionTemplateRef {
-                skill_ref: published.skill_ref.clone(),
-                revision_uid: published.revision_uid,
+                skill_ref: activated.skill_ref.clone(),
+                revision_uid: activated.revision_uid,
             },
             input: template_input.clone(),
         }),
@@ -477,7 +477,7 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
     let repository = ExecutionRepository::new(
         sqlx::PgPool::connect(&fixture.postgres_url)
             .await
-            .context("connect published-template provenance repository")?,
+            .context("connect activated-template provenance repository")?,
     );
     let persisted_run = repository
         .load_run(
@@ -487,11 +487,11 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
             execution_run_uid,
         )
         .await?
-        .context("published-template run should remain queryable")?;
+        .context("activated-template run should remain queryable")?;
     assert_persisted_skill_template_provenance(
         &persisted_run.source_provenance,
-        &published.skill_ref,
-        published.revision_uid,
+        &activated.skill_ref,
+        activated.revision_uid,
     )?;
     let tasks = list_execution_tasks(test.client(), run_request.clone()).await?;
     assert!(tasks.next_cursor.is_none());
@@ -669,7 +669,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> Result<()> {
-    // Pins: a published skill without a template is pinned and injected into task-local Agent work.
+    // Pins: an activated skill without a template is pinned and injected into task-local Agent work.
     let objective =
         "Start an execution run using the agent-task-research instruction skill for this case";
     let skill_ref = ArtifactRef::artifact(ArtifactKind::Skill, INSTRUCTION_SKILL_NAME);
@@ -705,7 +705,7 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
     let test = fixture.isolated().await;
     let session_id = test.create_session("instruction-agent-task").await?;
     let session = test.client().get_session(session_id).await?;
-    let published = publish_skill(
+    let activated = activate_skill(
         &fixture,
         test.client(),
         session.tenant_id,
@@ -714,7 +714,7 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
         instruction_skill_markdown(),
     )
     .await?;
-    assert_eq!(published.skill_ref, skill_ref.to_string());
+    assert_eq!(activated.skill_ref, skill_ref.to_string());
     let started = start_turn_in_session(&test, session_id, objective, None).await?;
 
     let outcome = await_turn_outcome(test.client(), &started).await?;
@@ -1158,7 +1158,7 @@ Use the exact structured input supplied to the pinned execution template.
 
 fn instruction_skill_source() -> String {
     format!(
-        "api_version: moa.artifact/v1\nkind: skill\nmetadata:\n  name: {INSTRUCTION_SKILL_NAME}\n  description: Agent task research instructions for deterministic service verification.\n  tags: [agent-task-research, deterministic]\nstatus: draft\ndefinition:\n  type: skill\n  spec:\n    instructions:\n      path: SKILL.md\n    inputs: {{\"type\":\"object\"}}\n    outputs: {{\"type\":\"object\"}}\n    allowed_tools: [file_read]\n"
+        "api_version: moa.artifact/v1\nkind: skill\nmetadata:\n  name: {INSTRUCTION_SKILL_NAME}\n  description: Agent task research instructions for deterministic service verification.\n  tags: [agent-task-research, deterministic]\nstatus: draft\ndefinition:\n  type: skill\n  spec:\n    instructions:\n      path: SKILL.md\n    inputs: {{\"type\":\"object\"}}\n    outputs: {{\"type\":\"object\"}}\n"
     )
 }
 
@@ -1166,7 +1166,6 @@ fn instruction_skill_markdown() -> &'static str {
     r#"---
 name: agent-task-research
 description: Agent task research instructions for deterministic service verification.
-allowed-tools: file_read
 metadata:
   moa-tags: "agent-task-research,deterministic"
 ---

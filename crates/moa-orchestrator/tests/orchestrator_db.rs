@@ -8,6 +8,10 @@ mod analytics_chaos_db;
 mod analytics_export_db;
 #[path = "orchestrator_db/api_keys_db.rs"]
 mod api_keys_db;
+#[path = "support/artifact_release.rs"]
+mod artifact_release;
+#[path = "orchestrator_db/artifact_release_evaluation_db.rs"]
+mod artifact_release_evaluation_db;
 #[path = "orchestrator_db/authz_admin_db.rs"]
 mod authz_admin_db;
 #[path = "orchestrator_db/authz_challenges_db.rs"]
@@ -24,6 +28,8 @@ mod guardrail_hourly_db;
 mod lineage_postgres_db;
 #[path = "orchestrator_db/session_store_db.rs"]
 mod session_store_db;
+#[path = "support/simulator_policy.rs"]
+mod simulator_policy;
 #[path = "orchestrator_db/skill_learning_workflow_db.rs"]
 mod skill_learning_workflow_db;
 #[path = "orchestrator_db/workspace_authz_db.rs"]

@@ -15,6 +15,19 @@ use moa_core::types::security::SensitivityClass;
 use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
+use moa_eval::controls::authoring::{AuthoringSplit, DEFAULT_AUTHORING_FRACTION};
+use moa_eval::controls::fixed_rag::{
+    FixedRagNull, FixedRagQuestion, control_rankings, oracle_rankings, recall_by_slice,
+};
+use moa_eval::controls::{SUITE_WIXQA_RAG, lane_classification};
+use moa_eval::kernel::contamination::{
+    ArtifactKind, CaseSplit, CorpusObject, EvalCaseText, LaneClassification, LeakageScanReport,
+    LeakageScanner, PinnedCorpus, SourceProvenance, sha256_text,
+};
+use moa_eval::kernel::controls::{
+    DEFAULT_CONTROL_ALPHA, DEFAULT_ORACLE_FLOOR, MIN_NULL_SEEDS, NullCeiling, SuiteValidityReport,
+    SuiteVerdict, audit_controlled_metric, derive_null_ceilings,
+};
 use moa_eval::kernel::cost::{
     COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS, COHERE_RERANK_V4_FAST_USD_PER_SEARCH,
     PRICING_AS_OF,
@@ -65,6 +78,10 @@ const INGESTION_BATCH_SIZE: usize = 64;
 const VECTOR_SYNC_DRAIN_LIMIT: i64 = 100_000;
 const WEAK_REPEAT_FALLBACK_WINDOW: usize = 10;
 const WEAK_REPEAT_FALLBACK_THRESHOLD: usize = 1;
+/// Independent seeds behind every WixQA null ceiling.
+const CONTROL_NULL_SEEDS: [u64; MIN_NULL_SEEDS] = [11, 22, 33, 44, 55];
+/// Seed used only to validate a ceiling learned from [`CONTROL_NULL_SEEDS`].
+const CONTROL_NULL_VALIDATION_SEED: u64 = 66;
 
 /// Runs the WixQA RAG benchmark command.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
@@ -105,6 +122,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
     let corpus = load_corpus(&options.data_dir, options.dataset)?;
     let questions = load_questions(&options.data_dir, options.dataset)?;
     let selected = select_workload(&corpus, &questions, &options)?;
+    let leakage_scan = scan_selected_wixqa_corpus(&selected)?;
     let config = benchmark_config(&options)?;
     let pool = PgPool::connect(&config.database.url)
         .await
@@ -211,16 +229,20 @@ async fn run_async(options: Options) -> Result<RunSummary> {
     }
     let mut report = build_report(
         &options,
-        tenant_id,
-        connection_uid,
-        selected,
-        ingestion,
-        vector_sync,
-        query_run.measurements,
-    );
+        WixQaRunResults {
+            tenant_id,
+            connection_uid,
+            selected,
+            ingestion,
+            vector_sync,
+            leakage_scan,
+            measurements: query_run.measurements,
+        },
+    )?;
     report.turbopuffer_reprojected = turbopuffer_reprojected;
     write_pretty_json(&options.output, &report)
         .with_context(|| format!("write {}", options.output.display()))?;
+    ensure_controls_valid(&report.controls.validity)?;
     Ok(RunSummary {
         output: options.output,
         dataset: report.dataset,
@@ -1250,21 +1272,33 @@ fn graph_path_diagnostic(
     }
 }
 
-fn build_report(
-    options: &Options,
+struct WixQaRunResults {
     tenant_id: TenantId,
     connection_uid: Uuid,
     selected: SelectedWorkload,
     ingestion: IngestionReport,
     vector_sync: VectorSyncReport,
+    leakage_scan: LeakageScanReport,
     measurements: Vec<QueryMeasurement>,
-) -> WixQaReport {
+}
+
+fn build_report(options: &Options, results: WixQaRunResults) -> Result<WixQaReport> {
+    let WixQaRunResults {
+        tenant_id,
+        connection_uid,
+        selected,
+        ingestion,
+        vector_sync,
+        leakage_scan,
+        measurements,
+    } = results;
     let aggregate = aggregate_metrics(&measurements);
     let latency = latency_report(&measurements);
     let cost = cost_report(&selected, &measurements, options);
     let fallback = FallbackReport::from_options(options, &measurements);
     let graph_diagnostics = graph_diagnostics_report(&measurements, options);
-    WixQaReport {
+    let controls = fixed_rag_controls_report(&selected, &measurements, options.top_k)?;
+    Ok(WixQaReport {
         generated_at: Utc::now().to_rfc3339(),
         dataset: selected.dataset.as_str().to_string(),
         backend: options.backend.as_str().to_string(),
@@ -1295,12 +1329,270 @@ fn build_report(
         metrics: aggregate,
         latency,
         cost,
+        leakage_scan,
+        controls,
         per_query: measurements,
         notes: vec![
             "WixQA gold uses article_ids; this report measures source-object retrieval before answer generation.".to_string(),
             "Rerank cost is estimated per query when reranker is enabled; embedding token counts use the repo's chars/4 estimator.".to_string(),
+            "WixQA is a closed corpus: controls are package-level nulls and a pinned-source oracle.".to_string(),
+            "An invalid controls.validity verdict makes the headline unusable; the candidate score is never null-corrected.".to_string(),
         ],
+    })
+}
+
+fn scan_selected_wixqa_corpus(selected: &SelectedWorkload) -> Result<LeakageScanReport> {
+    let captured_at = Utc::now();
+    let objects = selected
+        .articles
+        .iter()
+        .map(|article| CorpusObject {
+            object_id: article.id.clone(),
+            declared_kind: ArtifactKind::SourceDocument,
+            content_sha256: Some(sha256_text(&article.contents)),
+            provenance: Some(SourceProvenance {
+                source_uri: article.url.clone(),
+                upstream_revision: selected.cache_key.clone(),
+                retrieved_at: captured_at,
+            }),
+            text: article.contents.clone(),
+        })
+        .collect::<Vec<_>>();
+    let pinned = PinnedCorpus::new(
+        selected.cache_key.clone(),
+        objects
+            .iter()
+            .map(|object| (object.object_id.clone(), sha256_text(&object.text))),
+    );
+    let questions = selected
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| (format!("q-{index:04}"), question))
+        .collect::<Vec<_>>();
+    let split = AuthoringSplit::derive(
+        SUITE_WIXQA_RAG,
+        questions
+            .iter()
+            .map(|(question_id, _)| question_id.as_str()),
+        DEFAULT_AUTHORING_FRACTION,
+    );
+    let cases = questions
+        .into_iter()
+        .map(|(question_id, question)| EvalCaseText {
+            split: if split.is_authoring(&question_id) {
+                CaseSplit::Authoring
+            } else {
+                CaseSplit::GatedTest
+            },
+            case_id: question_id,
+            question: question.question.clone(),
+            answer: question.article_ids.join(" "),
+        })
+        .collect::<Vec<_>>();
+    LeakageScanner::new()
+        .scan(&pinned, &objects, &cases)
+        .context("scan selected WixQA corpus for package leakage")
+}
+
+/// Strongest negative control for one metric slice.
+struct StrongestNullSlice {
+    /// Control that produced this slice's highest ceiling.
+    control_id: String,
+    /// Derived ceiling for this slice.
+    ceiling: NullCeiling,
+    /// Observed null score from the independent validation seed.
+    observed: f64,
+}
+
+/// Builds negative and positive control evidence for this run.
+///
+/// WixQA is a closed corpus with no web-search surface, so the controls that
+/// apply are package-level: how much of the reported recall a retriever earns
+/// without reading the question. Every control produces ranked article ids and is
+/// scored by the same recall function as the candidate.
+fn fixed_rag_controls_report(
+    selected: &SelectedWorkload,
+    measurements: &[QueryMeasurement],
+    top_k: usize,
+) -> Result<FixedRagControlsReport> {
+    let questions = selected
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| FixedRagQuestion {
+            question_id: format!("q-{index:04}"),
+            question: question.question.clone(),
+            gold_object_ids: question.article_ids.clone(),
+        })
+        .collect::<Vec<_>>();
+    let corpus_object_ids = selected
+        .articles
+        .iter()
+        .map(|article| article.id.clone())
+        .collect::<Vec<_>>();
+    let split = AuthoringSplit::derive(
+        SUITE_WIXQA_RAG,
+        questions
+            .iter()
+            .map(|question| question.question_id.as_str()),
+        DEFAULT_AUTHORING_FRACTION,
+    );
+    if measurements.len() != questions.len() {
+        bail!(
+            "WixQA controls require one measurement per question, got {} measurements for {} questions",
+            measurements.len(),
+            questions.len()
+        );
     }
+
+    // Measurements are produced in question order and the cardinality check above
+    // prevents a partial run from being silently scored as a different case set.
+    let candidate_rankings = measurements
+        .iter()
+        .map(|measurement| measurement.ranked_article_ids.clone())
+        .collect::<Vec<_>>();
+    let oracle = recall_by_slice(&questions, &oracle_rankings(&questions, top_k), top_k);
+
+    let mut nulls = BTreeMap::new();
+    let mut ceilings = BTreeMap::new();
+    let mut strongest_by_slice = BTreeMap::new();
+    for null in [
+        FixedRagNull::PopularInCorpus,
+        FixedRagNull::RandomInCorpus,
+        FixedRagNull::QuestionPermutation,
+    ] {
+        let runs = moa_eval::controls::fixed_rag::null_seed_runs(
+            null,
+            &questions,
+            &corpus_object_ids,
+            &split,
+            &CONTROL_NULL_SEEDS,
+            top_k,
+        );
+        let derived = derive_null_ceilings(&runs, DEFAULT_CONTROL_ALPHA)
+            .with_context(|| format!("derive WixQA ceilings for {}", null.control_id()))?;
+        let observed = recall_by_slice(
+            &questions,
+            &control_rankings(
+                null,
+                &questions,
+                &corpus_object_ids,
+                &split,
+                CONTROL_NULL_VALIDATION_SEED,
+                top_k,
+            ),
+            top_k,
+        );
+        nulls.insert(null.control_id().to_string(), observed.clone());
+        ceilings.insert(
+            null.control_id().to_string(),
+            derived
+                .iter()
+                .map(|(slice, ceiling)| (slice.clone(), ceiling.ceiling))
+                .collect(),
+        );
+        record_strongest_null_slices(
+            &mut strongest_by_slice,
+            null.control_id(),
+            &derived,
+            &observed,
+        )?;
+    }
+
+    let slices = questions
+        .iter()
+        .map(|question| question.slice_key().to_string())
+        .collect::<BTreeSet<_>>();
+    let candidate = recall_by_slice(&questions, &candidate_rankings, top_k);
+    let evidence = slices
+        .iter()
+        .map(|slice| {
+            let strongest = strongest_by_slice
+                .get(slice)
+                .with_context(|| format!("no WixQA null ceiling for slice `{slice}`"))?;
+            Ok(moa_eval::kernel::controls::SliceEvidence {
+                slice: slice.clone(),
+                candidate: candidate
+                    .get(slice)
+                    .copied()
+                    .with_context(|| format!("no WixQA candidate score for slice `{slice}`"))?,
+                null_observed: strongest.observed,
+                null_ceiling: strongest.ceiling.clone(),
+                oracle_observed: oracle
+                    .get(slice)
+                    .copied()
+                    .with_context(|| format!("no WixQA oracle score for slice `{slice}`"))?,
+                oracle_floor: DEFAULT_ORACLE_FLOOR,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let validity = audit_controlled_metric(&moa_eval::kernel::controls::ControlledMetric {
+        suite: SUITE_WIXQA_RAG.to_string(),
+        metric: "recall_at_k".to_string(),
+        candidate_overall: aggregate_metrics(measurements).recall_at_k,
+        slices: evidence,
+    });
+
+    Ok(FixedRagControlsReport {
+        lane: *lane_classification(SUITE_WIXQA_RAG).expect("wixqa is classified in the lane table"),
+        null_seeds: CONTROL_NULL_SEEDS.to_vec(),
+        null_validation_seed: CONTROL_NULL_VALIDATION_SEED,
+        alpha: DEFAULT_CONTROL_ALPHA,
+        authoring_case_count: split.authoring.len(),
+        gated_case_count: split.gated.len(),
+        nulls,
+        ceilings,
+        oracle,
+        oracle_floor: DEFAULT_ORACLE_FLOOR,
+        audited_against: strongest_by_slice
+            .into_iter()
+            .map(|(slice, strongest)| (slice, strongest.control_id))
+            .collect(),
+        validity,
+    })
+}
+
+fn record_strongest_null_slices(
+    strongest_by_slice: &mut BTreeMap<String, StrongestNullSlice>,
+    control_id: &str,
+    ceilings: &BTreeMap<String, NullCeiling>,
+    observed: &BTreeMap<String, f64>,
+) -> Result<()> {
+    let ceiling_slices = ceilings.keys().collect::<BTreeSet<_>>();
+    let observed_slices = observed.keys().collect::<BTreeSet<_>>();
+    if ceiling_slices != observed_slices {
+        bail!("WixQA null `{control_id}` ceiling and validation slices differ");
+    }
+    for (slice, ceiling) in ceilings {
+        let observed = observed
+            .get(slice)
+            .copied()
+            .with_context(|| format!("WixQA null `{control_id}` has no `{slice}` observation"))?;
+        let replace = strongest_by_slice
+            .get(slice)
+            .is_none_or(|current| ceiling.ceiling > current.ceiling.ceiling);
+        if replace {
+            strongest_by_slice.insert(
+                slice.clone(),
+                StrongestNullSlice {
+                    control_id: control_id.to_string(),
+                    ceiling: ceiling.clone(),
+                    observed,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_controls_valid(validity: &SuiteValidityReport) -> Result<()> {
+    if validity.verdict == SuiteVerdict::InvalidSuite {
+        bail!(
+            "WixQA suite controls are invalid; report was written for diagnosis but its headline score cannot gate"
+        );
+    }
+    Ok(())
 }
 
 fn aggregate_metrics(measurements: &[QueryMeasurement]) -> AggregateMetrics {
@@ -2107,8 +2399,41 @@ struct WixQaReport {
     metrics: AggregateMetrics,
     latency: LatencyReport,
     cost: CostReport,
+    /// Preflight package-leakage scan over the selected article bytes.
+    leakage_scan: LeakageScanReport,
+    /// Suite validity evidence: both control sides with per-slice results.
+    controls: FixedRagControlsReport,
     per_query: Vec<QueryMeasurement>,
     notes: Vec<String>,
+}
+
+/// Negative/null and positive/oracle control evidence for this run.
+#[derive(Debug, Clone, Serialize)]
+struct FixedRagControlsReport {
+    /// Lane classification that decides which controls apply.
+    lane: LaneClassification,
+    /// Independent seeds behind every null ceiling.
+    null_seeds: Vec<u64>,
+    /// Disjoint seed used to validate each learned null ceiling.
+    null_validation_seed: u64,
+    /// One-sided error rate used for the ceilings.
+    alpha: f64,
+    /// Cases used to fit adaptive controls; never the gated ones.
+    authoring_case_count: usize,
+    /// Cases that gate.
+    gated_case_count: usize,
+    /// Per-slice observed score for each negative control.
+    nulls: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Per-slice derived ceiling for each negative control.
+    ceilings: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Per-slice oracle score.
+    oracle: BTreeMap<String, f64>,
+    /// Floor the oracle had to clear.
+    oracle_floor: f64,
+    /// Strongest negative control selected independently for each slice.
+    audited_against: BTreeMap<String, String>,
+    /// Audit of `recall_at_k` against those per-slice nulls.
+    validity: SuiteValidityReport,
 }
 
 #[derive(Debug)]
@@ -2473,11 +2798,164 @@ fn elapsed_ms(started: Instant) -> u128 {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use moa_eval::kernel::controls::CeilingMethod;
     use moa_memory_graph::NodeIndexRow;
     use moa_retrieval::retrieval::{KnowledgeChunkHydration, LegSources, SourceTier};
     use serde_json::Value;
 
     use super::*;
+
+    fn ceiling(slice: &str, value: f64) -> NullCeiling {
+        NullCeiling {
+            slice: slice.to_string(),
+            seeds: MIN_NULL_SEEDS,
+            mean: value / 2.0,
+            std_dev: 0.1,
+            alpha: DEFAULT_CONTROL_ALPHA,
+            ceiling: value,
+            method: CeilingMethod::SeedPredictionUpperBound,
+        }
+    }
+
+    fn selected_wixqa_fixture(contents: &str) -> SelectedWorkload {
+        let article = WixArticle {
+            id: "kb-1".to_string(),
+            url: "https://support.example.test/kb-1".to_string(),
+            contents: contents.to_string(),
+            title: "Signing keys".to_string(),
+            article_type: "support".to_string(),
+        };
+        SelectedWorkload {
+            dataset: Dataset::Simulated,
+            questions: vec![WixQuestion {
+                question: "How long is the signing key rotation window?".to_string(),
+                article_ids: vec![article.id.clone()],
+            }],
+            articles: vec![article],
+            url_to_article_id: HashMap::from([(
+                "https://support.example.test/kb-1".to_string(),
+                "kb-1".to_string(),
+            )]),
+            chunking: ChunkingConfig::default(),
+            cache_key: "wixqa:test-corpus-revision".to_string(),
+        }
+    }
+
+    #[test]
+    fn wixqa_preflight_scans_selected_article_bytes_and_provenance() {
+        // Pins: the live command's pre-database path scans the actual selected
+        // article text and retains its URL/revision provenance.
+        let selected = selected_wixqa_fixture(
+            "Open Security, choose Rotate, and wait one day for the signing-key window.",
+        );
+        let report = scan_selected_wixqa_corpus(&selected).expect("clean corpus passes preflight");
+
+        assert_eq!(report.corpus_id, selected.cache_key);
+        assert_eq!(report.objects_scanned, 1);
+        assert_eq!(report.cases_scanned, 1);
+    }
+
+    #[test]
+    fn wixqa_preflight_fails_closed_on_selected_eval_artifact() {
+        // Pins: a selected article containing eval metadata is rejected before
+        // run_async constructs configuration, connects to Postgres, or calls a provider.
+        let selected =
+            selected_wixqa_fixture("Ground truth: the signing key rotation answer is one day.");
+        let error = scan_selected_wixqa_corpus(&selected)
+            .expect_err("selected eval artifact must fail preflight");
+
+        assert!(
+            error
+                .to_string()
+                .contains("scan selected WixQA corpus for package leakage"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn wixqa_preflight_fails_closed_on_blank_selected_provenance() {
+        // Pins: the command cannot manufacture trustworthy provenance from a
+        // selected article whose source URL is empty.
+        let mut selected = selected_wixqa_fixture(
+            "Open Security, choose Rotate, and wait one day for the signing-key window.",
+        );
+        selected.articles[0].url.clear();
+
+        let error = scan_selected_wixqa_corpus(&selected)
+            .expect_err("blank selected provenance must fail preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("scan selected WixQA corpus for package leakage"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn null_validation_seed_is_disjoint_from_ceiling_seeds() {
+        // Pins: the ceiling predicts a new null run instead of validating one of
+        // the observations used to fit itself.
+        assert!(!CONTROL_NULL_SEEDS.contains(&CONTROL_NULL_VALIDATION_SEED));
+    }
+
+    #[test]
+    fn strongest_wixqa_null_is_selected_per_slice() {
+        // Pins: one null can dominate single-gold questions while another
+        // dominates multi-gold questions; no global winner may mask either.
+        let mut strongest = BTreeMap::new();
+        record_strongest_null_slices(
+            &mut strongest,
+            "popular",
+            &BTreeMap::from([
+                ("single".to_string(), ceiling("single", 0.8)),
+                ("multiple".to_string(), ceiling("multiple", 0.2)),
+            ]),
+            &BTreeMap::from([("single".to_string(), 0.4), ("multiple".to_string(), 0.1)]),
+        )
+        .expect("first null is complete");
+        record_strongest_null_slices(
+            &mut strongest,
+            "permutation",
+            &BTreeMap::from([
+                ("single".to_string(), ceiling("single", 0.3)),
+                ("multiple".to_string(), ceiling("multiple", 0.9)),
+            ]),
+            &BTreeMap::from([("single".to_string(), 0.2), ("multiple".to_string(), 0.5)]),
+        )
+        .expect("second null is complete");
+
+        assert_eq!(strongest["single"].control_id, "popular");
+        assert_eq!(strongest["multiple"].control_id, "permutation");
+    }
+
+    #[test]
+    fn mismatched_null_slices_are_refused() {
+        // Pins: a missing validation slice is an invalid control run, not an
+        // omitted comparison that can disappear from the report.
+        let error = record_strongest_null_slices(
+            &mut BTreeMap::new(),
+            "partial",
+            &BTreeMap::from([("single".to_string(), ceiling("single", 0.8))]),
+            &BTreeMap::new(),
+        )
+        .expect_err("missing observed slice must fail");
+        assert!(error.to_string().contains("slices differ"), "{error}");
+    }
+
+    #[test]
+    fn invalid_wixqa_controls_fail_the_command_gate() {
+        // Pins: run_async writes the report before calling this gate, then
+        // returns a non-zero command result instead of publishing a usable score.
+        let validity = SuiteValidityReport {
+            suite: SUITE_WIXQA_RAG.to_string(),
+            metric: "recall_at_k".to_string(),
+            candidate_overall: 0.9,
+            verdict: SuiteVerdict::InvalidSuite,
+            slices: Vec::new(),
+        };
+        let error = ensure_controls_valid(&validity).expect_err("invalid suite must fail");
+        assert!(error.to_string().contains("headline score cannot gate"));
+    }
 
     #[test]
     fn default_graph_policy_is_anchored_rescue() {

@@ -2,7 +2,7 @@
 //!
 //! This drives the R2 (semantic clustering + dedup) infrastructure: it populates
 //! task-summary embeddings on `experience_records` and identity embeddings on
-//! published Skill artifacts. It is invoked from a cron handler, never from the
+//! serving Skill artifacts. It is invoked from a cron handler, never from the
 //! turn or persist path, so embeddings lag their source writes by up to one tick
 //! (the eventual-consistency contract the storage columns document). Provider
 //! unavailability is logged and leaves rows NULL/absent for the next tick to
@@ -41,7 +41,7 @@ const MAX_INPUTS_PER_CALL: usize = 64;
 /// Builds the canonical identity text embedded for a skill.
 ///
 /// Tags are sorted so the identity is independent of tag ordering, making the
-/// digest stable across republishes that only reorder tags.
+/// digest stable across reactivations that only reorder tags.
 #[must_use]
 pub fn skill_identity_text(name: &str, description: &str, tags: &[String]) -> String {
     let mut sorted: Vec<&str> = tags.iter().map(String::as_str).collect();
@@ -52,7 +52,7 @@ pub fn skill_identity_text(name: &str, description: &str, tags: &[String]) -> St
 /// Computes the digest of a skill's identity text.
 ///
 /// Stored as `moa.skill_embedding.source_hash` so the backfill can skip
-/// re-embedding a republished skill whose identity text did not change.
+/// re-embedding a reactivated skill whose identity text did not change.
 #[must_use]
 pub fn skill_identity_hash(name: &str, description: &str, tags: &[String]) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -174,13 +174,13 @@ pub async fn backfill_experience_embeddings(
     Ok(written)
 }
 
-/// Embeds missing or stale identity embeddings for published Skill artifacts.
+/// Embeds missing or stale identity embeddings for serving Skill artifacts.
 ///
-/// Selects up to `skill_batch_size` published skills whose embedding is missing,
+/// Selects up to `skill_batch_size` serving skills whose embedding is missing,
 /// whose artifact changed since it was embedded, or whose stored vector belongs
 /// to a different embedder than the active one. A candidate whose stored digest
 /// still matches its current identity AND is already in the active vector space
-/// (an unchanged republish on the same embedder) only has its `updated_at`
+/// (an unchanged reactivation on the same embedder) only has its `updated_at`
 /// advanced, avoiding a provider call; the rest are embedded in provider-sized
 /// calls and upserted. Each write is guarded on the artifact's observed
 /// `updated_at`, so an identity change racing the provider call leaves the row
@@ -224,12 +224,16 @@ pub async fn backfill_skill_embeddings(
         {
             to_embed.push((candidate, current_hash));
         } else {
-            // Identity unchanged since the last embed (a republish that did not
+            // Identity unchanged since the last embed (a reactivation that did not
             // touch name/description/tags): advance updated_at so it stops
             // re-selecting, without spending a provider call. Guarded on the
             // observed timestamp so a concurrent identity change is not masked.
             registry
-                .touch_skill_embedding(candidate.artifact_uid, candidate.artifact_updated_at)
+                .touch_skill_embedding(
+                    candidate.artifact_uid,
+                    candidate.revision_uid,
+                    candidate.artifact_updated_at,
+                )
                 .await?;
         }
     }
@@ -267,8 +271,7 @@ pub async fn backfill_skill_embeddings(
                 .set_skill_embedding(NewSkillEmbedding {
                     artifact_uid: candidate.artifact_uid,
                     revision_uid: candidate.revision_uid,
-                    storage_partition_id: candidate.storage_partition_id.as_deref(),
-                    user_id: candidate.user_id.as_deref(),
+                    storage_partition_id: candidate.storage_partition_id.as_str(),
                     embedding: &vector,
                     model: &model,
                     model_version,
@@ -294,7 +297,7 @@ mod tests {
     #[test]
     fn skill_identity_text_is_tag_order_independent() {
         // Pins: identity text sorts tags, so reordered tags hash identically and
-        // a republish that only reorders tags does not trigger a re-embed.
+        // a reactivation that only reorders tags does not trigger a re-embed.
         let a = skill_identity_text("deploy", "ship it", &["ops".into(), "cd".into()]);
         let b = skill_identity_text("deploy", "ship it", &["cd".into(), "ops".into()]);
         assert_eq!(a, b);

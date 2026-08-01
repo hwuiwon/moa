@@ -34,13 +34,22 @@ object, and queues the prompt through `Session/queue_message`. Tool routing,
 skills, memory, approvals, event logging, and learning emission are the same
 production path used by user sessions.
 
-`execution_run` targets identify a published skill's exact pinned
+`execution_run` targets identify an activated skill's exact pinned
 `execution_plan` template, plus input JSON, an optional session ID, and an
 idempotency key. Raw plan JSON and compiled plan IDs are not accepted. Starting
 a run validates its input, immutable goal contract, current capability catalog,
 and worst-case budget before any task is created. Missing input or unsupported
 capability returns a typed result. The experiment starts the common execution
 runtime and stores `execution_run_uid`.
+
+Experiment plans pin an exact certified simulator policy by `(policy_uid,
+revision)`. Admission resolves that revision and persists its immutable binding
+and component snapshot on the run and trials. Agent-loop simulator turns then
+re-resolve that exact revision, verify the persisted snapshot, and send the
+policy-owned provider, model, decoding controls, prompt, context contract, and
+strict response schema through the production provider gateway. Typed simulator
+decisions and the policy binding become part of terminal evidence. An
+`execution_run` target does not use the simulator and skips this lookup.
 
 ## Artifact Revisions
 
@@ -149,10 +158,20 @@ override is blocked in production environments.
 
 ## Live And Billed Gates
 
-There is no live-provider simulation lane today:
-`behavior_lab_simulation_e2e` runs only against scripted provider fixtures via
-`MOA_PROVIDERS_OVERRIDE=scripted:<fixture>`. Do not put live or billed
-experiment checks in the default test lane.
+The billed simulator lane is ignored by default and requires
+`MOA_RUN_LIVE_E2E=1`, `MOA_RUN_LIVE_PROVIDER_TESTS=1`, a positive
+`MOA_BEHAVIOR_LAB_BUDGET_USD`, and a supported provider credential. It registers
+and certifies a policy for the selected live model, admits a plan using that
+exact revision, executes a real multi-turn trial through Restate and the
+production provider gateway, and verifies the persisted trial and score.
+
+Run the complete clean live lane with:
+
+```bash
+./scripts/run-clean-e2e.sh --live --providers --long-eval --behavior-lab-live
+```
+
+Do not put live or billed experiment checks in the default test lane.
 
 ## Authorization
 

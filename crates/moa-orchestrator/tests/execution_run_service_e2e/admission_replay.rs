@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::execution_execution_support::fixtures::{
-    POLL_INTERVAL, SERVICE_TIMEOUT, await_execution_terminal, publish_skill, raw_events,
+    POLL_INTERVAL, SERVICE_TIMEOUT, activate_skill, await_execution_terminal, raw_events,
 };
 
 const SKILL_NAME: &str = "admission-replay-output";
@@ -39,7 +39,7 @@ pub(crate) async fn run_execution_template_admission_replay() -> Result<()> {
     let test = fixture.isolated().await;
     let session_id = test.create_session("admission-replay").await?;
     let session = test.client().get_session(session_id).await?;
-    let published = publish_skill(
+    let activated = activate_skill(
         &fixture,
         test.client(),
         session.tenant_id,
@@ -53,8 +53,8 @@ pub(crate) async fn run_execution_template_admission_replay() -> Result<()> {
         contact_id: None,
         session_id,
         template: PinnedExecutionTemplateRef {
-            skill_ref: published.skill_ref,
-            revision_uid: published.revision_uid,
+            skill_ref: activated.skill_ref,
+            revision_uid: activated.revision_uid,
         },
         objective: OBJECTIVE.to_string(),
         input: json!({"result": "continued"}),

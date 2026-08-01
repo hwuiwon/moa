@@ -4,6 +4,11 @@ use std::{collections::BTreeMap, io::Read, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
+use moa_artifacts::{
+    document::ArtifactDocument,
+    registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile},
+};
+use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
@@ -1312,6 +1317,91 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         rows.iter()
             .any(|row| row["privacy_subject_provenance"] == "linked_contact")
     );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_export_includes_archived_skill_bytes_db_memory() {
+    // Pins: artifact lifecycle state controls serving, not subject-access
+    // visibility. An archived revision whose bytes are still retained must be
+    // exported when those bytes contain the privacy subject identifier.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let tenant_id = TenantId::from(tenant_id);
+    let subject = Uuid::now_v7();
+    let subject_user_id = subject.to_string();
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let document: ArtifactDocument = serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "skill",
+        "metadata": {
+            "name": format!("archived-privacy-skill-{}", Uuid::now_v7()),
+            "description": format!("retained subject {subject_user_id}")
+        },
+        "definition": {
+            "type": "skill",
+            "spec": {
+                "instructions": { "path": "SKILL.md" }
+            }
+        }
+    }))
+    .expect("valid privacy skill document");
+    let source = document.to_yaml().expect("serialize privacy skill");
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &[NewArtifactFile::new(
+                    "SKILL.md",
+                    format!("# Retained\nSubject: {subject_user_id}\n").into_bytes(),
+                )],
+            },
+        )
+        .await
+        .expect("create retained skill revision");
+    sqlx::query("UPDATE moa.artifact_revision SET status = 'archived' WHERE revision_uid = $1")
+        .bind(draft.revision_uid)
+        .execute(store.pool())
+        .await
+        .expect("archive retained revision");
+
+    let export_dir = tempdir().expect("tempdir");
+    let ctx = PrivacyExportContext {
+        pool: store.pool().clone(),
+        tenant_id,
+        storage_partition: Some(storage_partition_id),
+        subject_user: subject,
+        subject_user_id: subject_user_id.clone(),
+        subjects: vec![PrivacySubject::primary(subject_user_id.clone(), subject)],
+        reason: "subject access request".to_string(),
+        claims: valid_claims_for_user_id(&subject_user_id, tenant_id.0, "export"),
+    };
+    let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
+        .await
+        .expect("collect archived skill export");
+    let rows = tokio::fs::read_to_string(export_dir.path().join("skills.jsonl"))
+        .await
+        .expect("read skill export")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse skill row"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(counts["skills"], 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["revision_uid"], draft.revision_uid.to_string());
+    assert_eq!(rows[0]["status"], "archived");
+    assert_eq!(rows[0]["files"].as_array().map(Vec::len), Some(1));
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)

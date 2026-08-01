@@ -128,7 +128,11 @@ impl TestApiClient {
         decode_response(request.send().await.context("send orchestrator request")?).await
     }
 
-    async fn post_empty_call<Resp>(&self, path: &str) -> Result<Resp>
+    /// Sends an authenticated empty-body POST request and decodes a JSON response.
+    ///
+    /// Restate handlers with no request parameter reject a serialized unit value
+    /// (`null`); callers must omit the request body entirely.
+    pub async fn post_empty_call<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: serde::de::DeserializeOwned,
     {

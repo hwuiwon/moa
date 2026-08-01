@@ -226,6 +226,7 @@ impl Experiments for ExperimentsImpl {
             identity: accepted.identity,
             score_run_id: accepted.score_run_id,
             agent_revision_variants: accepted.agent_revision_variants,
+            release_evaluation: accepted.release_evaluation,
         };
         crate::restate_identity::replay_safe_request(
             ctx.workflow_client::<ExperimentRunClient>(workflow_request.run_uid.to_string())
@@ -571,6 +572,42 @@ async fn run_inner(
     request: ExperimentRunRequest,
     identity: Identity,
 ) -> Result<moa_experiments::app::AdmittedExperimentRun, HandlerError> {
+    if let Some(binding) = request.release_evaluation.as_ref() {
+        if request.target.is_some()
+            || request.variant.is_some()
+            || request.scorecard.is_some()
+            || request.score_run_id.is_some()
+            || !request.agent_revision_variants.is_empty()
+        {
+            return Err(TerminalError::new_with_code(
+                400,
+                "release evaluation must be an unmodified plan-backed run",
+            )
+            .into());
+        }
+        let plan_revision_uid = request.plan_revision_uid.ok_or_else(|| {
+            TerminalError::new_with_code(400, "release evaluation requires an approved plan")
+        })?;
+        let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
+            TerminalError::new_with_code(
+                400,
+                "release evaluation requires its dispatch idempotency key",
+            )
+        })?;
+        crate::workflows::artifact_release_evaluation::repository::ReleaseEvaluationRepository::new(
+            pool.clone(),
+        )
+        .validate_experiment_binding(
+            request.tenant_id,
+            plan_revision_uid,
+            idempotency_key,
+            binding,
+        )
+        .await
+        .map_err(
+            crate::workflows::artifact_release_evaluation::Error::terminal,
+        )?;
+    }
     admit_run(pool, request, identity)
         .await
         .map_err(experiment_app_error_to_handler_error)
@@ -750,6 +787,7 @@ impl AgentRevisionSimulationAccepted {
             identity: self.identity.clone(),
             score_run_id: self.score_run_id,
             agent_revision_variants: self.variants.clone(),
+            release_evaluation: None,
         }
     }
 }
@@ -775,6 +813,7 @@ pub async fn run_agent_revision_simulation_inner(
             score_run_id: None,
             idempotency_key: request.idempotency_key,
             agent_revision_variants: variants.clone(),
+            release_evaluation: None,
         },
         identity.clone(),
     )

@@ -1,20 +1,17 @@
-//! Restate service for cloud-owned skill import, export, and listing.
+//! Restate service for cloud-owned skill export and listing.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_authz_schema::Relation;
 use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_skills::package::{SkillPackage, SkillPackageFile};
-use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
+use moa_skills::registry::{Skill, SkillRegistry, StoredSkillPackage};
 use moa_wire::skills::{
-    SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
-    SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
-    SkillSummary,
+    SkillExportRequest, SkillExportResponse, SkillListRequest, SkillListResponse,
+    SkillPackageDocument, SkillPackageDocumentFile, SkillSummary,
 };
 use restate_sdk::prelude::*;
 
-use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::workflows::errors::moa_error_to_status_handler_error;
 
@@ -26,11 +23,6 @@ pub trait Skills {
     async fn export(
         request: Json<SkillExportRequest>,
     ) -> Result<Json<SkillExportResponse>, HandlerError>;
-
-    /// Imports tenant-scoped skill packages after the matching authz check.
-    async fn import(
-        request: Json<SkillImportRequest>,
-    ) -> Result<Json<SkillImportResponse>, HandlerError>;
 
     /// Lists visible tenant skills after a tenant operator check.
     async fn list(request: Json<SkillListRequest>)
@@ -67,25 +59,6 @@ impl Skills for SkillsImpl {
         Ok(ctx
             .run(|| async move { export_inner(pool, request).await.map(Json::from) })
             .name("skills_export")
-            .await?)
-    }
-
-    #[tracing::instrument(skip(self, ctx, request))]
-    async fn import(
-        &self,
-        ctx: Context<'_>,
-        request: Json<SkillImportRequest>,
-    ) -> Result<Json<SkillImportResponse>, HandlerError> {
-        crate::ctx::adopt_incoming_trace_parent(&ctx);
-        annotate_restate_handler_span("Skills", "import");
-        let request = request.into_inner();
-        let scope = authorized_import_scope(&ctx, request.scope).await?;
-        let packages = request.packages;
-
-        let pool = self.pool.clone();
-        Ok(ctx
-            .run(|| async move { import_inner(pool, scope, packages).await.map(Json::from) })
-            .name("skills_import")
             .await?)
     }
 
@@ -147,25 +120,6 @@ async fn export_inner(
     })
 }
 
-async fn import_inner(
-    pool: sqlx::PgPool,
-    scope: ActionRuleScope,
-    packages: Vec<SkillPackageDocument>,
-) -> Result<SkillImportResponse, HandlerError> {
-    let registry = skill_registry(pool);
-    let mut imported = 0_u64;
-    for package in packages {
-        let files = decode_skill_package_files(package.files)?;
-        let skill = NewSkill::from_package(scope, SkillPackage::new(files));
-        registry
-            .upsert_by_name(skill)
-            .await
-            .map_err(moa_error_to_status_handler_error)?;
-        imported = imported.saturating_add(1);
-    }
-    Ok(SkillImportResponse { scope, imported })
-}
-
 async fn list_inner(
     pool: sqlx::PgPool,
     request: SkillListRequest,
@@ -187,18 +141,6 @@ async fn list_inner(
 
 fn skill_registry(pool: sqlx::PgPool) -> SkillRegistry {
     SkillRegistry::new(pool)
-}
-
-async fn authorized_import_scope(
-    ctx: &impl RequestHeaders,
-    scope: ActionRuleScope,
-) -> Result<ActionRuleScope, HandlerError> {
-    match scope {
-        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
-            authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
-        }
-    }
-    Ok(scope)
 }
 
 fn reject_user_scoped_skill() -> HandlerError {
@@ -248,31 +190,6 @@ fn skill_package_document_from_stored(stored: StoredSkillPackage) -> SkillPackag
             "manifest": skill.manifest,
         }),
     }
-}
-
-fn decode_skill_package_files(
-    files: Vec<SkillPackageDocumentFile>,
-) -> Result<Vec<SkillPackageFile>, HandlerError> {
-    files
-        .into_iter()
-        .map(|file| {
-            let content = BASE64.decode(&file.content_base64).map_err(|error| {
-                HandlerError::from(TerminalError::new_with_code(
-                    400,
-                    format!(
-                        "skill package file `{}` content_base64 is invalid: {error}",
-                        file.path
-                    ),
-                ))
-            })?;
-            Ok(SkillPackageFile {
-                path: file.path,
-                content,
-                content_type: file.content_type,
-                executable: file.executable,
-            })
-        })
-        .collect()
 }
 
 fn memory_scope_from_skill(skill: &Skill) -> Result<ActionRuleScope, HandlerError> {

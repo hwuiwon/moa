@@ -2,6 +2,7 @@
 
 pub mod call_origin;
 pub mod injection;
+pub mod mcp_catalog_policy;
 pub mod mcp_credentials;
 pub mod mcp_egress;
 pub mod policies;
@@ -12,6 +13,10 @@ pub use injection::{
     ToolInputCanaryLeak, ToolInputCanaryScreening, apply_assessment, apply_owner_assessment,
     canary_system_message, classify_tool_output, inject_canary, new_canary_token,
     screen_tool_input_for_canary, wrap_untrusted_tool_output,
+};
+pub use mcp_catalog_policy::{
+    ConnectorCandidateFacts, ConnectorPolicyDefect, ConnectorPolicyReport, ConnectorPolicyWarning,
+    check_connector_policy,
 };
 pub use mcp_credentials::McpDeploymentCredentials;
 pub use mcp_egress::{McpEgressError, McpEgressGuard, McpEgressPolicy};

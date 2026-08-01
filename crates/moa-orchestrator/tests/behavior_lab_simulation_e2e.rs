@@ -29,10 +29,7 @@ use moa_experiments::{
 use moa_orchestrator::workflows::experiment_run::ExperimentRunWorkflowRequest;
 use moa_test_support::postgres::test_database_url;
 use moa_wire::{
-    artifacts::{
-        ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
-        ArtifactPublishResponse,
-    },
+    artifacts::{ArtifactImportRequest, ArtifactImportResponse},
     experiments::{ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusResponse},
 };
 use serde_json::{Value, json};
@@ -126,10 +123,10 @@ async fn execution_template_run_target_tenant_scoped_internal_session() -> Resul
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        let published = publish_execution_template(&client, ingress, &identity, scope).await?;
+        let activated = activate_execution_template(&client, ingress, &identity, scope).await?;
         let objective = "Resolve tenant case TENANT-42 through the pinned execution template.";
         let (target, variant) = execution_template_fixture(
-            published.revision_uid,
+            activated.revision_uid,
             objective,
             json!({"case_id": "TENANT-42", "resolution": "replacement"}),
         );
@@ -194,7 +191,8 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
     let client = reqwest::Client::new();
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
-    let scope = ActionRuleScope::Contact {
+    let artifact_scope = ActionRuleScope::Tenant { tenant_id };
+    let run_scope = ActionRuleScope::Contact {
         tenant_id,
         contact_id,
     };
@@ -205,10 +203,14 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        let published = publish_execution_template(&client, ingress, &identity, scope).await?;
+        // Execution-template skills are tenant release subjects. The experiment
+        // run, its internal session, and its common execution run retain the
+        // narrower contact scope independently.
+        let activated =
+            activate_execution_template(&client, ingress, &identity, artifact_scope).await?;
         let objective = "Resolve contact case CONTACT-42 without widening its storage scope.";
         let (target, variant) = execution_template_fixture(
-            published.revision_uid,
+            activated.revision_uid,
             objective,
             json!({"case_id": "CONTACT-42", "resolution": "credit"}),
         );
@@ -218,11 +220,12 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
         let score_run_id = Uuid::now_v7();
         let run = ExperimentStore::new(pool.clone())
             .insert_run(
-                &scope,
+                &run_scope,
                 NewExperimentRun {
                     plan_artifact_uid: None,
                     expected_trials: 1,
                     resource_envelope: fixture_experiment_envelope(),
+                    simulator_policy: None,
                     name: "contact-scoped-template-experiment".to_string(),
                     target: target.clone(),
                     variant: variant.clone(),
@@ -230,7 +233,7 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
                     score_run_id,
                     session_id: None,
                     execution_run_uid: None,
-                    artifact_revision_uids: vec![published.revision_uid],
+                    artifact_revision_uids: vec![activated.revision_uid],
                     idempotency_key: Some(format!(
                         "contact-template-experiment-{}",
                         Uuid::now_v7()
@@ -250,6 +253,7 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
             identity: identity.clone(),
             score_run_id,
             agent_revision_variants: Vec::new(),
+            release_evaluation: None,
         };
         let workflow_service = format!("ExperimentRun/{}", run.run_uid);
         let workflow_response = post_json_with_identity(
@@ -302,12 +306,12 @@ struct ExecutionDelivery {
     started: ExecutionRunStarted,
 }
 
-async fn publish_execution_template(
+async fn activate_execution_template(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     scope: ActionRuleScope,
-) -> Result<ArtifactPublishResponse> {
+) -> Result<ArtifactImportResponse> {
     let imported = post_json_with_identity(
         client,
         ingress,
@@ -326,25 +330,24 @@ async fn publish_execution_template(
     .await
     .context("deserialize execution-template artifact import")?;
     assert_eq!(imported.status, "draft");
+    assert_validation_report_has_no_errors(&imported.validation_report)?;
 
-    let published = post_json_with_identity(
-        client,
-        ingress,
-        "Artifacts",
-        "publish",
-        identity,
-        &ArtifactPublishRequest {
-            scope,
-            revision_uid: imported.revision_uid,
+    let pool = PgPool::connect(&test_database_url())
+        .await
+        .context("connect for execution-template activation")?;
+    let release_scope = moa_artifacts::release::TenantScope::from_action_rule_scope(&scope)?;
+    moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        release_scope,
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: imported.artifact_uid,
         },
+        imported.revision_uid,
     )
-    .await?
-    .json::<ArtifactPublishResponse>()
     .await
-    .context("deserialize execution-template artifact publish")?;
-    assert_eq!(published.status, "published");
-    assert_validation_report_has_no_errors(&published.validation_report)?;
-    Ok(published)
+    .context("activate execution-template skill through the release path")?;
+    pool.close().await;
+    Ok(imported)
 }
 
 fn execution_template_fixture(
@@ -393,6 +396,7 @@ async fn run_tenant_experiment(
         score_run_id: None,
         idempotency_key: Some(format!("tenant-template-experiment-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
+        release_evaluation: None,
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
         .await?
@@ -508,13 +512,37 @@ async fn fetch_events(
         .await
         .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
     if status == reqwest::StatusCode::FORBIDDEN {
-        let session_exists =
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = $1)")
+        let contact_id =
+            sqlx::query_scalar::<_, Option<Uuid>>("SELECT contact_id FROM sessions WHERE id = $1")
                 .bind(session_id.0)
-                .fetch_one(pool)
+                .fetch_optional(pool)
                 .await
                 .context("check whether the deterministic experiment session exists")?;
-        if !session_exists {
+        let Some(contact_id) = contact_id else {
+            return Ok(None);
+        };
+
+        // Session creation commits its row and complete authorization outbox
+        // set atomically, then synchronously flushes those receipts to OpenFGA.
+        // A poll can land inside that visibility window. Retry only when the
+        // complete expected receipt set exists and none is dead-lettered; a
+        // missing or terminal receipt remains an immediate test failure.
+        let tuple_object = format!("session:{session_id}");
+        let (receipt_count, dead_letter_count) = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT
+                COUNT(*)::BIGINT,
+                COUNT(*) FILTER (WHERE status = 'dead_letter')::BIGINT
+            FROM authz_outbox
+            WHERE tuple_object = $1
+            "#,
+        )
+        .bind(tuple_object)
+        .fetch_one(pool)
+        .await
+        .context("inspect deterministic experiment session authorization receipts")?;
+        let expected_receipts = if contact_id.is_some() { 3 } else { 2 };
+        if receipt_count >= expected_receipts && dead_letter_count == 0 {
             return Ok(None);
         }
     }

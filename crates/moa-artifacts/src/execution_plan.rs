@@ -223,7 +223,7 @@ pub enum MapTask {
     Agent {
         /// Instructions supplied to each agent task.
         instructions: String,
-        /// Published skill artifacts available to each agent task.
+        /// Activated skill artifacts available to each agent task.
         skill_refs: Vec<ArtifactRef>,
         /// Governed capabilities available to each agent task.
         capability_refs: Vec<CapabilityReference>,
@@ -245,7 +245,7 @@ pub enum ExecutionReducer {
     Agent {
         /// Instructions supplied to each reducer agent task.
         instructions: String,
-        /// Published skill artifacts available to the reducer.
+        /// Activated skill artifacts available to the reducer.
         skill_refs: Vec<ArtifactRef>,
         /// Governed capabilities available to the reducer.
         capability_refs: Vec<CapabilityReference>,
@@ -267,7 +267,7 @@ pub enum ExecutionOperation {
     Agent {
         /// Instructions supplied to the agent task.
         instructions: String,
-        /// Published skill artifacts available to the agent task.
+        /// Activated skill artifacts available to the agent task.
         skill_refs: Vec<ArtifactRef>,
         /// Governed capabilities available to the agent task.
         capability_refs: Vec<CapabilityReference>,
@@ -487,7 +487,7 @@ pub enum PlanAmendmentOperation {
     },
 }
 
-/// Reusable goal semantics stored alongside a published skill plan template.
+/// Reusable goal semantics stored alongside an activated skill plan template.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionGoalTemplate {

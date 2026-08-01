@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "context_compaction_under_sustained_token_pressure"
 description = "Recorded sustained-token-pressure session that forces compaction and verifies error preservation."
 default_timeout_seconds = 90

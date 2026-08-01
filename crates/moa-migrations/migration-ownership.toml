@@ -279,6 +279,7 @@ owner = "moa-agents"
 name = "agent_installation"
 schema = "moa"
 owner = "moa-agents"
+notes = "The agent serving pointer. serving_pointer_version and activation_attestation_uid make deploy an attested compare-and-set owned by moa-artifacts release control."
 
 [[table]]
 name = "artifact"
@@ -299,6 +300,72 @@ owner = "moa-artifacts"
 name = "artifact_revision"
 schema = "moa"
 owner = "moa-artifacts"
+
+[[table]]
+name = "artifact_serving_pointer"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-skills", "moa-agents", "moa-orchestrator"]
+notes = "The exact revision a tenant serves for one release-gated artifact. Moved only by the activation repository transaction; every normal skill/action resolver reads it instead of a revision status."
+
+[[table]]
+name = "artifact_release_policy"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-orchestrator"]
+notes = "Server-resolved release gate. Platform defaults are global-scope rows no tenant role can write, which is the database-level reason a candidate submitter cannot weaken its own gate."
+
+[[table]]
+name = "artifact_release_candidate"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-orchestrator"]
+notes = "Release attempt bookkeeping per candidate revision: exact evaluation subject, resolved policy, and coalescing slot. Candidate lifecycle state lives in artifact_revision.status."
+
+[[table]]
+name = "artifact_activation_attestation"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-orchestrator"]
+notes = "Immutable, expiring, single-use permission to move one serving pointer. UPDATE is refused except for the first consumption."
+
+[[table]]
+name = "artifact_activation_audit"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-orchestrator"]
+notes = "Append-only during normal operation: one record per serving pointer move or rollback, written in the same transaction. Tenant erasure uses the owner-only exact-partition purge seam."
+
+[[table]]
+name = "artifact_release_dispatch_outbox"
+schema = "moa"
+owner = "moa-orchestrator"
+readers = ["moa-artifacts"]
+notes = "Durable release-evaluation dispatch record, written in the same transaction as candidate submission. At most one row per artifact may be open."
+
+[[table]]
+name = "artifact_release_case_pack"
+schema = "moa"
+owner = "moa-orchestrator"
+notes = "Versioned approved plan and scenario pack. Platform rows are global-scope and hidden rows are never returned to a tenant."
+
+[[table]]
+name = "artifact_release_fixture"
+schema = "moa"
+owner = "moa-orchestrator"
+notes = "Copy-on-write release-evaluation environment whose connector bindings cannot reference production credentials."
+
+[[table]]
+name = "artifact_release_eval_overlay"
+schema = "moa"
+owner = "moa-orchestrator"
+notes = "Evaluation-only exact revision overlay bound to a secret and one evaluation-owned session; normal serving resolution never reads it."
+
+[[table]]
+name = "artifact_release_attempt"
+schema = "moa"
+owner = "moa-orchestrator"
+notes = "Release-attempt and attestation review surface for hand-authored and learned artifacts."
 
 [[table]]
 name = "artifact_run"
@@ -346,6 +413,18 @@ owner = "moa-experiments"
 name = "experiment_trial"
 schema = "moa"
 owner = "moa-experiments"
+
+[[table]]
+name = "simulator_policy"
+schema = "moa"
+owner = "moa-experiments"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "simulator_fidelity_study"
+schema = "moa"
+owner = "moa-experiments"
+readers = ["moa-orchestrator"]
 
 [[table]]
 name = "experiment_resource_reservation"

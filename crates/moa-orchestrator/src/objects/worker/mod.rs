@@ -33,7 +33,7 @@ use moa_core::{
     types::worker::state::WorkerTerminalResult,
     types::worker::tool_schema::child_report_tool_schemas,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{ToolCatalogPin, ToolRouter};
 use moa_providers::ProviderRegistry;
 use moa_wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use restate_sdk::prelude::*;

@@ -196,3 +196,65 @@ async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> 
 
     Ok(())
 }
+
+#[tokio::test]
+async fn empty_store_pre_retrieval_control_scores_zero_db_memory() -> TestResult {
+    // Pins: the memory-retrieval suite's pre-retrieval null, run in its real lane.
+    // A live isolated tenant that has ingested nothing holds no Fact node, and the
+    // production per-probe scorer returns zero recall in every probe-type slice —
+    // so a candidate's recall is attributable to retrieval rather than to cases
+    // that were already scoreable.
+    assert!(
+        std::env::var_os("MOA_DATABASE_URL").is_some(),
+        "empty_store_pre_retrieval_control_scores_zero_db_memory requires MOA_DATABASE_URL \
+         (run via `cargo nextest run -p moa-eval --profile db-memory` with Postgres)"
+    );
+
+    let _guard = GOLD_RESOLUTION_TEST_LOCK.lock().await;
+    let corpus =
+        generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3], TranscriptStyle::Marked)
+            .expect("generate PR memory eval corpus");
+    let stack = GoldResolutionStack::up().await?;
+    let result = run_empty_store_control_case(&stack, &corpus.probes).await;
+    let cleanup = stack.cleanup().await;
+    result?;
+    cleanup
+}
+
+async fn run_empty_store_control_case(
+    stack: &GoldResolutionStack,
+    probes: &[moa_eval::memory_eval::Probe],
+) -> TestResult {
+    let storage_partition_id = gold_resolution_storage_partition_id("explicit", &stack.schema_name);
+    // Seeds only embedder state for the partition; it stores no graph content.
+    let _ctx = stack.ingest_ctx(&storage_partition_id).await?;
+    let runtime_storage_partition_id =
+        tenant_id_from_storage_partition_id(&storage_partition_id).to_string();
+
+    let scope = RlsContext::tenant(tenant_id_from_storage_partition_id(&storage_partition_id));
+    let mut conn = ScopedConn::begin(&stack.pool, &scope).await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await?;
+    let fact_nodes = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.node_index \
+         WHERE storage_partition_id = $1 AND label = 'Fact'",
+    )
+    .bind(&runtime_storage_partition_id)
+    .fetch_one(conn.as_mut())
+    .await?;
+    conn.commit().await?;
+    assert_eq!(fact_nodes, 0, "a freshly created tenant must hold no facts");
+
+    let scores = moa_eval::controls::memory_retrieval::recall_at_4_by_probe_type(
+        &moa_eval::controls::memory_retrieval::pre_retrieval_probe_results(probes),
+    );
+    assert!(!scores.is_empty(), "control produced no probe-type slices");
+    for (slice, score) in &scores {
+        assert_eq!(
+            *score, 0.0,
+            "pre-retrieval slice {slice} scored {score} with an empty store"
+        );
+    }
+    Ok(())
+}

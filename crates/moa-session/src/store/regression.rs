@@ -3,7 +3,8 @@
 //! These read-only aggregates back the background monitor that turns a silently
 //! rotting promoted skill into a reviewed rollback proposal. They join the
 //! append-only `learning_log` (promotion events) against `task_segments`
-//! (post-promotion usage) and `moa.artifact_revision` (the revision to restore),
+//! (post-promotion usage) and `moa.artifact_revision` (the exact activated and
+//! prior serving revisions),
 //! keeping all rate-comparison logic in `moa-skills` and the I/O here.
 
 use chrono::{DateTime, Utc};
@@ -13,9 +14,9 @@ use super::*;
 /// One recently promoted skill discovered from the learning log.
 ///
 /// Each row is a `skill_created` or `skill_improved` promotion whose resolution
-/// rate the monitor should re-check. `previous_revision_uid` is the highest
-/// published revision below the promoted one — the revision a rollback restores
-/// — and is `None` for a created skill with no prior published revision.
+/// rate the monitor should re-check. `previous_revision_uid` is the exact
+/// predecessor recorded by the activation audit and supplies the comparison
+/// baseline; rollback itself unserves rather than restoring it implicitly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentSkillPromotion {
     /// Tenant that owns the promotion.
@@ -26,12 +27,16 @@ pub struct RecentSkillPromotion {
     pub operation: String,
     /// Artifact row backing the skill.
     pub artifact_uid: Uuid,
-    /// Published revision installed by the promotion.
+    /// Activated revision installed by the promotion.
     pub promoted_revision_uid: Uuid,
-    /// Prior published revision to restore on rollback, when one exists.
+    /// Prior serving revision recorded by activation history, when one exists.
     pub previous_revision_uid: Option<Uuid>,
     /// Learning candidate that produced the promotion.
     pub promotion_candidate_id: Uuid,
+    /// Exact activation transition the monitor observed for this promotion.
+    pub activation_audit_uid: Uuid,
+    /// Serving-pointer epoch installed by that activation.
+    pub activated_pointer_version: i64,
     /// Time the promotion became valid.
     pub promoted_at: DateTime<Utc>,
 }
@@ -77,8 +82,11 @@ impl PostgresSessionStore {
     /// first.
     ///
     /// Exactly one row is returned per skill — the promotion installing the
-    /// currently-serving (highest-version published) revision — so the monitor
-    /// only ever judges the revision that is actually serving. Earlier
+    /// currently-serving revision — so the monitor only ever judges the revision
+    /// that is actually serving. The predecessor comes from the activation audit
+    /// row that installed the promoted revision, which names the exact revision
+    /// that was serving before it; inferring it from "highest lower version" would
+    /// name a revision that may never have served at all. Earlier
     /// promotions of the same skill are excluded: measuring a superseded
     /// promotion's post-window (open-ended, so it would fold in the newer
     /// revision's outcomes) produced regression proposals against revisions that
@@ -102,34 +110,37 @@ impl PostgresSessionStore {
                  latest.promoted_revision_uid, \
                  latest.promotion_candidate_id, \
                  latest.promoted_at, \
-                 latest.previous_revision_uid \
+                 latest.previous_revision_uid, \
+                 latest.activation_audit_uid, \
+                 latest.activated_pointer_version \
              FROM ( \
                  SELECT DISTINCT ON (l.target_label) \
                      l.target_label AS skill_name, \
                      l.learning_type AS operation, \
                      (l.payload->>'artifact_uid')::uuid AS artifact_uid, \
-                     (l.payload->>'published_artifact_revision_uid')::uuid AS promoted_revision_uid, \
+                     (l.payload->>'activated_artifact_revision_uid')::uuid AS promoted_revision_uid, \
                      (l.payload->>'candidate_id')::uuid AS promotion_candidate_id, \
                      l.valid_from AS promoted_at, \
                      promoted.version AS promoted_version, \
-                     prev.revision_uid AS previous_revision_uid \
+                     activation.previous_revision_uid AS previous_revision_uid, \
+                     activation.audit_uid AS activation_audit_uid, \
+                     activation.activated_pointer_version AS activated_pointer_version \
                  FROM {learning_log} l \
                  LEFT JOIN LATERAL ( \
                      SELECT rp.version \
                      FROM moa.artifact_revision rp \
-                     WHERE rp.revision_uid = (l.payload->>'published_artifact_revision_uid')::uuid \
+                     WHERE rp.revision_uid = (l.payload->>'activated_artifact_revision_uid')::uuid \
                  ) promoted ON TRUE \
                  LEFT JOIN LATERAL ( \
-                     SELECT r2.revision_uid \
-                     FROM moa.artifact_revision r2 \
-                     WHERE r2.artifact_uid = (l.payload->>'artifact_uid')::uuid \
-                       AND r2.status = 'published' \
-                       AND r2.valid_to IS NULL \
-                       AND r2.revision_uid <> (l.payload->>'published_artifact_revision_uid')::uuid \
-                       AND r2.version < promoted.version \
-                     ORDER BY r2.version DESC \
+                     SELECT audit.audit_uid, audit.previous_revision_uid, \
+                            audit.activated_pointer_version \
+                     FROM moa.artifact_activation_audit audit \
+                     WHERE audit.audit_uid = (l.payload->>'activation_audit_uid')::uuid \
+                       AND audit.activated_revision_uid = (l.payload->>'activated_artifact_revision_uid')::uuid \
+                       AND audit.activated_pointer_version = (l.payload->>'activated_pointer_version')::bigint \
+                       AND audit.decision_kind = 'activation' \
                      LIMIT 1 \
-                 ) prev ON TRUE \
+                 ) activation ON TRUE \
                  WHERE l.tenant_id = $1 \
                    AND l.learning_type IN ('skill_created', 'skill_improved') \
                    AND l.valid_to IS NULL \
@@ -155,16 +166,26 @@ impl PostgresSessionStore {
             let promotion_candidate_id: Option<Uuid> = row
                 .try_get("promotion_candidate_id")
                 .map_err(map_sqlx_error)?;
+            let activation_audit_uid: Option<Uuid> = row
+                .try_get("activation_audit_uid")
+                .map_err(map_sqlx_error)?;
+            let activated_pointer_version: Option<i64> = row
+                .try_get("activated_pointer_version")
+                .map_err(map_sqlx_error)?;
             let (
                 Some(skill_name),
                 Some(artifact_uid),
                 Some(promoted_revision_uid),
                 Some(promotion_candidate_id),
+                Some(activation_audit_uid),
+                Some(activated_pointer_version),
             ) = (
                 skill_name,
                 artifact_uid,
                 promoted_revision_uid,
                 promotion_candidate_id,
+                activation_audit_uid,
+                activated_pointer_version,
             )
             else {
                 continue;
@@ -179,6 +200,8 @@ impl PostgresSessionStore {
                     .try_get("previous_revision_uid")
                     .map_err(map_sqlx_error)?,
                 promotion_candidate_id,
+                activation_audit_uid,
+                activated_pointer_version,
                 promoted_at: row.try_get("promoted_at").map_err(map_sqlx_error)?,
             });
         }

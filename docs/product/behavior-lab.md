@@ -60,7 +60,7 @@ and agents, but exposes one artifact kind:
 
 | Kind | Purpose |
 |---|---|
-| `experiment_plan` | Trial matrix, variants, simulator model, budgets, scorecard, and learning proposal settings |
+| `experiment_plan` | Trial matrix, variants, pinned simulator policy, budgets, scorecard, and learning proposal settings |
 
 Simulation inputs are typed embedded blocks under
 `definition.spec.simulation`:
@@ -75,6 +75,13 @@ Simulation inputs are typed embedded blocks under
 Each block has a stable `id`. Trial rows, score breakdowns, analytics, and UI
 state refer to these IDs, while `artifact_revision_uids` pin the exact
 `experiment_plan` bytes used for the run.
+
+Every plan also pins an exact simulator policy by `(policy_uid, revision)`.
+Admission resolves only a currently certified policy and stores its immutable
+binding and component snapshot on the experiment run and every simulator trial.
+The snapshot owns the provider, model, decoding controls, system prompt,
+structured response protocol, and context contract; plan authors cannot
+override those certified runtime controls.
 
 Postgres stores the canonical artifact document as JSON. YAML is an
 authoring/import/export format only; importing YAML produces the same typed
@@ -101,9 +108,16 @@ the pinned plan revision, selected persona/profile/scenario/data-bundle IDs,
 simulator settings, target session or execution-run links, trial score run ID,
 stop reason, and trace ID.
 
+Before a simulator turn, `ExperimentTrialRun` reloads the pinned plan and exact
+policy revision, verifies both against the stored trial snapshot, and dispatches
+the request through the production provider gateway. Simulator output uses the
+policy's strict typed decision schema, and the decision plus policy binding are
+included in terminal evidence. Execution-run targets do not invoke a simulator,
+so they do not resolve or consume simulator context.
+
 Targets are `agent_loop` or `execution_run`. Agent-loop targets enter normal
 `respond`/`act`/`run` routing through `TurnExecution`. Execution-run targets pin
-a published skill's exact `execution_plan` template revision and use the same
+an activated skill's exact `execution_plan` template revision and use the same
 `ExecutionRun`/`ExecutionTask` runtime as user work. Live trials never publish
 generated plans or mutate skill revisions.
 
@@ -112,6 +126,12 @@ summaries plus trial rollups and scenario breakdowns. `Experiments/compare`
 returns run comparisons plus scenario and variant deltas. Direct edge analytics
 routes own broader product insights; clients should not query raw SQL from the
 UI.
+
+Blocking group rollups count independent modeled cases by the exact
+`scenario_id` + `persona_id` + `profile_id` tuple. Variants and repetitions add
+observations, not independent support. Every rollup exposes the observed and
+required independent-unit counts plus a typed support status; missing case
+identity leaves the group `incomplete`.
 
 Experiment-derived improvements cross one explicit review boundary:
 `Experiments/propose_improvements` creates proposed `learning_candidates` and
@@ -155,5 +175,9 @@ cargo nextest run -p moa-orchestrator \
   --run-ignored ignored-only
 ```
 
-There is no live-provider simulation lane: these e2e tests run scripted
-provider fixtures only.
+The billed production-provider lane is opt-in and requires the live flags,
+provider credentials, and an explicit Behavior Lab budget:
+
+```bash
+./scripts/run-clean-e2e.sh --live --providers --long-eval --behavior-lab-live
+```

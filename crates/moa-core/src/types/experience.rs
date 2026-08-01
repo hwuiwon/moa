@@ -358,7 +358,7 @@ impl LearningCandidateStatus {
 pub enum LearningProposalKind {
     /// A generated skill draft with a real draft revision and an accept path.
     SkillDraft,
-    /// A proposal to archive a regressed published revision.
+    /// A proposal to archive a regressed activated revision.
     SkillRollback,
     /// A memory observation surfaced for reading only.
     MemoryAdvisory,
@@ -599,7 +599,7 @@ impl LearningCandidateSource {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum LearningReviewDecision {
-    /// A skill draft was accepted and its artifact published.
+    /// A skill draft was accepted and its artifact activated.
     AcceptedSkill,
     /// A rollback proposal was accepted and its revision archived.
     AcceptedRollback,
@@ -642,6 +642,12 @@ pub struct LearningCandidateDecisionRecord {
     /// Free-text reason recorded with the decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Canonical review-action digest for deterministic terminal replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_digest: Option<Vec<u8>>,
+    /// Exact response returned by the terminal action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Value>,
     /// Time the decision was recorded.
     pub decided_at: DateTime<Utc>,
 }

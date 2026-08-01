@@ -119,16 +119,17 @@ fn skill_definition_to_package_replaces_skill_moa_yaml() {
 }
 
 #[test]
-fn published_skill_artifact_revision_files_convert_to_skill_package() {
-    // Pins: accepted skill artifacts can be materialized back into package rows.
+fn executable_skill_artifact_revision_files_convert_to_skill_package() {
+    // Pins: ready and superseded skill artifacts remain materializable, while
+    // rollback-archived package bytes are audit-only and non-executable.
     let original = SkillPackage::from_skill_markdown(SKILL_MD.to_string())
         .validate()
         .expect("valid skill package");
-    let document = skill_artifact_document_from_package(&original, ArtifactStatus::Published)
+    let document = skill_artifact_document_from_package(&original, ArtifactStatus::Ready)
         .expect("skill artifact document");
     let now = moa_test_support::fixtures::pg_now();
     let tenant_id = uuid::Uuid::now_v7();
-    let revision = StoredArtifactRevision {
+    let mut revision = StoredArtifactRevision {
         artifact_uid: Uuid::now_v7(),
         revision_uid: Uuid::now_v7(),
         storage_partition_id: Some(
@@ -146,7 +147,7 @@ fn published_skill_artifact_revision_files_convert_to_skill_package() {
         canonical_hash: Vec::new(),
         source_format: "yaml".to_string(),
         source_text: Vec::new(),
-        status: ArtifactStatus::Published,
+        status: ArtifactStatus::Ready,
         validation_report: serde_json::json!({}),
         version: 1,
         published_at: Some(now),
@@ -164,7 +165,7 @@ fn published_skill_artifact_revision_files_convert_to_skill_package() {
         file_size_bytes: SKILL_MD.len() as i64,
     }];
 
-    let package = skill_package_from_artifact_revision(&revision, files)
+    let package = skill_package_from_artifact_revision(&revision, files.clone())
         .expect("package from artifact revision")
         .validate()
         .expect("converted package validates");
@@ -176,5 +177,20 @@ fn published_skill_artifact_revision_files_convert_to_skill_package() {
             .files
             .iter()
             .any(|file| file.path == SKILL_ARTIFACT_PATH)
+    );
+
+    revision.status = ArtifactStatus::Superseded;
+    skill_package_from_artifact_revision(&revision, files.clone())
+        .expect("superseded exact skill package remains executable");
+
+    revision.status = ArtifactStatus::Archived;
+    let error = skill_package_from_artifact_revision(&revision, files)
+        .expect_err("archived exact skill package must be non-executable");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "artifact revision {} is archived and is not executable skill content",
+            revision.revision_uid
+        )
     );
 }

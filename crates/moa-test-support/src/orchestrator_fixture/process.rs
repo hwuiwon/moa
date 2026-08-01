@@ -196,6 +196,11 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env_remove("MOA_OBSERVABILITY_RELEASE")
         .env_remove("MOA_METRICS_EXPORTER")
         .env_remove("MOA_METRICS_PROMETHEUS_LISTEN")
+        // Internal fixtures use the deterministic heuristic classifier unless
+        // a test explicitly supplies a sidecar through `extra_env`. Inheriting
+        // a developer or parent runner's optional endpoint makes an otherwise
+        // hermetic child depend on external availability and load.
+        .env_remove("MOA_PII_SERVICE_URL")
         .env_remove("OTEL_METRIC_EXPORT_INTERVAL")
         .arg("--port")
         .arg(config.port.to_string())

@@ -46,7 +46,7 @@ use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_definition_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
-use moa_skills::registry::SkillRegistry;
+use moa_skills::registry::StoredSkillPackage;
 use moa_skills::regression::{SkillRegressionSummary, compare_scores};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -94,7 +94,7 @@ impl SkillRegressionExecution {
 pub struct SkillRegressionGate {
     /// Structured report to attach to the candidate evaluation payload.
     pub report: Value,
-    /// Whether review acceptance may continue to publish and materialize the skill.
+    /// Whether review acceptance may continue to activate and materialize the skill.
     pub allow_promotion: bool,
     /// Human-readable rejection reason when regression blocks promotion.
     pub rejection_reason: Option<String>,
@@ -148,13 +148,14 @@ pub struct SkillRegressionCompileContext {
     pub draft: StoredArtifactRevision,
     /// Files belonging to the exact draft revision.
     pub draft_files: Vec<ArtifactFile>,
+    /// Exact serving package captured before regression execution, if one served.
+    pub previous_package: Option<StoredSkillPackage>,
 }
 
 /// Builds the review-time regression report for accepting a skill candidate.
 pub async fn skill_acceptance_regression_report(
     config: MoaConfig,
     providers: Arc<ProviderRegistry>,
-    registry: SkillRegistry,
     store: Arc<PostgresSessionStore>,
     scope: ActionRuleScope,
     candidate: LearningCandidate,
@@ -194,7 +195,7 @@ pub async fn skill_acceptance_regression_report(
         ));
     };
 
-    let previous_package = registry.load_package_by_name(&scope, &skill_name).await?;
+    let previous_package = compile_context.previous_package;
     let previous_skill = previous_package
         .as_ref()
         .map(|package| previous_skill_payload(&package.skill));

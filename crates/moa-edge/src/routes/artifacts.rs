@@ -24,9 +24,6 @@ pub(super) fn translate(
         "/v1/skills/export" => {
             translate_json_object_with_tenant_id(body, "/Skills/export", tenant_id)
         }
-        "/v1/skills/import" => {
-            translate_json_object_with_tenant_scope(body, "/Skills/import", tenant_id)
-        }
         "/v1/skills/list" => translate_json_object_with_tenant_id(body, "/Skills/list", tenant_id),
         "/v1/capabilities/list" => {
             translate_json_object_with_tenant_id(body, "/Execution/list_capabilities", tenant_id)
@@ -196,14 +193,6 @@ mod tests {
                 serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
             (
-                "/v1/skills/import",
-                "/Skills/import",
-                serde_json::json!({
-                    "scope": test_tenant_scope_json(),
-                    "packages": []
-                }),
-            ),
-            (
                 "/v1/skills/list",
                 "/Skills/list",
                 serde_json::json!({ "tenant_id": test_tenant_json() }),
@@ -220,9 +209,6 @@ mod tests {
             let mut input_body = expected_body.clone();
             let object = input_body.as_object_mut().expect("expected body is object");
             object.remove("tenant_id");
-            if public_path == "/v1/skills/import" {
-                object.remove("scope");
-            }
             let body = Bytes::from(input_body.to_string());
 
             let translation = translate(&Method::POST, &uri, &body);
@@ -247,6 +233,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn manual_skill_import_route_is_not_exposed() {
+        // Pins: generic artifact import already owns draft authoring, so the edge must
+        // not expose a second skill-specific route that implies a manual release path.
+        let uri = "/v1/skills/import"
+            .parse::<Uri>()
+            .expect("skill import route should parse");
+        assert_eq!(
+            translate(
+                &Method::POST,
+                &uri,
+                &Bytes::from_static(br#"{"packages":[]}"#)
+            ),
+            RouteTranslation::NotFound
+        );
     }
 
     #[test]
@@ -430,8 +433,8 @@ mod tests {
                 }),
             ),
             // Rollback and dismiss reach their OWN handlers. If either collapsed
-            // onto accept_skill, accepting a rollback would run the draft-publish
-            // path against a revision nobody proposed publishing.
+            // onto accept_skill, accepting a rollback would run the learned-skill
+            // activation path against a revision nobody proposed activating.
             (
                 "/v1/learning-candidates/accept-rollback",
                 "/LearningReview/accept_rollback",

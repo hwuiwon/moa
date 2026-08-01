@@ -524,7 +524,7 @@ pub enum LogicalTaskKind {
     Agent {
         /// Agent instructions.
         instructions: String,
-        /// Published skills available to the task.
+        /// Activated skills available to the task.
         skill_refs: Vec<ArtifactRef>,
         /// Governed capabilities available to the task.
         capability_refs: Vec<CapabilityReference>,

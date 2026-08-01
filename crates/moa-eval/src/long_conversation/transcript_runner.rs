@@ -21,10 +21,10 @@ use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore,
     types::completion::CompletionRequest, types::completion::CompletionStream,
     types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::experience::AttributionSubjectType, types::identifiers::SessionId,
-    types::model::ModelCapabilities, types::segment_assessment::AssessmentPhase,
-    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
-    types::segment_assessment::SegmentEvidenceKind,
+    types::experience::AttributionSubjectType, types::experience::LearningCandidateSourceRef,
+    types::identifiers::SessionId, types::model::ModelCapabilities,
+    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
     types::session::SessionMeta,
@@ -898,6 +898,7 @@ async fn collect_learning_summary(
 ) -> Result<LearningRunSummary> {
     let mut experience_count = 0usize;
     let mut attribution_count = 0usize;
+    let mut experience_ids = BTreeSet::new();
     let mut skill_subjects = BTreeSet::new();
     for session_id in session_ids {
         let experiences = environment
@@ -906,6 +907,7 @@ async fn collect_learning_summary(
             .await?;
         experience_count += experiences.len();
         for experience in experiences {
+            experience_ids.insert(experience.id);
             let attributions = environment
                 .experience_store
                 .list_experience_attributions(experience.id)
@@ -926,16 +928,32 @@ async fn collect_learning_summary(
         }
     }
 
-    let candidates = environment
+    let candidate_count = environment
         .learning_candidate_store
         .list_learning_candidates(environment.storage_partition_id.as_str(), None, 256)
-        .await?;
+        .await?
+        .iter()
+        .filter(|candidate| candidate_references_experience(&candidate.sources, &experience_ids))
+        .count();
 
     Ok(LearningRunSummary {
         experience_count,
         attribution_count,
-        candidate_count: candidates.len(),
+        candidate_count,
         task_strategy_skill_subjects: skill_subjects.into_iter().collect(),
+    })
+}
+
+fn candidate_references_experience(
+    sources: &[LearningCandidateSourceRef],
+    experience_ids: &BTreeSet<Uuid>,
+) -> bool {
+    sources.iter().any(|source| {
+        matches!(
+            source,
+            LearningCandidateSourceRef::Experience { experience_id }
+                if experience_ids.contains(experience_id)
+        )
     })
 }
 
@@ -1588,6 +1606,28 @@ mod tests {
     use super::super::memory_metrics::test_session_store::RecordingSessionStore;
     use super::*;
     use moa_eval_core::EvalMetrics;
+
+    #[test]
+    fn learning_summary_counts_only_candidates_from_scenario_experiences() {
+        // Pins: seeded skill-review candidates share the eval tenant but must not inflate
+        // the learning summary for experience records created by this scenario.
+        let scenario_experience = Uuid::now_v7();
+        let seeded_skill_experience = Uuid::now_v7();
+        let experience_ids = BTreeSet::from([scenario_experience]);
+
+        assert!(candidate_references_experience(
+            &[LearningCandidateSourceRef::Experience {
+                experience_id: scenario_experience,
+            }],
+            &experience_ids,
+        ));
+        assert!(!candidate_references_experience(
+            &[LearningCandidateSourceRef::Experience {
+                experience_id: seeded_skill_experience,
+            }],
+            &experience_ids,
+        ));
+    }
 
     fn cache_report_record(
         session_id: SessionId,

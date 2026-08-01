@@ -7,9 +7,10 @@ use moa_artifacts::agent::{
     ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicyMode,
 };
 use moa_artifacts::canonical::canonical_hash;
-use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
+use moa_artifacts::document::{ArtifactDefinition, ArtifactKind};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifactRevision};
+use moa_artifacts::release::{EvalOverlayBinding, ReleaseState};
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
     types::agent::AgentActionPolicy, types::agent::AgentContext,
@@ -27,7 +28,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, types::Json};
 use uuid::Uuid;
 
-use crate::definition::AgentInstallationPointer;
+use crate::definition::{AgentInstallationBinding, AgentInstallationPointer};
 use crate::policy::AgentRuntimePolicy;
 
 /// Postgres-backed configured-agent resolver.
@@ -56,26 +57,120 @@ impl AgentResolver {
                     "agent installation {installation_uid} not found or not visible"
                 ))
             })?;
-        self.resolve_revision_with_pointer(scope, pointer).await
+        self.resolve_revision_with_pointer(scope, pointer, None)
+            .await
     }
 
-    /// Resolves an exact published agent revision without moving any deployment pointer.
+    /// Resolves an active installation while substituting release-evaluation revisions.
+    ///
+    /// The overlay is evaluation-only. Supplying one recomputes the dependency
+    /// lock from the installed agent revision instead of reusing the production
+    /// deployment lock, then the resulting exact lock is persisted on the eval
+    /// session like any other agent context.
+    pub async fn resolve_installation_with_overlay(
+        &self,
+        scope: &ActionRuleScope,
+        installation_uid: Uuid,
+        overlay: &EvalOverlayBinding,
+    ) -> Result<AgentRuntimePolicy> {
+        let pointer = self
+            .load_installation_pointer(scope, installation_uid)
+            .await?
+            .ok_or_else(|| {
+                MoaError::StorageError(format!(
+                    "agent installation {installation_uid} not found or not visible"
+                ))
+            })?;
+        self.resolve_revision_with_pointer(scope, pointer, Some(overlay))
+            .await
+    }
+
+    /// Resolves an exact executable agent revision without moving any deployment pointer.
     pub async fn resolve_exact_revision(
         &self,
         scope: &ActionRuleScope,
         revision_uid: Uuid,
     ) -> Result<AgentRuntimePolicy> {
-        let revision = load_agent_revision(&self.pool, scope, revision_uid).await?;
-        self.resolve_loaded_revision(scope, revision, None).await
+        let revision = load_executable_agent_revision(&self.pool, scope, revision_uid).await?;
+        self.resolve_loaded_revision(scope, revision, None, None)
+            .await
+    }
+
+    /// Resolves an exact agent revision with evaluation-only dependency substitutions.
+    pub async fn resolve_exact_revision_with_overlay(
+        &self,
+        scope: &ActionRuleScope,
+        revision_uid: Uuid,
+        overlay: &EvalOverlayBinding,
+    ) -> Result<AgentRuntimePolicy> {
+        let revision = load_agent_revision_for_evaluation(&self.pool, scope, revision_uid).await?;
+        self.resolve_loaded_revision(scope, revision, None, Some(overlay))
+            .await
+    }
+
+    /// Resolves a release-gated agent candidate into the exact lock activation persists.
+    ///
+    /// Unlike normal exact resolution, this accepts non-serving release states. It
+    /// does not make the revision visible to a production session; it only builds
+    /// the immutable deployment lock consumed by the attested activation path.
+    pub async fn resolve_release_candidate(
+        &self,
+        scope: &ActionRuleScope,
+        revision_uid: Uuid,
+    ) -> Result<AgentRuntimePolicy> {
+        let revision = load_agent_release_candidate(&self.pool, scope, revision_uid).await?;
+        self.resolve_loaded_revision(scope, revision, None, None)
+            .await
+    }
+
+    /// Loads the immutable authorization binding for one active installation.
+    ///
+    /// Deployment callers authorize this binding before entering their write
+    /// transaction, then compare it with the locked row before moving the
+    /// deployment pointer.
+    pub async fn load_installation_binding(
+        &self,
+        scope: &ActionRuleScope,
+        installation_uid: Uuid,
+    ) -> Result<Option<AgentInstallationBinding>> {
+        let mut conn = scoped_conn_for_artifact_scope(&self.pool, scope).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let row = sqlx::query(
+            r#"
+            SELECT installation_uid, agent_id
+            FROM moa.agent_installation
+            WHERE installation_uid = $3
+              AND status <> 'retired'
+              AND storage_partition_id = $1
+              AND (user_id IS NULL OR user_id = $2)
+            LIMIT 1
+            "#,
+        )
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(installation_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        row.map(|row| {
+            Ok(AgentInstallationBinding {
+                installation_uid: row.try_get("installation_uid").map_err(map_sqlx_error)?,
+                agent_id: row.try_get("agent_id").map_err(map_sqlx_error)?,
+            })
+        })
+        .transpose()
     }
 
     async fn resolve_revision_with_pointer(
         &self,
         scope: &ActionRuleScope,
         pointer: AgentInstallationPointer,
+        overlay: Option<&EvalOverlayBinding>,
     ) -> Result<AgentRuntimePolicy> {
-        let revision = load_agent_revision(&self.pool, scope, pointer.current_revision_uid).await?;
-        self.resolve_loaded_revision(scope, revision, Some(pointer))
+        let revision =
+            load_executable_agent_revision(&self.pool, scope, pointer.current_revision_uid).await?;
+        self.resolve_loaded_revision(scope, revision, Some(pointer), overlay)
             .await
     }
 
@@ -84,6 +179,7 @@ impl AgentResolver {
         scope: &ActionRuleScope,
         revision: StoredArtifactRevision,
         pointer: Option<AgentInstallationPointer>,
+        overlay: Option<&EvalOverlayBinding>,
     ) -> Result<AgentRuntimePolicy> {
         let definition = agent_definition(&revision)?;
         let tool_policy = tool_policy_from_definition(definition);
@@ -109,11 +205,11 @@ impl AgentResolver {
             sandbox_policy: &sandbox_policy,
         };
         let revision_lock = match pointer.as_ref() {
-            Some(pointer) => pointer.revision_lock.clone(),
-            None => {
+            Some(pointer) if overlay.is_none() => pointer.revision_lock.clone(),
+            _ => {
                 let reference_paths = revision.document.reference_paths();
                 let resolved = self
-                    .resolve_artifact_dependencies(scope, &reference_paths)
+                    .resolve_artifact_dependencies(scope, &reference_paths, overlay)
                     .await?;
                 let artifact_dependencies = resolved.artifacts;
                 let tool_dependencies = locked_tools_from_definition(
@@ -243,6 +339,7 @@ impl AgentResolver {
         &self,
         scope: &ActionRuleScope,
         refs: &[(String, ArtifactRef)],
+        overlay: Option<&EvalOverlayBinding>,
     ) -> Result<ResolvedAgentDependencies> {
         let registry = ArtifactRegistry::new(self.pool.clone());
         let mut seen_refs = BTreeSet::new();
@@ -262,6 +359,7 @@ impl AgentResolver {
                         kind.clone(),
                         name,
                         artifact_ref,
+                        overlay,
                     )
                     .await?;
                     skill_tools.extend(skill_declared_tools(&revision));
@@ -275,6 +373,7 @@ impl AgentResolver {
                         ArtifactKind::Connector,
                         connector,
                         artifact_ref,
+                        overlay,
                     )
                     .await?;
                     dependencies.push(resolved_dependency(artifact_ref, &revision));
@@ -299,7 +398,7 @@ struct ResolvedAgentDependencies {
     skill_tools: Vec<String>,
 }
 
-/// Returns the registered tool names one published skill revision declares.
+/// Returns the registered tool names one activated skill revision declares.
 ///
 /// Both declaration sites count: `allowed_tools` is the skill's stated tool
 /// surface, and a `Tool`-kind action's reference is a tool the skill will
@@ -332,16 +431,24 @@ async fn load_dependency_revision(
     kind: ArtifactKind,
     name: &str,
     artifact_ref: &ArtifactRef,
+    overlay: Option<&EvalOverlayBinding>,
 ) -> Result<StoredArtifactRevision> {
     let key = (kind.as_str().to_string(), name.to_string());
     if let Some(revision) = loaded_revisions.get(&key) {
         return Ok(revision.clone());
     }
 
-    let revision = registry
-        .load_visible_published(scope, kind, name)
-        .await?
-        .ok_or_else(|| unresolved_dependency(artifact_ref))?;
+    // Release-gated artifacts resolve through their type-owned serving pointer.
+    // Other kinds retain their established published-revision lifecycle.
+    let revision = match kind {
+        ArtifactKind::Skill | ArtifactKind::Action => {
+            registry
+                .load_serving_with_overlay(scope, kind, name, overlay)
+                .await?
+        }
+        _ => registry.load_visible_published(scope, kind, name).await?,
+    }
+    .ok_or_else(|| unresolved_dependency(artifact_ref))?;
     loaded_revisions.insert(key, revision.clone());
     Ok(revision)
 }
@@ -366,10 +473,58 @@ async fn load_agent_revision(
             revision.revision_uid, revision.kind
         )));
     }
-    if revision.status != ArtifactStatus::Published {
+    Ok(revision)
+}
+
+async fn load_executable_agent_revision(
+    pool: &PgPool,
+    scope: &ActionRuleScope,
+    revision_uid: Uuid,
+) -> Result<StoredArtifactRevision> {
+    let revision = load_agent_revision(pool, scope, revision_uid).await?;
+    let state = ReleaseState::from_artifact_status(&revision.status)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    if !matches!(state, ReleaseState::Ready | ReleaseState::Superseded) {
         return Err(MoaError::ValidationError(format!(
-            "agent revision {} must be published before resolution",
-            revision.revision_uid
+            "agent revision {} is not executable in state {}",
+            revision.revision_uid, revision.status
+        )));
+    }
+    Ok(revision)
+}
+
+async fn load_agent_revision_for_evaluation(
+    pool: &PgPool,
+    scope: &ActionRuleScope,
+    revision_uid: Uuid,
+) -> Result<StoredArtifactRevision> {
+    let revision = load_agent_revision(pool, scope, revision_uid).await?;
+    let state = ReleaseState::from_artifact_status(&revision.status)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    if !matches!(
+        state,
+        ReleaseState::Evaluating | ReleaseState::Ready | ReleaseState::Superseded
+    ) {
+        return Err(MoaError::ValidationError(format!(
+            "agent revision {} is not executable in evaluation state {}",
+            revision.revision_uid, revision.status
+        )));
+    }
+    Ok(revision)
+}
+
+async fn load_agent_release_candidate(
+    pool: &PgPool,
+    scope: &ActionRuleScope,
+    revision_uid: Uuid,
+) -> Result<StoredArtifactRevision> {
+    let revision = load_agent_revision(pool, scope, revision_uid).await?;
+    let state = ReleaseState::from_artifact_status(&revision.status)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    if matches!(state, ReleaseState::Rejected | ReleaseState::Archived) {
+        return Err(MoaError::ValidationError(format!(
+            "agent revision {} cannot build a release lock from state {}",
+            revision.revision_uid, revision.status
         )));
     }
     Ok(revision)

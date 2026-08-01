@@ -10,7 +10,7 @@ use crate::{Error, Result, document::ArtifactKind};
 /// A stable, code-addressable reference to another building block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactRef {
-    /// A published artifact revision selected by kind and name.
+    /// A visible artifact revision selected by kind and name.
     Artifact {
         /// Artifact family stored in the registry.
         kind: ArtifactKind,

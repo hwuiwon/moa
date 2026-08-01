@@ -403,3 +403,174 @@ pub trait AbsoluteAnswerJudge: Send + Sync {
     /// Judges one candidate without seeing a baseline or comparator output.
     async fn judge(&self, request: AbsoluteJudgeRequest) -> Result<AbsoluteJudgeResponse, String>;
 }
+
+/// Derives the exact judge identity one absolute decision was produced under.
+///
+/// A calibration describes an instrument, so a report can only claim it by naming
+/// the instrument that actually answered: the model that replied, the prompt
+/// version and rubric text that were sent, the parser that turned the reply into
+/// a label, and the domain it was applied to. That identity is what
+/// [`super::calibration::judge::calibration_expiry`] compares, so deriving it from
+/// the request/response pair is what stops a report from inheriting a calibration
+/// measured on a different judge.
+///
+/// `rendered_prompt` must be the exact instruction text the judge sent, not the
+/// version label: a prompt edit that keeps the label is precisely the change a
+/// version string cannot detect. The rubric hash comes from the request because
+/// the rubric is an input the harness controls, while the model is read from the
+/// response because that is what actually served, which can differ from what was
+/// asked for.
+///
+/// # Errors
+///
+/// Returns [`ExternalMemoryError::InvalidConfig`] when the response answered under
+/// a different prompt version than the request carried, when the rendered prompt
+/// or rubric is empty, or when any label is blank. A prompt-version disagreement
+/// is a silent calibration break: the decisions would be attributed to a prompt
+/// that did not produce them.
+pub fn absolute_judge_identity(
+    request: &AbsoluteJudgeRequest,
+    response: &AbsoluteJudgeResponse,
+    rendered_prompt: &str,
+    output_parser_version: &str,
+    domain: &str,
+) -> ExternalMemoryResult<super::calibration::judge::JudgeIdentity> {
+    if request.prompt_version != response.prompt_version {
+        return Err(ExternalMemoryError::InvalidConfig(format!(
+            "absolute judge answered under prompt version `{}` but was sent `{}`",
+            response.prompt_version, request.prompt_version
+        )));
+    }
+    super::calibration::judge::JudgeIdentity::new(
+        &response.model,
+        &response.prompt_version,
+        rendered_prompt.as_bytes(),
+        request.rubric.as_bytes(),
+        output_parser_version,
+        domain,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::external_memory::cost::{NormalizedUsage, UsageProvenance};
+
+    fn usage() -> NormalizedUsage {
+        NormalizedUsage {
+            input_tokens_uncached: 100,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 8,
+            provenance: UsageProvenance::Actual,
+        }
+    }
+
+    fn judge_request(prompt_version: &str, rubric: &str) -> AbsoluteJudgeRequest {
+        AbsoluteJudgeRequest {
+            question: "what deploy target?".to_string(),
+            reference_answer: "prod-us-east".to_string(),
+            candidate_answer: "prod-us-east".to_string(),
+            rubric: rubric.to_string(),
+            prompt_version: prompt_version.to_string(),
+        }
+    }
+
+    fn judge_response(model: &str, prompt_version: &str) -> AbsoluteJudgeResponse {
+        AbsoluteJudgeResponse {
+            supported: true,
+            rationale: "matches the reference".to_string(),
+            model: model.to_string(),
+            prompt_version: prompt_version.to_string(),
+            usage: usage(),
+            latency_ms: 12,
+        }
+    }
+
+    #[test]
+    fn absolute_judge_identity_pins_the_instrument_that_actually_answered() {
+        // Pins: the derived fingerprint changes when the model, the exact prompt
+        // text, the rubric, the parser, or the domain changes, and a response that
+        // answered under a different prompt version is refused rather than
+        // silently attributed to the requested one. Each component matters on its
+        // own, so no single change can slip past a calibration.
+        let request = judge_request("v3", "rubric text");
+        let response = judge_response("judge-model-1", "v3");
+        let baseline = absolute_judge_identity(
+            &request,
+            &response,
+            "exact rendered prompt",
+            "strict-json-v1",
+            "longmemeval",
+        )
+        .expect("derivable identity");
+
+        let variants = [
+            absolute_judge_identity(
+                &request,
+                &judge_response("judge-model-2", "v3"),
+                "exact rendered prompt",
+                "strict-json-v1",
+                "longmemeval",
+            ),
+            absolute_judge_identity(
+                &request,
+                &response,
+                "edited rendered prompt",
+                "strict-json-v1",
+                "longmemeval",
+            ),
+            absolute_judge_identity(
+                &judge_request("v3", "edited rubric"),
+                &response,
+                "exact rendered prompt",
+                "strict-json-v1",
+                "longmemeval",
+            ),
+            absolute_judge_identity(
+                &request,
+                &response,
+                "exact rendered prompt",
+                "lenient-json-v2",
+                "longmemeval",
+            ),
+            absolute_judge_identity(
+                &request,
+                &response,
+                "exact rendered prompt",
+                "strict-json-v1",
+                "personamem",
+            ),
+        ];
+        for variant in variants {
+            let variant = variant.expect("derivable identity");
+            assert_ne!(
+                variant.fingerprint(),
+                baseline.fingerprint(),
+                "a changed instrument must not share a calibration fingerprint"
+            );
+        }
+
+        let error = absolute_judge_identity(
+            &request,
+            &judge_response("judge-model-1", "v4"),
+            "exact rendered prompt",
+            "strict-json-v1",
+            "longmemeval",
+        )
+        .expect_err("a prompt-version disagreement must fail closed");
+        assert!(error.to_string().contains("prompt version"), "{error}");
+
+        assert!(
+            absolute_judge_identity(
+                &judge_request("v3", ""),
+                &response,
+                "exact rendered prompt",
+                "strict-json-v1",
+                "longmemeval",
+            )
+            .is_err(),
+            "an empty rubric cannot be hashed into an identity"
+        );
+    }
+}

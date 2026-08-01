@@ -15,7 +15,7 @@ use moa_core::{
     types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
     types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
-use moa_hands::{ToolCallScope, ToolRouter};
+use moa_hands::{ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolRouter};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -50,6 +50,9 @@ pub trait ToolExecutor {
     async fn list_tools(
         tenant_id: Json<TenantId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError>;
+
+    /// Returns the exact governed tool-contract snapshot this deployment has activated.
+    async fn activated_tool_catalog() -> Result<Json<ToolCatalogPin>, HandlerError>;
 
     /// Releases the hands and durable leases owned by one finishing worker scope.
     async fn release_worker_hands(
@@ -186,10 +189,11 @@ impl ToolExecutorImpl {
 
     async fn execute_buffered(
         &self,
+        catalog: &ToolCatalogSnapshot,
         session: &SessionMeta,
         request: &ToolCallRequest,
     ) -> moa_core::error::Result<SecuredToolOutput> {
-        self.execute_buffered_with_scope(session, request, request.worker_id.as_deref())
+        self.execute_buffered_with_scope(catalog, session, request, request.worker_id.as_deref())
             .await
     }
 
@@ -202,6 +206,7 @@ impl ToolExecutorImpl {
     /// raw bytes and re-derive the assessment on every replay.
     async fn execute_buffered_with_scope(
         &self,
+        catalog: &ToolCatalogSnapshot,
         session: &SessionMeta,
         request: &ToolCallRequest,
         hand_scope: Option<&str>,
@@ -240,7 +245,8 @@ impl ToolExecutorImpl {
             .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
             .await;
         self.router
-            .execute_authorized_with_recovery_within(
+            .execute_authorized_with_recovery_from_catalog_within(
+                catalog,
                 session,
                 &request.caller_identity,
                 hand_scope,
@@ -390,12 +396,22 @@ impl ToolExecutor for ToolExecutorImpl {
             append_tool_call_event(&ctx, &request).await?;
         }
 
-        if let Some(output) = agent_tool_policy_denied_output(&session, &request) {
-            append_agent_tool_policy_denied_event(&ctx, &request, &output).await?;
+        // Read once and reused for the deployment-subject check and the span
+        // attribute, so a mid-handler refresh cannot make the refusal message
+        // disagree with the snapshot the span recorded.
+        let catalog = self.router.activated_catalog();
+        let activated_catalog = catalog.pin().map_err(moa_error_to_handler_error)?;
+        annotate_activated_catalog_span(&activated_catalog);
+        if let Some(output) = tool_contract_denial(&request, &activated_catalog) {
+            append_tool_dispatch_denied_event(&ctx, &request, &output).await?;
+            return Ok(Json::from(secured_handler_output(&request, output)));
+        }
+        if let Some(output) = agent_deployment_tool_denial(&session, &request, &activated_catalog) {
+            append_tool_dispatch_denied_event(&ctx, &request, &output).await?;
             return Ok(Json::from(secured_handler_output(&request, output)));
         }
 
-        let definition = match self.router.tool_definition(&request.tool_name) {
+        let definition = match catalog.tool_definition(&request.tool_name) {
             Some(definition) => definition,
             None => {
                 let secured = secured_handler_output(
@@ -431,11 +447,12 @@ impl ToolExecutor for ToolExecutorImpl {
         let request_for_run = request.clone();
         let session_for_run = session.clone();
         let service = self.clone();
+        let catalog_for_run = Arc::clone(&catalog);
 
         let output = match ctx
             .run(|| async move {
                 service
-                    .execute_buffered(&session_for_run, &request_for_run)
+                    .execute_buffered(catalog_for_run.as_ref(), &session_for_run, &request_for_run)
                     .await
                     .map(Json::from)
                     .map_err(moa_error_to_handler_error)
@@ -488,10 +505,18 @@ impl ToolExecutor for ToolExecutorImpl {
                 blocked_canary_tool_output(&request.call.tool_name),
             )));
         }
-        if let Some(output) = agent_tool_policy_denied_output(&session, &request.call) {
+        let catalog = self.router.activated_catalog();
+        let activated_catalog = catalog.pin().map_err(moa_error_to_handler_error)?;
+        annotate_activated_catalog_span(&activated_catalog);
+        if let Some(output) = tool_contract_denial(&request.call, &activated_catalog) {
             return Ok(Json::from(secured_handler_output(&request.call, output)));
         }
-        let Some(definition) = self.router.tool_definition(&request.call.tool_name) else {
+        if let Some(output) =
+            agent_deployment_tool_denial(&session, &request.call, &activated_catalog)
+        {
+            return Ok(Json::from(secured_handler_output(&request.call, output)));
+        }
+        let Some(definition) = catalog.tool_definition(&request.call.tool_name) else {
             return Ok(Json::from(secured_handler_output(
                 &request.call,
                 ToolOutput::from(ToolFailureClass::Fatal {
@@ -504,10 +529,12 @@ impl ToolExecutor for ToolExecutorImpl {
         let request_for_run = request.call.clone();
         let session_for_run = session.clone();
         let service = self.clone();
+        let catalog_for_run = Arc::clone(&catalog);
         let output = ctx
             .run(|| async move {
                 service
                     .execute_buffered_with_scope(
+                        catalog_for_run.as_ref(),
                         &session_for_run,
                         &request_for_run,
                         Some(hand_scope.as_str()),
@@ -535,6 +562,23 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "list_tools");
         let _tenant_id = tenant_id.into_inner();
         Ok(Json::from(self.list_descriptors()))
+    }
+
+    #[tracing::instrument(skip(self, ctx))]
+    // SAFETY: purely informational. It returns the deployment-wide activated tool schema
+    // snapshot — tool names, owners, and schema/contract digests — which carries no
+    // tenant-owned data and is the same value every tenant's prompt already contains.
+    async fn activated_tool_catalog(
+        &self,
+        ctx: Context<'_>,
+    ) -> Result<Json<ToolCatalogPin>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "activated_tool_catalog");
+        self.router
+            .activated_catalog()
+            .pin()
+            .map(Json::from)
+            .map_err(moa_error_to_handler_error)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -681,28 +725,113 @@ fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -
     })
 }
 
-fn agent_tool_policy_denied_output(
+/// Validates one tool call against the session's agent deployment subject.
+///
+/// Two facts, both owned by the deployment rather than by the call: whether the
+/// pinned agent revision's tool policy enables the tool at all, and — for a tool
+/// the revision lock names as a dependency — whether the activated catalog still
+/// serves it. The second check is the one a connector catalog makes necessary. A
+/// deployment is evaluated and attested against a specific set of tools; if one
+/// of those tools is no longer in the activated snapshot, the deployment is no
+/// longer the thing that was evaluated, and continuing would silently serve a
+/// different subject. Failing here rather than at routing is what makes the
+/// refusal name the deployment and the exact snapshot it disagrees with.
+///
+/// `tenant_tool_enablement` deliberately reads the deployment's own pinned
+/// policy and lock. There is no tenant-owned MCP registration to consult:
+/// `V000367` removed that ownership model, and recreating it to have something
+/// to validate would reintroduce a second credential lifecycle.
+fn agent_deployment_tool_denial(
     session: &SessionMeta,
     request: &ToolCallRequest,
+    activated_catalog: &ToolCatalogPin,
 ) -> Option<ToolOutput> {
     let agent_context = session.agent_context.as_ref()?;
     match agent_context.allows_tool(&request.tool_name) {
-        Ok(true) => None,
-        Ok(false) => Some(ToolOutput::error(
+        Ok(true) => {}
+        Ok(false) => {
+            return Some(ToolOutput::error(
+                format!(
+                    "tool {} denied by agent policy {} for {}",
+                    request.tool_name, agent_context.policy_hash, agent_context.definition_ref
+                ),
+                Duration::ZERO,
+            ));
+        }
+        Err(error) => {
+            return Some(ToolOutput::error(
+                format!(
+                    "tool {} denied because agent policy {} for {} could not be parsed: {error}",
+                    request.tool_name, agent_context.policy_hash, agent_context.definition_ref
+                ),
+                Duration::ZERO,
+            ));
+        }
+    }
+
+    let declared = agent_context
+        .tool_dependencies
+        .iter()
+        .any(|locked| locked.name == request.tool_name);
+    if !declared {
+        return None;
+    }
+    if activated_catalog
+        .contract_revision(&request.tool_name)
+        .is_some()
+    {
+        return None;
+    }
+    Some(ToolOutput::error(
+        format!(
+            "tool {} is locked by agent deployment {} (policy {}) but the activated tool catalog \
+             snapshot {} no longer serves it",
+            request.tool_name,
+            agent_context.definition_ref,
+            agent_context.policy_hash,
+            activated_catalog.contract_hash
+        ),
+        Duration::ZERO,
+    ))
+}
+
+/// Refuses a call when the executor cannot serve the contract that admitted it.
+fn tool_contract_denial(
+    request: &ToolCallRequest,
+    activated_catalog: &ToolCatalogPin,
+) -> Option<ToolOutput> {
+    let expected = request.expected_tool_contract_revision.as_str();
+    match activated_catalog.contract_revision(&request.tool_name) {
+        Some(activated) if activated == expected => None,
+        Some(activated) => Some(ToolOutput::error(
             format!(
-                "tool {} denied by agent policy {} for {}",
-                request.tool_name, agent_context.policy_hash, agent_context.definition_ref
+                "tool {} governed contract drifted from {expected} to {activated}; refusing stale dispatch",
+                request.tool_name
             ),
             Duration::ZERO,
         )),
-        Err(error) => Some(ToolOutput::error(
+        None => Some(ToolOutput::error(
             format!(
-                "tool {} denied because agent policy {} for {} could not be parsed: {error}",
-                request.tool_name, agent_context.policy_hash, agent_context.definition_ref
+                "tool {} is no longer registered at governed contract revision {expected}",
+                request.tool_name
             ),
             Duration::ZERO,
         )),
     }
+}
+
+/// Records the activated tool-contract snapshot on the current dispatch span.
+///
+/// Every dispatch is therefore traceable to the exact snapshot that served it,
+/// which is what lets an operator answer "which catalog was this call compiled
+/// against" after the catalog has already moved on.
+fn annotate_activated_catalog_span(pin: &ToolCatalogPin) {
+    let span = tracing::Span::current();
+    span.set_attribute("moa.tool_catalog.contract_hash", pin.contract_hash.clone());
+    span.set_attribute(
+        "moa.tool_catalog.mcp_revision",
+        pin.mcp_catalog_revision.clone(),
+    );
 }
 
 fn annotate_tool_execution_span(session: &SessionMeta, request: &ToolCallRequest) {
@@ -999,7 +1128,7 @@ async fn append_tool_canary_block_events(
     Ok(())
 }
 
-async fn append_agent_tool_policy_denied_event(
+async fn append_tool_dispatch_denied_event(
     ctx: &Context<'_>,
     request: &ToolCallRequest,
     output: &ToolOutput,
@@ -1057,16 +1186,18 @@ mod tests {
         types::action_policy::ExecutionTaskOrigin, types::action_policy::RiskLevel,
         types::agent::AgentContext, types::agent::AgentPolicySnapshot,
         types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
-        types::events_stream::EventRecord, types::hands::HandHandle, types::hands::HandSpec,
-        types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
-        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::agent::LockedToolRef, types::events_stream::EventRecord, types::hands::HandHandle,
+        types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
+        types::hands::SandboxTier, types::identifiers::SessionId, types::identifiers::TenantId,
         types::identifiers::ToolCallId, types::security::SensitivityClass,
         types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
         types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
         types::tools::ToolPolicySpec, types::tools::TrustedSandboxFileEntry,
         types::tools::TrustedSandboxFileManifestRef,
     };
-    use moa_hands::{HandRoute, ToolRegistry, ToolRouter};
+    use moa_hands::{
+        HandRoute, PinnedToolContract, PinnedToolOwner, ToolCatalogPin, ToolRegistry, ToolRouter,
+    };
     use moa_memory_pii::{MockClassifier, PiiResult};
     use moa_security::McpEgressGuard;
     use tempfile::tempdir;
@@ -1076,9 +1207,9 @@ mod tests {
 
     use super::{
         ExecutionTaskToolCallRequest, ToolExecutorImpl, TrustedSandboxFileManifestStore,
-        agent_tool_policy_denied_output, blocked_canary_tool_output, execution_task_hand_scope,
+        agent_deployment_tool_denial, blocked_canary_tool_output, execution_task_hand_scope,
         execution_task_tool_run_name, has_prior_tool_call_event, require_execution_task_origin,
-        root_trusted_file_read,
+        root_trusted_file_read, tool_contract_denial,
     };
 
     #[derive(Default)]
@@ -1203,6 +1334,31 @@ mod tests {
     }
 
     #[test]
+    fn tool_executor_requires_the_exact_admitted_contract() {
+        // Pins: direct, reviewed, and cross-replica dispatch all fail closed
+        // before retry selection when their admitted contract is stale.
+        let catalog = ToolCatalogPin {
+            contract_hash: "catalog-v2".to_string(),
+            mcp_catalog_revision: "mcp-v2".to_string(),
+            tools: vec![PinnedToolContract {
+                tool: "bash".to_string(),
+                owner: PinnedToolOwner::BuiltIn,
+                contract_revision: "contract-v2".to_string(),
+            }],
+        };
+        let mut request = tool_request("bash");
+
+        let stale = tool_contract_denial(&request, &catalog)
+            .expect("a stale admitted contract must fail closed");
+        assert!(stale.is_error);
+        assert!(stale.to_text().contains("contract-v1"));
+        assert!(stale.to_text().contains("contract-v2"));
+
+        request.expected_tool_contract_revision = "contract-v2".to_string();
+        assert!(tool_contract_denial(&request, &catalog).is_none());
+    }
+
+    #[test]
     fn execution_task_tool_executor_scopes_hands_by_run_and_task() {
         // Pins: sibling execution tasks never share a hand, while generations of one task do.
         let first = ExecutionTaskOrigin {
@@ -1271,11 +1427,16 @@ mod tests {
     #[test]
     fn agent_tool_policy_denies_unlisted_tools() {
         // Pins: persisted agent policy snapshots are enforced before router execution.
+        let catalog = ToolCatalogPin {
+            contract_hash: "empty-catalog".to_string(),
+            mcp_catalog_revision: "empty-mcp-catalog".to_string(),
+            tools: Vec::new(),
+        };
         let session = SessionMeta {
             agent_context: Some(agent_context_with_allowlist(&["file_read"])),
             ..SessionMeta::default()
         };
-        let denied = agent_tool_policy_denied_output(&session, &tool_request("bash"))
+        let denied = agent_deployment_tool_denial(&session, &tool_request("bash"), &catalog)
             .expect("bash should be denied by allowlist policy");
         assert!(denied.is_error);
         assert_eq!(
@@ -1283,7 +1444,81 @@ mod tests {
             "tool bash denied by agent policy policy-hash for agent://support"
         );
 
-        assert!(agent_tool_policy_denied_output(&session, &tool_request("file_read")).is_none());
+        assert!(
+            agent_deployment_tool_denial(&session, &tool_request("file_read"), &catalog).is_none()
+        );
+    }
+
+    #[test]
+    fn a_deployment_locked_tool_missing_from_the_activated_catalog_is_denied() {
+        // Pins: tenant tool enablement is validated as part of the deployment
+        // subject, not only as a name lookup. A deployment whose revision lock
+        // names a connector tool the activated snapshot no longer serves is not
+        // the deployment that was evaluated, so the call fails closed and the
+        // refusal names both the deployment and the exact snapshot it disagrees
+        // with. Nothing tenant-owned is consulted: `V000367` removed tenant MCP
+        // registration and this check reads only the deployment's own lock.
+        let locked_reference = moa_hands::mcp_tool_reference("crm", "lookup");
+        let mut agent_context = agent_context_with_allowlist(&[locked_reference.as_str()]);
+        agent_context.tool_dependencies = vec![LockedToolRef {
+            name: locked_reference.clone(),
+            identity_hash: "identity-only".to_string(),
+            provider: Some("crm".to_string()),
+        }];
+        let session = SessionMeta {
+            agent_context: Some(agent_context),
+            ..SessionMeta::default()
+        };
+        let serving = ToolCatalogPin {
+            contract_hash: "activated-hash".to_string(),
+            mcp_catalog_revision: "mcp-revision".to_string(),
+            tools: vec![PinnedToolContract {
+                tool: locked_reference.clone(),
+                owner: PinnedToolOwner::Connector {
+                    server: "crm".to_string(),
+                },
+                contract_revision: "contract-a".to_string(),
+            }],
+        };
+        let withdrawn = ToolCatalogPin {
+            tools: Vec::new(),
+            ..serving.clone()
+        };
+
+        assert!(
+            agent_deployment_tool_denial(&session, &tool_request(&locked_reference), &serving)
+                .is_none(),
+            "a locked tool the activated snapshot still serves must dispatch"
+        );
+
+        let denied =
+            agent_deployment_tool_denial(&session, &tool_request(&locked_reference), &withdrawn)
+                .expect("a withdrawn locked tool must fail closed");
+        assert!(denied.is_error);
+        assert!(
+            denied.to_text().contains("activated-hash")
+                && denied.to_text().contains("agent://support"),
+            "the refusal must name the snapshot and the deployment: {}",
+            denied.to_text()
+        );
+
+        // An undeclared tool is unaffected: the lock is the only thing that binds
+        // a tool into the deployment subject, so this check must not become a
+        // second registry gate for every tool the agent merely permits.
+        let mut permissive = agent_context_with_allowlist(&["file_read"]);
+        permissive.tool_dependencies = Vec::new();
+        let permissive_session = SessionMeta {
+            agent_context: Some(permissive),
+            ..SessionMeta::default()
+        };
+        assert!(
+            agent_deployment_tool_denial(
+                &permissive_session,
+                &tool_request("file_read"),
+                &withdrawn
+            )
+            .is_none()
+        );
     }
 
     fn agent_context_with_allowlist(tools: &[&str]) -> AgentContext {
@@ -1323,6 +1558,7 @@ mod tests {
             },
             provider_tool_use_id: Some("toolu_policy".to_string()),
             tool_name: tool_name.to_string(),
+            expected_tool_contract_revision: "contract-v1".to_string(),
             input: serde_json::json!({}),
             active_canary: None,
             session_id: SessionId::new(),
@@ -1435,9 +1671,10 @@ mod tests {
         );
         request.provider_tool_use_id = Some("provider-reviewed-call-1".to_string());
         request.input = serde_json::json!({"item_key": "AAPL-10K"});
+        let catalog = executor.router.activated_catalog();
 
         let output = executor
-            .execute_buffered(&session_for_request(&request), &request)
+            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
             .await
             .expect("reviewed MCP request should dispatch");
 
@@ -1525,6 +1762,7 @@ mod tests {
             },
             provider_tool_use_id: Some("provider-tool-use".to_string()),
             tool_name: "bash".to_string(),
+            expected_tool_contract_revision: "contract-v1".to_string(),
             input: serde_json::json!({"cmd": "cat .moa/skills/test/SKILL.md"}),
             active_canary: None,
             session_id: SessionId::new(),
@@ -1539,9 +1777,10 @@ mod tests {
         // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
         let (executor, provider, files, manifest) = install_scenario();
         let request = manifest_request(manifest, None);
+        let catalog = executor.router.activated_catalog();
 
         let output = executor
-            .execute_buffered(&session_for_request(&request), &request)
+            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
             .await
             .expect("tool execution should use request manifest");
 
@@ -1555,9 +1794,10 @@ mod tests {
         // set_trusted_sandbox_files write scope and the hand-execution read scope match.
         let (executor, provider, files, manifest) = install_scenario();
         let request = manifest_request(manifest, Some("worker-7".to_string()));
+        let catalog = executor.router.activated_catalog();
 
         let output = executor
-            .execute_buffered(&session_for_request(&request), &request)
+            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
             .await
             .expect("worker tool execution should install its scoped manifest");
 
@@ -1605,9 +1845,10 @@ mod tests {
 
         let mut request = tool_request("memory_remember");
         request.input = serde_json::json!({ "items": [{ "text": "the sky is blue" }] });
+        let catalog = executor.router.activated_catalog();
 
         let output = executor
-            .execute_buffered(&session_for_request(&request), &request)
+            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
             .await
             .expect("memory write should dispatch through the router");
 
@@ -1648,9 +1889,10 @@ mod tests {
         let mut request = manifest_request(manifest, None);
         request.tool_name = "file_read".to_string();
         request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
+        let catalog = executor.router.activated_catalog();
 
         let output = executor
-            .execute_buffered(&session_for_request(&request), &request)
+            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
             .await
             .expect("root skill file_read should use request manifest");
 
@@ -1690,9 +1932,10 @@ mod tests {
         let mut request = manifest_request(manifest, None);
         request.tool_name = "file_read".to_string();
         request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
+        let catalog = executor.router.activated_catalog();
 
         let secured = executor
-            .execute_buffered(&session_for_request(&request), &request)
+            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
             .await
             .expect("root skill file_read should return a classified envelope");
 

@@ -6,6 +6,7 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
     ArtifactRegistry, NewArtifactDraft, NewArtifactFile, StoredArtifactRevision,
 };
+use moa_artifacts::release::ActivationTargetClass;
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_authz_schema::Relation;
@@ -46,7 +47,10 @@ pub trait Artifacts {
         request: Json<ArtifactValidateRequest>,
     ) -> Result<Json<ArtifactValidateResponse>, HandlerError>;
 
-    /// Publishes a draft artifact revision.
+    /// Publishes a non-skill draft artifact revision.
+    ///
+    /// Learned skills activate only through `LearningReview/accept_skill`, whose
+    /// regression evidence is unavailable on this generic authoring surface.
     async fn publish(
         request: Json<ArtifactPublishRequest>,
     ) -> Result<Json<ArtifactPublishResponse>, HandlerError>;
@@ -286,6 +290,13 @@ async fn publish_inner(
         .await
         .map_err(moa_error_to_status_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "artifact revision not found"))?;
+    if stored.kind == ArtifactKind::Skill {
+        return Err(TerminalError::new_with_code(
+            409,
+            "skill revisions cannot be published manually; learned skills activate only through LearningReview/accept_skill",
+        )
+        .into());
+    }
     let mut document = stored.document.clone();
     document.reference_resolutions = ArtifactResolver::new(registry.clone())
         .resolve_document(&scope, &document)
@@ -294,17 +305,24 @@ async fn publish_inner(
     let report = validate_for_status(&document, ArtifactStatus::Published);
     if !report.is_ok() {
         return Err(
-            TerminalError::new_with_code(400, "artifact revision is not publishable").into(),
+            TerminalError::new_with_code(400, "artifact revision failed validation").into(),
         );
     }
 
-    let published = registry
-        .publish_revision(&scope, request.revision_uid, &report)
-        .await
-        .map_err(moa_error_to_status_handler_error)?;
+    let stored = if ActivationTargetClass::is_release_gated(&stored.kind) {
+        registry
+            .record_validation_report(&scope, request.revision_uid, &report)
+            .await
+            .map_err(moa_error_to_status_handler_error)?
+    } else {
+        registry
+            .publish_unserved_revision(&scope, request.revision_uid, &report)
+            .await
+            .map_err(moa_error_to_status_handler_error)?
+    };
     let validation_report = serde_json::to_value(report)
         .map_err(|error| TerminalError::new_with_code(500, error.to_string()))?;
-    Ok(publish_response(published, validation_report))
+    Ok(publish_response(stored, validation_report))
 }
 
 fn publish_response(

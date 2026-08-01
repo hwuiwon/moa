@@ -1,3 +1,5 @@
+mod support;
+
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use moa_core::types::resource::{ResourceAmounts, ResourceEnvelope};
@@ -269,11 +271,9 @@ fn trial_record_round_trips_through_public_model_offline() {
         data_bundle_ids: vec!["orders-fixture".to_string()],
         artifact_revision_uids: vec![Uuid::now_v7()],
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new("gpt-5.1-mini"),
-            temperature: Some(0.2),
+            policy: support::simulator_policy("gpt-5.1-mini"),
             max_turns: 8,
             token_budget: Some(8_000),
-            metadata: json!({ "style": "terse" }),
         },
         target_model: Some(ModelId::new("gpt-5.1")),
         seed: Some("seed-123".to_string()),
@@ -296,7 +296,10 @@ fn trial_record_round_trips_through_public_model_offline() {
         serde_json::from_value(encoded).expect("trial record deserializes");
 
     assert_eq!(decoded.trial_key, "scenario-a/persona-b/baseline");
-    assert_eq!(decoded.simulator.model, ModelId::new("gpt-5.1-mini"));
+    assert_eq!(
+        decoded.simulator.policy.components.model,
+        ModelId::new("gpt-5.1-mini")
+    );
     assert_eq!(decoded.session_id, Some(session_id));
     assert_eq!(decoded.execution_run_uid, Some(execution_run_uid));
     assert_eq!(
@@ -320,6 +323,7 @@ fn record_for_target(
         },
         plan_artifact_uid: None,
         resource_envelope: fixture_run_envelope(),
+        simulator_policy: None,
         run_uid: Uuid::now_v7(),
         name: "experiment run".to_string(),
         target_kind,

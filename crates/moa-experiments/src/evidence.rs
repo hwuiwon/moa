@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::model::ExperimentTrialStopReason;
+use crate::simulator_policy::{registry::SimulatorPolicyBinding, runtime::SimulatorDecision};
 
 /// Namespace for evidence-reference hashing.
 const EVIDENCE_HASH_DOMAIN: &str = "moa.experiment.trial-evidence";
@@ -125,6 +126,12 @@ pub struct TrialTerminalEvidence {
     pub visible_output: Option<String>,
     /// Stable failure code when the target failed.
     pub failure_code: Option<String>,
+    /// Certified simulator identity used by agent-loop trials.
+    pub simulator_policy: Option<SimulatorPolicyBinding>,
+    /// Last structured simulator decision, when a simulator ran.
+    pub simulator_decision: Option<SimulatorDecision>,
+    /// Last bounded simulator decision reason, when a simulator ran.
+    pub simulator_reason: Option<String>,
 }
 
 impl TrialTerminalEvidence {
@@ -181,6 +188,39 @@ impl TrialTerminalEvidence {
                 hasher.update(b"\x00");
             }
         }
+        match self.simulator_policy {
+            Some(binding) => {
+                hasher.update(b"\x01");
+                hasher.update(binding.policy_uid.as_bytes());
+                hasher.update(&binding.revision.to_be_bytes());
+                hasher.update(&binding.policy_hash.0);
+                hasher.update(binding.study_uid.as_bytes());
+                hasher.update(&binding.study_artifact_hash.0);
+                hasher.update(&binding.evaluator_version.to_be_bytes());
+                hasher.update(&binding.certified_until.timestamp_millis().to_be_bytes());
+            }
+            None => {
+                hasher.update(b"\x00");
+            }
+        }
+        match self.simulator_decision {
+            Some(decision) => {
+                hasher.update(b"\x01");
+                hasher.update(decision.as_str().as_bytes());
+            }
+            None => {
+                hasher.update(b"\x00");
+            }
+        }
+        match self.simulator_reason.as_deref() {
+            Some(reason) => {
+                hasher.update(b"\x01");
+                hasher.update(blake3::hash(reason.as_bytes()).as_bytes());
+            }
+            None => {
+                hasher.update(b"\x00");
+            }
+        }
         *hasher.finalize().as_bytes()
     }
 }
@@ -203,6 +243,9 @@ mod tests {
             latest_sequence_num: 42,
             visible_output: Some("the order shipped on tuesday".to_string()),
             failure_code: None,
+            simulator_policy: None,
+            simulator_decision: None,
+            simulator_reason: None,
         }
     }
 

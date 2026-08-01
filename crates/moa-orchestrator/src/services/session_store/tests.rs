@@ -3,11 +3,18 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use moa_artifacts::{
+    document::{ArtifactDocument, ArtifactStatus},
+    registry::{ArtifactRegistry, NewArtifactDraft},
+    validation::validate_for_status,
+};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::{
     events::Event,
     traits::SessionStore,
     traits::{Identity, IdentityType, SessionChannelBindingUpdate},
+    types::action_policy::ActionRuleScope,
+    types::agent::AgentSessionSelection,
     types::channel::ChannelRef,
     types::channel::SessionChannelBindingId,
     types::contact::ContactId,
@@ -30,6 +37,7 @@ use super::SessionStoreImpl;
 use super::inner::{
     change_contact_session_channel_atomic, create_session_for_identity,
     ensure_session_authz_visible, initialize_contact_session_atomic,
+    resolve_agent_context_for_evaluation, resolve_agent_context_for_session,
 };
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
@@ -730,6 +738,78 @@ async fn search_events_db_finds_by_payload() -> Result<()> {
         &record.event,
         Event::UserMessage { text, .. } if text.contains("refresh-token")
     )));
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn public_session_rejects_exact_revision_but_evaluation_can_preview_it_db_memory()
+-> Result<()> {
+    // Pins: a validated release candidate is not itself a serving installation.
+    // Public session admission must require an active installation, while the
+    // internal experiment path can preview the exact candidate revision.
+    let (service, database_url, schema_name) = test_service().await?;
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let name = format!("session-preview-{}", Uuid::now_v7());
+    let document: ArtifactDocument = serde_json::from_value(serde_json::json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "agent",
+        "metadata": {
+            "name": name,
+            "description": "session serving gate",
+            "tags": []
+        },
+        "definition": {
+            "type": "agent",
+            "spec": {
+                "display_name": "Session Preview Agent",
+                "purpose": {
+                    "summary": "Preview a candidate policy.",
+                    "expected_outputs": ["answer"]
+                },
+                "tool_policy": { "mode": "allowlist", "tools": ["file_read"] }
+            }
+        }
+    }))?;
+    let registry = ArtifactRegistry::new(service.pool.clone());
+    let source = document.to_yaml()?;
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    let report = validate_for_status(&document, ArtifactStatus::Ready);
+    assert!(report.is_ok(), "agent fixture must be valid for release");
+    registry
+        .record_validation_report(&scope, draft.revision_uid, &report)
+        .await?;
+
+    let meta = session_meta_fixture(tenant_id);
+    let selection = AgentSessionSelection {
+        installation_uid: None,
+        revision_uid: Some(draft.revision_uid),
+    };
+    let public_error = resolve_agent_context_for_session(service.pool.clone(), &meta, &selection)
+        .await
+        .expect_err("an exact revision is not a serving installation");
+    assert!(
+        format!("{public_error:?}").contains("active agent installation"),
+        "public refusal should name the serving requirement: {public_error:?}"
+    );
+
+    let preview =
+        resolve_agent_context_for_evaluation(service.pool.clone(), &meta, &selection, None)
+            .await
+            .map_err(into_anyhow)?;
+    assert_eq!(preview.revision_uid, draft.revision_uid);
+    assert_eq!(preview.installation_uid, None);
 
     cleanup(&database_url, &schema_name).await
 }

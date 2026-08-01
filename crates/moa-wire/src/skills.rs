@@ -1,4 +1,4 @@
-//! Skill import, export, and review wire DTOs.
+//! Skill export, listing, and package wire DTOs.
 
 use chrono::{DateTime, Utc};
 use moa_core::types::action_policy::ActionRuleScope;
@@ -24,7 +24,7 @@ pub struct SkillExportResponse {
     pub packages: Vec<SkillPackageDocument>,
 }
 
-/// Skill package supplied to skill import or returned by export.
+/// Skill package returned by export.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillPackageDocument {
     /// Optional stable skill name parsed from `SKILL.md`.
@@ -41,7 +41,7 @@ pub struct SkillPackageDocument {
     pub metadata: Value,
 }
 
-/// One file in a skill package import or export.
+/// One file in an exported skill package.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillPackageDocumentFile {
     /// POSIX relative path inside the skill package.
@@ -53,25 +53,6 @@ pub struct SkillPackageDocumentFile {
     /// Whether the file should be executable in a sandbox.
     #[serde(default)]
     pub executable: bool,
-}
-
-/// Request payload for importing skill packages.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillImportRequest {
-    /// Scope where imported skills should be written.
-    pub scope: ActionRuleScope,
-    /// Skill packages to import.
-    #[serde(default)]
-    pub packages: Vec<SkillPackageDocument>,
-}
-
-/// Response payload for importing skill packages.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillImportResponse {
-    /// Scope where skills were imported.
-    pub scope: ActionRuleScope,
-    /// Number of skill packages imported.
-    pub imported: u64,
 }
 
 /// Request payload for listing skills.

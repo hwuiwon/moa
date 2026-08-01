@@ -11,21 +11,22 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use moa_artifacts::reference::ArtifactRef;
-use moa_artifacts::skill::SkillActionKind;
+use moa_artifacts::document::ArtifactStatus;
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
+use moa_artifacts::release::TenantScope;
 use moa_core::traits::Identity;
 use moa_core::{
     events::Event, types::action_policy::ActionRuleScope, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::session::SessionStatus,
 };
-use moa_skills::artifact::skill_definition_from_package;
+use moa_skills::artifact::{
+    SKILL_ARTIFACT_PATH, skill_artifact_document_from_package, skill_definition_from_package,
+};
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
-use moa_wire::skills::{
-    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
+use moa_wire::skills::{SkillPackageDocument, SkillPackageDocumentFile};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -45,9 +46,9 @@ const REFUND_SKILL_PATH: &str = ".moa/skills/refund-triage/SKILL.md";
 const REFUND_SKILL_PROVIDER_ID: &str = "read_refund_triage_skill";
 
 #[test]
-fn refund_skill_fixture_is_instruction_action_skill_without_execution_plan() -> Result<()> {
-    // Pins: an imported skill may combine instructions and a governed action without requiring
-    // an execution-plan template.
+fn refund_skill_fixture_is_instruction_only_without_execution_plan() -> Result<()> {
+    // Pins: the serving fixture stays inside the learned-skill activation
+    // contract while still carrying a materialized instruction package.
     let document = refund_skill_package();
     let mut files = Vec::new();
     for file in document.files {
@@ -66,15 +67,9 @@ fn refund_skill_fixture_is_instruction_action_skill_without_execution_plan() -> 
 
     assert_eq!(package.name, "refund-triage");
     assert_eq!(definition.instructions.path, "SKILL.md");
-    assert_eq!(definition.actions.len(), 1);
-    assert_eq!(definition.actions[0].id, "classify_refund");
-    assert_eq!(definition.actions[0].kind, SkillActionKind::ConnectorAction);
-    assert_eq!(
-        definition.actions[0].artifact_ref,
-        Some(ArtifactRef::action("orders", "classify_refund"))
-    );
-    assert_eq!(package.manifest.allowed_tools, vec!["file_read"]);
-    assert_eq!(definition.allowed_tools, vec!["file_read"]);
+    assert!(definition.actions.is_empty());
+    assert!(package.manifest.allowed_tools.is_empty());
+    assert!(definition.allowed_tools.is_empty());
     assert!(definition.execution_plan.is_none());
     Ok(())
 }
@@ -126,7 +121,7 @@ fn spawn_orchestrator(
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
 async fn support_agent_selects_refund_skill_without_starting_execution_run() -> Result<()> {
-    // Pins: selecting a custom instruction/action skill in Execute/Inline materializes its
+    // Pins: selecting a custom instruction skill in Execute/Inline materializes its
     // instructions but does not implicitly start a detached execution run.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
@@ -163,7 +158,7 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
         wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
             .await?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_refund_skill(&client, ingress, &identity, &storage_partition_id).await?;
+        activate_refund_skill_fixture(&storage_partition_id).await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
 
         let prompt = "A customer says their ramen order arrived spilled all over the bag. \
@@ -199,23 +194,82 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
     result
 }
 
-async fn import_refund_skill(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-) -> Result<()> {
-    let request = SkillImportRequest {
-        scope: tenant_scope(storage_partition_id)?,
-        packages: vec![refund_skill_package()],
-    };
-    let import = post_json_with_identity(client, ingress, "Skills", "import", identity, &request)
-        .await?
-        .json::<SkillImportResponse>()
+async fn activate_refund_skill_fixture(storage_partition_id: &StoragePartitionId) -> Result<()> {
+    let pool = sqlx::PgPool::connect(&test_database_url())
         .await
-        .context("deserialize skill import response")?;
-    assert_eq!(import.imported, 1);
+        .context("connect for approved skill fixture")?;
+    let scope = tenant_scope(storage_partition_id)?;
+    let artifact_registry = ArtifactRegistry::new(pool.clone());
+    let stored =
+        create_skill_draft_fixture(&artifact_registry, &scope, decoded_refund_skill_package()?)
+            .await?;
+    moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        TenantScope::from_action_rule_scope(&scope)?,
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: stored.artifact_uid,
+        },
+        stored.revision_uid,
+    )
+    .await
+    .context("activate approved learned skill fixture")?;
     Ok(())
+}
+
+async fn create_skill_draft_fixture(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    package: SkillPackage,
+) -> Result<moa_artifacts::registry::StoredArtifactRevision> {
+    let package = package.validate()?;
+    let document = skill_artifact_document_from_package(&package, ArtifactStatus::Draft)?;
+    let source_text = if let Some(file) = package
+        .files
+        .iter()
+        .find(|file| file.path == SKILL_ARTIFACT_PATH)
+    {
+        file.content.clone()
+    } else {
+        document.to_yaml()?.into_bytes()
+    };
+    let files = package
+        .files
+        .iter()
+        .map(|file| NewArtifactFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+            content_type: file.content_type.clone(),
+            executable: file.executable,
+        })
+        .collect::<Vec<_>>();
+    registry
+        .create_draft(
+            scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: &source_text,
+                files: &files,
+            },
+        )
+        .await
+        .context("create learned skill fixture draft")
+}
+
+fn decoded_refund_skill_package() -> Result<SkillPackage> {
+    let mut files = Vec::new();
+    for file in refund_skill_package().files {
+        let content = BASE64
+            .decode(&file.content_base64)
+            .context("decode fixture skill package file")?;
+        let mut package_file = SkillPackageFile::new(file.path, content);
+        if let Some(content_type) = file.content_type {
+            package_file = package_file.with_content_type(content_type);
+        }
+        package_file = package_file.with_executable(file.executable);
+        files.push(package_file);
+    }
+    Ok(SkillPackage::new(files))
 }
 
 fn tenant_scope(storage_partition_id: &StoragePartitionId) -> Result<ActionRuleScope> {
@@ -400,34 +454,6 @@ async fn fetch_events(
         .context("deserialize event response")
 }
 
-async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
-    client: &reqwest::Client,
-    ingress: &str,
-    service: &str,
-    handler: &str,
-    identity: &Identity,
-    request: &T,
-) -> Result<reqwest::Response> {
-    let response = with_identity(
-        client.post(service_url(ingress, service, handler)),
-        identity,
-    )
-    .json(request)
-    .send()
-    .await
-    .with_context(|| format!("call {service}/{handler}"))?;
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
-    bail!("{service}/{handler} returned {status}: {body}")
-}
-
 fn service_url(ingress: &str, service: &str, handler: &str) -> String {
     format!(
         "{}/restate/call/{service}/{handler}",
@@ -597,7 +623,6 @@ fn refund_skill_package() -> SkillPackageDocument {
     let skill_md = r#"---
 name: refund-triage
 description: "Classify damaged food delivery complaints and decide whether refund, credit, replacement, restaurant escalation, or clearer evidence is needed."
-allowed-tools: file_read
 metadata:
   moa-tags: "support,refund,food-delivery,damaged-order,evidence,credit,replacement"
 ---
@@ -610,34 +635,14 @@ Verify the order id and evidence. A clear photo of spilled sauce, leaking packag
 
 If evidence is sufficient, summarize whether refund, credit, replacement, or restaurant escalation is appropriate and mention the customer-facing next step.
 "#;
-    let skill_yaml = r#"
-inputs:
-  type: object
-outputs:
-  type: object
-connectors:
-  - connector://orders
-allowed_tools:
-  - file_read
-actions:
-  - id: classify_refund
-    description: Decide refund, credit, replacement, or escalation from customer evidence.
-    kind: connector_action
-    ref: action://orders.classify_refund
-ui:
-  label: Refund triage
-"#;
     SkillPackageDocument {
         name: Some("refund-triage".to_string()),
         description: Some("Damaged food delivery refund triage".to_string()),
-        files: vec![
-            skill_file("SKILL.md", skill_md, Some("text/markdown; charset=utf-8")),
-            skill_file(
-                "skill.moa.yaml",
-                skill_yaml,
-                Some("application/yaml; charset=utf-8"),
-            ),
-        ],
+        files: vec![skill_file(
+            "SKILL.md",
+            skill_md,
+            Some("text/markdown; charset=utf-8"),
+        )],
         source_uri: Some("test://skills/refund-triage".to_string()),
         metadata: Value::Null,
     }

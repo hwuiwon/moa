@@ -61,8 +61,8 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
-`moa-migrations` owns the central table-ownership manifest. The current 119
-table declarations resolve to 111 owned logical families, enforced by
+`moa-migrations` owns the central table-ownership manifest. The current 157
+table declarations resolve to 149 owned logical families, enforced by
 `cargo run -p xtask --locked -- check-migrations`.
 
 ## External Services

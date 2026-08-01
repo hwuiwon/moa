@@ -2,18 +2,60 @@
 
 use super::*;
 
-pub(super) async fn start_restate_container() -> Result<ContainerAsync<GenericImage>> {
-    GenericImage::new(RESTATE_IMAGE, RESTATE_TAG)
-        .with_exposed_port(8080.tcp())
-        .with_exposed_port(9070.tcp())
-        .with_wait_for(WaitFor::seconds(1))
-        .with_env_var("DO_NOT_TRACK", "1")
-        .with_env_var("RESTATE_EXPERIMENTAL_ENABLE_VQUEUES", "true")
-        .with_host("host.docker.internal", Host::HostGateway)
-        .with_cmd(["--node-name=restate-test"])
-        .start()
-        .await
-        .context("start Restate testcontainer")
+pub(super) async fn start_restate_container() -> Result<(ContainerAsync<GenericImage>, u16, u16)> {
+    let mut failures = Vec::new();
+    for attempt in 1..=3 {
+        let container = match GenericImage::new(RESTATE_IMAGE, RESTATE_TAG)
+            .with_exposed_port(8080.tcp())
+            .with_exposed_port(9070.tcp())
+            .with_wait_for(WaitFor::seconds(1))
+            .with_env_var("DO_NOT_TRACK", "1")
+            .with_env_var("RESTATE_EXPERIMENTAL_ENABLE_VQUEUES", "true")
+            .with_host("host.docker.internal", Host::HostGateway)
+            .with_cmd(["--node-name=restate-test"])
+            .start()
+            .await
+        {
+            Ok(container) => container,
+            Err(error) => {
+                failures.push(format!("attempt {attempt} failed to start: {error}"));
+                continue;
+            }
+        };
+
+        let ports = async {
+            let ingress = fixture_host_port_ipv4(&container, "restate ingress", 8080.tcp()).await?;
+            let admin = fixture_host_port_ipv4(&container, "restate admin", 9070.tcp()).await?;
+            Ok::<_, anyhow::Error>((ingress, admin))
+        }
+        .await;
+        match ports {
+            Ok((ingress, admin)) => return Ok((container, ingress, admin)),
+            Err(error) => {
+                failures.push(format!(
+                    "attempt {attempt} exposed incomplete ports: {error:#}"
+                ));
+                tracing::warn!(
+                    attempt,
+                    container_id = %container.id(),
+                    %error,
+                    "restarting Restate fixture after incomplete Docker port publication"
+                );
+                if let Err(remove_error) = container.rm().await {
+                    tracing::warn!(
+                        attempt,
+                        %remove_error,
+                        "failed to remove incomplete Restate fixture container"
+                    );
+                }
+            }
+        }
+    }
+
+    bail!(
+        "start Restate testcontainer with ingress and admin ports failed after 3 attempts: {}",
+        failures.join("; ")
+    )
 }
 
 pub(super) async fn wait_for_restate_admin(admin_url: &str) -> Result<()> {

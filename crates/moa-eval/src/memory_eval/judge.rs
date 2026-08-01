@@ -1,4 +1,23 @@
 //! Answer judging support for nightly memory-evaluation probes.
+//!
+//! Memory retrieval is scored deterministically. [`DeterministicJudge`] is the
+//! reporting authority for factual support, temporal as-of, abstention, and
+//! redaction probes, and it owns them exclusively: those probes are refused by
+//! [`PairwiseLlmJudge`] rather than merely discouraged from reaching it, so no
+//! deterministic probe can acquire a model judge by configuration.
+//!
+//! [`PairwiseLlmJudge`] covers only the two open-ended probe types, and it is not
+//! wired into `run-memory-retrieval-eval`. That matters for what it is allowed to
+//! claim: it has no human calibration behind it, so its output is a diagnostic
+//! and never a reported or gated metric. It reports a *relative* preference and
+//! deliberately leaves [`JudgeOutcome::answer_faithful`] unset, and it
+//! distinguishes an explicit tie from a preference that tracked presentation
+//! order ([`PairwiseAgreement`]) so a position-biased judge is visible rather
+//! than averaged away. Before it could ever become a reporting input it would
+//! need the calibration contract in
+//! [`crate::external_memory::calibration::judge`]: a pinned judge identity,
+//! blinded human labels, an untouched validation split, and per-task authority
+//! thresholds.
 
 use std::sync::Arc;
 
@@ -99,6 +118,35 @@ pub enum PairwiseWinner {
     Baseline,
 }
 
+/// Why a pair of swapped-order judgements did or did not produce a winner.
+///
+/// With two orders and three possible verdicts these three states are exhaustive:
+/// if neither order abstained and the two did not name the same answer, then they
+/// named the same *slot*, which is position bias by definition. Separating the two
+/// no-winner cases is the point — an abstention and a position-biased judge are
+/// different findings, and collapsing both into "no agreement" hides the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairwiseAgreement {
+    /// Both orders named the same answer.
+    Agreed,
+    /// At least one order returned an explicit tie or abstention.
+    Tied,
+    /// Both orders preferred the same presentation slot, not the same answer.
+    PositionBiased,
+}
+
+impl PairwiseAgreement {
+    /// Returns the stable diagnostic spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agreed => "agreed",
+            Self::Tied => "tied",
+            Self::PositionBiased => "position_biased",
+        }
+    }
+}
+
 /// Standalone answer-judging outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgeOutcome {
@@ -112,6 +160,12 @@ pub struct JudgeOutcome {
     pub temporal_as_of_correct: Option<bool>,
     /// Pairwise winner when an LLM pairwise judge reached an agreed decision.
     pub pairwise_winner: Option<PairwiseWinner>,
+    /// Why the swapped-order pair did or did not produce a winner.
+    ///
+    /// `None` on every deterministic outcome, which is how a reader can tell a
+    /// deterministic score from a model-judged one without inspecting the probe
+    /// type.
+    pub pairwise_agreement: Option<PairwiseAgreement>,
     /// Short machine-readable explanation of the scoring path.
     pub explanation: String,
 }
@@ -130,17 +184,19 @@ impl JudgeOutcome {
             pii_redacted,
             temporal_as_of_correct,
             pairwise_winner: None,
+            pairwise_agreement: None,
             explanation: explanation.into(),
         }
     }
 
-    fn pairwise(pairwise_winner: Option<PairwiseWinner>) -> Self {
+    fn pairwise(pairwise_winner: Option<PairwiseWinner>, agreement: PairwiseAgreement) -> Self {
         Self {
             answer_faithful: None,
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
             pairwise_winner,
+            pairwise_agreement: Some(agreement),
             explanation: match pairwise_winner {
                 Some(PairwiseWinner::Candidate) => "pairwise_judge_agreed_candidate".to_string(),
                 Some(PairwiseWinner::Baseline) => "pairwise_judge_agreed_baseline".to_string(),
@@ -263,55 +319,77 @@ impl PairwiseLlmJudge {
     }
 
     /// Runs A/B and B/A comparative judging and returns a winner only on agreement.
+    ///
+    /// Both orders are always issued. A winner requires the two to name the same
+    /// *answer*; when they name the same slot instead, the outcome carries
+    /// [`PairwiseAgreement::PositionBiased`] rather than a quiet "no agreement",
+    /// because those two findings call for different responses.
     pub async fn judge_pairwise(&self, input: &JudgeInput) -> Result<JudgeOutcome> {
+        let (winner, agreement) = self.judge_swapped_pair(input).await?;
+        Ok(JudgeOutcome::pairwise(winner, agreement))
+    }
+
+    async fn judge_swapped_pair(
+        &self,
+        input: &JudgeInput,
+    ) -> Result<(Option<PairwiseWinner>, PairwiseAgreement)> {
         ensure_llm_judgable(input.probe_type)?;
         let baseline_answer = input.baseline_answer.as_deref().ok_or_else(|| {
             invalid_config_error("pairwise memory eval judge requires baseline_answer")
         })?;
 
         let first = self
-            .judge_order(
-                input,
-                &input.candidate_answer,
-                baseline_answer,
-                PairwiseOrder::CandidateThenBaseline,
-            )
+            .judge_order(input, &input.candidate_answer, baseline_answer)
             .await?;
         let second = self
-            .judge_order(
-                input,
-                baseline_answer,
-                &input.candidate_answer,
-                PairwiseOrder::BaselineThenCandidate,
-            )
+            .judge_order(input, baseline_answer, &input.candidate_answer)
             .await?;
 
-        let winner = match (first, second) {
-            (Some(first), Some(second)) if first == second => Some(first),
-            _ => None,
-        };
-
-        Ok(JudgeOutcome::pairwise(winner))
+        Ok(resolve_swapped_verdicts(first, second))
     }
 
+    /// Issues one ordered comparison and returns its raw slot verdict.
+    ///
+    /// The verdict is returned in slot terms rather than mapped to candidate or
+    /// baseline here, so the caller can tell a same-answer agreement from a
+    /// same-slot preference.
     async fn judge_order(
         &self,
         input: &JudgeInput,
         answer_a: &str,
         answer_b: &str,
-        order: PairwiseOrder,
-    ) -> Result<Option<PairwiseWinner>> {
+    ) -> Result<JudgeVerdict> {
         let request = pairwise_request(input, answer_a, answer_b);
 
         let response = self.provider.complete(request).await?.collect().await?;
-        let verdict = normalized_verdict(&response.text).ok_or_else(|| {
+        normalized_verdict(&response.text).ok_or_else(|| {
             invalid_config_error(format!(
                 "memory eval pairwise judge returned an unrecognized verdict: {}",
                 response.text
             ))
-        })?;
+        })
+    }
+}
 
-        Ok(order.map_verdict(verdict))
+/// Resolves two swapped-order slot verdicts into a winner and an agreement state.
+///
+/// `first` was asked with the candidate in slot A, `second` with the candidate in
+/// slot B, so the same answer winning twice shows up as opposite slots.
+fn resolve_swapped_verdicts(
+    first: JudgeVerdict,
+    second: JudgeVerdict,
+) -> (Option<PairwiseWinner>, PairwiseAgreement) {
+    match (first, second) {
+        (JudgeVerdict::Tie, _) | (_, JudgeVerdict::Tie) => (None, PairwiseAgreement::Tied),
+        (JudgeVerdict::A, JudgeVerdict::B) => {
+            (Some(PairwiseWinner::Candidate), PairwiseAgreement::Agreed)
+        }
+        (JudgeVerdict::B, JudgeVerdict::A) => {
+            (Some(PairwiseWinner::Baseline), PairwiseAgreement::Agreed)
+        }
+        (JudgeVerdict::A, JudgeVerdict::A) | (JudgeVerdict::B, JudgeVerdict::B) => {
+            (None, PairwiseAgreement::PositionBiased)
+        }
     }
 }
 
@@ -322,24 +400,7 @@ impl AnswerJudge for PairwiseLlmJudge {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PairwiseOrder {
-    CandidateThenBaseline,
-    BaselineThenCandidate,
-}
-
-impl PairwiseOrder {
-    fn map_verdict(self, verdict: JudgeVerdict) -> Option<PairwiseWinner> {
-        match (self, verdict) {
-            (_, JudgeVerdict::Tie) => None,
-            (Self::CandidateThenBaseline, JudgeVerdict::A) => Some(PairwiseWinner::Candidate),
-            (Self::CandidateThenBaseline, JudgeVerdict::B) => Some(PairwiseWinner::Baseline),
-            (Self::BaselineThenCandidate, JudgeVerdict::A) => Some(PairwiseWinner::Baseline),
-            (Self::BaselineThenCandidate, JudgeVerdict::B) => Some(PairwiseWinner::Candidate),
-        }
-    }
-}
-
+/// Raw slot preference returned by one ordered comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JudgeVerdict {
     A,
@@ -493,5 +554,95 @@ fn verdict_token(token: &str) -> Option<JudgeVerdict> {
         "b" | "answerb" | "answer_b" => Some(JudgeVerdict::B),
         "tie" | "draw" | "equal" => Some(JudgeVerdict::Tie),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_deterministic_and_model_judged_probe_sets_partition_every_probe_type() {
+        // Pins: no probe type can be scored by both judges, and none can be scored
+        // by neither. Adding a probe type without deciding which authority owns it
+        // fails here rather than silently defaulting to a model judge.
+        let deterministic = DeterministicJudge::new();
+        for probe_type in [
+            ProbeType::PointRecall,
+            ProbeType::LatestValueAfterUpdate,
+            ProbeType::Abstention,
+            ProbeType::CrossUserIsolation,
+            ProbeType::TenantSharedFact,
+            ProbeType::MultiHop,
+            ProbeType::TemporalAsOf,
+            ProbeType::PreferenceApplication,
+            ProbeType::PiiRedaction,
+        ] {
+            let deterministic_owns = deterministic
+                .judge_sync(&JudgeInput::new(probe_type, "gold", "gold"))
+                .is_ok();
+            let model_owns = ensure_llm_judgable(probe_type).is_ok();
+            assert_ne!(
+                deterministic_owns, model_owns,
+                "{probe_type:?} must be owned by exactly one judge"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_outcomes_never_carry_a_pairwise_agreement_state() {
+        // Pins: the field that tells a reader whether a model judge was involved.
+        // A deterministic score must be distinguishable from a judged one without
+        // re-deriving the probe type.
+        let outcome = DeterministicJudge::new()
+            .judge_sync(&JudgeInput::new(ProbeType::PointRecall, "gold", "gold"))
+            .expect("deterministic probe scores");
+        assert_eq!(outcome.pairwise_agreement, None);
+        assert_eq!(outcome.answer_faithful, Some(true));
+    }
+
+    #[test]
+    fn a_same_slot_preference_is_reported_as_position_bias_not_as_a_tie() {
+        // Pins: the three exhaustive swapped-order states. Both orders naming slot A
+        // is position bias, an explicit tie in either order is a tie, and opposite
+        // slots are a real winner. Collapsing the first two would hide a judge that
+        // simply prefers whatever it reads first.
+        assert_eq!(
+            resolve_swapped_verdicts(JudgeVerdict::A, JudgeVerdict::B),
+            (Some(PairwiseWinner::Candidate), PairwiseAgreement::Agreed)
+        );
+        assert_eq!(
+            resolve_swapped_verdicts(JudgeVerdict::B, JudgeVerdict::A),
+            (Some(PairwiseWinner::Baseline), PairwiseAgreement::Agreed)
+        );
+        for biased in [
+            (JudgeVerdict::A, JudgeVerdict::A),
+            (JudgeVerdict::B, JudgeVerdict::B),
+        ] {
+            assert_eq!(
+                resolve_swapped_verdicts(biased.0, biased.1),
+                (None, PairwiseAgreement::PositionBiased),
+                "{biased:?} preferred a slot rather than an answer"
+            );
+        }
+        for tied in [
+            (JudgeVerdict::Tie, JudgeVerdict::A),
+            (JudgeVerdict::B, JudgeVerdict::Tie),
+            (JudgeVerdict::Tie, JudgeVerdict::Tie),
+        ] {
+            assert_eq!(
+                resolve_swapped_verdicts(tied.0, tied.1),
+                (None, PairwiseAgreement::Tied),
+                "{tied:?} must be reported as an abstention"
+            );
+        }
+
+        // The explanation strings stay the stable scoring-path labels, so a
+        // position-biased pair is still "no agreement" to existing readers while
+        // carrying the sharper diagnosis alongside.
+        assert_eq!(
+            JudgeOutcome::pairwise(None, PairwiseAgreement::PositionBiased).explanation,
+            "pairwise_judge_no_agreement"
+        );
     }
 }

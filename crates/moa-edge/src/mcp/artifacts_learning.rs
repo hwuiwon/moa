@@ -138,7 +138,7 @@ struct ArtifactImportInput {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 struct ArtifactPublishInput {
-    /// Exact draft revision to publish.
+    /// Exact non-skill draft revision to publish.
     revision_uid: Uuid,
 }
 
@@ -222,6 +222,9 @@ impl Server {
     }
 
     /// Import artifact source as a new draft revision; this never publishes it.
+    ///
+    /// A hand-authored skill remains draft-only because learned skills can activate
+    /// only from the evidence-backed learning-review path.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = false,
@@ -254,7 +257,10 @@ impl Server {
         )
     }
 
-    /// Publish an exact draft artifact revision, changing active tenant behavior.
+    /// Publish an exact non-skill draft revision, changing tenant behavior.
+    ///
+    /// Skill revisions are rejected; learned skills activate only through
+    /// `learning_candidate_accept_skill` after regression review.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -306,7 +312,7 @@ impl Server {
         .await
     }
 
-    /// Accept a proposed skill candidate through the existing regression and publish gate.
+    /// Accept a proposed skill candidate through the regression and activation gate.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -327,7 +333,10 @@ impl Server {
         .await
     }
 
-    /// Accept a rollback proposal, archiving the regressed published revision.
+    /// Accept a rollback proposal, archiving the regressed revision and unserving the skill.
+    ///
+    /// Rollback does not restore a predecessor; a replacement must pass a separate
+    /// learned-skill review and activation.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,

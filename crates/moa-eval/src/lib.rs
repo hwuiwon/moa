@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 pub mod collector;
+pub mod controls;
 pub mod engine;
 pub mod execution;
 pub mod external_memory;

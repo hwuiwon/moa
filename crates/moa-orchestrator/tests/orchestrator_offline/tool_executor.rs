@@ -102,6 +102,7 @@ fn tool_request(tool_call_id: ToolCallId, tool_name: &str) -> ToolCallRequest {
         },
         provider_tool_use_id: None,
         tool_name: tool_name.to_string(),
+        expected_tool_contract_revision: "contract-v1".to_string(),
         input: json!({}),
         active_canary: None,
         session_id: SessionId::new(),

@@ -749,6 +749,7 @@ mod tests {
             },
             provider_tool_use_id: None,
             tool_name: "bash".to_string(),
+            expected_tool_contract_revision: "contract-v1".to_string(),
             input: json!({"cmd": "printf reviewed"}),
             active_canary: None,
             session_id: moa_core::types::identifiers::SessionId::new(),

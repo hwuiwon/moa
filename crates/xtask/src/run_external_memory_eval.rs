@@ -27,6 +27,7 @@ use moa_eval::external_memory::cost::{
 };
 use moa_eval::external_memory::dataset::{
     DatasetPackageRegistry, DatasetPackageV1, PreparedExternalMemoryCase, VerifiedFetchSummaryV1,
+    scan_package_leakage,
 };
 use moa_eval::external_memory::formation::{
     ComponentConfig, ConsolidationSettings, EmbeddingConfig, EntityBlockingConfig, FormationMode,
@@ -458,6 +459,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .map_err(anyhow::Error::from)?;
             (cases, None, None, None)
         };
+    scan_loaded_package_cases(&cases)?;
     validate_fetch_summary_before_runtime(
         parsed.fetch_summary.as_deref(),
         &package,
@@ -477,6 +479,10 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         personamem_cases,
         longmemeval_cases,
     ))
+}
+
+fn scan_loaded_package_cases(cases: &[PreparedExternalMemoryCase]) -> Result<()> {
+    scan_package_leakage(cases).map_err(anyhow::Error::from)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2448,6 +2454,77 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn full_package_branches_scan_before_runtime_or_scoring() {
+        // Pins: both typed full-package loaders converge on the same mandatory
+        // leakage gate before fetch validation, runtime construction, and paid
+        // provider work.
+        let source = include_str!("run_external_memory_eval.rs");
+        let run_start = source.find("pub(crate) fn run(").expect("run function");
+        let run_end = source[run_start..]
+            .find("fn scan_loaded_package_cases(")
+            .map(|offset| run_start + offset)
+            .expect("scan helper boundary");
+        let run = &source[run_start..run_end];
+        let persona_load = run
+            .find("load_full_personamem_package")
+            .expect("PersonaMem loader");
+        let longmem_load = run
+            .find("load_full_longmemeval_package")
+            .expect("LongMemEval loader");
+        let scan = run
+            .find("scan_loaded_package_cases(&cases)")
+            .expect("unconditional package scan");
+        let fetch_validation = run
+            .find("validate_fetch_summary_before_runtime")
+            .expect("fetch validation");
+        let runtime = run
+            .find("tokio::runtime::Builder")
+            .expect("runtime construction");
+
+        assert!(persona_load < scan);
+        assert!(longmem_load < scan);
+        assert!(scan < fetch_validation);
+        assert!(scan < runtime);
+    }
+
+    #[test]
+    fn full_package_branches_fail_closed_on_leakage() {
+        // Pins: neither direct typed loader branch can reach scoring with an
+        // answer-key turn after it has produced prepared cases.
+        let case = moa_eval::external_memory::dataset::validate_case(
+            moa_eval::external_memory::dataset::ExternalMemoryCaseV1 {
+                schema_version: 1,
+                isolation_key: "leaky-case".to_string(),
+                sessions: vec![moa_eval::external_memory::dataset::ExternalMemorySession {
+                    source_id: "session-1".to_string(),
+                    occurred_at: Utc::now(),
+                    turns: vec![moa_eval::external_memory::dataset::ExternalMemoryTurn {
+                        source_id: "turn-1".to_string(),
+                        occurred_at: Utc::now(),
+                        role: "user".to_string(),
+                        text: "Which instrument did I learn? I learned the cello.".to_string(),
+                    }],
+                }],
+                question: "Which instrument did I learn?".to_string(),
+                options: Vec::new(),
+                answer: "I learned the cello.".to_string(),
+                category: "single-session-user".to_string(),
+                evidence_labels: Default::default(),
+            },
+        )
+        .expect("valid structural case");
+
+        for dataset in [PERSONAMEM_DATASET, LONGMEMEVAL_DATASET] {
+            let error = scan_loaded_package_cases(std::slice::from_ref(&case))
+                .expect_err("full-package leakage must fail");
+            assert!(
+                error.to_string().contains("answer key"),
+                "{dataset}: {error}"
+            );
+        }
     }
 
     #[test]

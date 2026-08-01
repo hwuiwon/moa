@@ -499,6 +499,13 @@ pub struct ToolCallRequest {
     pub provider_tool_use_id: Option<String>,
     /// Stable registered tool name.
     pub tool_name: String,
+    /// Contract revision the caller was admitted against.
+    ///
+    /// Conversational calls pin the revision offered to the model, and durable
+    /// calls pin the revision compiled into the execution capability.
+    /// `ToolExecutor` compares this with the exact immutable catalog snapshot it
+    /// uses for retry selection and dispatch.
+    pub expected_tool_contract_revision: String,
     /// Raw JSON input passed to the tool implementation.
     pub input: Value,
     /// Active per-turn canary that must not appear in tool input.
@@ -629,8 +636,9 @@ mod tests {
     };
 
     #[test]
-    fn tool_call_request_requires_persisted_session_identity() {
-        // Pins: every durable tool execution names its exact persisted session on the wire.
+    fn tool_call_request_requires_persisted_session_and_contract_identity() {
+        // Pins: every durable tool execution names its exact session and admitted
+        // catalog contract on the wire.
         let request = ToolCallRequest {
             tool_call_id: ToolCallId::new(),
             caller_identity: Identity {
@@ -642,6 +650,7 @@ mod tests {
             },
             provider_tool_use_id: None,
             tool_name: "memory_search".to_string(),
+            expected_tool_contract_revision: "contract-v1".to_string(),
             input: serde_json::json!({}),
             active_canary: None,
             session_id: SessionId::new(),
@@ -649,15 +658,31 @@ mod tests {
             worker_id: None,
             resource_budget: Default::default(),
         };
-        let mut wire = serde_json::to_value(request).expect("serialize request");
-        wire.as_object_mut()
+        let mut missing_session = serde_json::to_value(request.clone()).expect("serialize request");
+        missing_session
+            .as_object_mut()
             .expect("tool request should serialize as an object")
             .remove("session_id");
 
-        let error = serde_json::from_value::<ToolCallRequest>(wire)
+        let error = serde_json::from_value::<ToolCallRequest>(missing_session)
             .expect_err("missing persisted session id must fail decoding");
 
         assert!(error.to_string().contains("missing field `session_id`"));
+
+        let mut missing_contract = serde_json::to_value(request).expect("serialize request");
+        missing_contract
+            .as_object_mut()
+            .expect("tool request should serialize as an object")
+            .remove("expected_tool_contract_revision");
+
+        let error = serde_json::from_value::<ToolCallRequest>(missing_contract)
+            .expect_err("missing admitted contract must fail decoding");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing field `expected_tool_contract_revision`")
+        );
     }
 
     #[test]

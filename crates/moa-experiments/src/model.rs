@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::simulator_policy::registry::ResolvedSimulatorPolicy;
+
 /// Lifecycle state for an experiment run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +123,15 @@ impl ExperimentTrialStatus {
 }
 
 /// Durable reason why a trial stopped producing turns.
+///
+/// Nothing a simulator *says* is a containment authority. The independent
+/// authorities are the durable ones: the resource ledger's committed and
+/// outstanding counters, the reservations it grants, and
+/// [`ExperimentResourceEnvelope::deadline_at`]. A simulator claim that a request
+/// is out of scope is an outcome signal scored by the trial evaluator, and it has
+/// no variant here at all. [`Self::SimulatorDone`] records that the simulated
+/// conversation ended, which is likewise an outcome: it cannot extend an envelope,
+/// release a reservation, or move a deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExperimentTrialStopReason {
@@ -701,7 +712,7 @@ pub enum ExperimentTarget {
     },
     /// Run one exact published execution-template revision.
     ExecutionTemplate {
-        /// Exact published skill template revision.
+        /// Exact activated skill template revision.
         template: PinnedExecutionTemplateRef,
         /// Explicit immutable execution objective.
         objective: String,
@@ -754,16 +765,12 @@ pub struct ExperimentVariant {
 /// Simulator settings used when expanding an experiment plan into trials.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentSimulatorConfig {
-    /// Model used for simulator user turns.
-    pub model: ModelId,
-    /// Optional sampling temperature for simulator calls.
-    pub temperature: Option<f32>,
+    /// Immutable certified policy snapshot used for simulator user turns.
+    pub policy: ResolvedSimulatorPolicy,
     /// Maximum simulator-visible turns allowed for one trial.
     pub max_turns: u32,
     /// Optional total token budget for the simulator side.
     pub token_budget: Option<u32>,
-    /// Additional simulator metadata that does not affect storage invariants.
-    pub metadata: Value,
 }
 
 /// Plan expansion metadata used to create deterministic trial rows.
@@ -823,6 +830,8 @@ pub struct NewExperimentRun {
     pub expected_trials: u64,
     /// Durable resource ceiling this run and its trials execute inside.
     pub resource_envelope: ExperimentResourceEnvelope,
+    /// Certified simulator policy snapshot for a plan-backed run.
+    pub simulator_policy: Option<ResolvedSimulatorPolicy>,
 }
 
 /// Input used to create a durable experiment trial row.
@@ -893,6 +902,8 @@ pub struct ExperimentRunRecord {
     pub plan_artifact_uid: Option<Uuid>,
     /// Durable resource ceiling this run and its trials execute inside.
     pub resource_envelope: ExperimentResourceEnvelope,
+    /// Certified simulator policy snapshot for a plan-backed run.
+    pub simulator_policy: Option<ResolvedSimulatorPolicy>,
     /// Terminal error message for failed runs.
     pub error: Option<String>,
     /// Timestamp when the row was created and the run was accepted.

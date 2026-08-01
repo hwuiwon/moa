@@ -5,13 +5,13 @@ use moa_core::{error::MoaError, error::Result};
 use moa_db::ScopedConn;
 use moa_memory_graph::GraphStore;
 use moa_skills::lessons::{LessonContext, learn_lesson};
-use moa_skills::registry::{NewSkill, SkillRegistry};
+use moa_skills::package::SkillPackage;
 use sqlx::Row;
 use uuid::Uuid;
 
 use super::skill_graph::{
-    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, map_sqlx_error, memory_scope, set_app_role,
-    tenant_scope,
+    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, map_sqlx_error, memory_scope,
+    serve_skill_package, set_app_role, tenant_scope,
 };
 
 #[tokio::test]
@@ -22,13 +22,12 @@ async fn learn_lesson_writes_graph_node() -> Result<()> {
     let workspace_name = format!("skills-lesson-{}", Uuid::now_v7());
     let artifact_scope = tenant_scope(&workspace_name);
     let scope = memory_scope(&workspace_name);
-    let registry = SkillRegistry::new(store.pool().clone());
-    let skill_uid = registry
-        .upsert_by_name(NewSkill::from_skill_markdown(
-            artifact_scope,
-            DISTILLED_SKILL.to_string(),
-        ))
-        .await?;
+    let skill_uid = serve_skill_package(
+        store.pool(),
+        artifact_scope,
+        SkillPackage::from_skill_markdown(DISTILLED_SKILL.to_string()),
+    )
+    .await?;
     let lesson_ctx = LessonContext::for_app_role(graph_store(store.pool(), &scope));
 
     let lesson_uid = learn_lesson(

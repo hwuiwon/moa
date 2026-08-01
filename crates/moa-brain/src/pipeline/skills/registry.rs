@@ -1,6 +1,6 @@
 //! Skill registry reads and database-row conversion.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument};
 use moa_core::{
@@ -37,18 +37,19 @@ async fn load_visible_skills(pool: &PgPool, ctx: &WorkingContext) -> Result<Vec<
     let tenant_id = ctx.tenant_id.to_string();
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (a.name)
-               a.name, a.description, a.tags, r.revision_uid, r.definition, r.source_text
-        FROM moa.artifact a
-        JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
+        -- Serving is the type-owned pointer, so the manifest offers exactly what
+        -- the tenant serves. A newer or merely validated revision is invisible
+        -- here until an audited learned-skill activation moves the pointer to it.
+        SELECT a.name, a.description, a.tags, r.revision_uid, r.definition, r.source_text
+        FROM moa.artifact_serving_pointer p
+        JOIN moa.artifact a ON a.artifact_uid = p.artifact_uid
+        JOIN moa.artifact_revision r ON r.revision_uid = p.revision_uid
         WHERE a.valid_to IS NULL
           AND r.valid_to IS NULL
           AND a.kind = 'skill'
-          AND r.status = 'published'
-          AND a.storage_partition_id = $1
+          AND p.storage_partition_id = $1
           AND a.user_id IS NULL
-        ORDER BY a.name ASC,
-                 r.version DESC
+        ORDER BY a.name ASC
         "#,
     )
     .bind(&tenant_id)
@@ -82,10 +83,25 @@ async fn load_locked_skills(
         WHERE r.revision_uid = ANY($2::uuid[])
           AND a.valid_to IS NULL
           AND r.valid_to IS NULL
+          AND r.status IN ('ready', 'superseded')
           AND a.kind = 'skill'
-          AND r.status = 'published'
           AND a.storage_partition_id = $1
           AND a.user_id IS NULL
+          -- Exact pinned access is historical only while the revision remains
+          -- executable. Ready and superseded revisions also need serving
+          -- provenance; rollback archives the revision and is terminal even
+          -- though its activation audit remains immutable.
+          AND (
+              EXISTS (
+                  SELECT 1 FROM moa.artifact_serving_pointer p
+                  WHERE p.revision_uid = r.revision_uid
+              )
+              OR EXISTS (
+                  SELECT 1 FROM moa.artifact_activation_audit audit
+                  WHERE audit.activated_revision_uid = r.revision_uid
+                    AND audit.decision_kind = 'activation'
+              )
+          )
         ORDER BY array_position($2::uuid[], r.revision_uid), a.name ASC
         "#,
     )
@@ -97,7 +113,7 @@ async fn load_locked_skills(
 
     if rows.len() != revision_uids.len() {
         return Err(MoaError::StorageError(format!(
-            "agent policy locked {} skill revisions but {} are visible",
+            "agent policy locked {} skill revisions but {} are executable",
             revision_uids.len(),
             rows.len()
         )));
@@ -141,14 +157,17 @@ pub(super) async fn load_selected_skill_files(
     }
 
     let tenant_id = ctx.tenant_id.to_string();
-    let selected_names = selected
+    let revision_uids = selected
         .iter()
-        .map(|skill| skill.name.clone())
-        .collect::<Vec<_>>();
-    let selected_revision_uids = selected
-        .iter()
-        .map(|skill| skill.artifact_revision_uid)
-        .collect::<Option<Vec<Uuid>>>();
+        .map(|skill| {
+            skill.artifact_revision_uid.ok_or_else(|| {
+                MoaError::StorageError(format!(
+                    "registry-selected skill `{}` has no exact artifact revision",
+                    skill.name
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let base_paths = selected
         .iter()
         .map(|skill| {
@@ -158,67 +177,57 @@ pub(super) async fn load_selected_skill_files(
             ))
         })
         .collect::<Result<HashMap<_, _>>>()?;
-    let rows = if let Some(revision_uids) = selected_revision_uids {
-        sqlx::query(
-            r#"
-            WITH requested AS (
-                SELECT revision_uid, ord
-                FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(revision_uid, ord)
-            )
-            SELECT a.name, f.path, f.content, f.executable
-            FROM requested
-            JOIN moa.artifact_revision r ON r.revision_uid = requested.revision_uid
-            JOIN moa.artifact a ON a.artifact_uid = r.artifact_uid
-            JOIN moa.artifact_file f ON f.revision_uid = r.revision_uid
-            WHERE a.valid_to IS NULL
-              AND r.valid_to IS NULL
-              AND a.kind = 'skill'
-              AND r.status = 'published'
-              AND a.storage_partition_id = $1
-              AND a.user_id IS NULL
-            ORDER BY requested.ord ASC, f.path ASC
-            "#,
-        )
-        .bind(&tenant_id)
-        .bind(&revision_uids)
-        .fetch_all(pool)
-        .await
-    } else {
-        sqlx::query(
-            r#"
+    let rows = sqlx::query(
+        r#"
         WITH requested AS (
-            SELECT name, ord
-            FROM unnest($2::text[]) WITH ORDINALITY AS requested(name, ord)
-        ),
-        visible AS (
-            SELECT a.name, r.revision_uid, requested.ord,
-                   row_number() OVER (
-                       PARTITION BY a.name
-                       ORDER BY r.version DESC
-                   ) AS rank
-            FROM requested
-            JOIN moa.artifact a ON a.name = requested.name
-            JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
-            WHERE a.valid_to IS NULL
-              AND r.valid_to IS NULL
-              AND a.kind = 'skill'
-              AND r.status = 'published'
-              AND a.storage_partition_id = $1
-              AND a.user_id IS NULL
+            SELECT revision_uid, ord
+            FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(revision_uid, ord)
         )
-        SELECT visible.name, f.path, f.content, f.executable
-        FROM visible
-        JOIN moa.artifact_file f ON f.revision_uid = visible.revision_uid
-        WHERE visible.rank = 1
-        ORDER BY visible.ord ASC, f.path ASC
+        SELECT r.revision_uid, a.name, f.path, f.content, f.executable
+        FROM requested
+        JOIN moa.artifact_revision r ON r.revision_uid = requested.revision_uid
+        JOIN moa.artifact a ON a.artifact_uid = r.artifact_uid
+        JOIN moa.artifact_file f ON f.revision_uid = r.revision_uid
+        WHERE a.valid_to IS NULL
+          AND r.valid_to IS NULL
+          AND r.status IN ('ready', 'superseded')
+          AND a.kind = 'skill'
+          AND a.storage_partition_id = $1
+          AND a.user_id IS NULL
+          -- Archived package bytes remain auditable after rollback, but can
+          -- never be materialized into a runtime sandbox.
+          AND (
+              EXISTS (
+                  SELECT 1 FROM moa.artifact_serving_pointer p
+                  WHERE p.revision_uid = r.revision_uid
+              )
+              OR EXISTS (
+                  SELECT 1 FROM moa.artifact_activation_audit audit
+                  WHERE audit.activated_revision_uid = r.revision_uid
+                    AND audit.decision_kind = 'activation'
+              )
+          )
+        ORDER BY requested.ord ASC, f.path ASC
         "#,
-        )
-        .bind(&tenant_id)
-        .bind(&selected_names)
-        .fetch_all(pool)
-        .await
-    }
+    )
+    .bind(&tenant_id)
+    .bind(&revision_uids)
+    .fetch_all(pool)
+    .await
     .map_err(|error| MoaError::StorageError(error.to_string()))?;
+
+    let expected_revision_uids = revision_uids.iter().copied().collect::<BTreeSet<_>>();
+    let materialized_revision_uids = rows
+        .iter()
+        .map(|row| row.try_get("revision_uid").map_err(map_sqlx_error))
+        .collect::<Result<BTreeSet<Uuid>>>()?;
+    if materialized_revision_uids != expected_revision_uids {
+        return Err(MoaError::StorageError(format!(
+            "selected {} exact skill revisions but {} have executable package files",
+            expected_revision_uids.len(),
+            materialized_revision_uids.len()
+        )));
+    }
 
     let mut files = Vec::new();
     for row in rows {
@@ -319,4 +328,173 @@ fn slugify_skill_name(value: &str) -> String {
 
 fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct database coverage for exact skill package loading fences.
+
+    use moa_artifacts::{
+        document::{ArtifactDocument, ArtifactStatus},
+        registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile, StoredArtifactRevision},
+        release::TenantScope,
+    };
+    use moa_core::types::{
+        action_policy::ActionRuleScope, identifiers::TenantId, model::ModelCapabilities,
+        session::SessionMeta,
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn exact_files_load_for_superseded_revision_and_reject_archived_revision_db_memory()
+    -> Result<()> {
+        // Pins: a rollback between metadata selection and file loading cannot
+        // silently emit an included manifest with no executable package. Earlier
+        // superseded activations remain valid exact pins.
+        let (store, database_url, schema_name) =
+            moa_session::testing::create_isolated_test_store().await?;
+        let pool = store.pool().clone();
+        let registry = ArtifactRegistry::new(pool.clone());
+        let tenant_id = TenantId::from(Uuid::now_v7());
+        let scope = ActionRuleScope::Tenant { tenant_id };
+        let release_scope = TenantScope::new(tenant_id);
+        let name = format!("exact-file-fence-{}", Uuid::now_v7().simple());
+
+        let v1 = create_skill_draft(&registry, &scope, &name, b"# v1\n").await?;
+        moa_artifacts::test_fixtures::activate_revision(
+            &pool,
+            release_scope,
+            moa_artifacts::release::ActivationTarget::SkillVisibility {
+                artifact_uid: v1.artifact_uid,
+            },
+            v1.revision_uid,
+        )
+        .await
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        let v2 = create_skill_draft(&registry, &scope, &name, b"# v2\n").await?;
+        let v2_activation = moa_artifacts::test_fixtures::activate_revision(
+            &pool,
+            release_scope,
+            moa_artifacts::release::ActivationTarget::SkillVisibility {
+                artifact_uid: v2.artifact_uid,
+            },
+            v2.revision_uid,
+        )
+        .await
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+
+        let superseded = registry
+            .load_revision(&scope, v1.revision_uid)
+            .await?
+            .expect("first activation remains available for exact pins");
+        assert_eq!(superseded.status, ArtifactStatus::Superseded);
+        let ctx = WorkingContext::new(
+            &SessionMeta {
+                tenant_id,
+                ..SessionMeta::default()
+            },
+            ModelCapabilities::default(),
+        );
+        let v1_metadata = selected_metadata(&name, v1.revision_uid);
+        let files = load_selected_skill_files(&pool, &ctx, &[v1_metadata]).await?;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].content, b"# v1\n");
+
+        let mut conn = moa_db::ScopedConn::begin_tenant(&pool, tenant_id).await?;
+        let rollback = ArtifactRegistry::rollback_serving_revision_in_tx(
+            conn.as_mut(),
+            &release_scope,
+            v2.revision_uid,
+            v2_activation.audit_uid,
+            v2_activation.pointer_version,
+            "exact-file-fence-test",
+            Some("regression"),
+        )
+        .await?;
+        conn.commit().await?;
+        assert_eq!(
+            rollback,
+            moa_artifacts::registry::RollbackApplication::Applied
+        );
+
+        let archived = registry
+            .load_revision(&scope, v2.revision_uid)
+            .await?
+            .expect("rollback keeps exact revision audit history");
+        assert_eq!(archived.status, ArtifactStatus::Archived);
+        let error = load_selected_skill_files(
+            &pool,
+            &ctx,
+            &[selected_metadata(&name, archived.revision_uid)],
+        )
+        .await
+        .expect_err("archived exact files must fail closed after metadata selection");
+        match error {
+            MoaError::StorageError(message) => assert_eq!(
+                message,
+                "selected 1 exact skill revisions but 0 have executable package files"
+            ),
+            other => panic!("expected archived exact-file storage failure, got {other:?}"),
+        }
+
+        moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+    }
+
+    async fn create_skill_draft(
+        registry: &ArtifactRegistry,
+        scope: &ActionRuleScope,
+        name: &str,
+        skill_md: &[u8],
+    ) -> Result<StoredArtifactRevision> {
+        let document: ArtifactDocument = serde_json::from_value(json!({
+            "api_version": "moa.artifact/v1",
+            "kind": "skill",
+            "metadata": {
+                "name": name,
+                "description": "Exact file fence fixture"
+            },
+            "definition": {
+                "type": "skill",
+                "spec": {
+                    "instructions": { "path": "SKILL.md" }
+                }
+            }
+        }))
+        .expect("exact file fence skill fixture is valid");
+        let source = document
+            .to_yaml()
+            .expect("serialize exact file fence skill fixture");
+        registry
+            .create_draft(
+                scope,
+                NewArtifactDraft {
+                    document: &document,
+                    source_format: "yaml",
+                    source_text: source.as_bytes(),
+                    files: &[NewArtifactFile {
+                        path: "SKILL.md".to_string(),
+                        content: skill_md.to_vec(),
+                        content_type: Some("text/markdown; charset=utf-8".to_string()),
+                        executable: false,
+                    }],
+                },
+            )
+            .await
+    }
+
+    fn selected_metadata(name: &str, revision_uid: Uuid) -> SkillMetadata {
+        SkillMetadata {
+            artifact_revision_uid: Some(revision_uid),
+            path: format!(".moa/skills/{name}/SKILL.md"),
+            name: name.to_string(),
+            description: "Exact file fence fixture".to_string(),
+            tags: Vec::new(),
+            allowed_tools: Vec::new(),
+            actions: Vec::new(),
+            has_execution_plan: false,
+            estimated_tokens: 1,
+        }
+    }
 }

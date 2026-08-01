@@ -210,7 +210,7 @@ pub struct ExperienceDistillationInput {
 /// recurrence evidence into the reviewer-facing proposal payload.
 ///
 /// `embedder`, when present, activates the semantic (R2) layer: the task summary
-/// is embedded once and reused to (1) route improve-vs-create by nearest published
+/// is embedded once and reused to (1) route improve-vs-create by nearest serving
 /// skill embedding, replacing token Jaccard as the primary signal, and (2) dedup a
 /// near-duplicate of an open proposal into a sibling instead of a parallel draft.
 /// A missing embedder, a failed embed, or a dimension mismatch skips the semantic
@@ -682,7 +682,7 @@ async fn embed_task_summary_probe(
     }
 }
 
-/// Resolves the nearest published skill embedding to an improvable skill match.
+/// Resolves the nearest serving-skill embedding to an improvable skill match.
 ///
 /// Runs the skill-identity NN within the tenant's storage partition, resolves the
 /// nearest artifact to its current skill name, and confirms that skill is present
@@ -707,7 +707,7 @@ async fn nearest_skill_match(
         return Ok(None);
     };
     let Some(name) = registry
-        .published_skill_name_for_artifact(nearest.artifact_uid)
+        .live_skill_name_for_artifact(nearest.artifact_uid)
         .await?
     else {
         return Ok(None);

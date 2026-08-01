@@ -87,7 +87,7 @@ pub fn validate_for_status(
         }
     }
 
-    if requested_status == ArtifactStatus::Published {
+    if requested_status.requires_resolved_references() {
         for resolution in &document.reference_resolutions {
             if resolution.state == ReferenceState::Unresolved {
                 report.push_error(
@@ -631,12 +631,18 @@ fn validate_simulation_scenario(
 fn validate_experiment_plan(definition: &ExperimentPlanDefinition, report: &mut ValidationReport) {
     validate_experiment_simulation(&definition.simulation, report);
     validate_target_variants(definition, report);
-    require_non_empty(
-        "definition.spec.simulator_model",
-        &definition.simulator_model,
-        "experiment plan simulator_model",
-        report,
-    );
+    if definition.simulator_policy.policy_uid.is_nil() {
+        report.push_error(
+            "definition.spec.simulator_policy.policy_uid",
+            "experiment plan simulator policy id must not be nil",
+        );
+    }
+    if definition.simulator_policy.revision < 1 {
+        report.push_error(
+            "definition.spec.simulator_policy.revision",
+            "experiment plan simulator policy revision must be positive",
+        );
+    }
     if let Some(target_model) = &definition.target_model {
         require_non_empty(
             "definition.spec.target_model",
@@ -2051,7 +2057,10 @@ mod tests {
                 config: serde_json::json!({}),
                 ui: serde_json::json!({}),
             }],
-            simulator_model: "gpt-5.1-mini".to_string(),
+            simulator_policy: crate::simulation::SimulatorPolicyReference {
+                policy_uid: uuid::Uuid::from_u128(0x51),
+                revision: 1,
+            },
             parallelism: 1,
             trials_per_combination: 1,
             budget: ExperimentBudget {

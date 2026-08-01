@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "session_resume_after_orchestrator_crash"
 description = "Recorded crash-recovery workflow covering event-log replay and duplicate-event prevention after resume."
 default_timeout_seconds = 60

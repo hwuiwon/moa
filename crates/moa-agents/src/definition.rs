@@ -3,6 +3,15 @@
 use moa_core::types::agent::AgentRevisionLock;
 use uuid::Uuid;
 
+/// Immutable authorization binding for one active agent installation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AgentInstallationBinding {
+    /// Stable installed-agent row identifier.
+    pub installation_uid: Uuid,
+    /// Optional agent principal bound to this installation.
+    pub agent_id: Option<Uuid>,
+}
+
 /// Installed-agent pointer selected for session creation or deployment resolution.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AgentInstallationPointer {

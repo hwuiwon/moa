@@ -45,7 +45,7 @@ pub struct GetEventsRequest {
 pub struct CreateAgentSessionRequest {
     /// Base session metadata to persist after agent resolution.
     pub meta: SessionMeta,
-    /// Installed deployment or exact revision to pin onto the session.
+    /// Active installed deployment to pin onto the public session.
     pub agent: AgentSessionSelection,
 }
 
@@ -222,6 +222,38 @@ pub struct LearningCandidateReviewRequest {
     pub reason: Option<String>,
 }
 
+impl LearningCandidateReviewRequest {
+    /// Returns the versioned digest used to identify an exact terminal-review retry.
+    #[must_use]
+    pub fn replay_digest(&self) -> [u8; 32] {
+        fn add_text(hasher: &mut blake3::Hasher, value: &str) {
+            hasher.update(&(value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"moa.learning-review.request.v1\0");
+        hasher.update(self.tenant_id.0.as_bytes());
+        hasher.update(self.candidate_id.as_bytes());
+        hasher.update(&[match self.action {
+            LearningCandidateReviewAction::Accept => 1,
+            LearningCandidateReviewAction::Reject => 2,
+            LearningCandidateReviewAction::Dismiss => 3,
+        }]);
+        add_text(&mut hasher, &self.reviewer_subject);
+        match self.reason.as_deref() {
+            Some(reason) => {
+                hasher.update(&[1]);
+                add_text(&mut hasher, reason);
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        *hasher.finalize().as_bytes()
+    }
+}
+
 /// Response payload returned after reviewing one learning candidate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearningCandidateReviewResponse {
@@ -233,8 +265,8 @@ pub struct LearningCandidateReviewResponse {
     pub artifact_uid: Option<Uuid>,
     /// Draft artifact revision that the candidate refers to, when applicable.
     pub draft_artifact_revision_uid: Option<Uuid>,
-    /// Published artifact revision created by acceptance, when applicable.
-    pub published_artifact_revision_uid: Option<Uuid>,
+    /// Artifact revision activated by acceptance, when applicable.
+    pub activated_artifact_revision_uid: Option<Uuid>,
 }
 
 /// Request payload for recording active-segment tool usage.

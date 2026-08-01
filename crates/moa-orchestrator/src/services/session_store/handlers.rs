@@ -806,7 +806,7 @@ impl RestateSessionStore for SessionStoreImpl {
 
     #[tracing::instrument(skip(self, ctx, _request))]
     // SAFETY: Internal maintenance handler; embeds tenant-owned task summaries and
-    // published skill identities into derived vector columns. No caller data is returned.
+    // serving skill identities into derived vector columns. No caller data is returned.
     async fn backfill_learning_embeddings(
         &self,
         ctx: Context<'_>,

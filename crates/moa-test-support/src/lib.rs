@@ -8,6 +8,9 @@
 #![deny(missing_docs)]
 
 pub mod execution_audits;
+
+#[cfg(feature = "capability-fixture")]
+pub mod fixture_capability;
 pub mod fixtures;
 pub mod invariants;
 pub mod postgres;

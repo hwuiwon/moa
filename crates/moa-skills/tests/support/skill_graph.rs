@@ -9,11 +9,17 @@
 
 use std::sync::{Arc, OnceLock};
 
+use moa_artifacts::document::ArtifactStatus;
+use moa_artifacts::registry::{
+    ArtifactRegistry, NewArtifactDraft, NewArtifactFile, StoredArtifactRevision,
+};
 use moa_core::types::memory::RlsContext;
 use moa_core::{error::MoaError, error::Result, types::action_policy::ActionRuleScope};
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
+use moa_skills::artifact::{SKILL_ARTIFACT_PATH, skill_artifact_document_from_package};
+use moa_skills::package::SkillPackage;
 use moa_test_support::fixtures::tenant_id_from_storage_partition;
 use sqlx::PgConnection;
 
@@ -45,6 +51,74 @@ pub(crate) async fn set_app_role(conn: &mut PgConnection) -> Result<()> {
         .await
         .map_err(map_sqlx_error)?;
     Ok(())
+}
+
+/// Creates a skill draft and activates it so the tenant serves it.
+///
+/// The fixture drives the real validation, baseline, audit, and pointer
+/// transaction, so it cannot make a skill serve that activation would refuse.
+pub(crate) async fn serve_skill_package(
+    pool: &sqlx::PgPool,
+    scope: ActionRuleScope,
+    package: SkillPackage,
+) -> Result<uuid::Uuid> {
+    let draft = draft_skill_package(pool, scope, package).await?;
+    let release_scope = moa_artifacts::release::TenantScope::from_action_rule_scope(&scope)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    moa_artifacts::test_fixtures::activate_revision(
+        pool,
+        release_scope,
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    Ok(draft.revision_uid)
+}
+
+/// Creates one canonical draft through the generic artifact registry.
+pub(crate) async fn draft_skill_package(
+    pool: &sqlx::PgPool,
+    scope: ActionRuleScope,
+    package: SkillPackage,
+) -> Result<StoredArtifactRevision> {
+    let package = package.validate()?;
+    let document = skill_artifact_document_from_package(&package, ArtifactStatus::Draft)?;
+    let source_text = if let Some(file) = package
+        .files
+        .iter()
+        .find(|file| file.path == SKILL_ARTIFACT_PATH)
+    {
+        file.content.clone()
+    } else {
+        document
+            .to_yaml()
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?
+            .into_bytes()
+    };
+    let files = package
+        .files
+        .iter()
+        .map(|file| NewArtifactFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+            content_type: file.content_type.clone(),
+            executable: file.executable,
+        })
+        .collect::<Vec<_>>();
+    ArtifactRegistry::new(pool.clone())
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: &source_text,
+                files: &files,
+            },
+        )
+        .await
 }
 
 pub(crate) async fn purge_test_skill_name(

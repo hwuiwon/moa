@@ -1,0 +1,46 @@
+# Eval control scorer and gate mutants.
+#
+# Scope is deliberately narrow: null-ceiling derivation, the suite-validity
+# audit, the fixed-corpus leakage scanner, and cohort pairing. These are the
+# functions a silent edit would turn into a gate that always passes, so they are
+# the ones that need mutation evidence rather than a manual "break it and see"
+# check.
+#
+# Target selection stays in this file so a reviewer can audit the exact surface
+# before the expensive run. The command adapters are included so wiring a scan
+# but failing to execute or gate it is also mutation-tested. Invoke through
+# `cargo run -p xtask --features eval-tools -- eval-control-mutants`.
+test_tool = "nextest"
+test_package = ["moa-eval", "xtask"]
+additional_cargo_test_args = [
+  "-E",
+  "(package(moa-eval) & kind(lib)) | (package(moa-eval) & binary(eval_offline)) | (package(xtask) & binary(xtask))",
+  "--no-tests=fail",
+]
+# Restrict both by file and by function name. File globs alone also select DTO
+# accessors, display helpers, and unrelated lifecycle code, which do not support
+# the decision-function claims above.
+examine_globs = [
+  "crates/moa-eval/src/kernel/controls.rs",
+  "crates/moa-eval/src/kernel/contamination.rs",
+  "crates/moa-eval/src/kernel/cohorts.rs",
+  "crates/xtask/src/eval_suite_controls.rs",
+  "crates/xtask/src/run_external_memory_eval.rs",
+  "crates/xtask/src/wixqa_rag_eval.rs",
+]
+examine_re = [
+  "derive_null_ceilings",
+  "audit_controlled_metric",
+  "LeakageScanner::scan",
+  "require_paired",
+  "leakage_outcome",
+  "validate_leakage_coverage",
+  "scan_selected_wixqa_corpus",
+  "scan_loaded_package_cases",
+]
+minimum_test_timeout = 120.0
+timeout_multiplier = 3.0
+build_timeout_multiplier = 3.0
+cap_lints = true
+gitignore = true
+copy_vcs = false

@@ -25,6 +25,7 @@ use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
+use moa_wire::experiments::ArtifactReleaseExperimentBinding;
 use moa_wire::experiments::{
     AgentRevisionSimulationVariant, ExperimentRunStatusRequest, ExperimentRunStatusResponse,
 };
@@ -38,7 +39,7 @@ use uuid::Uuid;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::inner::{
-    apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
+    apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_evaluation,
 };
 use crate::workflows::durable_utc_now;
 use crate::workflows::errors::{bad_request, handler_error_message, moa_error_to_handler_error};
@@ -90,6 +91,9 @@ pub struct ExperimentRunWorkflowRequest {
     /// Exact agent revision variants used to override plan target variants.
     #[serde(default)]
     pub agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
+    /// Internal artifact-release arms executed through this production run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_evaluation: Option<ArtifactReleaseExperimentBinding>,
 }
 
 /// Restate workflow surface for one live behavior experiment run.
@@ -542,7 +546,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use moa_experiments::model::ExperimentSimulatorConfig;
-    use serde_json::json;
 
     #[test]
     fn aggregate_status_keeps_parent_running_until_partial_failures_are_final() {
@@ -659,11 +662,11 @@ mod tests {
             data_bundle_ids: Vec::new(),
             artifact_revision_uids: Vec::new(),
             simulator: ExperimentSimulatorConfig {
-                model: ModelId::new("gpt-5.1-mini"),
-                temperature: Some(0.0),
+                policy: crate::workflows::experiment_trial_run::fixture_simulator_policy(
+                    "gpt-5.1-mini",
+                ),
                 max_turns: 4,
                 token_budget: None,
-                metadata: json!({}),
             },
             target_model: Some(ModelId::new("gpt-5.1")),
             seed: None,

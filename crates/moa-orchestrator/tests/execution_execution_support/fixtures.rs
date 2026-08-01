@@ -21,10 +21,7 @@ use moa_execution::wire::{
 use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
 use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
-use moa_wire::artifacts::{
-    ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
-    ArtifactPublishResponse,
-};
+use moa_wire::artifacts::{ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse};
 use moa_wire::turn::{SessionProgress, SessionProgressRequest, StartTurnRequest, TurnOutcome};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -139,11 +136,11 @@ pub(crate) struct StartedTurn {
     pub(crate) turn_id: String,
 }
 
-/// One exact published skill revision available to planning.
-pub(crate) struct PublishedSkill {
+/// One exact activated skill revision available to planning.
+pub(crate) struct ActivatedSkill {
     /// Canonical `skill://` reference.
     pub(crate) skill_ref: String,
-    /// Exact published revision identifier.
+    /// Exact activated revision identifier.
     pub(crate) revision_uid: uuid::Uuid,
 }
 
@@ -377,15 +374,15 @@ pub(crate) async fn list_execution_tasks(
         .context("list execution task projections")
 }
 
-/// Imports and publishes one real skill artifact plus its exact `SKILL.md` package file.
-pub(crate) async fn publish_skill(
+/// Imports and activates one real skill artifact plus its exact `SKILL.md` package file.
+pub(crate) async fn activate_skill(
     fixture: &OrchestratorTestFixture,
     client: &TestApiClient,
     tenant_id: TenantId,
     name: &str,
     source_text: String,
     skill_markdown: &str,
-) -> Result<PublishedSkill> {
+) -> Result<ActivatedSkill> {
     fixture
         .grant_default_tenant_admin(tenant_id)
         .await
@@ -413,24 +410,23 @@ pub(crate) async fn publish_skill(
     }
     assert_validation_report_has_no_errors(&imported.validation_report)?;
 
-    let published: ArtifactPublishResponse = client
-        .post_call(
-            "/Artifacts/publish",
-            &ArtifactPublishRequest {
-                scope,
-                revision_uid: imported.revision_uid,
-            },
-        )
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
         .await
-        .context("publish deterministic skill artifact")?;
-    if published.status != "published" {
-        bail!("artifact publish returned non-published status: {published:?}");
-    }
-    assert_validation_report_has_no_errors(&published.validation_report)?;
+        .context("connect for learned-skill activation fixture")?;
+    moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        moa_artifacts::release::TenantScope::new(tenant_id),
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: imported.artifact_uid,
+        },
+        imported.revision_uid,
+    )
+    .await
+    .context("activate deterministic skill artifact")?;
 
-    Ok(PublishedSkill {
+    Ok(ActivatedSkill {
         skill_ref: ArtifactRef::artifact(ArtifactKind::Skill, name).to_string(),
-        revision_uid: published.revision_uid,
+        revision_uid: imported.revision_uid,
     })
 }
 

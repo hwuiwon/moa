@@ -50,6 +50,7 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-artifacts = { workspace = true, features = ["test-support"] }
 insta.workspace = true
 moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-lifecycle = { workspace = true }

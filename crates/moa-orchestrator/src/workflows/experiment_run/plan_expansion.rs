@@ -36,6 +36,7 @@ pub(super) async fn run_experiment_plan(
         request.run_uid,
         plan_revision_uid,
         request.agent_revision_variants.clone(),
+        request.release_evaluation.clone(),
         pool,
     )
     .await?;
@@ -169,6 +170,13 @@ async fn dispatch_plan_trials(
                         target: payload.target.clone(),
                         variant: payload.variant.clone(),
                         identity: request.identity.clone(),
+                        release_overlay: request.release_evaluation.as_ref().and_then(|binding| {
+                            binding
+                                .arms
+                                .iter()
+                                .find(|arm| arm.variant_key == claimed_trial.variant_key)
+                                .cloned()
+                        }),
                         completion_awakeable_id: Some(awakeable_id),
                     })),
             )
@@ -232,6 +240,7 @@ async fn load_plan_expansion(
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
+    release_evaluation: Option<moa_wire::experiments::ArtifactReleaseExperimentBinding>,
     pool: &sqlx::PgPool,
 ) -> Result<PlanExpansion, HandlerError> {
     let pool = pool.clone();
@@ -243,6 +252,7 @@ async fn load_plan_expansion(
                 run_uid,
                 plan_revision_uid,
                 agent_revision_variants,
+                release_evaluation,
             )
             .await
             .map(Json::from)
@@ -258,6 +268,7 @@ async fn expand_plan(
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
+    release_evaluation: Option<moa_wire::experiments::ArtifactReleaseExperimentBinding>,
 ) -> Result<PlanExpansion, HandlerError> {
     let registry = ArtifactRegistry::new(pool.clone());
     let plan_revision = load_required_published_revision(
@@ -273,9 +284,44 @@ async fn expand_plan(
         ));
     };
     let definition = definition_with_agent_revision_variants(definition, &agent_revision_variants)?;
-    let mut pager = PlanTrialPager::new(run_uid, plan_revision_uid, &definition)
-        .map_err(plan_expansion_error_to_handler_error)?;
+    let definition = definition_with_release_variants(definition, release_evaluation.as_ref())?;
     let store = ExperimentStore::new(pool);
+    let run = store
+        .load_run(&scope, run_uid)
+        .await
+        .map_err(moa_error_to_handler_error)?
+        .ok_or_else(|| bad_request("experiment run disappeared before plan expansion"))?;
+    let simulator_policy = run.simulator_policy.ok_or_else(|| {
+        bad_request("plan-backed experiment run has no simulator policy snapshot")
+    })?;
+    if simulator_policy.reference() != definition.simulator_policy {
+        return Err(bad_request(
+            "experiment run simulator policy does not match the pinned plan revision",
+        ));
+    }
+    let mut pager = match release_evaluation.as_ref() {
+        Some(binding) => {
+            let cases = binding
+                .cases
+                .iter()
+                .map(|case| moa_experiments::plan::PlanCaseSelection {
+                    scenario_id: case.scenario_id.clone(),
+                    persona_id: case.persona_id.clone(),
+                    profile_id: case.profile_id.clone(),
+                    repetitions: case.repetitions,
+                })
+                .collect::<Vec<_>>();
+            PlanTrialPager::new_selected(
+                run_uid,
+                plan_revision_uid,
+                &definition,
+                &simulator_policy,
+                &cases,
+            )
+        }
+        None => PlanTrialPager::new(run_uid, plan_revision_uid, &definition, &simulator_policy),
+    }
+    .map_err(plan_expansion_error_to_handler_error)?;
     let mut variants = BTreeMap::new();
     loop {
         let page = pager.next_page();
@@ -303,6 +349,64 @@ async fn expand_plan(
             .map_err(|_| bad_request("experiment plan parallelism is too large"))?,
         variants,
     })
+}
+
+fn definition_with_release_variants(
+    mut definition: moa_artifacts::simulation::ExperimentPlanDefinition,
+    release: Option<&moa_wire::experiments::ArtifactReleaseExperimentBinding>,
+) -> Result<moa_artifacts::simulation::ExperimentPlanDefinition, HandlerError> {
+    let Some(release) = release else {
+        return Ok(definition);
+    };
+    if release.arms.is_empty() {
+        return Err(bad_request(
+            "artifact release experiment must declare at least one arm",
+        ));
+    }
+    let template = definition
+        .target_variants
+        .first()
+        .cloned()
+        .ok_or_else(|| bad_request("artifact release experiment requires a target variant"))?;
+    let mut variants = Vec::with_capacity(release.arms.len() + 1);
+    if !release
+        .arms
+        .iter()
+        .any(|arm| arm.variant_key == moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY)
+    {
+        let mut control = template.clone();
+        control.key = moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY.to_string();
+        variants.push(control);
+    }
+    variants.extend(
+        release
+            .arms
+            .iter()
+            .map(|arm| {
+                if arm.variant_key.trim().is_empty() {
+                    return Err(bad_request(
+                        "artifact release experiment variant_key is required",
+                    ));
+                }
+                let mut config = template.config.clone();
+                if release.activation_target == "agent_deployment" {
+                    if let Some(object) = config.as_object_mut() {
+                        object.insert("agent_revision_uid".to_string(), json!(arm.revision_uid));
+                    } else {
+                        config = json!({ "agent_revision_uid": arm.revision_uid });
+                    }
+                }
+                Ok(moa_artifacts::simulation::ExperimentTargetVariant {
+                    key: arm.variant_key.clone(),
+                    kind: template.kind,
+                    config,
+                    ui: template.ui.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    definition.target_variants = variants;
+    Ok(definition)
 }
 
 fn definition_with_agent_revision_variants(
@@ -668,6 +772,60 @@ mod tests {
 
     type BoxedTrialWaitFuture =
         Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'static>>;
+
+    #[test]
+    fn first_release_activation_uses_the_approved_plan_target_as_baseline_offline() {
+        // Pins: without an existing serving revision, release evaluation still
+        // runs a real paired comparison. The control is the approved plan's
+        // authored target, while only the candidate arm receives the exact
+        // candidate revision substitution.
+        let candidate_revision_uid = Uuid::now_v7();
+        let authored_config = json!({
+            "agent_revision_uid": Uuid::now_v7(),
+            "model": "approved-control"
+        });
+        let definition = moa_artifacts::simulation::ExperimentPlanDefinition {
+            target_variants: vec![moa_artifacts::simulation::ExperimentTargetVariant {
+                key: "approved_target".to_string(),
+                kind: moa_artifacts::simulation::ExperimentTargetKind::AgentLoop,
+                config: authored_config.clone(),
+                ui: json!({}),
+            }],
+            ..Default::default()
+        };
+        let release = moa_wire::experiments::ArtifactReleaseExperimentBinding {
+            outbox_uid: Uuid::now_v7(),
+            activation_target: "agent_deployment".to_string(),
+            arms: vec![moa_wire::experiments::ArtifactReleaseExperimentArm {
+                variant_key: moa_wire::experiments::ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY
+                    .to_string(),
+                revision_uid: candidate_revision_uid,
+                overlay_uid: Uuid::now_v7(),
+                overlay_token: "candidate-token".to_string(),
+                eval_session_id: Uuid::now_v7(),
+            }],
+            cases: Vec::new(),
+        };
+
+        let expanded = definition_with_release_variants(definition, Some(&release))
+            .expect("expand first activation");
+        assert_eq!(expanded.target_variants.len(), 2);
+        let baseline = &expanded.target_variants[0];
+        let candidate = &expanded.target_variants[1];
+        assert_eq!(
+            baseline.key,
+            moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY
+        );
+        assert_eq!(baseline.config, authored_config);
+        assert_eq!(
+            candidate.key,
+            moa_wire::experiments::ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY
+        );
+        assert_eq!(
+            candidate.config["agent_revision_uid"],
+            json!(candidate_revision_uid)
+        );
+    }
 
     #[tokio::test]
     async fn plan_trial_completion_awakeable_resolves_without_polling_offline() {

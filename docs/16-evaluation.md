@@ -216,6 +216,151 @@ Use the score card to identify what changed, the event file to identify where
 it happened, and the lineage file to inspect retrieval, generation, citation,
 and score lineage emitted during the run.
 
+## Suite Controls And Leakage
+
+A suite that passes proves nothing on its own: the same green score is produced
+by a working system and by a scorer that cannot fail. Two `xtask` commands are
+the evidence that the graders themselves work, and both are exit-status gates
+rather than reports somebody has to read.
+
+```bash
+cargo run -p xtask --features eval-tools -- eval-suite-controls [--out <path>]
+cargo run -p xtask --features eval-tools -- eval-control-mutants \
+  [--out-dir <dir>] [--minimum-score <0..1>] [--list]
+```
+
+`eval-suite-controls` runs every control that does not need a live database and
+writes one suite-validity report (default
+`target/eval-controls/suite-controls.json`). Each suite declares both sides of
+the pair:
+
+- a **negative/null control** that should score at chance — a
+  query-independent answer, a permuted question, a majority-class predictor
+  derived from an authoring split. Its ceiling is *derived* from repeated seeds
+  rather than guessed, and a null scoring above its ceiling means the metric is
+  measuring something other than the capability it names.
+- a **positive/oracle control** that should score near the top — known
+  relevant fact IDs, an exact expected UID set, a manifest-provided expected
+  route. An
+  oracle below its floor means the scorer cannot recognize a correct answer, so
+  every passing score above it is unearned.
+
+The command fails on an incomplete registry (a suite declaring only one side of
+the pair), when the registry and report control sets differ, when an executed
+control has missing or empty slice evidence, on authoring defects in a checked-in
+corpus, on a null above its ceiling, and on an oracle below its floor. Every
+non-database control runs in this command. Database-lane controls run in the
+`db-memory` lane and are the only entries reported as
+`skipped_requires_database`, so a missing control cannot look like an intentional
+skip. The same report carries one typed package-leakage outcome for every real
+corpus this command owns: generated memory transcripts, the checked-in golden
+source fixtures, and checked-in external-memory turns. A missing, duplicate, or
+vacuous command-owned outcome fails the command. Its deterministic fixed-RAG
+workload is explicitly tagged `scanner_fixture`; it tests scanner/control logic
+but does not claim WixQA corpus coverage. The report declares this boundary as
+`package_leakage_scope=command_owned_corpora_plus_labeled_scanner_fixtures`.
+When a suite is invalid the report's `headline_score` is `null` —
+deliberately not a null-corrected number, because a broken scorer's arithmetic is
+not worth correcting.
+
+`eval-control-mutants` runs a narrow `cargo-mutants` slice over the decision
+surface itself: null-ceiling derivation, the validity audit, the fixed-corpus
+leakage scanner, and anchor-cohort pairing (`.cargo/mutants-eval-controls.toml`
+holds the exact target list so the surface can be audited before the expensive
+run). It writes `selected-mutants.txt`, `outcomes.json`, and
+`mutation-report.json`, and fails below `--minimum-score` (default 0.90).
+A surviving mutant is a scorer edit no test noticed, recorded by name instead of
+remembered. `--list` enumerates the selected mutants without running them.
+`cargo-mutants` must be installed (`cargo install --locked cargo-mutants`).
+
+The shared `LeakageScanner` is the contamination boundary: a fixed corpus is only
+a valid measurement while its cases are absent from what the system under test
+can read. `eval-suite-controls` runs it over each required lane's real fixture or
+generated source text, exact SHA-256, provenance, and case split. It does not
+claim cross-command fulfillment. The live `wixqa-rag-eval` command owns WixQA's
+required outcome and scans the selected article bytes, URLs,
+deterministic corpus revision, and selected questions before it loads runtime
+configuration, connects to Postgres, or calls a provider. Both paths fail closed;
+an absent or blank source URL/revision is treated as contaminated rather than
+clean. Generated memory probes are split by semantic template family, keeping
+the deliberately repeated seed/tenant/user variants on one side of the
+leakage-analysis authoring boundary. The memory null controls remain explicitly
+all-probe, per-probe-type diagnostics; they are not labeled as a held-out
+authoring/validation experiment while several probe types have only one
+independent query-template family.
+`run-external-memory-eval` also scans the prepared cases after every package
+loader branch, including the direct PersonaMem and LongMemEval loaders, before
+live authorization, runtime construction, or scoring.
+`eval-control-mutants` mutation-checks this scanner and its surrounding decision
+surface. Anchor-cohort pairing is in the same slice because a comparison across
+two different frozen case sets invents a delta; `moa_eval::kernel::cohorts`
+refuses that, and `kernel::compare` refuses two reports whose declared anchor
+manifests differ.
+
+Run both after any change to a scorer, a control, a corpus manifest, or a gate
+threshold. A change to the graders is exactly the change a suite's own green
+result cannot detect.
+
+## Model Judges
+
+Most of this harness does not use a model judge, and that is a design choice
+rather than a gap. Memory retrieval is scored deterministically: factual
+support, temporal as-of, abstention, and redaction probes have exact
+authorities, and the
+pairwise LLM judge in `moa_eval::memory_eval::judge` is restricted to the two
+open-ended probe types and is not wired into `run-memory-retrieval-eval`. Judges
+are not added so that calibration machinery becomes applicable.
+
+Where a judge does decide something, it is treated as a measuring instrument
+that has to be calibrated before its output can be quoted. The contract lives in
+`moa_eval::external_memory::calibration::judge`:
+
+- **Identity and expiry.** A calibration is bound to one `JudgeIdentity`: exact
+  model, prompt version *and* prompt-text hash, rubric hash, output-parser
+  version, and domain, reduced to one fingerprint. It expires when any of those
+  changes or when positive-class prevalence moves materially — a judge
+  calibrated at 20% positives is answering a different question at 60%.
+- **Three separate claims.** Human-human reliability (how well two blinded
+  labelers agreed), judge-versus-adjudicated-gold validity (whether the judge is
+  right, measured on an untouched validation split), and aggregate bias
+  correction are distinct reports. Quoting a high human kappa as evidence the
+  judge works is the usual error, and the types make it impossible.
+- **What gets reported.** Confusion matrix, class prevalence, raw agreement,
+  kappa *with its interval*, class-specific precision/recall/sensitivity/
+  specificity, worst-stratum weakest-class recall, and selective
+  accuracy/coverage wherever abstention exists. Prompt-injection, position-swap,
+  rare-class, and cross-domain slices must all carry their own held-out validity
+  measurement or authority is refused; caller-asserted slice labels are not
+  evidence.
+- **Per-task thresholds, not one number.** There is no shared `kappa >= 0.80`
+  point threshold. Each task declares a `JudgeAuthorityRequirement`, because the
+  same number is unmeetable on a ten-case stratum (a flawless three-for-three
+  recall has a Wilson lower bound of 0.44) and trivial on a thousand-case suite.
+  Kappa is required of the interval's lower bound; small-stratum recall is
+  required of the point estimate with a much weaker interval bar, and the
+  reasoning is recorded next to the numbers.
+- **Uncertainty propagates from both sides.** `correct_aggregate_rate` applies
+  the Rogan-Gladen correction and takes its interval over the calibration set's
+  uncertainty about sensitivity and specificity as well as the evaluation set's
+  uncertainty about the apparent rate. It refuses outright when the judge's
+  interval admits chance performance, where the corrected value is unbounded
+  rather than merely wide.
+- **Uncalibrated means inconclusive.** `apply_judge_authority` downgrades a
+  judge-derived metric decision to `INCONCLUSIVE` when calibration is missing,
+  stale, or measured on the selection split. It does not report a weaker pass.
+  External-memory runner reports are always emitted informational. There is no
+  promotion helper until a reviewed workflow can bind the byte-pinned results,
+  exact judge identity, held-out case set, and per-slice measurements in one
+  durable artifact.
+- **Live calibration is off by default.** `admit_live_calibration` refuses the
+  default request. A live run needs an explicit flag, resolved credentials, and
+  a positive authorized budget, all three.
+
+Prompt shape is decided the same way: `decide_prompt_shape` refuses to choose on
+the split that selected the prompts, and picks per-dimension decomposition over
+a single structured call only when the decomposed accuracy interval clears the
+holistic point estimate on held-out cases.
+
 ## Triage
 
 Treat failures as regressions until proven otherwise. Read the budget output
@@ -223,6 +368,8 @@ first, then inspect artifacts.
 
 | Failure | Start with | Common causes |
 |---|---|---|
+| Null control above its ceiling | Suite controls report | metric measuring a query-independent shortcut, corpus authoring defect, ceiling derived from too few seeds |
+| Oracle control below its floor | Suite controls report | scorer cannot recognize a correct answer, corpus/manifest drift, evaluator ID or version mismatch |
 | Cache ratio dropped | Stable-prefix contract | timestamps or IDs in stages 1-4, tool schema ordering, nondeterministic skill manifest, provider serialization drift, compaction breakpoint movement |
 | Cost regressed | Token counts | extra tool calls, more retrieved memory, compaction not firing, cached tokens not counted, pricing fixture drift |
 | Latency p95 regressed | First newly slow stage | blocking filesystem/database work, slow tool router, long approval waits, memory query plans |

@@ -25,6 +25,7 @@ enum Rule {
     LocBudget,
     RuntimeContext,
     ReverseDependencyBudget,
+    ReleaseServingWriteBoundary,
     SymbolBudget,
     WorkspaceBudget,
 }
@@ -46,6 +47,9 @@ impl fmt::Display for Rule {
             Self::LocBudget => formatter.write_str("LOC budget"),
             Self::RuntimeContext => formatter.write_str("raw OrchestratorCtx dependency access"),
             Self::ReverseDependencyBudget => formatter.write_str("reverse dependency budget"),
+            Self::ReleaseServingWriteBoundary => {
+                formatter.write_str("raw release-serving table write outside the database seam")
+            }
             Self::SymbolBudget => formatter.write_str("symbol budget"),
             Self::WorkspaceBudget => formatter.write_str("workspace package budget"),
         }
@@ -102,7 +106,7 @@ const ALLOWANCES: &[Allowance] = &[
         DirectSql,
         "crates/moa-orchestrator/src/services/agent_definitions.rs",
         "sqlx::query(",
-        7,
+        4,
         "Agent installation and deployment SQL remains local pending an agent-definition repository seam"
     ),
     allow!(
@@ -118,13 +122,6 @@ const ALLOWANCES: &[Allowance] = &[
         "sqlx::query_scalar",
         1,
         "Authz admin still resolves one API-key ownership record inline"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/eval/mod.rs",
-        "sqlx::query(",
-        5,
-        "Experiment analytics read-model SQL consolidated into the eval handler pending a dedicated analytics repository"
     ),
     allow!(
         DirectSql,
@@ -150,6 +147,11 @@ const ALLOWANCES: &[Allowance] = &[
 const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 51;
 const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 48;
 const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
+const RELEASE_SERVING_TABLES: &[&str] = &[
+    "moa.artifact_serving_pointer",
+    "moa.artifact_activation_audit",
+];
+const SQL_WRITE_PREFIXES: &[&str] = &["insert into", "update", "delete from"];
 
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
@@ -677,6 +679,7 @@ fn validate_configured_paths(root: &Path) -> Result<()> {
 pub fn run() -> Result<()> {
     validate_configured_paths(Path::new("."))?;
     let mut findings = scan_roots(SCAN_ROOTS)?;
+    findings.extend(scan_release_serving_writes(Path::new("crates"))?);
     findings.extend(
         crate::execution_trace_manifest::audit(Path::new("."))?
             .into_iter()
@@ -1392,6 +1395,49 @@ fn scan_roots(roots: &[&str]) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// Refuses raw production writes to the two release-control tables.
+///
+/// Reads remain available to serving and replay repositories. All writes must
+/// cross the checked V373 SECURITY DEFINER functions, so a new Rust call site
+/// cannot silently regain direct pointer or audit DML.
+fn scan_release_serving_writes(root: &Path) -> Result<Vec<Finding>> {
+    let mut files = Vec::new();
+    collect_rust_files(root, &mut files)?;
+    files.sort();
+
+    let mut findings = Vec::new();
+    for path in files {
+        let path_text = normalize_path(&path);
+        if path_text.split('/').any(|component| component == "tests") {
+            continue;
+        }
+        let body = fs::read_to_string(&path).with_context(|| format!("read {path_text}"))?;
+        // Inline test modules deliberately probe the denied raw-DML path. They
+        // are not production call sites and remain below the conventional final
+        // cfg(test) boundary.
+        let production = body.split("#[cfg(test)]").next().unwrap_or(&body);
+        let continuation_free = production.replace("\\\r\n", " ").replace("\\\n", " ");
+        let normalized = continuation_free
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        for table in RELEASE_SERVING_TABLES {
+            for prefix in SQL_WRITE_PREFIXES {
+                let forbidden = format!("{prefix} {table}");
+                if normalized.contains(&forbidden) {
+                    findings.push(Finding::budget(
+                        Rule::ReleaseServingWriteBoundary,
+                        path_text.clone(),
+                        format!("`{forbidden}` bypasses the checked V373 transition functions"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(findings)
+}
+
 fn scan_file(
     path: &Path,
     service_traits: &BTreeSet<String>,
@@ -1898,8 +1944,8 @@ mod tests {
         event_wildcard_match_arms, forbidden_dependency_findings, handler_authz_safety_findings,
         is_repository_code_path, matching_allowance, missing_configured_paths,
         moa_core_root_export_allowlist_finding, parse_package_graph,
-        restate_service_traits_from_source, reverse_dependency_budget_reports, scan_source,
-        symbol_budget_finding, validate_configured_paths,
+        restate_service_traits_from_source, reverse_dependency_budget_reports,
+        scan_release_serving_writes, scan_source, symbol_budget_finding, validate_configured_paths,
     };
 
     const ENV_OVERLAY_OWNER: &str = "moa-config env overlay LOC budget";
@@ -1911,6 +1957,34 @@ mod tests {
             .join("..")
             .canonicalize()
             .expect("workspace root should resolve from the xtask manifest directory")
+    }
+
+    #[test]
+    fn release_serving_tables_are_writeable_only_through_the_database_seam() {
+        // Pins: a production raw write is rejected even when SQL is split across
+        // a Rust line continuation, while an inline negative test may still
+        // exercise PostgreSQL's permission denial.
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let source = root.path().join("owner.rs");
+        std::fs::write(
+            &source,
+            r#"
+fn bypass() {
+    let _ = "UPDATE \
+        moa.artifact_serving_pointer SET revision_uid = gen_random_uuid()";
+}
+
+#[cfg(test)]
+mod tests {
+    const DENIED: &str = "DELETE FROM moa.artifact_activation_audit";
+}
+"#,
+        )
+        .expect("write scanner fixture");
+
+        let findings = scan_release_serving_writes(root.path()).expect("scan fixture");
+        assert_eq!(findings.len(), 1, "raw production pointer write must fail");
+        assert_eq!(findings[0].rule, Rule::ReleaseServingWriteBoundary);
     }
 
     #[test]

@@ -9,6 +9,10 @@ use serde_canonical_json::CanonicalFormatter;
 use sha2::{Digest, Sha256};
 
 use super::{ExternalMemoryError, Result};
+use crate::kernel::contamination::{
+    DEFAULT_ANSWER_CONTAINMENT, DEFAULT_NEAR_DUPLICATE_JACCARD,
+    DEFAULT_QUESTION_RESTATEMENT_CONTAINMENT, containment, jaccard, normalize, shingles,
+};
 
 /// Schema version accepted for common external-memory cases.
 pub const EXTERNAL_MEMORY_CASE_SCHEMA_VERSION: u32 = 1;
@@ -552,6 +556,93 @@ pub fn load_common_json(path: &Path) -> Result<Vec<PreparedExternalMemoryCase>> 
         .collect()
 }
 
+/// Rejects a dataset package whose own content leaks its answers.
+///
+/// Two package-level leaks are checkable without any retrieval:
+///
+/// - **a duplicated case.** Two cases with the same question *and* the same
+///   evidence are one case counted twice; if their answers also differ, the pair
+///   is unsatisfiable. Note what is deliberately *allowed*: the same question
+///   over different evidence with different answers, which is exactly how a
+///   persona benchmark is built.
+/// - **an in-package answer key.** A conversation turn that restates the question
+///   *and* carries the gold answer hands the reader the pair directly. A turn that
+///   merely contains the answer is the legitimate evidence the benchmark is built
+///   from and must pass — that distinction is the whole point.
+///
+/// Fails closed: the first leak refuses the package rather than annotating it.
+pub fn scan_package_leakage(cases: &[PreparedExternalMemoryCase]) -> Result<()> {
+    let fingerprints = cases
+        .iter()
+        .map(|case| {
+            (
+                normalize(&case.case.question),
+                evidence_fingerprint(case),
+                normalize(&case.case.answer),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (left_index, left) in cases.iter().enumerate() {
+        for (right_index, right) in cases.iter().enumerate().skip(left_index + 1) {
+            let (left_question, left_evidence, left_answer) = &fingerprints[left_index];
+            let (right_question, right_evidence, right_answer) = &fingerprints[right_index];
+            if left_evidence != right_evidence {
+                continue;
+            }
+            if left_question == right_question {
+                return Err(ExternalMemoryError::InvalidDataset(format!(
+                    "cases `{}` and `{}` share the same question and the same evidence; \
+                     a duplicated case scores one case against the other's labels",
+                    left.case.isolation_key, right.case.isolation_key
+                )));
+            }
+            if left_answer != right_answer {
+                continue;
+            }
+            let similarity = jaccard(
+                &shingles(&left.case.question),
+                &shingles(&right.case.question),
+            );
+            if similarity >= DEFAULT_NEAR_DUPLICATE_JACCARD {
+                return Err(ExternalMemoryError::InvalidDataset(format!(
+                    "cases `{}` and `{}` are near-duplicates (question similarity \
+                     {similarity:.3}) over identical evidence",
+                    left.case.isolation_key, right.case.isolation_key
+                )));
+            }
+        }
+    }
+
+    for case in cases {
+        for turn in &case.chronological_turns {
+            let turn_shingles = shingles(&turn.text);
+            let question_containment = containment(&turn_shingles, &case.case.question);
+            if question_containment < DEFAULT_QUESTION_RESTATEMENT_CONTAINMENT {
+                continue;
+            }
+            let answer_containment = containment(&turn_shingles, &case.case.answer);
+            if answer_containment >= DEFAULT_ANSWER_CONTAINMENT {
+                return Err(ExternalMemoryError::InvalidDataset(format!(
+                    "case `{}` turn `{}` restates the question (containment \
+                     {question_containment:.3}) and carries its gold answer (containment \
+                     {answer_containment:.3}); that is an answer key, not evidence",
+                    case.case.isolation_key, turn.turn_source_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns a normalized fingerprint of a case's evidence turns.
+fn evidence_fingerprint(case: &PreparedExternalMemoryCase) -> String {
+    case.chronological_turns
+        .iter()
+        .map(|turn| normalize(&turn.text))
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
+}
+
 /// Loader format selected by one package registry entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -636,7 +727,7 @@ impl DatasetPackageRegistry {
                 manifest.dataset
             ))
         })?;
-        match entry.format {
+        let cases = match entry.format {
             DatasetPackageFormat::CommonJson => load_common_json(data_path),
             DatasetPackageFormat::PersonaMem32k => {
                 let dataset = super::personamem::load_full_personamem_package(package, data_path)?;
@@ -655,7 +746,11 @@ impl DatasetPackageRegistry {
                     .map(|case| case.prepared)
                     .collect())
             }
-        }
+        }?;
+        // Package leakage is checked after loading and before any case is scored,
+        // so an answer key or a duplicated question can never reach a run.
+        scan_package_leakage(&cases)?;
+        Ok(cases)
     }
 }
 

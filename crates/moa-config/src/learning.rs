@@ -35,7 +35,7 @@ pub struct SkillLearningConfig {
     /// creating a new one.
     ///
     /// Compared against the semantic similarity of the experience's task-summary
-    /// embedding to the nearest published skill-identity embedding. Because
+    /// embedding to the nearest serving skill-identity embedding. Because
     /// pgvector's `<=>` operator returns cosine *distance* `d = 1 - cosine_sim`,
     /// this similarity `s` maps to the distance ceiling `1 - s`: a neighbor at
     /// distance `<= 1 - s` clears the floor. This is the primary improve-vs-create
@@ -127,7 +127,7 @@ impl Default for RegressionMonitorConfig {
 /// Background learning-embedding backfill configuration.
 ///
 /// Drives the cron that populates task-summary embeddings on `experience_records`
-/// and identity embeddings on published Skill artifacts. Embeddings are computed
+/// and identity embeddings on serving Skill artifacts. Embeddings are computed
 /// out-of-band (never on the turn or persist path), so they lag writes by up to
 /// one cron tick; every knob here bounds per-tick provider cost. Provider
 /// unavailability leaves rows NULL for the next tick rather than failing.
@@ -142,7 +142,7 @@ pub struct EmbeddingBackfillConfig {
     /// backfill. Bounds the working set to recent recurrence-relevant rows;
     /// older un-embedded rows are intentionally left NULL.
     pub experience_lookback_days: i64,
-    /// Maximum number of published Skill artifacts embedded per tick.
+    /// Maximum number of serving Skill artifacts embedded per tick.
     pub skill_batch_size: usize,
 }
 

@@ -7,7 +7,12 @@ publish = false
 
 [features]
 integration = ["orchestrator-fixture"]
+# Just the in-process MCP capability fixture: no Docker, Restate, or Postgres.
+# Split out so connector-catalog staging tests can drive scripted connector
+# outcomes without pulling the whole orchestrator harness into their build.
+capability-fixture = ["dep:axum", "dep:reqwest"]
 orchestrator-fixture = [
+    "capability-fixture",
     "dep:axum",
     "dep:moa-authz",
     "dep:moa-authz-schema",

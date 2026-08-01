@@ -47,7 +47,7 @@ pub fn distance_to_similarity(distance: f64) -> f64 {
 /// the semantic embedding signal or the lexical Jaccard fallback chose the path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutingMethod {
-    /// The nearest published skill-identity embedding cleared the improve floor.
+    /// The nearest serving-skill identity embedding cleared the improve floor.
     Embedding,
     /// No embedding signal was available; the lexical Jaccard fallback matched.
     Jaccard,
@@ -67,7 +67,7 @@ impl RoutingMethod {
     }
 }
 
-/// The nearest published skill-identity embedding to a probe.
+/// The nearest serving-skill identity embedding to a probe.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingSkillMatch {
     /// Name of the nearest skill (resolved from its artifact identity).
@@ -92,7 +92,7 @@ pub struct RoutingDecision {
 ///
 /// The embedding signal is authoritative whenever it is *available*
 /// (`embedding_nearest` is `Some`, i.e. the probe embedded and at least one
-/// published skill embedding existed to compare against):
+/// serving-skill embedding existed to compare against):
 ///
 /// - within the improve floor → improve that skill (`method = embedding`);
 /// - outside it → create a new skill (`method = none`); Jaccard is **not**

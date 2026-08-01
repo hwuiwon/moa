@@ -990,6 +990,7 @@ fn capability() -> CapabilityReference {
 fn catalog() -> ExecutionCapabilityCatalog {
     let capability = ExecutionCapability {
         reference: capability(),
+        contract_revision: "contract-v1".to_string(),
         description: "Look up an order".to_string(),
         input_schema: json!({ "type": "object" }),
         output_schema: json!({}),

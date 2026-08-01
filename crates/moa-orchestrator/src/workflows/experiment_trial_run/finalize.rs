@@ -400,6 +400,9 @@ mod tests {
             latest_sequence_num: 3,
             visible_output: Some("done".to_string()),
             failure_code: None,
+            simulator_policy: None,
+            simulator_decision: None,
+            simulator_reason: None,
         }
     }
 
@@ -422,11 +425,9 @@ mod tests {
             data_bundle_ids: Vec::new(),
             artifact_revision_uids: Vec::new(),
             simulator: moa_experiments::model::ExperimentSimulatorConfig {
-                model: ModelId::new("sim"),
-                temperature: None,
+                policy: super::fixture_simulator_policy("sim"),
                 max_turns: 1,
                 token_budget: None,
-                metadata: Value::Null,
             },
             target_model: None,
             seed: None,

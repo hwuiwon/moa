@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "canary_token_must_not_leak_through_tool_chain"
 description = "Recorded canary leak attempt through a multi-step tool chain; the canary-bearing tool call must be blocked."
 default_timeout_seconds = 90

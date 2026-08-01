@@ -32,10 +32,10 @@ use moa_scoring::{
     ScoreSummaryRow, compare_score_runs_for_tenant, exact_experiment_run_score_rows_for_tenant,
 };
 use moa_wire::experiments::{
-    AgentRevisionSimulationVariant, ExperimentCancelRequest, ExperimentCancelResponse,
-    ExperimentCompareRequest, ExperimentCompareResponse, ExperimentCompareRow,
-    ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
-    ExperimentListResponse, ExperimentProposeImprovementsRequest,
+    AgentRevisionSimulationVariant, ArtifactReleaseExperimentBinding, ExperimentCancelRequest,
+    ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
+    ExperimentCompareRow, ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse,
+    ExperimentListRequest, ExperimentListResponse, ExperimentProposeImprovementsRequest,
     ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
     ExperimentScenarioScoreDeltaRow, ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow,
     ExperimentScoresRequest, ExperimentScoresResponse, ExperimentTrialScoreSummary,
@@ -45,14 +45,15 @@ use moa_wire::experiments::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::eligibility::{
     ScorecardAssessment, ScorecardEligibility, ScorecardExpectation, ScorecardFinding,
-    ScorecardGroupRollup, assess_trial_scorecard, require_runnable_scorecard, roll_up_group,
+    ScorecardGroupRollup, ScorecardSupportSummary, assess_trial_scorecard,
+    require_runnable_scorecard, roll_up_group,
 };
 use crate::evidence::TrialScoreTarget;
 use crate::model::{
@@ -60,12 +61,16 @@ use crate::model::{
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant, MICRO_USD_PER_CENT,
     NewExperimentRun,
 };
-use crate::plan::{PlanMatrixShape, plan_matrix_shape, project_plan_run};
+use crate::plan::{
+    PlanCaseSelection, PlanMatrixShape, plan_matrix_shape, project_plan_run,
+    selected_plan_matrix_shape,
+};
 use crate::scores::{
     ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
     TrialScoreSummary, VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
     experiment_score_breakdown_for_tenant,
 };
+use crate::simulator_policy::store::SimulatorPolicyStore;
 use crate::store::ExperimentStore;
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
@@ -117,6 +122,9 @@ pub struct AdmittedExperimentRun {
     /// Exact agent revision variants selected for plan-backed simulation, when present.
     #[serde(default)]
     pub agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
+    /// Internal artifact-release arms to execute through the production plan path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_evaluation: Option<ArtifactReleaseExperimentBinding>,
 }
 
 /// Proposed experiment-derived learning candidate plus API response metadata.
@@ -137,7 +145,7 @@ status `draft`, and definition.type `experiment_plan`.
 
 The document must validate as a draft experiment_plan artifact. Put scenarios, personas, profiles, \
 and optional data_bundles inside definition.spec.simulation as embedded objects with stable `id` \
-fields. Include at least one scenario, persona, profile, target variant, simulator_model, \
+fields. Include at least one scenario, persona, profile, target variant, simulator_policy, \
 parallelism, trials_per_combination, and budget.max_total_cents. Use stable snake_case or \
 kebab-case names in metadata.name, simulation IDs, and target variant keys. Every scenario must \
 have a non-empty initial_situation, at least one goal, at least one success criterion, and max_turns \
@@ -150,6 +158,11 @@ pub fn plan_generation_request(
 ) -> Result<CompletionRequest> {
     if request.description.trim().is_empty() {
         return Err(bad_request("experiment plan description must not be empty"));
+    }
+    if request.simulator_policy_uid.is_nil() || request.simulator_policy_revision < 1 {
+        return Err(bad_request(
+            "experiment plan generation requires an exact non-nil simulator policy revision",
+        ));
     }
 
     let mut completion = CompletionRequest::new(plan_generation_user_prompt(request));
@@ -191,6 +204,18 @@ pub async fn store_generated_plan(
 ) -> Result<ExperimentGeneratePlanResponse> {
     let document = parse_generated_plan_document(completion_text)?;
     require_valid_generated_plan(&document)?;
+    let ArtifactDefinition::ExperimentPlan(definition) = &document.definition else {
+        return Err(bad_request(
+            "generated artifact must contain an experiment_plan definition",
+        ));
+    };
+    if definition.simulator_policy.policy_uid != request.simulator_policy_uid
+        || definition.simulator_policy.revision != request.simulator_policy_revision
+    {
+        return Err(bad_request(
+            "generated plan simulator policy does not match the requested certified revision",
+        ));
+    }
     let source_text = document.to_json().map_err(bad_request_from)?;
     let document_value =
         serde_json::to_value(&document).map_err(|error| serialization_error(error.to_string()))?;
@@ -226,14 +251,17 @@ pub async fn admit_run(
     identity: Identity,
 ) -> Result<AdmittedExperimentRun> {
     let scope = tenant_scope(request.tenant_id);
+    let release_evaluation = request.release_evaluation.clone();
     let run_inputs = match request.plan_revision_uid {
         Some(plan_revision_uid) => {
             plan_run_inputs(
                 pool.clone(),
+                request.tenant_id,
                 &scope,
                 plan_revision_uid,
                 &request.name,
                 &request.agent_revision_variants,
+                release_evaluation.as_ref(),
             )
             .await?
         }
@@ -257,6 +285,7 @@ pub async fn admit_run(
                 plan_artifact_uid: run_inputs.plan_artifact_uid,
                 expected_trials: run_inputs.expected_trials,
                 resource_envelope: run_inputs.resource_envelope,
+                simulator_policy: run_inputs.simulator_policy.clone(),
             },
         )
         .await
@@ -272,6 +301,7 @@ pub async fn admit_run(
         identity,
         score_run_id: run.score_run_id,
         agent_revision_variants: request.agent_revision_variants,
+        release_evaluation,
     })
 }
 
@@ -743,6 +773,7 @@ struct ExperimentRunInputs {
     plan_artifact_uid: Option<Uuid>,
     expected_trials: u64,
     resource_envelope: ExperimentResourceEnvelope,
+    simulator_policy: Option<crate::simulator_policy::registry::ResolvedSimulatorPolicy>,
 }
 
 /// Longest a behavior-lab run may stay live before its envelope expires.
@@ -890,6 +921,7 @@ fn single_target_run_inputs(
         // adds a run slot and no trial load.
         expected_trials: 0,
         resource_envelope: direct_resource_envelope(Utc::now()),
+        simulator_policy: None,
     })
 }
 
@@ -938,19 +970,26 @@ fn validate_target_variant(
 
 async fn plan_run_inputs(
     pool: sqlx::PgPool,
+    tenant_id: TenantId,
     scope: &ActionRuleScope,
     plan_revision_uid: Uuid,
     run_name: &str,
     agent_revision_variants: &[AgentRevisionSimulationVariant],
+    release_evaluation: Option<&ArtifactReleaseExperimentBinding>,
 ) -> Result<ExperimentRunInputs> {
-    let plan = load_published_plan_revision(pool, scope, plan_revision_uid).await?;
+    let plan = load_published_plan_revision(pool.clone(), scope, plan_revision_uid).await?;
     let ArtifactDefinition::ExperimentPlan(definition) = &plan.document.definition else {
         return Err(bad_request(
             "plan revision must contain an experiment_plan definition",
         ));
     };
-    let shape = plan_matrix_shape(definition).map_err(bad_request_from)?;
-    let resource_envelope = plan_resource_envelope(definition, &shape, Utc::now())?;
+    let now = Utc::now();
+    let simulator_policy = SimulatorPolicyStore::new(pool.clone())
+        .resolve_policy(tenant_id, definition.simulator_policy, now)
+        .await
+        .map_err(bad_request_from)?;
+    let shape = plan_matrix_shape_for_release(definition, release_evaluation)?;
+    let resource_envelope = plan_resource_envelope(definition, &shape, now)?;
     let mut projection = project_plan_run(definition, plan_revision_uid, &plan.name, run_name)
         .map_err(bad_request_from)?;
     if !agent_revision_variants.is_empty() {
@@ -967,6 +1006,13 @@ async fn plan_run_inputs(
         projection.artifact_revision_uids.sort_unstable();
         projection.artifact_revision_uids.dedup();
     }
+    if let Some(binding) = release_evaluation {
+        projection
+            .artifact_revision_uids
+            .extend(binding.arms.iter().map(|arm| arm.revision_uid));
+        projection.artifact_revision_uids.sort_unstable();
+        projection.artifact_revision_uids.dedup();
+    }
     Ok(ExperimentRunInputs {
         target: projection.target,
         variant: projection.variant,
@@ -976,7 +1022,57 @@ async fn plan_run_inputs(
         plan_artifact_uid: Some(plan.artifact_uid),
         expected_trials: u64::from(shape.total_trials),
         resource_envelope,
+        simulator_policy: Some(simulator_policy),
     })
+}
+
+fn plan_matrix_shape_for_release(
+    definition: &moa_artifacts::simulation::ExperimentPlanDefinition,
+    release_evaluation: Option<&ArtifactReleaseExperimentBinding>,
+) -> Result<PlanMatrixShape> {
+    let Some(binding) = release_evaluation else {
+        return plan_matrix_shape(definition).map_err(bad_request_from);
+    };
+    if binding.arms.is_empty() {
+        return Err(bad_request(
+            "artifact release experiment must declare at least one arm",
+        ));
+    }
+    let template = definition
+        .target_variants
+        .first()
+        .ok_or_else(|| bad_request("artifact release experiment plan has no target variant"))?;
+    let mut effective = definition.clone();
+    let mut variants = Vec::with_capacity(binding.arms.len() + 1);
+    if !binding
+        .arms
+        .iter()
+        .any(|arm| arm.variant_key == moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY)
+    {
+        let mut control = template.clone();
+        control.key = moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY.to_string();
+        variants.push(control);
+    }
+    variants.extend(binding.arms.iter().map(|arm| {
+        moa_artifacts::simulation::ExperimentTargetVariant {
+            key: arm.variant_key.clone(),
+            kind: template.kind,
+            config: template.config.clone(),
+            ui: template.ui.clone(),
+        }
+    }));
+    effective.target_variants = variants;
+    let cases = binding
+        .cases
+        .iter()
+        .map(|case| PlanCaseSelection {
+            scenario_id: case.scenario_id.clone(),
+            persona_id: case.persona_id.clone(),
+            profile_id: case.profile_id.clone(),
+            repetitions: case.repetitions,
+        })
+        .collect::<Vec<_>>();
+    selected_plan_matrix_shape(&effective, &cases).map_err(bad_request_from)
 }
 
 async fn load_published_plan_revision(
@@ -1101,6 +1197,10 @@ pub struct TrialScorecardAssessment {
     pub variant_key: String,
     /// Scenario the trial ran, when the plan named one.
     pub scenario_id: Option<String>,
+    /// Simulated persona used by the modeled case, when available.
+    pub persona_id: Option<String>,
+    /// Simulation profile used by the modeled case, when available.
+    pub profile_id: Option<String>,
     /// Assessment computed from this trial's exact score rows.
     pub assessment: ScorecardAssessment,
 }
@@ -1154,6 +1254,8 @@ async fn experiment_run_scorecards(
                 trial_key: trial.trial_key.clone(),
                 variant_key: trial.variant_key.clone(),
                 scenario_id: trial.scenario_id.clone(),
+                persona_id: trial.persona_id.clone(),
+                profile_id: trial.profile_id.clone(),
                 assessment: ScorecardAssessment {
                     eligibility: ScorecardEligibility::Incomplete,
                     findings: vec![ScorecardFinding {
@@ -1187,16 +1289,15 @@ async fn experiment_run_scorecards(
             trial_key: trial.trial_key.clone(),
             variant_key: trial.variant_key.clone(),
             scenario_id: trial.scenario_id.clone(),
+            persona_id: trial.persona_id.clone(),
+            profile_id: trial.profile_id.clone(),
             assessment: assess_trial_scorecard(&run.scorecard, &expectation, trial_rows),
         });
     }
 
-    let all = assessments
-        .iter()
-        .map(|entry| entry.assessment.eligibility)
-        .collect::<Vec<_>>();
+    let all = assessments.iter().collect::<Vec<_>>();
     Ok(ExperimentRunScorecards {
-        run: roll_up_group(run.run_uid.to_string(), &all),
+        run: roll_up_assessments(run.run_uid.to_string(), &all),
         scenarios: grouped_rollups(&assessments, |entry| {
             entry
                 .scenario_id
@@ -1212,17 +1313,51 @@ fn grouped_rollups(
     assessments: &[TrialScorecardAssessment],
     key: impl Fn(&TrialScorecardAssessment) -> String,
 ) -> Vec<ScorecardGroupRollup> {
-    let mut grouped: BTreeMap<String, Vec<ScorecardEligibility>> = BTreeMap::new();
+    let mut grouped: BTreeMap<String, Vec<&TrialScorecardAssessment>> = BTreeMap::new();
     for assessment in assessments {
-        grouped
-            .entry(key(assessment))
-            .or_default()
-            .push(assessment.assessment.eligibility);
+        grouped.entry(key(assessment)).or_default().push(assessment);
     }
     grouped
         .into_iter()
-        .map(|(key, eligibilities)| roll_up_group(key, &eligibilities))
+        .map(|(key, assessments)| roll_up_assessments(key, &assessments))
         .collect()
+}
+
+fn roll_up_assessments(
+    key: impl Into<String>,
+    assessments: &[&TrialScorecardAssessment],
+) -> ScorecardGroupRollup {
+    let eligibilities = assessments
+        .iter()
+        .map(|entry| entry.assessment.eligibility)
+        .collect::<Vec<_>>();
+    roll_up_group(key, &eligibilities, support_for_assessments(assessments))
+}
+
+fn support_for_assessments(assessments: &[&TrialScorecardAssessment]) -> ScorecardSupportSummary {
+    let mut cases = BTreeSet::new();
+    let mut identity_unavailable = false;
+    for assessment in assessments {
+        let identity = (
+            nonblank_id(assessment.scenario_id.as_deref()),
+            nonblank_id(assessment.persona_id.as_deref()),
+            nonblank_id(assessment.profile_id.as_deref()),
+        );
+        if let (Some(scenario_id), Some(persona_id), Some(profile_id)) = identity {
+            cases.insert((scenario_id, persona_id, profile_id));
+        } else {
+            identity_unavailable = true;
+        }
+    }
+    let required = crate::eligibility::group_support_floor();
+    if identity_unavailable {
+        return ScorecardSupportSummary::case_identity_unavailable(cases.len(), required);
+    }
+    ScorecardSupportSummary::from_counts(cases.len(), required)
+}
+
+fn nonblank_id(value: Option<&str>) -> Option<&str> {
+    value.filter(|id| !id.trim().is_empty())
 }
 
 fn trial_score_target(trial: &ExperimentTrialRecord) -> Option<TrialScoreTarget> {
@@ -1350,6 +1485,7 @@ fn scorecard_rollup_payload(rollup: &ScorecardGroupRollup) -> Value {
         "key": rollup.key,
         "eligibility": rollup.eligibility.as_str(),
         "trials": rollup.trials,
+        "support": rollup.support,
     })
 }
 
@@ -1420,8 +1556,11 @@ fn plan_generation_user_prompt(request: &ExperimentGeneratePlanRequest) -> Strin
     };
 
     format!(
-        "Plan description:\n{}\n\n{}",
+        "Plan description:\n{}\n\nPin this exact simulator policy in definition.spec.simulator_policy:\n\
+         - policy_uid: {}\n- revision: {}\n\n{}",
         request.description.trim(),
+        request.simulator_policy_uid,
+        request.simulator_policy_revision,
         refs
     )
 }
@@ -1681,6 +1820,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::eligibility::group_support_floor;
     use crate::model::{ExperimentSimulatorConfig, ExperimentTrialStopReason};
 
     #[test]
@@ -1708,6 +1848,8 @@ mod tests {
                 .to_string(),
             model: Some("gpt-5.4-mini".to_string()),
             artifact_refs: vec!["agent:refund-baseline@1".to_string()],
+            simulator_policy_uid: fixture_uuid(41),
+            simulator_policy_revision: 3,
         };
 
         let completion =
@@ -1745,6 +1887,8 @@ mod tests {
             description: "Create a greeting experiment.".to_string(),
             model: Some("gpt-5.4-mini".to_string()),
             artifact_refs: Vec::new(),
+            simulator_policy_uid: fixture_uuid(41),
+            simulator_policy_revision: 3,
         };
 
         let completion = plan_generation_repair_request(
@@ -1800,6 +1944,148 @@ mod tests {
     }
 
     #[test]
+    fn scorecard_support_counts_distinct_cases_not_repetitions_offline() {
+        // Pins: variant and repetition coordinates create observations, not new
+        // independent cases. Only scenario/persona/profile identity may satisfy
+        // the shared support floor, and a missing identity fails closed.
+        let assessment =
+            |index: usize,
+             variant_key: String,
+             scenario_id: Option<String>,
+             persona_id: Option<String>,
+             profile_id: Option<String>| TrialScorecardAssessment {
+                trial_uid: Uuid::from_u128(index as u128 + 1),
+                score_run_id: Uuid::from_u128(100),
+                trial_key: format!("trial-{index}"),
+                variant_key,
+                scenario_id,
+                persona_id,
+                profile_id,
+                assessment: ScorecardAssessment {
+                    eligibility: ScorecardEligibility::Eligible,
+                    findings: Vec::new(),
+                },
+            };
+
+        let repetitions = (0..group_support_floor() + 2)
+            .map(|index| {
+                assessment(
+                    index,
+                    format!("variant-{index}"),
+                    Some("scenario-a".to_string()),
+                    Some("persona-a".to_string()),
+                    Some("profile-a".to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let repetition_refs = repetitions.iter().collect::<Vec<_>>();
+        let repetition_support = support_for_assessments(&repetition_refs);
+        assert_eq!(repetition_support.independent_units, 1);
+        assert_eq!(
+            repetition_support.status,
+            crate::eligibility::ScorecardSupportStatus::InsufficientIndependentUnits
+        );
+        let repetition_rollup = roll_up_assessments("repetitions", &repetition_refs);
+        assert_eq!(repetition_rollup.trials, repetitions.len());
+        assert_eq!(
+            repetition_rollup.eligibility,
+            ScorecardEligibility::Incomplete
+        );
+
+        for (dimension, identities) in [
+            (
+                "scenario",
+                [
+                    ("scenario-a", "persona-a", "profile-a"),
+                    ("scenario-b", "persona-a", "profile-a"),
+                ],
+            ),
+            (
+                "persona",
+                [
+                    ("scenario-a", "persona-a", "profile-a"),
+                    ("scenario-a", "persona-b", "profile-a"),
+                ],
+            ),
+            (
+                "profile",
+                [
+                    ("scenario-a", "persona-a", "profile-a"),
+                    ("scenario-a", "persona-a", "profile-b"),
+                ],
+            ),
+        ] {
+            let pair = identities
+                .into_iter()
+                .enumerate()
+                .map(|(index, (scenario_id, persona_id, profile_id))| {
+                    assessment(
+                        index,
+                        "candidate".to_string(),
+                        Some(scenario_id.to_string()),
+                        Some(persona_id.to_string()),
+                        Some(profile_id.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                support_for_assessments(&pair.iter().collect::<Vec<_>>()).independent_units,
+                2,
+                "{dimension} is not part of modeled-case identity"
+            );
+        }
+
+        let distinct_cases = (0..group_support_floor())
+            .map(|index| {
+                assessment(
+                    index,
+                    "candidate".to_string(),
+                    Some(format!("scenario-{index}")),
+                    Some("persona-a".to_string()),
+                    Some("profile-a".to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let distinct_refs = distinct_cases.iter().collect::<Vec<_>>();
+        let distinct_support = support_for_assessments(&distinct_refs);
+        assert_eq!(distinct_support.independent_units, group_support_floor());
+        assert_eq!(
+            distinct_support.status,
+            crate::eligibility::ScorecardSupportStatus::Sufficient
+        );
+        assert_eq!(
+            roll_up_assessments("distinct", &distinct_refs).eligibility,
+            ScorecardEligibility::Eligible
+        );
+
+        let missing_identity = assessment(
+            999,
+            "candidate".to_string(),
+            Some("scenario-a".to_string()),
+            Some("persona-a".to_string()),
+            Some("  ".to_string()),
+        );
+        let known_identity = assessment(
+            998,
+            "candidate".to_string(),
+            Some("scenario-a".to_string()),
+            Some("persona-a".to_string()),
+            Some("profile-a".to_string()),
+        );
+        let missing_refs = vec![&known_identity, &missing_identity];
+        let missing_support = support_for_assessments(&missing_refs);
+        assert_eq!(missing_support.independent_units, 1);
+        assert_eq!(
+            missing_support.status,
+            crate::eligibility::ScorecardSupportStatus::CaseIdentityUnavailable
+        );
+        assert_eq!(
+            roll_up_assessments("missing", &missing_refs).eligibility,
+            ScorecardEligibility::Incomplete
+        );
+    }
+
+    #[test]
     fn experiment_proposal_candidate_stays_review_only() {
         // Pins: experiment-derived improvements create proposed candidates without active artifacts.
         let tenant_id = tenant_id_from_str("tenant-a");
@@ -1812,7 +2098,15 @@ mod tests {
             mean_or_rate: Some(1.0),
         }];
         let scorecards = ExperimentRunScorecards {
-            run: roll_up_group(run.run_uid.to_string(), &[ScorecardEligibility::Eligible]),
+            run: ScorecardGroupRollup {
+                key: run.run_uid.to_string(),
+                eligibility: ScorecardEligibility::Eligible,
+                trials: 1,
+                support: ScorecardSupportSummary::from_counts(
+                    group_support_floor(),
+                    group_support_floor(),
+                ),
+            },
             scenarios: Vec::new(),
             variants: Vec::new(),
             trials: vec![TrialScorecardAssessment {
@@ -1821,6 +2115,8 @@ mod tests {
                 trial_key: trials[0].trial_key.clone(),
                 variant_key: trials[0].variant_key.clone(),
                 scenario_id: trials[0].scenario_id.clone(),
+                persona_id: trials[0].persona_id.clone(),
+                profile_id: trials[0].profile_id.clone(),
                 assessment: ScorecardAssessment {
                     eligibility: ScorecardEligibility::Eligible,
                     findings: Vec::new(),
@@ -1899,6 +2195,7 @@ mod tests {
             scope: ActionRuleScope::Tenant { tenant_id },
             plan_artifact_uid: None,
             resource_envelope: fixture_resource_envelope(),
+            simulator_policy: None,
             run_uid: fixture_uuid(1),
             name: "support escalation comparison".to_string(),
             target_kind: ExperimentTargetKind::AgentLoop,
@@ -1957,11 +2254,9 @@ mod tests {
             data_bundle_ids: vec!["bundle-a".to_string()],
             artifact_revision_uids: vec![fixture_uuid(3)],
             simulator: ExperimentSimulatorConfig {
-                model: ModelId::new("gpt-fixture"),
-                temperature: Some(0.2),
+                policy: crate::simulator_policy::test_support::resolved_policy(),
                 max_turns: 6,
                 token_budget: Some(1000),
-                metadata: json!({}),
             },
             target_model: Some(ModelId::new("gpt-fixture")),
             seed: Some("seed-a".to_string()),

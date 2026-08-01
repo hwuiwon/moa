@@ -92,12 +92,12 @@ pub struct AgentDefinitionSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Request payload for installing a published agent revision into a tenant.
+/// Request payload for installing an agent artifact into a tenant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentInstallRequest {
     /// Tenant that receives the installation.
     pub tenant_id: TenantId,
-    /// Exact published agent revision to install and deploy.
+    /// Exact agent revision whose artifact to install.
     pub revision_uid: Uuid,
     /// Optional agent principal bound to the installation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,7 +105,7 @@ pub struct AgentInstallRequest {
     /// Optional display-name override for this installation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Optional deployment reason.
+    /// Optional installation reason recorded in metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Installation metadata owned by product/admin UI.
@@ -113,19 +113,18 @@ pub struct AgentInstallRequest {
     pub metadata: Value,
 }
 
-/// Response payload returned after installing an agent revision.
+/// Response payload returned after creating a non-serving agent installation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInstallResponse {
     /// Tenant that owns the installation.
     pub tenant_id: TenantId,
     /// Stable installation pointer.
     pub installation_uid: Uuid,
-    /// Stable deployment row selected by the installation.
-    pub deployment_uid: Uuid,
-    /// Exact published agent revision deployed.
-    pub revision_uid: Uuid,
-    /// Runtime policy hash selected by the deployment lock.
-    pub policy_hash: String,
+    /// Installation lifecycle status. A new installation is `inactive`.
+    pub status: String,
+    /// Current deployed revision. A new installation has no serving revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_revision_uid: Option<Uuid>,
 }
 
 /// Request payload for listing installed agents in a tenant.
@@ -183,8 +182,10 @@ pub struct AgentDeployRequest {
     pub tenant_id: TenantId,
     /// Installed-agent pointer to move.
     pub installation_uid: Uuid,
-    /// Exact published agent revision to deploy.
+    /// Exact release-ready agent revision to deploy.
     pub revision_uid: Uuid,
+    /// Single-use release attestation authorizing this exact deployment subject.
+    pub attestation_uid: Uuid,
     /// Optional deployment reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

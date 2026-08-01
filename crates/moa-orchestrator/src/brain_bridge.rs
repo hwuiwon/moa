@@ -36,6 +36,7 @@ use tracing::Instrument;
 
 use crate::ctx::OrchestratorCtx;
 use crate::services::llm_gateway::USER_TURN_METADATA_KEY;
+use crate::tool_invocation::governed::TOOL_CATALOG_PIN_METADATA_KEY;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 32;
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
@@ -132,12 +133,12 @@ pub(crate) async fn prepare_turn_request(
     // `file_read` is kept so selected skill packages can be read without a sandbox.
     // The worker tool subsets (built from the unfiltered `tool_schemas`)
     // keep the hand tools, so all compute is delegated.
-    let root_tool_schemas = {
-        let tool_router = ctx.tool_router();
-        coordinator_tool_schemas(ctx.tool_schemas().as_ref(), |name| {
-            tool_router.tool_requires_sandbox(name)
-        })
-    };
+    let tool_catalog = ctx.tool_router().activated_catalog();
+    let root_tool_schemas =
+        coordinator_tool_schemas(tool_catalog.tool_schema_snapshot().as_ref(), |name| {
+            tool_catalog.tool_requires_sandbox(name)
+        });
+    let tool_catalog_pin = tool_catalog.pin()?;
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         config.as_ref(),
         session_store.clone(),
@@ -238,6 +239,10 @@ pub(crate) async fn prepare_turn_request(
         );
     }
     context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
+    context.insert_metadata(
+        TOOL_CATALOG_PIN_METADATA_KEY,
+        serde_json::to_value(tool_catalog_pin)?,
+    );
 
     let query_rewrite_cache = query_rewrite_cache_from_context(active_user_sequence_num, &context);
     let trusted_sandbox_files = context.take_trusted_sandbox_files();

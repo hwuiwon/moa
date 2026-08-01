@@ -1,8 +1,12 @@
 //! Restate service for tenant-configurable agent definitions and deployments.
 
+use chrono::Utc;
 use moa_agents::AgentResolver;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifactRevision};
+use moa_artifacts::registry::{
+    ArtifactRegistry, ArtifactScopeParts, ReleaseRepository, StoredArtifactRevision,
+};
+use moa_artifacts::release::{ActivationRequest, ActivationTarget, TenantScope};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
@@ -11,6 +15,7 @@ use moa_core::{
     types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
+use moa_hands::ToolRouter;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_wire::agents::{
     AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDefinitionSummary,
@@ -40,7 +45,7 @@ pub trait AgentDefinitions {
         request: Json<AgentDefinitionListRequest>,
     ) -> Result<Json<AgentDefinitionListResponse>, HandlerError>;
 
-    /// Installs and deploys a published agent revision in a tenant.
+    /// Creates a non-serving installation for an agent artifact.
     async fn install(
         request: Json<AgentInstallRequest>,
     ) -> Result<Json<AgentInstallResponse>, HandlerError>;
@@ -50,7 +55,7 @@ pub trait AgentDefinitions {
         request: Json<AgentInstallationListRequest>,
     ) -> Result<Json<AgentInstallationListResponse>, HandlerError>;
 
-    /// Moves an installed agent to an exact published revision.
+    /// Spends a release attestation to deploy an exact agent revision.
     async fn deploy(
         request: Json<AgentDeployRequest>,
     ) -> Result<Json<AgentDeployResponse>, HandlerError>;
@@ -65,13 +70,14 @@ pub trait AgentDefinitions {
 #[derive(Clone)]
 pub struct AgentDefinitionsImpl {
     pool: PgPool,
+    tool_router: std::sync::Arc<ToolRouter>,
 }
 
 impl AgentDefinitionsImpl {
     /// Creates the agent-definition adapter with its artifact and deployment pool.
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, tool_router: std::sync::Arc<ToolRouter>) -> Self {
+        Self { pool, tool_router }
     }
 }
 
@@ -143,10 +149,36 @@ impl AgentDefinitions for AgentDefinitionsImpl {
         annotate_restate_handler_span("AgentDefinitions", "deploy");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let binding_pool = self.pool.clone();
+        let binding_scope = tenant_scope(request.tenant_id);
+        let installation_uid = request.installation_uid;
+        let expected_agent_id = ctx
+            .run(|| async move {
+                AgentResolver::new(binding_pool)
+                    .load_installation_binding(&binding_scope, installation_uid)
+                    .await
+                    .map_err(moa_error_to_handler_error)?
+                    .map(|binding| binding.agent_id)
+                    .ok_or_else(|| {
+                        TerminalError::new_with_code(404, "agent installation not found").into()
+                    })
+                    .map(Json::from)
+            })
+            .name("agent_definitions_load_deploy_binding")
+            .await?
+            .into_inner();
+        if let Some(agent_id) = expected_agent_id {
+            authorize_agent_operator(&ctx, agent_id).await?;
+        }
         let pool = self.pool.clone();
+        let tool_router = self.tool_router.clone();
 
         Ok(ctx
-            .run(|| async move { deploy_inner(pool, request, identity).await.map(Json::from) })
+            .run(|| async move {
+                deploy_inner(pool, tool_router, request, expected_agent_id, identity)
+                    .await
+                    .map(Json::from)
+            })
             .name("agent_definitions_deploy")
             .await?)
     }
@@ -214,16 +246,14 @@ pub async fn list_definitions_inner(
     })
 }
 
-/// Installs and deploys a published agent revision after caller authorization has passed.
+/// Creates a non-serving installation after caller authorization has passed.
 pub async fn install_inner(
     pool: PgPool,
     request: AgentInstallRequest,
     identity: Identity,
 ) -> Result<AgentInstallResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
-    let revision =
-        load_published_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
+    let revision = load_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
     let definition = agent_definition(&revision)?;
     let display_name = request
         .display_name
@@ -233,15 +263,13 @@ pub async fn install_inner(
         .map(ToString::to_string)
         .unwrap_or_else(|| definition.display_name.clone());
     let definition_ref = format!("agent://{}", revision.name);
-    let policy = AgentResolver::new(pool.clone())
-        .resolve_exact_revision(&scope, request.revision_uid)
-        .await
-        .map_err(moa_error_to_handler_error)?;
     let installed_by = Some(identity.id.to_string());
-    let metadata = object_or_empty(request.metadata);
+    let mut metadata = object_or_empty(request.metadata);
+    if let (Some(reason), Some(metadata)) = (request.reason, metadata.as_object_mut()) {
+        metadata.insert("installation_reason".to_string(), Value::String(reason));
+    }
     let parts = ArtifactScopeParts::from_scope(&scope);
     let installation_uid = Uuid::now_v7();
-    let deployment_uid = Uuid::now_v7();
 
     let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
@@ -254,7 +282,7 @@ pub async fn install_inner(
             display_name, status, current_revision_uid, last_deployment_uid, last_deployed_at,
             installed_by, deployment_metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9, now(), $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'inactive', NULL, NULL, NULL, $8, $9)
         "#,
     )
     .bind(installation_uid)
@@ -264,35 +292,18 @@ pub async fn install_inner(
     .bind(revision.artifact_uid)
     .bind(&definition_ref)
     .bind(&display_name)
-    .bind(request.revision_uid)
-    .bind(deployment_uid)
     .bind(installed_by.as_deref())
     .bind(SqlJson(metadata))
     .execute(conn.as_mut())
     .await
     .map_err(sqlx_handler_error)?;
-    insert_deployment(
-        conn.as_mut(),
-        NewDeployment {
-            deployment_uid,
-            installation_uid,
-            storage_partition_id: storage_partition_id.as_str(),
-            user_id: parts.user_id.as_deref(),
-            revision_uid: request.revision_uid,
-            deployed_by: installed_by.as_deref(),
-            reason: request.reason.as_deref(),
-            revision_lock: &policy.revision_lock,
-        },
-    )
-    .await?;
     conn.commit().await.map_err(moa_error_to_handler_error)?;
 
     Ok(AgentInstallResponse {
         tenant_id: request.tenant_id,
         installation_uid,
-        deployment_uid,
-        revision_uid: request.revision_uid,
-        policy_hash: policy.revision_lock.canonical_policy_hash,
+        status: "inactive".to_string(),
+        current_revision_uid: None,
     })
 }
 
@@ -332,31 +343,45 @@ pub async fn list_installations_inner(
     })
 }
 
-/// Deploys an exact published agent revision after caller authorization has passed.
+/// Deploys an exact release-ready agent revision after caller authorization has passed.
 pub async fn deploy_inner(
     pool: PgPool,
+    tool_router: std::sync::Arc<ToolRouter>,
     request: AgentDeployRequest,
+    expected_agent_id: Option<Uuid>,
     identity: Identity,
 ) -> Result<AgentDeployResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
-    let revision =
-        load_published_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
+    let revision = load_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
     let policy = AgentResolver::new(pool.clone())
-        .resolve_exact_revision(&scope, request.revision_uid)
+        .resolve_release_candidate(&scope, request.revision_uid)
         .await
         .map_err(moa_error_to_handler_error)?;
-    let deployment_uid = Uuid::now_v7();
-    let deployed_by = Some(identity.id.to_string());
+    let release_scope = TenantScope::new(request.tenant_id);
+    let target = ActivationTarget::AgentDeployment {
+        artifact_uid: revision.artifact_uid,
+        installation_uid: request.installation_uid,
+    };
+    let repository = ReleaseRepository::new(pool.clone());
+    let candidate = repository
+        .load_candidate(&release_scope, request.revision_uid)
+        .await
+        .map_err(release_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(409, "agent release candidate not found"))?;
+    super::artifact_release::ensure_current_release_environment(&pool, &candidate).await?;
+    super::artifact_release::ensure_current_tool_catalog(&candidate, &tool_router)?;
     let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
-    let installation = load_installation_for_update(
-        conn.as_mut(),
-        &storage_partition_id,
-        request.installation_uid,
-    )
-    .await?;
+    let installation =
+        load_installation_for_update(conn.as_mut(), request.installation_uid).await?;
+    if installation.agent_id != expected_agent_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "agent installation binding changed after authorization",
+        )
+        .into());
+    }
     if installation.artifact_uid != revision.artifact_uid {
         return Err(TerminalError::new_with_code(
             400,
@@ -364,49 +389,38 @@ pub async fn deploy_inner(
         )
         .into());
     }
-    sqlx::query(
-        r#"
-        UPDATE moa.agent_deployment
-        SET status = 'superseded'
-        WHERE installation_uid = $1
-          AND status = 'active'
-        "#,
-    )
-    .bind(request.installation_uid)
-    .execute(conn.as_mut())
-    .await
-    .map_err(sqlx_handler_error)?;
-    insert_deployment(
+    if candidate.activation_target != target {
+        return Err(TerminalError::new_with_code(
+            409,
+            "agent release candidate targets a different installation",
+        )
+        .into());
+    }
+    let expected_serving =
+        ReleaseRepository::expected_serving_in_tx(conn.as_mut(), &release_scope, &target)
+            .await
+            .map_err(release_handler_error)?;
+    let outcome = ReleaseRepository::activate_in_tx(
         conn.as_mut(),
-        NewDeployment {
-            deployment_uid,
-            installation_uid: request.installation_uid,
-            storage_partition_id: storage_partition_id.as_str(),
-            user_id: installation.user_id.as_deref(),
-            revision_uid: request.revision_uid,
-            deployed_by: deployed_by.as_deref(),
-            reason: request.reason.as_deref(),
-            revision_lock: &policy.revision_lock,
+        &ActivationRequest {
+            scope: release_scope,
+            activation_target: target,
+            candidate_revision_uid: request.revision_uid,
+            candidate_revision_hash: candidate.candidate_revision_hash,
+            attestation_uid: request.attestation_uid,
+            expected_serving,
+            agent_revision_lock: Some(policy.revision_lock.clone()),
+            actor: identity.id.to_string(),
+            reason: request.reason,
         },
+        Utc::now(),
     )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE moa.agent_installation
-        SET current_revision_uid = $2,
-            last_deployment_uid = $3,
-            last_deployed_at = now(),
-            updated_at = now()
-        WHERE installation_uid = $1
-        "#,
-    )
-    .bind(request.installation_uid)
-    .bind(request.revision_uid)
-    .bind(deployment_uid)
-    .execute(conn.as_mut())
     .await
-    .map_err(sqlx_handler_error)?;
+    .map_err(release_handler_error)?;
     conn.commit().await.map_err(moa_error_to_handler_error)?;
+    let deployment_uid = outcome
+        .deployment_uid
+        .ok_or_else(|| TerminalError::new_with_code(500, "agent activation wrote no deployment"))?;
 
     Ok(AgentDeployResponse {
         tenant_id: request.tenant_id,
@@ -470,46 +484,7 @@ pub async fn list_deployments_inner(
 
 struct InstallationForDeploy {
     artifact_uid: Uuid,
-    user_id: Option<String>,
-}
-
-struct NewDeployment<'a> {
-    deployment_uid: Uuid,
-    installation_uid: Uuid,
-    storage_partition_id: &'a str,
-    user_id: Option<&'a str>,
-    revision_uid: Uuid,
-    deployed_by: Option<&'a str>,
-    reason: Option<&'a str>,
-    revision_lock: &'a moa_core::types::agent::AgentRevisionLock,
-}
-
-async fn insert_deployment(
-    conn: &mut sqlx::PgConnection,
-    deployment: NewDeployment<'_>,
-) -> Result<(), HandlerError> {
-    sqlx::query(
-        r#"
-        INSERT INTO moa.agent_deployment (
-            deployment_uid, installation_uid, storage_partition_id, user_id, revision_uid,
-            deployed_by, status, reason, dependency_lock, dependency_lock_hash
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)
-        "#,
-    )
-    .bind(deployment.deployment_uid)
-    .bind(deployment.installation_uid)
-    .bind(deployment.storage_partition_id)
-    .bind(deployment.user_id)
-    .bind(deployment.revision_uid)
-    .bind(deployment.deployed_by)
-    .bind(deployment.reason)
-    .bind(SqlJson((*deployment.revision_lock).clone()))
-    .bind(&deployment.revision_lock.canonical_policy_hash)
-    .execute(conn)
-    .await
-    .map_err(sqlx_handler_error)?;
-    Ok(())
+    agent_id: Option<Uuid>,
 }
 
 async fn ensure_no_active_installation(
@@ -547,20 +522,17 @@ async fn ensure_no_active_installation(
 
 async fn load_installation_for_update(
     conn: &mut sqlx::PgConnection,
-    storage_partition_id: &StoragePartitionId,
     installation_uid: Uuid,
 ) -> Result<InstallationForDeploy, HandlerError> {
     let row = sqlx::query(
         r#"
-        SELECT artifact_uid, user_id
+        SELECT artifact_uid, agent_id
         FROM moa.agent_installation
-        WHERE storage_partition_id = $1
-          AND installation_uid = $2
-          AND status = 'active'
+        WHERE installation_uid = $1
+          AND status <> 'retired'
         FOR UPDATE
         "#,
     )
-    .bind(storage_partition_id.as_str())
     .bind(installation_uid)
     .fetch_optional(conn)
     .await
@@ -569,7 +541,7 @@ async fn load_installation_for_update(
 
     Ok(InstallationForDeploy {
         artifact_uid: row.try_get("artifact_uid").map_err(sqlx_handler_error)?,
-        user_id: row.try_get("user_id").map_err(sqlx_handler_error)?,
+        agent_id: row.try_get("agent_id").map_err(sqlx_handler_error)?,
     })
 }
 
@@ -600,7 +572,7 @@ async fn ensure_installation_visible(
     Ok(())
 }
 
-async fn load_published_agent_revision(
+async fn load_agent_revision(
     pool: PgPool,
     scope: &ActionRuleScope,
     revision_uid: Uuid,
@@ -612,9 +584,6 @@ async fn load_published_agent_revision(
         .ok_or_else(|| TerminalError::new_with_code(404, "agent revision not found"))?;
     if revision.kind != ArtifactKind::Agent {
         return Err(TerminalError::new_with_code(400, "revision is not an agent").into());
-    }
-    if revision.status != ArtifactStatus::Published {
-        return Err(TerminalError::new_with_code(400, "agent revision must be published").into());
     }
     Ok(revision)
 }
@@ -724,4 +693,13 @@ async fn authorize_agent_operator(
 
 fn sqlx_handler_error(error: sqlx::Error) -> HandlerError {
     HandlerError::from(MoaError::StorageError(error.to_string()))
+}
+
+fn release_handler_error(error: moa_artifacts::Error) -> HandlerError {
+    match error {
+        moa_artifacts::Error::Release { .. } => {
+            TerminalError::new_with_code(409, error.to_string()).into()
+        }
+        other => TerminalError::new_with_code(400, other.to_string()).into(),
+    }
 }

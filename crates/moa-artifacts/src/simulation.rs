@@ -1,8 +1,13 @@
 //! Behavior-lab experiment plan and embedded simulation definitions.
+//!
+//! Scenario prose — `initial_situation`, `goals`, `success_criteria`, and
+//! `failure_criteria` — guides the simulator and human reviewers. It is not a
+//! machine-verifiable outcome contract.
 
 use moa_core::types::experiments::ExperimentScorecard;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{document::empty_object, reference::ArtifactRef};
 
@@ -187,6 +192,7 @@ pub enum SimulationDataSourceKind {
 
 /// Scenario definition for a simulated behavior-lab conversation.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulationScenarioDefinition {
     /// Stable scenario identifier within the experiment plan.
     #[serde(default)]
@@ -200,10 +206,10 @@ pub struct SimulationScenarioDefinition {
     /// User intents allowed during this scenario.
     #[serde(default)]
     pub allowed_user_intents: Vec<String>,
-    /// Observable success criteria.
+    /// Human-readable success criteria.
     #[serde(default)]
     pub success_criteria: Vec<String>,
-    /// Observable failure criteria.
+    /// Human-readable failure criteria.
     #[serde(default)]
     pub failure_criteria: Vec<String>,
     /// Maximum target-agent turns in one trial.
@@ -245,9 +251,9 @@ pub struct ExperimentPlanDefinition {
     /// Target variants under test.
     #[serde(default)]
     pub target_variants: Vec<ExperimentTargetVariant>,
-    /// Simulator model identifier.
+    /// Exact certified simulator policy used by every expanded trial.
     #[serde(default)]
-    pub simulator_model: String,
+    pub simulator_policy: SimulatorPolicyReference,
     /// Optional target model override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_model: Option<String>,
@@ -273,6 +279,16 @@ pub struct ExperimentPlanDefinition {
     /// Builder-owned UI metadata.
     #[serde(default = "empty_object")]
     pub ui: Value,
+}
+
+/// Exact simulator-policy revision selected by an experiment plan.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimulatorPolicyReference {
+    /// Stable policy identifier.
+    pub policy_uid: Uuid,
+    /// Exact positive revision.
+    pub revision: i32,
 }
 
 impl ExperimentPlanDefinition {
@@ -436,7 +452,7 @@ pub fn experiment_plan_response_schema() -> Value {
                         "required": [
                             "simulation",
                             "target_variants",
-                            "simulator_model",
+                            "simulator_policy",
                             "parallelism",
                             "trials_per_combination",
                             "budget",
@@ -460,7 +476,7 @@ pub fn experiment_plan_response_schema() -> Value {
                                                 "initial_situation": { "type": "string", "minLength": 1, "description": "Non-empty starting situation shown to the simulated user." },
                                                 "goals": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "At least one user goal." },
                                                 "allowed_user_intents": { "type": "array", "items": { "type": "string" } },
-                                                "success_criteria": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "At least one observable success criterion." },
+                                                "success_criteria": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "At least one human-readable success criterion." },
                                                 "failure_criteria": { "type": "array", "items": { "type": "string" } },
                                                 "max_turns": { "type": "integer", "minimum": 1, "maximum": MAX_SCENARIO_TURNS, "description": "Maximum target-agent turns, from 1 through 100." },
                                                 "admin_review_behavior": { "enum": ["stop_on_admin_review", "continue_with_synthetic_clearance", "continue_with_synthetic_denial"] },
@@ -557,7 +573,15 @@ pub fn experiment_plan_response_schema() -> Value {
                                     }
                                 }
                             },
-                            "simulator_model": { "type": "string", "minLength": 1 },
+                            "simulator_policy": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["policy_uid", "revision"],
+                                "properties": {
+                                    "policy_uid": { "type": "string", "format": "uuid" },
+                                    "revision": { "type": "integer", "minimum": 1 }
+                                }
+                            },
                             "target_model": { "type": "string", "minLength": 1 },
                             "parallelism": {
                                 "type": "integer",
@@ -645,7 +669,8 @@ mod tests {
     use super::{
         ExperimentPlanDefinition, ExperimentSimulationDefinition, ExperimentTargetKind,
         ExperimentTargetVariant, MAX_SCENARIO_TURNS, SimulationDataBundleDefinition,
-        SimulationDataSource, SimulationDataSourceKind, experiment_plan_response_schema,
+        SimulationDataSource, SimulationDataSourceKind, SimulationScenarioDefinition,
+        experiment_plan_response_schema,
     };
     use crate::document::{ArtifactDocument, ArtifactStatus};
     use crate::reference::ArtifactRef;
@@ -751,7 +776,10 @@ mod tests {
                             "profiles": [{ "id": "profile", "facts": { "tier": "standard" } }]
                         },
                         "target_variants": [{ "key": "agent", "kind": "agent_loop" }],
-                        "simulator_model": "gpt-4.1-mini",
+                        "simulator_policy": {
+                            "policy_uid": "10000000-0000-0000-0000-000000000001",
+                            "revision": 1
+                        },
                         "parallelism": 1,
                         "trials_per_combination": 1,
                         "budget": { "max_total_cents": 100 }
@@ -831,5 +859,23 @@ mod tests {
             simulation["profiles"]["items"]["properties"]["facts"]["required"],
             json!(["summary"])
         );
+    }
+
+    #[test]
+    fn scenario_assertion_declarations_are_not_a_supported_plan_surface() {
+        // Pins: there is no durable assertion-evidence producer. The artifact
+        // type and generated schema both reject the deleted field instead of
+        // accepting a declaration that execution can never honor.
+        let error = serde_json::from_value::<SimulationScenarioDefinition>(json!({
+            "id": "refund",
+            "assertions": []
+        }))
+        .expect_err("unsupported assertion declarations must not deserialize");
+        assert!(error.to_string().contains("unknown field `assertions`"));
+
+        let schema = experiment_plan_response_schema();
+        let properties = &schema["properties"]["definition"]["properties"]["spec"]["properties"]["simulation"]
+            ["properties"]["scenarios"]["items"]["properties"];
+        assert!(properties.get("assertions").is_none());
     }
 }

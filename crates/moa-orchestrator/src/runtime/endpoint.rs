@@ -13,6 +13,9 @@ use crate::services::{
     security_events::{SecurityEvents, SecurityEventsImpl},
     tenants::{Tenants, TenantsImpl},
 };
+use crate::workflows::artifact_release_evaluation::{
+    ArtifactReleaseEvaluation, ArtifactReleaseEvaluationImpl,
+};
 use crate::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl,
 };
@@ -46,6 +49,7 @@ use crate::{
     services::{
         action_policy::{ActionPolicy, ActionPolicyImpl},
         action_reviews::{ActionReviews, ActionReviewsImpl},
+        artifact_release::{ArtifactRelease, ArtifactReleaseImpl},
         artifacts::{Artifacts, ArtifactsImpl},
         contacts::{Contacts, ContactsImpl},
         execution::{Execution, ExecutionImpl},
@@ -109,7 +113,15 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
 ];
 
 const CORE_TAIL_SERVICE_NAMES: &[&str] = &["WorkerTurnExecution", "TurnExecution"];
-const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &["ExperimentRun", "ExperimentTrialRun"];
+const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &[
+    "ExperimentRun",
+    "ExperimentTrialRun",
+    // Bound next to the experiment workflows because it dispatches into them: a
+    // release evaluation is an `Experiments/run` on a pinned plan, so readiness
+    // that admits one without the other would advertise a release surface whose
+    // dispatch target is missing.
+    "ArtifactReleaseEvaluation",
+];
 
 /// Restate admin deployment-list response.
 #[derive(Debug, Deserialize)]
@@ -173,10 +185,11 @@ pub fn build_endpoint(
                 .with_session_limits(session_limits.clone())
                 .serve(),
         )
-        .bind(AgentDefinitionsImpl::new(pool.clone()).serve())
+        .bind(AgentDefinitionsImpl::new(pool.clone(), tool_router.clone()).serve())
         .bind(AgentsImpl::new(pool.clone(), fga_client.clone()).serve())
         .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone()).serve())
         .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone())).serve())
+        .bind(ArtifactReleaseImpl::new(pool.clone(), tool_router.clone()).serve())
         .bind(
             ActionReviewsImpl::new(
                 pool.clone(),
@@ -333,6 +346,7 @@ pub fn build_endpoint(
     }
 
     builder = builder
+        .bind(ArtifactReleaseEvaluationImpl::new(pool.clone()).serve())
         .bind(ExperimentRunImpl::new(pool.clone(), session_store.clone(), config.clone()).serve())
         .bind(
             ExperimentTrialRunImpl::new(

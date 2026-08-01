@@ -437,6 +437,316 @@ async fn refinery_clean_apply_then_second_apply_reports_no_new_migrations_db() {
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn artifact_release_activation_boundary_is_execute_only_db() {
+    // Pins: only the dedicated non-login role owns release-transition functions,
+    // the application role may execute them, and raw pointer/audit writes remain
+    // revoked.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create artifact release boundary database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        target
+            .execute(
+                "CREATE EXTENSION IF NOT EXISTS vector; \
+                 CREATE EXTENSION IF NOT EXISTS pgaudit;",
+            )
+            .await?;
+        moa_migrations::run(&target_url).await?;
+
+        let boundary_ok: bool = sqlx::query_scalar(
+            r#"
+            SELECT
+                NOT activator.rolcanlogin
+                AND NOT activator.rolinherit
+                AND NOT activator.rolbypassrls
+                AND (
+                    SELECT count(*) = 3
+                    FROM pg_proc function_row
+                    JOIN pg_namespace namespace ON namespace.oid = function_row.pronamespace
+                    JOIN pg_roles owner ON owner.oid = function_row.proowner
+                    WHERE namespace.nspname = 'moa'
+                      AND function_row.proname IN (
+                          'lock_artifact_serving_pointer',
+                          'apply_artifact_activation_transition',
+                          'apply_artifact_rollback_transition'
+                      )
+                      AND owner.rolname = 'moa_artifact_activator'
+                      AND 'search_path=pg_catalog, pg_temp' =
+                          ANY(COALESCE(function_row.proconfig, ARRAY[]::TEXT[]))
+                      AND has_function_privilege('moa_app', function_row.oid, 'EXECUTE')
+                      AND NOT has_function_privilege(
+                          'moa_promoter', function_row.oid, 'EXECUTE'
+                      )
+                )
+                AND NOT has_table_privilege(
+                    'moa_app', 'moa.artifact_serving_pointer', 'INSERT'
+                )
+                AND NOT has_table_privilege(
+                    'moa_app', 'moa.artifact_serving_pointer', 'UPDATE'
+                )
+                AND NOT has_table_privilege(
+                    'moa_app', 'moa.artifact_serving_pointer', 'DELETE'
+                )
+                AND NOT has_table_privilege(
+                    'moa_app', 'moa.artifact_activation_audit', 'INSERT'
+                )
+            FROM pg_roles activator
+            WHERE activator.rolname = 'moa_artifact_activator'
+            "#,
+        )
+        .fetch_one(&target)
+        .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(boundary_ok)
+    }
+    .await;
+
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+    assert!(
+        outcome.expect("artifact release boundary assertions should complete"),
+        "artifact activation role, function ownership, or raw-DML revocation drifted"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn artifact_release_purge_is_scope_bound_and_execute_only_db() {
+    // Pins: tenant erasure can remove release-control rows only through the
+    // exact-partition SECURITY DEFINER seam, and only when the application
+    // transaction is scoped to that same partition.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create artifact release purge database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let tenant_id = uuid::Uuid::now_v7();
+        let partition = tenant_id.to_string();
+        let neighbor_partition = uuid::Uuid::now_v7().to_string();
+        let policy_uid = uuid::Uuid::now_v7();
+
+        sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, 'release purge')")
+            .bind(tenant_id)
+            .bind(format!("release-purge-{tenant_id}"))
+            .execute(&target)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO moa.artifact_release_policy (
+                policy_uid, storage_partition_id, user_id, name, revision,
+                target_class, blocking_assertions, primary_gate_family,
+                attestation_ttl_secs, resource_policy_hash, policy_hash
+            )
+            VALUES (
+                $1, $2, NULL, 'tenant-release-purge', 1, 'skill_visibility',
+                '[{"id":"safety"}]'::JSONB,
+                '[{"metric":"scenario_pass_rate"}]'::JSONB,
+                3600, $3, $4
+            )
+            "#,
+        )
+        .bind(policy_uid)
+        .bind(&partition)
+        .bind(vec![1_u8; 32])
+        .bind(vec![2_u8; 32])
+        .execute(&target)
+        .await?;
+
+        let role_boundary_ok: bool = sqlx::query_scalar(
+            r#"
+            SELECT
+                NOT releaser.rolcanlogin
+                AND NOT releaser.rolinherit
+                AND NOT releaser.rolbypassrls
+                AND owner.rolname = 'moa_artifact_releaser'
+                AND 'search_path=pg_catalog, pg_temp' =
+                    ANY(COALESCE(function_row.proconfig, ARRAY[]::TEXT[]))
+                AND has_function_privilege('moa_app', function_row.oid, 'EXECUTE')
+                AND NOT has_function_privilege(
+                    'moa_promoter', function_row.oid, 'EXECUTE'
+                )
+                AND NOT has_function_privilege(
+                    'moa_auditor', function_row.oid, 'EXECUTE'
+                )
+            FROM pg_proc function_row
+            JOIN pg_roles owner ON owner.oid = function_row.proowner
+            JOIN pg_roles releaser ON releaser.rolname = 'moa_artifact_releaser'
+            JOIN pg_namespace namespace ON namespace.oid = function_row.pronamespace
+            WHERE namespace.nspname = 'moa'
+              AND function_row.proname = 'purge_artifact_release_partition'
+            "#,
+        )
+        .fetch_one(&target)
+        .await?;
+
+        let wrong_scope_code = {
+            let mut tx = target.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+                .bind(&neighbor_partition)
+                .execute(tx.as_mut())
+                .await?;
+            sqlx::query("SET LOCAL ROLE moa_app")
+                .execute(tx.as_mut())
+                .await?;
+            let result = sqlx::query("SELECT moa.purge_artifact_release_partition($1)")
+                .bind(&partition)
+                .execute(tx.as_mut())
+                .await;
+            let code = result
+                .as_ref()
+                .err()
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(|error| error.code())
+                .map(|code| code.into_owned());
+            tx.rollback().await?;
+            code
+        };
+
+        let row_survived_wrong_scope: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM moa.artifact_release_policy WHERE policy_uid = $1)",
+        )
+        .bind(policy_uid)
+        .fetch_one(&target)
+        .await?;
+
+        let releaser_visible_rows = {
+            let mut tx = target.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+                .bind(&partition)
+                .execute(tx.as_mut())
+                .await?;
+            sqlx::query("SET LOCAL ROLE moa_artifact_releaser")
+                .execute(tx.as_mut())
+                .await?;
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM moa.artifact_release_policy WHERE storage_partition_id = $1",
+            )
+            .bind(&partition)
+            .fetch_one(tx.as_mut())
+            .await?;
+            tx.rollback().await?;
+            count
+        };
+
+        let blank_partition_code = {
+            let mut tx = target.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+                .bind(&partition)
+                .execute(tx.as_mut())
+                .await?;
+            sqlx::query("SET LOCAL ROLE moa_app")
+                .execute(tx.as_mut())
+                .await?;
+            let result = sqlx::query("SELECT moa.purge_artifact_release_partition('')")
+                .execute(tx.as_mut())
+                .await;
+            let code = result
+                .as_ref()
+                .err()
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(|error| error.code())
+                .map(|code| code.into_owned());
+            tx.rollback().await?;
+            code
+        };
+
+        let deleted = {
+            let mut tx = target.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+                .bind(&partition)
+                .execute(tx.as_mut())
+                .await?;
+            sqlx::query("SET LOCAL ROLE moa_app")
+                .execute(tx.as_mut())
+                .await?;
+            let deleted: i64 =
+                sqlx::query_scalar("SELECT moa.purge_artifact_release_partition($1)")
+                    .bind(&partition)
+                    .fetch_one(tx.as_mut())
+                    .await?;
+            tx.commit().await?;
+            deleted
+        };
+
+        let tenant_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.artifact_release_policy WHERE storage_partition_id = $1",
+        )
+        .bind(&partition)
+        .fetch_one(&target)
+        .await?;
+        let platform_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.artifact_release_policy WHERE storage_partition_id IS NULL",
+        )
+        .fetch_one(&target)
+        .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            role_boundary_ok,
+            wrong_scope_code,
+            row_survived_wrong_scope,
+            releaser_visible_rows,
+            blank_partition_code,
+            deleted,
+            tenant_rows,
+            platform_rows,
+        ))
+    }
+    .await;
+
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+    let (
+        role_boundary_ok,
+        wrong_scope_code,
+        row_survived_wrong_scope,
+        releaser_visible_rows,
+        blank_partition_code,
+        deleted,
+        tenant_rows,
+        platform_rows,
+    ) = outcome.expect("artifact release purge assertions should complete");
+    assert!(role_boundary_ok, "release purge role or grants drifted");
+    assert_eq!(wrong_scope_code.as_deref(), Some("42501"));
+    assert!(row_survived_wrong_scope);
+    assert_eq!(releaser_visible_rows, 1);
+    assert_eq!(blank_partition_code.as_deref(), Some("22023"));
+    assert_eq!((deleted, tenant_rows, platform_rows), (1, 0, 3));
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     // Pins: V337 starts normalized audit storage empty, installs every finite SQL matrix and
     // immutable trace/high-water boundary, rebuilds execution-only facts, and applies once.
@@ -1588,7 +1898,7 @@ async fn procedure_runtime_cutover_discards_rows_without_execution_translation_d
             );
             INSERT INTO moa.experiment_run (
                 run_uid,storage_partition_id,user_id,name,target_kind,status,
-                target,variant,score_run_id,created_by_identity
+                target,variant,score_run_id,created_by_identity,resource_envelope
             ) VALUES (
                 '00000000-0000-0000-0000-000000033603',
                 '00000000-0000-0000-0000-000000003360',
@@ -1597,7 +1907,11 @@ async fn procedure_runtime_cutover_discards_rows_without_execution_translation_d
                 '{"kind":"procedure","procedure_ref":"skill://discard-proof"}',
                 '{}',
                 '00000000-0000-0000-0000-000000033602',
-                '{"kind":"operator","id":"cutover-proof"}'
+                '{"kind":"operator","id":"cutover-proof"}',
+                '{"version": 1,
+                     "run_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "trial_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
+                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb
             );
             "#,
         )
@@ -4531,20 +4845,29 @@ async fn seed_provenance_fixture(
          VALUES ('00000000-0000-0000-0000-000000000006', '11111111-1111-1111-1111-111111111111', NULL, 'experiment_trial')",
         "INSERT INTO moa.experiment_run (
              run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
-             scorecard, score_run_id, artifact_revision_uids, created_by_identity
+             scorecard, score_run_id, artifact_revision_uids, created_by_identity,
+             resource_envelope
          ) VALUES (
              '00000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111',
              NULL, 'fixture run', 'agent_loop', 'running', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
-             '00000000-0000-0000-0000-000000000006', '{}', '{}'::jsonb
+             '00000000-0000-0000-0000-000000000006', '{}', '{}'::jsonb,
+             '{\"version\": 1,
+                     \"run_limits\": {\"cost_micro_usd\": 0, \"tokens\": 0, \"turns\": 0, \"model_calls\": 0, \"tool_calls\": 0},
+                     \"trial_limits\": {\"cost_micro_usd\": 0, \"tokens\": 0, \"turns\": 0, \"model_calls\": 0, \"tool_calls\": 0},
+                     \"deadline_at\": \"1970-01-01T00:00:00Z\"}'::jsonb
          )",
         "INSERT INTO moa.experiment_trial (
              trial_uid, run_uid, storage_partition_id, user_id, trial_key, status, target_kind,
-             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id
+             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id,
+             resource_envelope
          ) VALUES (
              '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003',
              '11111111-1111-1111-1111-111111111111', NULL, 'fixture/0', 'running',
              'agent_loop', 'baseline', '00000000-0000-0000-0000-000000000004', '{}'::jsonb,
-             'sim-model', '00000000-0000-0000-0000-000000000006'
+             'sim-model', '00000000-0000-0000-0000-000000000006',
+             '{\"version\": 1,
+                     \"limits\": {\"cost_micro_usd\": 0, \"tokens\": 0, \"turns\": 0, \"model_calls\": 0, \"tool_calls\": 0},
+                     \"deadline\": \"1970-01-01T00:00:00Z\"}'::jsonb
          )",
     ] {
         pool.execute(statement).await?;

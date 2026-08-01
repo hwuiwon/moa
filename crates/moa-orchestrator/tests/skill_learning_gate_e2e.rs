@@ -91,8 +91,8 @@ mod skill_learning_gate {
                 .contains("smoke gate"),
             "acceptance checks must describe the candidate-only run honestly"
         );
-        let published = harness.load_revision(draft.revision_uid).await;
-        assert_eq!(published.status, ArtifactStatus::Published);
+        let activated = harness.load_revision(draft.revision_uid).await;
+        assert_eq!(activated.status, ArtifactStatus::Ready);
     }
 
     /// Identifiers planted in the source transcript this gate test learns from.
@@ -163,11 +163,12 @@ mod skill_learning_gate {
             evaluation["regression_report"]["candidate"]["failed_runs"], 0,
             "the generated suite must actually execute and pass"
         );
-        let published = harness.load_revision(draft.revision_uid).await;
-        assert_eq!(published.status, ArtifactStatus::Published);
+        let activated = harness.load_revision(draft.revision_uid).await;
+        assert_eq!(activated.status, ArtifactStatus::Ready);
 
-        // The reviewed row is the durable artifact of this decision, so the
-        // redaction has to hold there and not only in the in-memory suite.
+        // Candidate and evaluation payloads must never regain raw source PII.
+        // Suite bytes live in the typed contribution owner rather than being
+        // duplicated into either payload, so verify their durable row directly.
         let reloaded = harness.reload_candidate(candidate.id).await;
         let stored = serde_json::to_string(&reloaded.payload).expect("serialize candidate payload")
             + &serde_json::to_string(&reloaded.evaluation_payload)
@@ -178,9 +179,21 @@ mod skill_learning_gate {
                 "{planted} survived into the reviewed rows: {stored}"
             );
         }
+        let contributions = ArtifactRegistry::new(harness.test_db.store().pool().clone())
+            .list_suite_contributions(&harness.scope(), candidate.id)
+            .await
+            .expect("load the reviewed suite contribution");
+        assert_eq!(contributions.len(), 1);
+        let reviewed_suite = &contributions[0].suite_source;
+        for planted in [GATE_USER_EMAIL, GATE_QUEUED_EMAIL, GATE_SUMMARY_EMAIL] {
+            assert!(
+                !reviewed_suite.contains(planted),
+                "{planted} survived into the reviewed suite: {reviewed_suite}"
+            );
+        }
         assert!(
-            stored.contains("[EMAIL_REDACTED]"),
-            "the reviewed suite should carry the redaction placeholder: {stored}"
+            reviewed_suite.contains("[EMAIL_REDACTED]"),
+            "the reviewed suite should carry the redaction placeholder: {reviewed_suite}"
         );
     }
 
@@ -241,14 +254,14 @@ mod skill_learning_gate {
 
     #[tokio::test]
     #[ignore = "requires compose Postgres and the provider-overrides feature"]
-    async fn accept_compares_against_published_previous_revision_e2e() {
-        // Pins: when a published previous revision exists, the gate executes both the
+    async fn accept_compares_against_activated_previous_revision_e2e() {
+        // Pins: when an activated previous revision exists, the gate executes both the
         // previous and candidate suites and promotes on a no-regression comparison —
         // and the previous revision's own suite (riding its package) executes as
         // held-out material the candidate was not derived from.
         let harness = GateHarness::bootstrap("gate-compared").await;
-        let previous = skill_package_with_suite(&harness.skill_name, "Previous published revision");
-        harness.create_and_publish(&previous).await;
+        let previous = skill_package_with_suite(&harness.skill_name, "Previous activated revision");
+        harness.create_and_activate(&previous).await;
         let improved = skill_package(&harness.skill_name, "Improved candidate revision");
         let draft = harness.create_draft(&improved).await;
         let candidate = harness
@@ -301,9 +314,9 @@ mod skill_learning_gate {
 
     #[tokio::test]
     #[ignore = "requires compose Postgres and the provider-overrides feature"]
-    async fn accepted_execution_template_skill_compiles_audits_and_publishes_e2e() {
+    async fn accepted_execution_template_skill_compiles_audits_and_activates_e2e() {
         // Pins: a template-bearing skill candidate compiles through moa-execution, persists
-        // its strict preterminal planning audit, and publishes the same validated template.
+        // its strict preterminal planning audit, and activates the same validated template.
         let harness = GateHarness::bootstrap("gate-execution-template").await;
         let package = execution_template_skill_package(&harness.skill_name);
         let draft = harness.create_draft(&package).await;
@@ -320,16 +333,16 @@ mod skill_learning_gate {
         let response = harness.accept(candidate.id).await.expect("accept promotes");
 
         assert_eq!(response.status, LearningCandidateStatus::Promoted);
-        let published = harness.load_revision(draft.revision_uid).await;
-        assert_eq!(published.status, ArtifactStatus::Published);
+        let activated = harness.load_revision(draft.revision_uid).await;
+        assert_eq!(activated.status, ArtifactStatus::Ready);
         let moa_artifacts::document::ArtifactDefinition::Skill(definition) =
-            published.document.definition
+            activated.document.definition
         else {
-            panic!("published artifact must be a skill definition");
+            panic!("activated artifact must be a skill definition");
         };
         assert!(
             definition.execution_plan.is_some(),
-            "published skill keeps its compiled execution-plan template"
+            "activated skill keeps its compiled execution-plan template"
         );
         let audits: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT source, outcome, operation_key \
@@ -454,14 +467,23 @@ mod skill_learning_gate {
                 .expect("create draft skill artifact")
         }
 
-        async fn create_and_publish(&self, package: &ValidatedSkillPackage) {
+        async fn create_and_activate(&self, package: &ValidatedSkillPackage) {
             let draft = self.create_draft(package).await;
-            let report = validate_for_status(&draft.document, ArtifactStatus::Published);
-            assert!(report.is_ok(), "previous revision must be publishable");
-            ArtifactRegistry::new(self.test_db.store().pool().clone())
-                .publish_revision(&self.scope(), draft.revision_uid, &report)
-                .await
-                .expect("publish previous skill revision");
+            let report = validate_for_status(&draft.document, ArtifactStatus::Ready);
+            assert!(report.is_ok(), "previous revision must be activatable");
+            // The predecessor has to be serving, which means an audited
+            // learned-skill activation rather than a publish.
+            moa_artifacts::test_fixtures::activate_revision(
+                self.test_db.store().pool(),
+                moa_artifacts::release::TenantScope::from_action_rule_scope(&self.scope())
+                    .expect("gate fixtures are tenant scoped"),
+                moa_artifacts::release::ActivationTarget::SkillVisibility {
+                    artifact_uid: draft.artifact_uid,
+                },
+                draft.revision_uid,
+            )
+            .await
+            .expect("activate previous skill revision");
         }
 
         async fn append_proposed_candidate(
@@ -619,7 +641,6 @@ mod skill_learning_gate {
             "---\n\
              name: {skill_name}\n\
              description: \"{description}\"\n\
-             allowed-tools: bash file_read\n\
              metadata:\n\
              \x20 moa-version: \"1.0\"\n\
              \x20 moa-tags: \"gate, e2e\"\n\
@@ -666,7 +687,6 @@ mod skill_learning_gate {
             "---\n\
              name: {skill_name}\n\
              description: \"Execution-template gate skill\"\n\
-             allowed-tools: bash\n\
              metadata:\n\
              \x20 moa-version: \"1.0\"\n\
              \x20 moa-tags: \"gate, execution-template\"\n\
@@ -681,8 +701,6 @@ inputs:
   additionalProperties: false
 outputs:
   type: object
-allowed_tools:
-  - bash
 execution_plan:
   goal:
     requirements:

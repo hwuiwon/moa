@@ -2,7 +2,15 @@
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{ArtifactFile, ArtifactRegistry, StoredArtifactRevision};
+use moa_artifacts::registry::{
+    ArtifactFile, ArtifactRegistry, CandidateSubjectInputs, RecordDecision, ReleaseRepository,
+    StoredArtifactRevision, SubmitCandidate,
+};
+use moa_artifacts::release::{
+    ActivationOutcome, ActivationRequest, ActivationTarget, AgentRuntimeSubject, AssertionRef,
+    DeterminismClass, DeterministicVerdict, Digest32, EvaluationPlanSubject, EvidenceAdapter,
+    ExpectedServing, PLATFORM_BLOCKING_ASSERTIONS, TenantScope,
+};
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
@@ -11,10 +19,14 @@ use moa_core::{
     types::experience::LearningCandidateStatusUpdate, types::experience::LearningProposalKind,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::learning::LearningEntry, types::learning::LearningLogSourceRef,
+    types::memory::RlsContext,
 };
 use moa_db::ScopedConn;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use sqlx::PgConnection;
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use crate::util::{artifact_scope_context, tenant_artifact_scope};
@@ -51,6 +63,13 @@ pub trait LearningReviewStore: Send + Sync {
         conn: &'a mut PgConnection,
         entry: &'a LearningEntry,
     ) -> impl Future<Output = std::result::Result<(), MoaError>> + Send + 'a;
+
+    /// Records a durable review decision in the caller's open transaction.
+    fn record_learning_candidate_decision_in_tx<'a>(
+        &'a self,
+        conn: &'a mut PgConnection,
+        decision: &'a moa_core::types::experience::LearningCandidateDecisionRecord,
+    ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a;
 }
 
 /// Request metadata supplied by the authenticated review service.
@@ -90,8 +109,10 @@ pub struct PreparedSkillAcceptance {
     pub draft_artifact_revision_uid: Uuid,
     /// Draft package files used for regression checks.
     pub draft_files: Vec<ArtifactFile>,
-    /// Validation report proving the draft is publishable.
-    pub publish_report: ValidationReport,
+    /// Validation report proving the draft is activatable.
+    pub validation_report: ValidationReport,
+    /// Serving-pointer generation the regression run was compared against.
+    pub expected_serving: ExpectedServing,
 }
 
 /// Held-in and held-out acceptance checks recorded when a candidate is promoted.
@@ -152,7 +173,7 @@ fn ensure_acceptance_checks(checks: &AcceptanceChecks) -> Result<()> {
 }
 
 /// Result of applying a learning-candidate review decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillReviewOutcome {
     /// Candidate that was reviewed.
     pub candidate_id: Uuid,
@@ -162,8 +183,8 @@ pub struct SkillReviewOutcome {
     pub artifact_uid: Option<Uuid>,
     /// Draft artifact revision linked to the candidate, when any.
     pub draft_artifact_revision_uid: Option<Uuid>,
-    /// Published artifact revision created by acceptance, when any.
-    pub published_artifact_revision_uid: Option<Uuid>,
+    /// Artifact revision activated by acceptance, when any.
+    pub activated_artifact_revision_uid: Option<Uuid>,
 }
 
 /// Error returned by skill candidate review helpers.
@@ -185,6 +206,15 @@ pub enum SkillReviewError {
 
 /// Convenience result type for skill review operations.
 pub type Result<T> = std::result::Result<T, SkillReviewError>;
+
+/// Inputs captured while a proposed candidate is claimed for rejection.
+#[derive(Debug)]
+struct PreparedSkillRejection {
+    candidate: LearningCandidate,
+    artifact_uid: Option<Uuid>,
+    draft_artifact_revision_uid: Option<Uuid>,
+    evaluation_payload: Value,
+}
 
 /// Loads one candidate after the caller has authorized tenant review access.
 pub async fn get_learning_candidate_for_review(
@@ -220,16 +250,24 @@ pub async fn prepare_skill_acceptance(
     document.reference_resolutions = ArtifactResolver::new(ArtifactRegistry::new(pool.clone()))
         .resolve_document(&scope, &document)
         .await?;
-    let report = validate_for_status(&document, ArtifactStatus::Published);
+    let report = validate_for_status(&document, ArtifactStatus::Ready);
     if !report.is_ok() {
         return Err(bad_request(
-            "skill draft artifact revision is not publishable",
+            "skill draft artifact revision is not activatable",
         ));
     }
 
     let draft_files = artifact_registry
         .load_files(&scope, draft_revision_uid)
         .await?;
+    let release_scope = TenantScope::new(candidate.tenant_id);
+    let activation_target = ActivationTarget::SkillVisibility {
+        artifact_uid: draft.artifact_uid,
+    };
+    let expected_serving = ReleaseRepository::new(pool)
+        .expected_serving(&release_scope, &activation_target)
+        .await
+        .map_err(release_error)?;
     claim_candidate_for_acceptance(store, candidate.id).await?;
 
     Ok(PreparedSkillAcceptance {
@@ -238,28 +276,40 @@ pub async fn prepare_skill_acceptance(
         draft,
         draft_artifact_revision_uid: draft_revision_uid,
         draft_files,
-        publish_report: report,
+        validation_report: report,
+        expected_serving,
     })
 }
 
 /// Rejects a claimed skill candidate after a review-time promotion gate fails.
 pub async fn reject_claimed_skill_candidate(
     store: &(impl LearningReviewStore + ?Sized),
+    pool: sqlx::PgPool,
     request: &SkillReviewRequest,
     prepared: &PreparedSkillAcceptance,
     regression_report: Value,
     rejection_reason: Option<String>,
+    request_digest: &[u8],
 ) -> Result<SkillReviewOutcome> {
     let evaluation_payload = review_evaluation_payload(ReviewEvaluationPayload {
         request,
         candidate: &prepared.candidate,
         artifact_uid: Some(prepared.draft.artifact_uid),
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
-        published_artifact_revision_uid: None,
+        activated_artifact_revision_uid: None,
         regression_report: Some(regression_report),
     });
-    finish_claimed_candidate_review(
+    let outcome = SkillReviewOutcome {
+        candidate_id: prepared.candidate.id,
+        status: LearningCandidateStatus::Rejected,
+        artifact_uid: Some(prepared.draft.artifact_uid),
+        draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
+        activated_artifact_revision_uid: None,
+    };
+    let mut conn = ScopedConn::begin(&pool, &artifact_scope_context(&prepared.scope)).await?;
+    finish_claimed_candidate_review_in_tx(
         store,
+        conn.as_mut(),
         LearningCandidateStatusUpdate {
             candidate_id: prepared.candidate.id,
             status: LearningCandidateStatus::Rejected,
@@ -272,15 +322,221 @@ pub async fn reject_claimed_skill_candidate(
         },
     )
     .await?;
+    record_terminal_decision_in_tx(
+        store,
+        conn.as_mut(),
+        request,
+        request_digest,
+        moa_core::types::experience::LearningReviewDecision::Rejected,
+        LearningCandidateStatus::Evaluating,
+        &outcome,
+    )
+    .await?;
+    conn.commit().await?;
 
-    Ok(SkillReviewOutcome {
-        candidate_id: prepared.candidate.id,
-        status: LearningCandidateStatus::Rejected,
-        artifact_uid: Some(prepared.draft.artifact_uid),
-        draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
-        published_artifact_revision_uid: None,
+    Ok(outcome)
+}
+
+/// Moves the serving pointer to a promoted distilled skill revision.
+///
+/// The learning review has already produced deterministic evidence: the draft
+/// validated as activatable, its generated suite ran, and the held-out suite ran.
+/// That result is adapted into a release decision here -- it does not replace the
+/// release contract. Everything happens in the caller's transaction, so a promoted
+/// skill cannot end up serving with no learning record or vice versa.
+struct ActivatedSkillRevision {
+    revision: StoredArtifactRevision,
+    activation: ActivationOutcome,
+}
+
+async fn activate_promoted_skill_revision(
+    conn: &mut PgConnection,
+    prepared: &PreparedSkillAcceptance,
+    request: &SkillReviewRequest,
+    regression_report: &Value,
+) -> Result<ActivatedSkillRevision> {
+    let now = Utc::now();
+    let scope = TenantScope::from_action_rule_scope(&prepared.scope)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    let activation_target = ActivationTarget::SkillVisibility {
+        artifact_uid: prepared.draft.artifact_uid,
+    };
+    let decided_by = request.reviewer_subject.clone();
+    // The regression run is this candidate's eligibility step, so its resolved
+    // report is recorded on the revision before submission. Without it the release
+    // repository would refuse the candidate for having unresolved references, which
+    // is the correct refusal for a candidate nothing validated.
+    ArtifactRegistry::record_validation_report_in_tx(
+        conn,
+        prepared.draft_artifact_revision_uid,
+        &prepared.validation_report,
+    )
+    .await?;
+    let submission = ReleaseRepository::submit_candidate_in_tx(
+        conn,
+        &SubmitCandidate {
+            scope,
+            activation_target,
+            candidate_revision_uid: prepared.draft_artifact_revision_uid,
+            subject_inputs: learning_subject_inputs(prepared, regression_report)?,
+            submitted_by: decided_by.clone(),
+        },
+        now,
+    )
+    .await
+    .map_err(release_error)?;
+    let candidate = submission.candidate;
+    let decision = ReleaseRepository::record_decision_in_tx(
+        conn,
+        &RecordDecision {
+            scope,
+            candidate_revision_uid: prepared.draft_artifact_revision_uid,
+            subject_digest: candidate.subject_digest,
+            verdict: DeterministicVerdict::Pass,
+            run_uid: prepared.candidate.id,
+            trial_uids: vec![prepared.candidate.id],
+            evidence_ids: learning_evidence_ids(prepared),
+            gate_results: BTreeMap::from([
+                ("held_in_suite".to_string(), "pass".to_string()),
+                ("held_out_suite".to_string(), "pass".to_string()),
+            ]),
+            blocking_assertions: PLATFORM_BLOCKING_ASSERTIONS
+                .iter()
+                .map(|id| AssertionRef {
+                    id: (*id).to_string(),
+                    version: "1".to_string(),
+                    determinism: DeterminismClass::Deterministic,
+                })
+                .collect(),
+            evidence_adapter: EvidenceAdapter::SkillLearningRegression,
+            decided_by: decided_by.clone(),
+        },
+        now,
+    )
+    .await
+    .map_err(release_error)?;
+    let attestation = decision.attestation.ok_or_else(|| {
+        MoaError::ValidationError(
+            "skill regression decision minted no activation attestation".to_string(),
+        )
+    })?;
+    let observed_serving =
+        ReleaseRepository::expected_serving_in_tx(conn, &scope, &activation_target)
+            .await
+            .map_err(release_error)?;
+    if observed_serving != prepared.expected_serving {
+        return Err(SkillReviewError::Conflict(format!(
+            "serving skill changed after regression evaluation: expected {:?}, found {:?}",
+            prepared.expected_serving, observed_serving
+        )));
+    }
+    let activation = ReleaseRepository::activate_in_tx(
+        conn,
+        &ActivationRequest {
+            scope,
+            activation_target,
+            candidate_revision_uid: prepared.draft_artifact_revision_uid,
+            candidate_revision_hash: candidate.candidate_revision_hash,
+            attestation_uid: attestation.attestation_uid,
+            expected_serving: prepared.expected_serving,
+            agent_revision_lock: None,
+            actor: decided_by,
+            reason: request.reason.clone(),
+        },
+        now,
+    )
+    .await
+    .map_err(release_error)?;
+    let revision = load_activated_revision(conn, prepared.draft_artifact_revision_uid).await?;
+    Ok(ActivatedSkillRevision {
+        revision,
+        activation,
     })
 }
+
+/// Builds the release subject inputs a distilled skill promotion can prove.
+fn learning_subject_inputs(
+    prepared: &PreparedSkillAcceptance,
+    regression_report: &Value,
+) -> Result<CandidateSubjectInputs> {
+    // Hashed from the serialized report bytes rather than canonical JSON: a
+    // regression report carries measured rates, and the canonical form forbids
+    // floating point. `serde_json::Map` is ordered, so the bytes are deterministic.
+    let report_hash = Digest32(
+        Sha256::digest(
+            serde_json::to_vec(regression_report)
+                .map_err(|error| MoaError::SerializationError(error.to_string()))?,
+        )
+        .into(),
+    );
+    let package_hash = Digest32(Sha256::digest(&prepared.draft.canonical_hash).into());
+    Ok(CandidateSubjectInputs {
+        dependency_lock_hash: package_hash,
+        agent_runtime: AgentRuntimeSubject {
+            prompt_hash: package_hash,
+            model: SKILL_LEARNING_MODEL_BINDING.to_string(),
+            provider: SKILL_LEARNING_PROVIDER_BINDING.to_string(),
+            runtime_policy_hash: package_hash,
+        },
+        tool_policy_hash: package_hash,
+        tool_bearing: false,
+        tool_catalog: None,
+        plan: EvaluationPlanSubject {
+            plan_hash: report_hash,
+            scenario_dataset_hash: report_hash,
+            seed_hash: report_hash,
+            evaluator_versions: BTreeMap::from([(
+                SKILL_LEARNING_EVALUATOR.to_string(),
+                SKILL_LEARNING_EVALUATOR_VERSION.to_string(),
+            )]),
+        },
+        simulator: None,
+    })
+}
+
+/// Returns the sanitized learning evidence identifiers backing the decision.
+fn learning_evidence_ids(prepared: &PreparedSkillAcceptance) -> Vec<Uuid> {
+    let mut evidence_ids = vec![prepared.candidate.id];
+    evidence_ids.extend(prepared.candidate.sources.iter().filter_map(|source| {
+        match source {
+            LearningCandidateSourceRef::Experience { experience_id } => Some(*experience_id),
+            LearningCandidateSourceRef::Attribution { attribution_id } => Some(*attribution_id),
+            LearningCandidateSourceRef::Event { event_id, .. } => Some(*event_id),
+            LearningCandidateSourceRef::ArtifactRevision { revision_uid } => Some(*revision_uid),
+            LearningCandidateSourceRef::ExperimentRun { run_uid } => Some(*run_uid),
+            LearningCandidateSourceRef::ExperimentTrial { trial_uid } => Some(*trial_uid),
+            LearningCandidateSourceRef::ScoreRun { run_id } => Some(*run_id),
+            // Sessions, segments, contacts, and promotion candidates are not
+            // evidence rows a release decision can cite.
+            LearningCandidateSourceRef::Session { .. }
+            | LearningCandidateSourceRef::TaskSegment { .. }
+            | LearningCandidateSourceRef::Contact { .. }
+            | LearningCandidateSourceRef::PromotionCandidate { .. } => None,
+        }
+    }));
+    evidence_ids.dedup();
+    evidence_ids
+}
+
+async fn load_activated_revision(
+    conn: &mut PgConnection,
+    revision_uid: Uuid,
+) -> Result<StoredArtifactRevision> {
+    Ok(ArtifactRegistry::load_revision_in_tx(conn, revision_uid).await?)
+}
+
+fn release_error(error: moa_artifacts::Error) -> MoaError {
+    MoaError::ValidationError(error.to_string())
+}
+
+/// Evaluator identity recorded for the skill-learning evidence adapter.
+const SKILL_LEARNING_EVALUATOR: &str = "skill_learning.regression_suite";
+/// Version of that evaluator, part of every subject digest it produces.
+const SKILL_LEARNING_EVALUATOR_VERSION: &str = "1.0.0";
+/// Model binding recorded for a distilled-skill subject.
+const SKILL_LEARNING_MODEL_BINDING: &str = "skill-learning-distillation";
+/// Provider binding recorded for a distilled-skill subject.
+const SKILL_LEARNING_PROVIDER_BINDING: &str = "moa-internal";
 
 /// Publishes a claimed skill candidate and records promoted learning.
 pub async fn promote_claimed_skill_candidate(
@@ -290,25 +546,28 @@ pub async fn promote_claimed_skill_candidate(
     prepared: PreparedSkillAcceptance,
     regression_report: Value,
     acceptance_checks: AcceptanceChecks,
+    request_digest: &[u8],
 ) -> Result<SkillReviewOutcome> {
     // Reject before mutating any surface: promotion cannot publish unless both the held-in and
     // held-out checks passed.
     ensure_acceptance_checks(&acceptance_checks)?;
     let scope_context = artifact_scope_context(&prepared.scope);
     let mut conn = ScopedConn::begin(&pool, &scope_context).await?;
-    let published = ArtifactRegistry::publish_revision_in_tx(
-        conn.as_mut(),
-        prepared.draft_artifact_revision_uid,
-        &prepared.publish_report,
-    )
-    .await?;
-    let artifact_uid = Some(published.artifact_uid);
+    // A distilled skill reaches serving through the same release decision
+    // contract as a hand-authored one. The learning-specific regression result is
+    // the evidence adapter, not the gate type: it supplies the deterministic
+    // verdict and evidence identifiers, and the release repository still owns the
+    // subject digest, the attestation, and the pointer compare-and-set.
+    let activated =
+        activate_promoted_skill_revision(conn.as_mut(), &prepared, request, &regression_report)
+            .await?;
+    let artifact_uid = Some(activated.revision.artifact_uid);
     let mut evaluation_payload = review_evaluation_payload(ReviewEvaluationPayload {
         request,
         candidate: &prepared.candidate,
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
-        published_artifact_revision_uid: Some(published.revision_uid),
+        activated_artifact_revision_uid: Some(activated.revision.revision_uid),
         regression_report: Some(regression_report),
     });
     evaluation_payload["acceptance_checks"] = acceptance_checks.to_payload();
@@ -331,19 +590,72 @@ pub async fn promote_claimed_skill_candidate(
     )
     .await?;
     let learning_entry =
-        accepted_learning_entry(&prepared.candidate, request, &published, evaluation_payload)?;
+        accepted_learning_entry(&prepared.candidate, request, &activated, evaluation_payload)?;
     store
         .append_learning_in_tx(conn.as_mut(), &learning_entry)
         .await?;
-    conn.commit().await?;
-
-    Ok(SkillReviewOutcome {
+    let outcome = SkillReviewOutcome {
         candidate_id: prepared.candidate.id,
         status: LearningCandidateStatus::Promoted,
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
-        published_artifact_revision_uid: Some(published.revision_uid),
-    })
+        activated_artifact_revision_uid: Some(activated.revision.revision_uid),
+    };
+    record_terminal_decision_in_tx(
+        store,
+        conn.as_mut(),
+        request,
+        request_digest,
+        moa_core::types::experience::LearningReviewDecision::AcceptedSkill,
+        LearningCandidateStatus::Evaluating,
+        &outcome,
+    )
+    .await?;
+    conn.commit().await?;
+
+    Ok(outcome)
+}
+
+async fn record_terminal_decision_in_tx(
+    store: &(impl LearningReviewStore + ?Sized),
+    conn: &mut PgConnection,
+    request: &SkillReviewRequest,
+    request_digest: &[u8],
+    decision: moa_core::types::experience::LearningReviewDecision,
+    from_status: LearningCandidateStatus,
+    outcome: &SkillReviewOutcome,
+) -> Result<()> {
+    if request_digest.len() != 32 {
+        return Err(SkillReviewError::Moa(MoaError::ValidationError(
+            "learning review request digest must be 32 bytes".to_string(),
+        )));
+    }
+    let outcome_json = serde_json::to_value(outcome)
+        .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+    let inserted = store
+        .record_learning_candidate_decision_in_tx(
+            conn,
+            &moa_core::types::experience::LearningCandidateDecisionRecord {
+                id: Uuid::now_v7(),
+                candidate_id: request.candidate_id,
+                tenant_id: request.tenant_id,
+                decision,
+                from_status,
+                to_status: outcome.status,
+                reviewer_subject: Some(request.reviewer_subject.clone()),
+                reason: request.reason.clone(),
+                request_digest: Some(request_digest.to_vec()),
+                outcome: Some(outcome_json),
+                decided_at: Utc::now(),
+            },
+        )
+        .await?;
+    if !inserted {
+        return Err(SkillReviewError::Conflict(
+            "learning review decision already exists".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Releases a claimed candidate back to `Proposed` after an operational failure.
@@ -384,8 +696,69 @@ pub async fn release_claimed_skill_candidate(
 /// so a transient conflict never strands the proposal in `Evaluating`.
 pub async fn reject_learning_candidate(
     store: &(impl LearningReviewStore + ?Sized),
+    pool: sqlx::PgPool,
     request: &SkillReviewRequest,
+    request_digest: &[u8],
 ) -> Result<SkillReviewOutcome> {
+    let prepared = prepare_skill_rejection(store, request).await?;
+    let outcome = SkillReviewOutcome {
+        candidate_id: prepared.candidate.id,
+        status: LearningCandidateStatus::Rejected,
+        artifact_uid: prepared.artifact_uid,
+        draft_artifact_revision_uid: prepared.draft_artifact_revision_uid,
+        activated_artifact_revision_uid: None,
+    };
+    let mut conn = match ScopedConn::begin(&pool, &RlsContext::tenant(request.tenant_id)).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            release_rejection_claim(store, prepared.candidate.id, &error.to_string()).await;
+            return Err(error.into());
+        }
+    };
+    let rejected = async {
+        finish_claimed_candidate_review_in_tx(
+            store,
+            conn.as_mut(),
+            LearningCandidateStatusUpdate {
+                candidate_id: prepared.candidate.id,
+                status: LearningCandidateStatus::Rejected,
+                status_reason: Some(
+                    request
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "rejected by reviewer".to_string()),
+                ),
+                evaluation_payload: Some(prepared.evaluation_payload),
+                updated_at: Utc::now(),
+            },
+        )
+        .await?;
+        record_terminal_decision_in_tx(
+            store,
+            conn.as_mut(),
+            request,
+            request_digest,
+            moa_core::types::experience::LearningReviewDecision::Rejected,
+            LearningCandidateStatus::Evaluating,
+            &outcome,
+        )
+        .await?;
+        conn.commit().await?;
+        Ok::<(), SkillReviewError>(())
+    }
+    .await;
+    if let Err(error) = rejected {
+        release_rejection_claim(store, prepared.candidate.id, &error.to_string()).await;
+        return Err(error);
+    }
+
+    Ok(outcome)
+}
+
+async fn prepare_skill_rejection(
+    store: &(impl LearningReviewStore + ?Sized),
+    request: &SkillReviewRequest,
+) -> Result<PreparedSkillRejection> {
     let candidate = load_candidate(store, &request.tenant_id, request.candidate_id).await?;
     ensure_reviewable_proposal(&candidate)?;
     ensure_proposed_candidate(&candidate)?;
@@ -397,7 +770,7 @@ pub async fn reject_learning_candidate(
         candidate: &candidate,
         artifact_uid,
         draft_artifact_revision_uid,
-        published_artifact_revision_uid: None,
+        activated_artifact_revision_uid: None,
         regression_report: None,
     });
 
@@ -413,42 +786,26 @@ pub async fn reject_learning_candidate(
     )
     .await?;
 
-    let rejected = finish_claimed_candidate_review(
-        store,
-        LearningCandidateStatusUpdate {
-            candidate_id: candidate.id,
-            status: LearningCandidateStatus::Rejected,
-            status_reason: Some(
-                request
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "rejected by reviewer".to_string()),
-            ),
-            evaluation_payload: Some(evaluation_payload),
-            updated_at: Utc::now(),
-        },
-    )
-    .await;
-    if let Err(error) = rejected {
-        if let Err(release_error) =
-            release_claimed_skill_candidate(store, candidate.id, &error.to_string()).await
-        {
-            tracing::warn!(
-                candidate_id = %candidate.id,
-                error = %release_error,
-                "failed to release rejection claim after a terminal write conflict"
-            );
-        }
-        return Err(error);
-    }
-
-    Ok(SkillReviewOutcome {
-        candidate_id: candidate.id,
-        status: LearningCandidateStatus::Rejected,
+    Ok(PreparedSkillRejection {
+        candidate,
         artifact_uid,
         draft_artifact_revision_uid,
-        published_artifact_revision_uid: None,
+        evaluation_payload,
     })
+}
+
+async fn release_rejection_claim(
+    store: &(impl LearningReviewStore + ?Sized),
+    candidate_id: Uuid,
+    reason: &str,
+) {
+    if let Err(release_error) = release_claimed_skill_candidate(store, candidate_id, reason).await {
+        tracing::warn!(
+            candidate_id = %candidate_id,
+            error = %release_error,
+            "failed to release rejection claim after a terminal write failure"
+        );
+    }
 }
 
 async fn load_candidate(
@@ -619,7 +976,7 @@ struct ReviewEvaluationPayload<'a> {
     candidate: &'a LearningCandidate,
     artifact_uid: Option<Uuid>,
     draft_artifact_revision_uid: Option<Uuid>,
-    published_artifact_revision_uid: Option<Uuid>,
+    activated_artifact_revision_uid: Option<Uuid>,
     regression_report: Option<Value>,
 }
 
@@ -636,7 +993,7 @@ fn review_evaluation_payload(input: ReviewEvaluationPayload<'_>) -> Value {
         "candidate_id": input.candidate.id,
         "artifact_uid": input.artifact_uid,
         "draft_artifact_revision_uid": input.draft_artifact_revision_uid,
-        "published_artifact_revision_uid": input.published_artifact_revision_uid,
+        "activated_artifact_revision_uid": input.activated_artifact_revision_uid,
         "regression_execution": regression_execution,
         "regression_report": input.regression_report,
     })
@@ -645,26 +1002,29 @@ fn review_evaluation_payload(input: ReviewEvaluationPayload<'_>) -> Value {
 fn accepted_learning_entry(
     candidate: &LearningCandidate,
     request: &SkillReviewRequest,
-    published: &StoredArtifactRevision,
+    activated: &ActivatedSkillRevision,
     evaluation_payload: Value,
 ) -> Result<LearningEntry> {
     let learning_type = accepted_learning_type(candidate)?;
+    let revision = &activated.revision;
     Ok(LearningEntry {
         id: Uuid::now_v7(),
         tenant_id: candidate.tenant_id,
         learning_type,
-        target_id: target_id(candidate, published),
+        target_id: target_id(candidate, revision),
         target_label: target_label(candidate),
         payload: json!({
             "candidate_id": candidate.id,
             "reviewer_subject": request.reviewer_subject,
             "reason": request.reason,
-            "artifact_uid": published.artifact_uid,
-            "published_artifact_revision_uid": published.revision_uid,
+            "artifact_uid": revision.artifact_uid,
+            "activated_artifact_revision_uid": revision.revision_uid,
+            "activation_audit_uid": activated.activation.audit_uid,
+            "activated_pointer_version": activated.activation.pointer_version,
             "review": evaluation_payload,
         }),
         confidence: candidate.confidence,
-        sources: learning_log_sources(candidate, published),
+        sources: learning_log_sources(candidate, revision),
         actor: format!("review:{}", request.reviewer_subject),
         valid_from: Utc::now(),
         valid_to: None,
@@ -849,6 +1209,14 @@ mod tests {
         ) -> std::result::Result<(), MoaError> {
             unreachable!("append_learning_in_tx is only used by the pool-backed promote path")
         }
+
+        async fn record_learning_candidate_decision_in_tx(
+            &self,
+            _conn: &mut PgConnection,
+            _decision: &moa_core::types::experience::LearningCandidateDecisionRecord,
+        ) -> std::result::Result<bool, MoaError> {
+            unreachable!("decision recording is only used by the service-backed dismiss path")
+        }
     }
 
     fn proposed_skill_candidate(payload: Value) -> LearningCandidate {
@@ -889,9 +1257,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_learning_candidate_claims_before_recording_the_rejection() {
-        // Pins: rejection walks the real state machine, Proposed -> Evaluating -> Rejected,
-        // and keeps the linked draft/artifact references so the draft is preserved.
+    async fn prepare_skill_rejection_claims_before_the_terminal_transaction() {
+        // Pins: rejection claims Proposed -> Evaluating before the database-backed
+        // terminal transaction, and keeps the linked draft/artifact references.
         //
         // There is no direct Proposed -> Rejected edge for either reviewable kind, and the
         // database enforces that with a trigger. A reject that compare-and-set straight from
@@ -908,27 +1276,18 @@ mod tests {
         );
         let request = reject_request(Some("not reusable"));
 
-        let outcome = reject_learning_candidate(&store, &request)
+        let prepared = prepare_skill_rejection(&store, &request)
             .await
-            .expect("reject succeeds");
+            .expect("rejection preparation succeeds");
 
-        assert_eq!(outcome.status, LearningCandidateStatus::Rejected);
-        assert_eq!(outcome.candidate_id, Uuid::from_u128(42));
-        assert_eq!(outcome.draft_artifact_revision_uid, Some(draft_uid));
-        assert_eq!(outcome.artifact_uid, Some(artifact_uid));
-        assert_eq!(outcome.published_artifact_revision_uid, None);
+        assert_eq!(prepared.candidate.id, Uuid::from_u128(42));
+        assert_eq!(prepared.draft_artifact_revision_uid, Some(draft_uid));
+        assert_eq!(prepared.artifact_uid, Some(artifact_uid));
 
         let recorded = store.updates();
-        assert_eq!(recorded.len(), 2, "rejection claims, then records");
+        assert_eq!(recorded.len(), 1, "preparation only claims the proposal");
         assert_eq!(recorded[0].1, LearningCandidateStatus::Proposed);
         assert_eq!(recorded[0].0.status, LearningCandidateStatus::Evaluating);
-        assert_eq!(
-            recorded[1].1,
-            LearningCandidateStatus::Evaluating,
-            "the terminal write compare-and-sets against the claim it took"
-        );
-        assert_eq!(recorded[1].0.status, LearningCandidateStatus::Rejected);
-        assert_eq!(recorded[1].0.status_reason.as_deref(), Some("not reusable"));
     }
 
     #[tokio::test]
@@ -942,7 +1301,7 @@ mod tests {
         candidate.status = LearningCandidateStatus::NeedsAuthoring;
         let store = RecordingReviewStore::new(Some(candidate), true);
 
-        let error = reject_learning_candidate(&store, &reject_request(None))
+        let error = prepare_skill_rejection(&store, &reject_request(None))
             .await
             .expect_err("an authoring item has no rejected state");
 
@@ -969,7 +1328,7 @@ mod tests {
         let store = RecordingReviewStore::new(Some(proposed_skill_candidate(json!({}))), false);
         let request = reject_request(None);
 
-        let error = reject_learning_candidate(&store, &request)
+        let error = prepare_skill_rejection(&store, &request)
             .await
             .expect_err("expected-status mismatch must conflict");
 
@@ -988,7 +1347,7 @@ mod tests {
         let store = RecordingReviewStore::new(Some(candidate), true);
         let request = reject_request(None);
 
-        let error = reject_learning_candidate(&store, &request)
+        let error = prepare_skill_rejection(&store, &request)
             .await
             .expect_err("a promoted candidate cannot be rejected");
 

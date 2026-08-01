@@ -156,16 +156,16 @@ pub struct ArtifactValidateResponse {
     pub validation_report: Value,
 }
 
-/// Request payload for publishing a draft artifact revision.
+/// Request payload for publishing a non-skill draft artifact revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactPublishRequest {
     /// Scope that owns the revision.
     pub scope: ActionRuleScope,
-    /// Draft revision to publish.
+    /// Non-skill draft revision to publish.
     pub revision_uid: Uuid,
 }
 
-/// Response payload returned after publishing an artifact revision.
+/// Response payload returned after publishing a non-skill artifact revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactPublishResponse {
     /// Artifact row identifier.

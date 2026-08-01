@@ -19,6 +19,10 @@ mod compare_eval_reports;
 #[cfg(feature = "eval-tools")]
 mod compute_memory_quality_scores;
 #[cfg(feature = "eval-tools")]
+mod eval_control_mutants;
+#[cfg(feature = "eval-tools")]
+mod eval_suite_controls;
+#[cfg(feature = "eval-tools")]
 mod execution_eval;
 mod execution_trace_manifest;
 #[cfg(feature = "eval-tools")]
@@ -41,6 +45,8 @@ const EVAL_TOOL_COMMANDS: &[&str] = &[
     "calibrate-external-memory-judge",
     "compare-eval-reports",
     "compute-memory-quality-scores",
+    "eval-control-mutants",
+    "eval-suite-controls",
     "execution-eval",
     "fetch-memory-benchmark",
     "generate-memory-eval-corpus",
@@ -95,6 +101,10 @@ fn main() -> Result<()> {
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         #[cfg(feature = "eval-tools")]
         Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
+        #[cfg(feature = "eval-tools")]
+        Some("eval-control-mutants") => eval_control_mutants::run(args),
+        #[cfg(feature = "eval-tools")]
+        Some("eval-suite-controls") => eval_suite_controls::run(args),
         #[cfg(feature = "eval-tools")]
         Some("execution-eval") => execution_eval::run(args),
         #[cfg(feature = "eval-tools")]

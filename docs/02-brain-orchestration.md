@@ -480,6 +480,12 @@ Behavior-lab execution uses the same reserve-before-dispatch rule. A direct
 reservation before starting its Session or Execution child, waits for terminal
 evidence, and reconciles observed session usage. A planned
 `ExperimentTrialRun` reserves each simulator and target coordinate separately.
+Simulator coordinates are admitted only with an exact certified policy
+revision; the workflow revalidates the stored immutable policy snapshot and
+uses its provider/model, decoding, prompt, context, and structured response
+contract for production gateway dispatch. Simulator decisions and the policy
+binding enter terminal evidence. Execution-template targets do not use a
+simulator coordinate.
 The admitted target slice is carried through `Session` admission into
 `TurnExecution`, `LLMGateway`, and `ToolExecutor`; loop, model, tool, and
 deadline gates may narrow it but never widen it. Bounded turns cannot detach
@@ -567,7 +573,7 @@ The orchestrator is responsible for connecting task work to learning:
 - Attribution writes `experience_attributions` for skills, tools, memory, policy, and verification evidence.
 - Candidate generation writes `learning_candidates` at the initial status their `proposal_kind` allows — `Proposed` only for the two reviewable kinds, `Advisory` or `NeedsAuthoring` for observations no code can materialize. Transitions are gated in the database, not only by convention.
 - `SkillLearning` writes only draft skill artifacts and proposed skill candidates.
-- `LearningReview` is the only runtime service that publishes accepted skill drafts, appends `skill_created` or `skill_improved`, and marks the candidate promoted.
-- Rejected skill candidates preserve draft artifacts for audit and never publish skill revisions.
+- `LearningReview` is the only runtime service that activates accepted skill drafts, appends `skill_created` or `skill_improved`, and marks the candidate promoted.
+- Rejected skill candidates preserve draft artifacts for audit and never activate skill revisions.
 
 This makes the learning pipeline event-sourced enough to audit and rollback without hiding updates inside model prompts.

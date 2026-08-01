@@ -13,12 +13,17 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use moa_artifacts::document::ArtifactStatus;
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
+use moa_artifacts::release::TenantScope;
 use moa_core::traits::Identity;
 use moa_core::{
     events::Event, types::action_policy::ActionRuleScope, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
 };
+use moa_skills::artifact::{SKILL_ARTIFACT_PATH, skill_artifact_document_from_package};
+use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use moa_wire::artifacts::{
@@ -28,9 +33,7 @@ use moa_wire::experiments::{
     ExperimentListRequest, ExperimentListResponse, ExperimentRunRequest, ExperimentRunResponse,
     ExperimentRunStatusRequest, ExperimentRunStatusResponse,
 };
-use moa_wire::skills::{
-    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
+use moa_wire::skills::{SkillPackageDocument, SkillPackageDocumentFile};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -116,8 +119,8 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_support_skill(&client, ingress, &identity, &storage_partition_id).await?;
-        let agent = import_and_publish_artifact(
+        activate_support_skill_fixture(&storage_partition_id).await?;
+        let agent = import_and_validate_agent_candidate(
             &client,
             ingress,
             &identity,
@@ -163,7 +166,7 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
                 .await?;
         assert!(
             saw_successful_skill_file_read(&events),
-            "expected the imported support skill to be read through normal tool routing; observed events: {}",
+            "expected the approved learned skill to be read through normal tool routing; observed events: {}",
             summarize_events(&events)
         );
 
@@ -230,6 +233,7 @@ async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
             score_run_id: None,
             idempotency_key: Some(format!("unauthorized-agent-loop-{}", Uuid::now_v7())),
             agent_revision_variants: Vec::new(),
+            release_evaluation: None,
         };
 
         let response = with_identity(
@@ -373,31 +377,93 @@ fn run_request_with_target(
         score_run_id: None,
         idempotency_key: Some(format!("{name}-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
+        release_evaluation: None,
     }
 }
 
-async fn import_support_skill(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-) -> Result<()> {
-    let request = SkillImportRequest {
-        scope: ActionRuleScope::Tenant {
-            tenant_id: TenantId::from(
-                Uuid::parse_str(storage_partition_id.as_str())
-                    .context("storage partition id is tenant uuid")?,
-            ),
-        },
-        packages: vec![support_skill_package()],
-    };
-    let imported = post_json_with_identity(client, ingress, "Skills", "import", identity, &request)
-        .await?
-        .json::<SkillImportResponse>()
+async fn activate_support_skill_fixture(storage_partition_id: &StoragePartitionId) -> Result<()> {
+    let pool = sqlx::PgPool::connect(&test_database_url())
         .await
-        .context("deserialize skill import response")?;
-    assert_eq!(imported.imported, 1);
+        .context("connect for approved skill fixture")?;
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(
+            Uuid::parse_str(storage_partition_id.as_str())
+                .context("storage partition id is tenant uuid")?,
+        ),
+    };
+    let stored = create_skill_draft_fixture(
+        &ArtifactRegistry::new(pool.clone()),
+        &scope,
+        decoded_support_skill_package()?,
+    )
+    .await?;
+    moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        TenantScope::from_action_rule_scope(&scope)?,
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: stored.artifact_uid,
+        },
+        stored.revision_uid,
+    )
+    .await
+    .context("activate approved learned skill fixture")?;
     Ok(())
+}
+
+async fn create_skill_draft_fixture(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    package: SkillPackage,
+) -> Result<moa_artifacts::registry::StoredArtifactRevision> {
+    let package = package.validate()?;
+    let document = skill_artifact_document_from_package(&package, ArtifactStatus::Draft)?;
+    let source_text = if let Some(file) = package
+        .files
+        .iter()
+        .find(|file| file.path == SKILL_ARTIFACT_PATH)
+    {
+        file.content.clone()
+    } else {
+        document.to_yaml()?.into_bytes()
+    };
+    let files = package
+        .files
+        .iter()
+        .map(|file| NewArtifactFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+            content_type: file.content_type.clone(),
+            executable: file.executable,
+        })
+        .collect::<Vec<_>>();
+    registry
+        .create_draft(
+            scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: &source_text,
+                files: &files,
+            },
+        )
+        .await
+        .context("create learned skill fixture draft")
+}
+
+fn decoded_support_skill_package() -> Result<SkillPackage> {
+    let mut files = Vec::new();
+    for file in support_skill_package().files {
+        let content = BASE64
+            .decode(&file.content_base64)
+            .context("decode support skill fixture file")?;
+        let mut package_file = SkillPackageFile::new(file.path, content);
+        if let Some(content_type) = file.content_type {
+            package_file = package_file.with_content_type(content_type);
+        }
+        package_file = package_file.with_executable(file.executable);
+        files.push(package_file);
+    }
+    Ok(SkillPackage::new(files))
 }
 
 async fn run_agent_loop_experiment(
@@ -431,6 +497,7 @@ async fn run_agent_loop_experiment(
         score_run_id: None,
         idempotency_key: Some(format!("agent-loop-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
+        release_evaluation: None,
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
         .await?
@@ -439,7 +506,7 @@ async fn run_agent_loop_experiment(
         .context("deserialize experiment run response")
 }
 
-async fn import_and_publish_artifact(
+async fn import_and_validate_agent_candidate(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -473,7 +540,7 @@ async fn import_and_publish_artifact(
         scope,
         revision_uid: imported.revision_uid,
     };
-    let published = post_json_with_identity(
+    let validated = post_json_with_identity(
         client,
         ingress,
         "Artifacts",
@@ -485,9 +552,9 @@ async fn import_and_publish_artifact(
     .json::<ArtifactPublishResponse>()
     .await
     .context("deserialize artifact publish response")?;
-    assert_eq!(published.status, "published");
-    assert_validation_report_has_no_errors(&published.validation_report)?;
-    Ok(published)
+    assert_eq!(validated.status, "draft");
+    assert_validation_report_has_no_errors(&validated.validation_report)?;
+    Ok(validated)
 }
 
 async fn wait_for_experiment_status(
@@ -698,7 +765,6 @@ fn support_skill_package() -> SkillPackageDocument {
     let skill_md = r#"---
 name: delivery-support
 description: "Resolve damaged or spilled food delivery support requests from clear customer evidence."
-allowed-tools: file_read
 metadata:
   moa-tags: "support,delivery,refund,replacement,food"
 ---

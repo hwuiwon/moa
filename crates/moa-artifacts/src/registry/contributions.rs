@@ -2,7 +2,7 @@
 //!
 //! Two kinds of derived bytes previously had no owner and no address.
 //!
-//! A published skill revision's `definition` and `source_text` are model output
+//! An activated skill revision's `definition` and `source_text` are model output
 //! fused from one or more people's transcripts. Nothing recorded whose. An
 //! erasure could therefore delete a subject's memories while a skill written
 //! from those memories kept serving, which is not erasure — it is erasure of the

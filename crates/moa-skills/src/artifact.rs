@@ -72,7 +72,7 @@ pub fn skill_definition_to_package(
     Ok(SkillPackage::new(output))
 }
 
-/// Builds a skill package from a published canonical skill artifact revision and its files.
+/// Builds a skill package from a canonical skill artifact revision that served.
 pub fn skill_package_from_artifact_revision(
     revision: &StoredArtifactRevision,
     files: Vec<ArtifactFile>,
@@ -83,10 +83,17 @@ pub fn skill_package_from_artifact_revision(
             revision.revision_uid
         )));
     }
-    if revision.status != ArtifactStatus::Published {
+    // Only executable activation-history statuses have a materializable package shape.
+    // Registry callers still prove current or prior serving from the pointer or
+    // activation audit; status alone is never serving authority. Draft and
+    // archived revisions may retain bytes for audit but cannot be installed.
+    if !matches!(
+        revision.status,
+        ArtifactStatus::Ready | ArtifactStatus::Superseded
+    ) {
         return Err(MoaError::ValidationError(format!(
-            "artifact revision {} must be published before skill materialization",
-            revision.revision_uid
+            "artifact revision {} is {} and is not executable skill content",
+            revision.revision_uid, revision.status
         )));
     }
     let ArtifactDefinition::Skill(definition) = &revision.document.definition else {

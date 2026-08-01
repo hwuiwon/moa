@@ -7,7 +7,6 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{
     ArtifactRegistry, NewArtifactDraft, NewArtifactFile, NewSkillEmbedding,
 };
-use moa_artifacts::validation::validate_for_status;
 use moa_brain::pipeline::skills::{SELECTED_SKILL_NAMES_METADATA_KEY, SkillInjector};
 use moa_core::{
     error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
@@ -82,6 +81,91 @@ async fn pinned_agent_skill_policy_injects_artifact_revision_files_db_memory() -
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
 }
 
+#[tokio::test]
+async fn archived_rollback_skill_rejects_exact_pin_and_auto_manifest_db_memory() -> Result<()> {
+    // Pins: exact pins may load a superseded activation, but rollback archives
+    // the regressed revision and makes it terminal even though activation audit
+    // history and the unserved pointer tombstone remain.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
+    let registry = ArtifactRegistry::new(pool.clone());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let release_scope = moa_artifacts::release::TenantScope::new(tenant_id);
+    let name = format!("rolled-back-skill-{}", Uuid::now_v7().simple());
+
+    let _ = publish_described_skill(&registry, &scope, &name, "first activation").await?;
+    let (regressed, regressed_activation) =
+        publish_described_skill(&registry, &scope, &name, "regressed").await?;
+    let current = run_skill_injection(pool.clone(), tenant_id, &name, None).await?;
+    assert_eq!(
+        current.items_included,
+        vec![name.clone()],
+        "the non-pinned path should resolve the current activation before rollback"
+    );
+    let pointer = registry
+        .load_serving_pointer(&release_scope, regressed.artifact_uid)
+        .await?
+        .expect("regressed skill has a serving pointer");
+    let mut conn = moa_db::ScopedConn::begin_tenant(&pool, tenant_id).await?;
+    let rollback = ArtifactRegistry::rollback_serving_revision_in_tx(
+        conn.as_mut(),
+        &release_scope,
+        regressed.revision_uid,
+        regressed_activation.audit_uid,
+        pointer.pointer_version,
+        "brain-test",
+        Some("regression"),
+    )
+    .await?;
+    conn.commit().await?;
+    assert_eq!(
+        rollback,
+        moa_artifacts::registry::RollbackApplication::Applied
+    );
+
+    let archived = registry
+        .load_revision(&scope, regressed.revision_uid)
+        .await?
+        .expect("rollback retains the revision for audit");
+    assert_eq!(archived.status, ArtifactStatus::Archived);
+    let mut pinned_ctx = WorkingContext::new(
+        &SessionMeta {
+            tenant_id,
+            agent_context: Some(agent_context(
+                &name,
+                archived.artifact_uid,
+                archived.revision_uid,
+                archived.version,
+                Uuid::now_v7(),
+            )),
+            ..SessionMeta::default()
+        },
+        ModelCapabilities::default(),
+    );
+    pinned_ctx.append_message(ContextMessage::user("use the rolled back exact skill"));
+    let error = SkillInjector::new(pool.clone())
+        .process(&mut pinned_ctx)
+        .await
+        .expect_err("an archived exact pin must not inject or materialize package files");
+    match error {
+        moa_core::error::MoaError::StorageError(message) => assert_eq!(
+            message,
+            "agent policy locked 1 skill revisions but 0 are executable"
+        ),
+        other => panic!("expected archived exact-pin storage failure, got {other:?}"),
+    }
+
+    let output = run_skill_injection(pool, tenant_id, "use the rolled back skill", None).await?;
+    assert!(
+        output.items_included.is_empty(),
+        "an unserved pointer tombstone must not enter the normal skill manifest"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
 async fn publish_skill_revision(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
@@ -105,13 +189,25 @@ async fn publish_skill_revision(
             },
         )
         .await?;
+    // Skill visibility is the serving pointer, so the fixture activates the draft
+    // through the real release path and returns the now-serving revision.
+    moa_artifacts::test_fixtures::activate_revision(
+        registry.pool(),
+        moa_artifacts::release::TenantScope::from_action_rule_scope(scope)
+            .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?,
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?;
     registry
-        .publish_revision(
-            scope,
-            draft.revision_uid,
-            &validate_for_status(&document, ArtifactStatus::Published),
-        )
-        .await
+        .load_revision(scope, draft.revision_uid)
+        .await?
+        .ok_or_else(|| {
+            moa_core::error::MoaError::StorageError("activated skill revision vanished".to_string())
+        })
 }
 
 fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
@@ -154,8 +250,7 @@ fn skill_document(skill_name: &str) -> ArtifactDocument {
         "definition": {
             "type": "skill",
             "spec": {
-                "instructions": { "path": "SKILL.md" },
-                "allowed_tools": ["file_read"]
+                "instructions": { "path": "SKILL.md" }
             }
         }
     }))
@@ -278,8 +373,9 @@ async fn embedding_ranked_manifest_keeps_semantic_match_under_truncation_db_memo
     // but not the reversal skill's; the seeded embeddings invert that ranking.
     let semantic_name = format!("charge-reversal-{}", Uuid::now_v7().simple());
     let lexical_name = format!("billing-glossary-{}", Uuid::now_v7().simple());
-    publish_described_skill(&registry, &scope, &semantic_name, "Undo a completed charge").await?;
-    publish_described_skill(
+    let _ = publish_described_skill(&registry, &scope, &semantic_name, "Undo a completed charge")
+        .await?;
+    let _ = publish_described_skill(
         &registry,
         &scope,
         &lexical_name,
@@ -302,8 +398,7 @@ async fn embedding_ranked_manifest_keeps_semantic_match_under_truncation_db_memo
             .set_skill_embedding(NewSkillEmbedding {
                 artifact_uid: row.artifact_uid,
                 revision_uid: row.revision_uid,
-                storage_partition_id: row.storage_partition_id.as_deref(),
-                user_id: row.user_id.as_deref(),
+                storage_partition_id: row.storage_partition_id.as_str(),
                 embedding: &embedding,
                 model: FIXED_MODEL,
                 model_version: 1,
@@ -402,7 +497,10 @@ async fn publish_described_skill(
     scope: &ActionRuleScope,
     name: &str,
     description: &str,
-) -> Result<moa_artifacts::registry::StoredArtifactRevision> {
+) -> Result<(
+    moa_artifacts::registry::StoredArtifactRevision,
+    moa_artifacts::test_fixtures::ActivatedRevision,
+)> {
     let document: ArtifactDocument = serde_json::from_value(json!({
         "api_version": "moa.artifact/v1",
         "kind": "skill",
@@ -410,8 +508,7 @@ async fn publish_described_skill(
         "definition": {
             "type": "skill",
             "spec": {
-                "instructions": { "path": "SKILL.md" },
-                "allowed_tools": ["file_read"]
+                "instructions": { "path": "SKILL.md" }
             }
         }
     }))
@@ -433,11 +530,24 @@ async fn publish_described_skill(
             },
         )
         .await?;
-    registry
-        .publish_revision(
-            scope,
-            draft.revision_uid,
-            &validate_for_status(&document, ArtifactStatus::Published),
-        )
-        .await
+    // Skill visibility is the serving pointer, so the fixture activates the draft
+    // through the real release path and returns the now-serving revision.
+    let activation = moa_artifacts::test_fixtures::activate_revision(
+        registry.pool(),
+        moa_artifacts::release::TenantScope::from_action_rule_scope(scope)
+            .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?,
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?;
+    let revision = registry
+        .load_revision(scope, draft.revision_uid)
+        .await?
+        .ok_or_else(|| {
+            moa_core::error::MoaError::StorageError("activated skill revision vanished".to_string())
+        })?;
+    Ok((revision, activation))
 }

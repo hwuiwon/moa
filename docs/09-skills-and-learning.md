@@ -32,8 +32,8 @@ Runtime provenance and quality signals such as source session, use count, last
 used time, success rate, brain affinity, generated/improved flags, and rollback
 counts are not `SKILL.md` fields. They belong to artifact revisions, learning
 candidates, `learning_log`, regression evidence, and tenant-scoped analytics
-views. Imports reject unsupported `metadata.moa-*` keys so stale runtime fields
-do not re-enter package revisions.
+views. Package parsing rejects unsupported `metadata.moa-*` keys so stale
+runtime fields do not re-enter package revisions.
 
 `SKILL.md` is required. Supporting files are optional, but when present they
 are part of the same package revision and may include scripts, references,
@@ -61,12 +61,18 @@ instructions; labels and canvas layout belong in non-semantic `ui` metadata.
 Visual editors round-trip the same artifact document and preserve stable node
 IDs.
 
-When routing selects Execute/Durable and a high-confidence published skill
-template matches, admission pins the artifact revision, template hash, and
+Learned revisions may currently activate catalog-independent templates made of
+`Review`, `WaitSignal`, and `Output` nodes. Templates containing `Capability`,
+`Agent`, `Map`, or `Reduce` remain draft-only until skill activation owns an
+exact tool-catalog snapshot; the release gate rejects them rather than binding
+them to whatever catalog happens to serve later.
+
+When routing selects Execute/Durable and a high-confidence template on a serving
+skill revision matches, admission pins the artifact revision, template hash, and
 input, then compiles an immutable run snapshot without a planning-model call. A
 one-off generated plan instead stores its planner model/prompt, candidate JSON,
 compiler report, capability-catalog snapshot, and canonical hash. It is not a
-skill artifact and is never auto-published. Both sources enter the same
+skill artifact and is never activated automatically. Both sources enter the same
 `ExecutionRun` runtime and `moa.execution_run`/`moa.execution_task`
 persistence.
 
@@ -79,9 +85,10 @@ patches and reasons are persisted in `plan_history` and remain replayable.
 
 Skill-template changes use normal artifact revisions: generated or
 experiment-derived improvements first become draft skill revisions plus
-`LearningCandidateType::Skill` rows. A live run never mutates or publishes a
-skill. Skills without an `execution_plan` retain identical ranking and context
-injection and remain usable in Inline Execute and in Durable `Agent` nodes.
+`LearningCandidateType::Skill` rows. A live run never mutates a skill revision
+and never moves a serving pointer. Skills without an `execution_plan` retain
+identical ranking and context injection and remain usable in Inline Execute and
+in Durable `Agent` nodes.
 
 ## Execution Capability Catalog
 
@@ -92,7 +99,7 @@ schemas, action/risk and idempotency classes, execution class, source
 provenance, authorization metadata, and optional cost estimate.
 
 The catalog merges typed built-ins, published actions and connector actions,
-published skill actions/code, memory operations, currently connected MCP tools
+serving skill actions/code, memory operations, currently connected MCP tools
 with stable schemas and policies, and datasource reads backed by typed query
 operations. A connection ID alone is not a capability. Every invocation goes
 through the existing action-policy and `ToolExecutor` or typed service owner;
@@ -109,23 +116,38 @@ Postgres is the only durable skill package store:
 - `moa.artifact_file` stores package files such as `SKILL.md`, scripts,
   references, assets, and optional `skill.moa.yaml`, keyed by artifact revision.
 
-The context pipeline reads published skill artifact revisions directly. There is
-no separate active skill mirror for turn context injection.
+The context pipeline reads the skill artifact revisions the tenant's serving
+pointers resolve to. There is no separate active skill mirror for turn context
+injection.
 
 Skill packages use tenant scope, not runtime memory scope:
 
 | Scope | Stored as | Visibility | Typical use |
 |---|---|---|---|
-| Tenant | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and optional execution-plan templates |
+| Tenant | `tenant_id` set | One tenant | Released hand-authored or approved learned skills and optional execution-plan templates |
 
-Visible skill resolution is name-based within a tenant. Tenant imports go
-through `/v1/skills/import` after tenant authorization. There is no
-contact-scoped skill inheritance.
+Visible skill resolution is name-based within a tenant and reads only the
+type-owned serving pointer. Generic artifact authoring may store a skill draft,
+but generic publish rejects skills. A hand-authored draft reaches the shared
+`ArtifactRelease` evaluation and attested activation path; an accepted
+`skill_draft` learning candidate reaches the same release repository through the
+learning regression adapter. Neither path can make a revision visible by
+changing status alone. There is no contact-scoped skill inheritance.
 
-MOA does not duplicate skill package bytes in object storage. Import/export uses
-package documents containing base64-encoded files. On each turn, selected skill
-packages are registered with the tool router and materialized into the active
-hand under `.moa/skills/<skill>/...` before the first hand tool executes.
+Hand-authored release evaluation executes the exact server-approved case tuples
+against candidate and serving-baseline overlays with paired seeds. The tenant's
+active authoring supplement binds the platform-owned cases to a published
+experiment-plan revision; submission fails closed when that plan omits a case,
+persona, profile, or deterministic blocking evaluator required by the release
+policy. Hidden cases remain platform-owned and are exposed only to the internal
+experiment binding.
+
+MOA does not duplicate skill package bytes in object storage. Skill export uses
+package documents containing base64-encoded files; generic artifact draft
+authoring carries the canonical source plus package files. On each turn,
+selected serving skill packages are registered with the tool router and
+materialized into the active hand under `.moa/skills/<skill>/...` before the
+first hand tool executes.
 
 ## Progressive Disclosure
 
@@ -147,10 +169,10 @@ tool-result data. The turn cannot classify again or downgrade; the execution
 compiler and `ExecutionTask` runtime own the graph, with no application fan-out
 cap below the approved run budget.
 
-Skill selection alone does not choose Execute or Durable. A published template
-is used only after routing chooses Execute/Durable and the template matches with
-high confidence. Otherwise a strict one-off plan is compiled from the current
-capability catalog.
+Skill selection alone does not choose Execute or Durable. A template on a serving
+skill revision is used only after routing chooses Execute/Durable and the
+template matches with high confidence. Otherwise a strict one-off plan is
+compiled from the current capability catalog.
 
 ## Skill Ranking
 
@@ -168,10 +190,11 @@ tenant-level rate when no similar task evidence exists.
 
 ## Distillation And Improvement
 
-Skill package import, export, rendering, and turn-time injection are production
-surfaces. Automatic skill distillation and improvement are learning surfaces
-always compiled in. They run by default after qualifying experience
-persistence and create draft proposals only.
+Skill export, rendering, and turn-time injection are production surfaces.
+Generic artifact authoring can store a skill draft but cannot activate it.
+Automatic skill distillation and improvement are learning surfaces always
+compiled in. They run by default after qualifying experience persistence and
+create draft proposals only.
 Eval-backed regression execution is owned by `moa-orchestrator`; `moa-skills`
 only generates reviewable regression suite source.
 
@@ -327,14 +350,15 @@ instead of filing a near-duplicate review item.
 
 Skill improvement builds an updated `SKILL.md`, preserves supporting package
 files from the previous revision, and stores the result as a draft artifact.
-It does not publish the artifact or append `skill_improved` during generation.
+It does not activate the artifact or append `skill_improved` during generation.
 
 Current review flow:
 
 1. A tenant admin or tenant operator loads the full candidate through
    `LearningReview/get`.
 2. `LearningReview/accept_skill` validates that the candidate is a proposed
-   skill candidate and that the referenced draft artifact is publishable.
+   skill candidate and that the referenced artifact is the exact draft under
+   review.
 3. The review-time regression gate fails closed. Candidate-content defects — a
    missing, unparseable, or empty generated suite, a missing skill name, or an
    estimated execution cost over the review budget — terminally reject the
@@ -348,10 +372,26 @@ Current review flow:
    same way, and the candidate must not regress on them (a stale pooled case
    that fails both revisions equally neutralizes itself). The acceptance checks
    recorded on the promoted candidate are derived from what actually executed,
-   including whether any held-out material existed.
-4. Accept publishes the existing draft artifact revision.
-5. Accept marks the candidate `Promoted` and appends `skill_created` or
-   `skill_improved` to `learning_log`.
+   including whether any held-out material existed. A terminal gate rejection
+   records the canonical request digest and exact rejected response with the
+   candidate status, so an identical retry does not rerun the gate.
+4. Accept activates the existing draft artifact revision inside the caller-owned
+   transaction: the revision becomes `ready`, its predecessor becomes
+   `superseded`, and the tenant's serving pointer moves to the accepted revision.
+   The pointer, not either status, remains the serving authority. A canonical
+   activation-input digest binds the candidate revision and package, regression
+   report, evaluator version, and the exact serving baseline captured before
+   evaluation; the transaction rejects a changed baseline and appends the
+   activation audit before moving the pointer.
+   There is no `published` status to write for a skill, action, or agent. The
+   learning regression result is an evidence adapter into the shared release
+   repository; hand-authored candidates use production Behavior Lab evidence.
+5. Accept marks the candidate `Promoted`, appends `skill_created` or
+   `skill_improved` to `learning_log`, and records an `accepted_skill` decision
+   with the canonical review-request digest and exact response. All three writes
+   commit in the activation transaction. A matching terminal retry returns that
+   response without rerunning the gate or activation; changed reviewer or reason
+   inputs conflict.
 6. `LearningReview/reject` marks the candidate `Rejected`, preserves draft
    artifacts for audit, and never mutates active skill rows.
 
@@ -489,11 +529,25 @@ than a silently unconstrained row.
 Each entry point checks `proposal_kind`, not `candidate_type` and not a payload
 string. The target domain does not say whether a materializer exists: a skill
 suggestion with no draft behind it is also `candidate_type = Skill`, and
-accepting one would run the publish path against a revision nobody generated.
+accepting one would run the activation path against a revision nobody generated.
 Routing a revision-archiving rollback by a JSON `kind` field was the same
 mistake in a different place — a payload key is writable by whatever produced
 the candidate, while `proposal_kind` is a closed enum the database constrains
 and refuses to let a row change.
+
+Accepting a rollback archives the regressed revision and tombstones the serving
+pointer, leaving the skill unserved. It does not restore a predecessor; any
+replacement must pass a separate `accept_skill` review and activation. The
+rollback transition, candidate status, learning log, and `accepted_rollback`
+decision commit together. Its canonical request digest includes the exact
+activation audit and pointer epoch, so a matching retry returns the recorded
+response while a changed request conflicts. A stale or already-unserved proposal
+instead commits its `Rejected` status, digest, and response together without a
+second pointer transition or rollback learning entry.
+
+Both accept routes bind their `Evaluating` claim to that request digest. A
+durable-step retry can resume the same in-progress review, but cannot take over a
+claim made with different authenticated inputs.
 
 Rejection walks `Proposed -> Evaluating -> Rejected` rather than jumping
 straight to `Rejected`. There is no direct edge, for the same reason acceptance

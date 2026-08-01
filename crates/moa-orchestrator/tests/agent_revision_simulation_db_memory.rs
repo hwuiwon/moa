@@ -1,6 +1,10 @@
 //! DB-backed coverage for agent revision simulation comparison.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use anyhow::Result;
+use moa_agents::AgentResolver;
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
@@ -196,6 +200,13 @@ async fn run_preserves_agent_revision_variants_for_workflow_db_memory() -> Resul
     let tenant_id = TenantId::new();
     let scope = ActionRuleScope::Tenant { tenant_id };
     let suffix = Uuid::now_v7();
+    support::simulator_policy::seed_certified(
+        &pool,
+        tenant_id,
+        Uuid::parse_str("10000000-0000-0000-0000-000000000001")?,
+        "gpt-5.1-mini",
+    )
+    .await?;
     let plan = publish_artifact(
         &registry,
         &scope,
@@ -319,6 +330,7 @@ fn new_experiment(
         artifact_revision_uids: vec![plan_revision_uid],
         idempotency_key: None,
         created_by_identity: identity_json(),
+        simulator_policy: None,
     }
 }
 
@@ -340,11 +352,9 @@ fn new_trial(
         data_bundle_ids: Vec::new(),
         artifact_revision_uids: vec![plan_revision_uid],
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new("gpt-5.1-mini"),
-            temperature: Some(0.0),
+            policy: support::simulator_policy::fixture("gpt-5.1-mini"),
             max_turns: 4,
             token_budget: Some(2_000),
-            metadata: json!({ "fixture": "agent_revision_simulation_db_memory" }),
         },
         target_model: Some(ModelId::new("gpt-5.1")),
         seed: Some(format!("{variant_key}-seed")),
@@ -424,19 +434,74 @@ async fn create_draft_artifact(
         .await?)
 }
 
+/// Makes a revision resolvable through its owning activation path.
 async fn publish_artifact(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
     document: ArtifactDocument,
 ) -> Result<StoredArtifactRevision> {
     let draft = create_draft_artifact(registry, scope, document.clone()).await?;
-    Ok(registry
-        .publish_revision(
-            scope,
-            draft.revision_uid,
-            &validate_for_status(&document, ArtifactStatus::Published),
+    if !moa_artifacts::release::ActivationTargetClass::is_release_gated(&draft.kind) {
+        return Ok(registry
+            .publish_unserved_revision(
+                scope,
+                draft.revision_uid,
+                &validate_for_status(&document, ArtifactStatus::Published),
+            )
+            .await?);
+    }
+    let release_scope = moa_artifacts::release::TenantScope::from_action_rule_scope(scope)?;
+    let target = if draft.kind == moa_artifacts::document::ArtifactKind::Agent {
+        let installation_uid = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO moa.agent_installation (
+                installation_uid, storage_partition_id, artifact_uid, definition_ref, display_name,
+                status, current_revision_uid, serving_pointer_version
+            )
+            VALUES ($1, $2, $3, $4, $5, 'inactive', NULL, 0)
+            "#,
         )
-        .await?)
+        .bind(installation_uid)
+        .bind(release_scope.storage_partition_id().to_string())
+        .bind(draft.artifact_uid)
+        .bind(format!("agent://{}", draft.name))
+        .bind(&draft.name)
+        .execute(registry.pool())
+        .await?;
+        moa_artifacts::release::ActivationTarget::AgentDeployment {
+            artifact_uid: draft.artifact_uid,
+            installation_uid,
+        }
+    } else {
+        moa_artifacts::release::ActivationTarget::for_kind(&draft.kind, draft.artifact_uid, None)?
+    };
+    if draft.kind == moa_artifacts::document::ArtifactKind::Agent {
+        let lock = AgentResolver::new(registry.pool().clone())
+            .resolve_release_candidate(scope, draft.revision_uid)
+            .await?
+            .revision_lock;
+        moa_artifacts::test_fixtures::activate_agent_revision(
+            registry.pool(),
+            release_scope,
+            target,
+            draft.revision_uid,
+            lock,
+        )
+        .await?;
+    } else {
+        moa_artifacts::test_fixtures::activate_revision(
+            registry.pool(),
+            release_scope,
+            target,
+            draft.revision_uid,
+        )
+        .await?;
+    }
+    registry
+        .load_revision(scope, draft.revision_uid)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("activated revision vanished"))
 }
 
 fn experiment_plan_doc(name: &str) -> ArtifactDocument {
@@ -475,11 +540,22 @@ fn experiment_plan_doc(name: &str) -> ArtifactDocument {
                     "kind": "agent_loop",
                     "config": { "prompt": "Start the support simulation." }
                 }],
-                "simulator_model": "gpt-5.1-mini",
+                "simulator_policy": {
+                    "policy_uid": "10000000-0000-0000-0000-000000000001",
+                    "revision": 1
+                },
                 "target_model": "gpt-5.1",
                 "parallelism": 1,
                 "trials_per_combination": 1,
-                "budget": { "max_total_cents": 1000 }
+                "budget": { "max_total_cents": 1000 },
+                "scorecard": {
+                    "requirements": [{
+                        "evaluator_id": "target_completed",
+                        "evaluator_version": "v1",
+                        "config": {},
+                        "effect": "blocking"
+                    }]
+                }
             }
         }
     }))

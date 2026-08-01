@@ -10,11 +10,20 @@
 //! Probes are nested inside users, so the binary gate uses a cluster-aware
 //! matched risk difference rather than a pair-independent closed form, and
 //! McNemar stays a zero-difference diagnostic.
+//!
+//! Corpus identity is checked in two layers. The corpus id, seed set, probe set,
+//! and per-probe cluster identity are compared directly, because each has its own
+//! precise diagnosis. On top of that, a report may declare the frozen
+//! [`AnchorCohort`](super::cohorts::AnchorCohort) it scored, and that declaration
+//! is enforced through [`super::cohorts`] rather than re-implemented here: two
+//! reports naming different anchors, or the same anchor with different frozen
+//! content, are not paired observations however well their corpus ids match.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use moa_eval_core::decision::{
     GateOutcome, MetricDecision, RegressionDeclaration, holm_regression_family,
     intersection_union_gate,
@@ -25,6 +34,7 @@ use moa_eval_core::metric::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::cohorts::{AnchorCohort, CohortError, PairedRunIdentity, require_paired};
 use super::stats::{
     PairedBinaryObservation, PairedGateError, PairedNumericObservation,
     evaluate_paired_binary_gate, evaluate_paired_numeric_gate,
@@ -125,6 +135,33 @@ pub enum CompareReportsError {
         /// Candidate final cutoff.
         candidate: usize,
     },
+    /// Only one report declares the frozen anchor cohort it scored.
+    #[error(
+        "{label} report declares no anchor cohort while the other side does; paired comparison refused"
+    )]
+    AnchorDeclarationMissing {
+        /// Logical report label that omitted the declaration.
+        label: &'static str,
+    },
+    /// The reports do not describe the same frozen anchor cohort.
+    #[error("anchor cohort mismatch; paired comparison refused: {source}")]
+    AnchorMismatch {
+        /// Exact cohort rejection raised by the anchor registry rules.
+        #[source]
+        source: CohortError,
+    },
+    /// One anchor declaration names a different freeze instant.
+    #[error(
+        "anchor cohort `{anchor_id}` freeze instant mismatch ({baseline} vs {candidate}); paired comparison refused"
+    )]
+    AnchorFreezeMismatch {
+        /// Anchor identity both reports claimed.
+        anchor_id: String,
+        /// Baseline freeze instant.
+        baseline: DateTime<Utc>,
+        /// Candidate freeze instant.
+        candidate: DateTime<Utc>,
+    },
     /// A declared metric gate could not decide the paired observations.
     #[error(transparent)]
     Gate(#[from] PairedGateError),
@@ -143,6 +180,9 @@ impl CompareReportsError {
                 | Self::ProbeUserMismatch { .. }
                 | Self::MissingBinaryOutcomes { .. }
                 | Self::FinalKMismatch { .. }
+                | Self::AnchorDeclarationMissing { .. }
+                | Self::AnchorMismatch { .. }
+                | Self::AnchorFreezeMismatch { .. }
         )
     }
 }
@@ -183,6 +223,12 @@ impl Default for RetrievalGatePolicy {
 pub struct EvalReportComparison {
     /// Corpus id shared by both reports.
     pub corpus_id: String,
+    /// Frozen anchor cohort both reports declared, when they declared one.
+    ///
+    /// `None` means the corpus is not anchored, so this comparison carries no
+    /// longitudinal claim; it is not a claim that the anchor matched.
+    #[serde(default)]
+    pub anchor_id: Option<String>,
     /// Number of probes paired by id.
     pub probes_paired: usize,
     /// Metric-level paired deltas and intervals.
@@ -345,11 +391,12 @@ fn compare_reports(
     validate_pairing(&baseline, &candidate)?;
     let baseline_by_probe = baseline.probe_map();
     let candidate_by_probe = candidate.probe_map();
+    let binary_observations = paired_binary_observations(&baseline_by_probe, &candidate_by_probe);
     let mcnemar = benjamini_hochberg(
         vec![mcnemar_paired_test(
             DIRECT_BINARY_METRIC,
-            &direct_binary_outcomes(&baseline_by_probe),
-            &direct_binary_outcomes(&candidate_by_probe),
+            &binary_arm(&binary_observations, |observation| observation.baseline),
+            &binary_arm(&binary_observations, |observation| observation.candidate),
         )],
         0.05,
     );
@@ -380,14 +427,19 @@ fn compare_reports(
     }
 
     let binary_definition = binary_metric_definition(bootstrap_config, policy);
-    let binary_observations = paired_binary_observations(&baseline_by_probe, &candidate_by_probe);
     decisions.push(evaluate_paired_binary_gate(&binary_definition, &binary_observations)?.decision);
 
     let gate = intersection_union_gate(&decisions);
     let regression_family = holm_regression_family(&decisions, policy.regression_family_alpha);
 
+    let anchor_id = baseline
+        .manifest
+        .anchor
+        .as_ref()
+        .map(|anchor| anchor.anchor_id.clone());
     Ok(EvalReportComparison {
         corpus_id: baseline.manifest.corpus_id,
+        anchor_id,
         probes_paired: baseline_by_probe.len(),
         metrics,
         mcnemar,
@@ -542,27 +594,111 @@ fn validate_pairing(
         }
     }
 
-    let mut baseline_missing = baseline
-        .probe_results
-        .iter()
-        .filter(|probe| probe.all_expected_found_at_4.is_none())
-        .map(|probe| probe.probe_id.clone())
-        .collect::<Vec<_>>();
-    let mut candidate_missing = candidate
-        .probe_results
-        .iter()
-        .filter(|probe| probe.all_expected_found_at_4.is_none())
-        .map(|probe| probe.probe_id.clone())
-        .collect::<Vec<_>>();
-    baseline_missing.sort();
-    candidate_missing.sort();
+    // The binary outcome is only defined for probes that declare expected
+    // facts: an abstention or cross-user-isolation probe has nothing to find, so
+    // "all expected found" is undefined rather than false, exactly as the
+    // numeric metrics already treat it. Requiring the outcome whenever *either*
+    // arm declares expected facts keeps the gate fail-closed for every probe the
+    // metric is defined over, without deleting the probe from the corpus.
+    let mut baseline_missing = Vec::new();
+    let mut candidate_missing = Vec::new();
+    for (probe_id, baseline_probe) in &baseline_by_probe {
+        let candidate_probe = candidate_by_probe
+            .get(probe_id)
+            .expect("probe sets were validated before outcome comparison");
+        if !binary_outcome_is_required(baseline_probe, candidate_probe) {
+            continue;
+        }
+        if baseline_probe.all_expected_found_at_4.is_none() {
+            baseline_missing.push(probe_id.clone());
+        }
+        if candidate_probe.all_expected_found_at_4.is_none() {
+            candidate_missing.push(probe_id.clone());
+        }
+    }
     if !baseline_missing.is_empty() || !candidate_missing.is_empty() {
         return Err(CompareReportsError::MissingBinaryOutcomes {
             baseline: baseline_missing,
             candidate: candidate_missing,
         });
     }
+
+    validate_anchor_pairing(baseline, candidate)
+}
+
+/// Refuses a comparison whose two sides did not score the same frozen anchor.
+///
+/// The declaration is turned into an [`AnchorCohort`] and handed to the cohort
+/// rules, so the anchor registry stays the single enforcement point for what an
+/// anchor promises. Nothing here re-implements those rules:
+///
+/// * [`AnchorCohort::ensure_unchanged`] refuses an incomplete declaration and any
+///   redefinition of a frozen anchor under its own id;
+/// * [`require_paired`] refuses two different anchors, hashes, corpora, seed sets,
+///   or case sets;
+/// * the freeze instant is compared here because it is part of the anchor record
+///   the two reports claim to have read, and neither cohort rule inspects it.
+///
+/// The corpus id, seed, and probe-set checks above run first and keep their
+/// precise diagnoses; this layer adds the anchor identity those checks cannot see.
+fn validate_anchor_pairing(
+    baseline: &ComparableReport,
+    candidate: &ComparableReport,
+) -> Result<(), CompareReportsError> {
+    let (baseline_anchor, candidate_anchor) =
+        match (&baseline.manifest.anchor, &candidate.manifest.anchor) {
+            (None, None) => return Ok(()),
+            (Some(_), None) => {
+                return Err(CompareReportsError::AnchorDeclarationMissing { label: "candidate" });
+            }
+            (None, Some(_)) => {
+                return Err(CompareReportsError::AnchorDeclarationMissing { label: "baseline" });
+            }
+            (Some(baseline_anchor), Some(candidate_anchor)) => (baseline_anchor, candidate_anchor),
+        };
+
+    let baseline_cohort = anchor_cohort(baseline_anchor, baseline);
+    let candidate_cohort = anchor_cohort(candidate_anchor, candidate);
+    baseline_cohort
+        .ensure_unchanged(&candidate_cohort)
+        .map_err(|source| CompareReportsError::AnchorMismatch { source })?;
+    require_paired(
+        &PairedRunIdentity::from_anchor(&baseline_cohort),
+        &PairedRunIdentity::from_anchor(&candidate_cohort),
+    )
+    .map_err(|source| CompareReportsError::AnchorMismatch { source })?;
+    if baseline_anchor.frozen_at != candidate_anchor.frozen_at {
+        return Err(CompareReportsError::AnchorFreezeMismatch {
+            anchor_id: baseline_anchor.anchor_id.clone(),
+            baseline: baseline_anchor.frozen_at,
+            candidate: candidate_anchor.frozen_at,
+        });
+    }
     Ok(())
+}
+
+/// Reconstructs the frozen cohort a report claims to have scored.
+///
+/// The corpus id, seeds, and case set come from the report body rather than from
+/// the declaration, so a report cannot claim a manifest hash while having scored
+/// a different case set.
+fn anchor_cohort(anchor: &ComparableAnchor, report: &ComparableReport) -> AnchorCohort {
+    AnchorCohort {
+        anchor_id: anchor.anchor_id.clone(),
+        manifest_hash: anchor.manifest_hash.clone(),
+        corpus_id: report.manifest.corpus_id.clone(),
+        seeds: report.manifest.seeds.clone(),
+        frozen_at: anchor.frozen_at,
+        case_ids: report.probe_ids(),
+    }
+}
+
+/// Returns whether the direct binary outcome is defined for a paired probe.
+fn binary_outcome_is_required(
+    baseline: &ComparableProbeResult,
+    candidate: &ComparableProbeResult,
+) -> bool {
+    !baseline.expected_fact_ids.is_empty() || !candidate.expected_fact_ids.is_empty()
 }
 
 fn metric_comparison(
@@ -626,40 +762,45 @@ fn delta_observations(paired: &[PairedNumericObservation]) -> Vec<ClusterObserva
         .collect()
 }
 
+/// Pairs the direct binary outcome for every probe the metric is defined over.
+///
+/// Probes whose outcome is undefined in either arm are excluded rather than
+/// coerced to `false`; [`validate_pairing`] has already refused any probe that
+/// declares expected facts but omits the outcome, so an exclusion here is never
+/// a silently dropped requirement.
 fn paired_binary_observations(
     baseline_by_probe: &BTreeMap<String, ComparableProbeResult>,
     candidate_by_probe: &BTreeMap<String, ComparableProbeResult>,
 ) -> Vec<PairedBinaryObservation> {
     baseline_by_probe
         .iter()
-        .map(|(probe_id, baseline_probe)| {
+        .filter_map(|(probe_id, baseline_probe)| {
             let candidate_probe = candidate_by_probe
                 .get(probe_id)
                 .expect("probe sets were validated before comparison");
-            PairedBinaryObservation {
+            Some(PairedBinaryObservation {
                 cluster_id: baseline_probe.user_id.clone(),
                 pair_id: probe_id.clone(),
-                baseline: baseline_probe
-                    .all_expected_found_at_4
-                    .expect("binary outcomes were validated before comparison"),
-                candidate: candidate_probe
-                    .all_expected_found_at_4
-                    .expect("binary outcomes were validated before comparison"),
-            }
+                baseline: baseline_probe.all_expected_found_at_4?,
+                candidate: candidate_probe.all_expected_found_at_4?,
+            })
         })
         .collect()
 }
 
-fn direct_binary_outcomes(
-    probes: &BTreeMap<String, ComparableProbeResult>,
+/// Projects one arm of the paired binary outcomes for the McNemar diagnostic.
+///
+/// Both arms come from the same paired vector, so the diagnostic and the gate
+/// can never disagree about which probes they cover.
+fn binary_arm(
+    observations: &[PairedBinaryObservation],
+    select: impl Fn(&PairedBinaryObservation) -> bool,
 ) -> Vec<BinaryProbeOutcome> {
-    probes
-        .values()
-        .map(|probe| BinaryProbeOutcome {
-            probe_id: probe.probe_id.clone(),
-            success: probe
-                .all_expected_found_at_4
-                .expect("binary outcomes were validated before comparison"),
+    observations
+        .iter()
+        .map(|observation| BinaryProbeOutcome {
+            probe_id: observation.pair_id.clone(),
+            success: select(observation),
         })
         .collect()
 }
@@ -704,6 +845,23 @@ struct ComparableManifest {
     corpus_id: String,
     #[serde(default)]
     seeds: Vec<u64>,
+    /// Frozen anchor cohort this report scored, when the corpus declares one.
+    ///
+    /// Optional because a corpus that has not been frozen into an anchor has no
+    /// honest value to put here, and inventing one would make an unpaired
+    /// comparison look anchored. A declaration on one side only is refused
+    /// instead: it is the case where the comparison cannot tell whether the two
+    /// arms scored the same frozen case set.
+    #[serde(default)]
+    anchor: Option<ComparableAnchor>,
+}
+
+/// A report's claim about the frozen anchor cohort behind its case set.
+#[derive(Debug, Clone, Deserialize)]
+struct ComparableAnchor {
+    anchor_id: String,
+    manifest_hash: String,
+    frozen_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -883,6 +1041,251 @@ mod tests {
 
         assert!(matches!(err, CompareReportsError::CorpusMismatch { .. }));
         assert!(err.is_pairing_error());
+    }
+
+    #[test]
+    fn compare_reports_refuses_arms_generated_from_different_paired_seeds() {
+        // Pins: a paired comparison needs common randomness. Two reports over
+        // the same corpus but different seed sets are not paired observations,
+        // so the comparison refuses rather than differencing unrelated draws.
+        let baseline = report_json("corpus-a", &[1, 2], &["probe-a"], |_| Vec::new());
+        let candidate = report_json("corpus-a", &[1, 3], &["probe-a"], |_| Vec::new());
+
+        let error = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect_err("paired seed mismatch must fail");
+
+        assert!(error.is_pairing_error());
+        assert!(matches!(
+            error,
+            CompareReportsError::SeedMismatch {
+                baseline,
+                candidate,
+            } if baseline == [1, 2] && candidate == [1, 3]
+        ));
+    }
+
+    #[test]
+    fn probes_with_no_expected_facts_leave_the_binary_gate_instead_of_failing_closed() {
+        // Pins: "all expected found" is undefined for an abstention or
+        // isolation probe that declares no expected facts, so such a probe is
+        // excluded from the binary metric exactly as the numeric metrics
+        // already exclude it. A probe that does declare expected facts and
+        // omits the outcome still fails closed.
+        let with_undefined_probe = |outcome: Option<bool>| {
+            report_with_metrics(
+                vec![
+                    probe_json(
+                        "probe-expected",
+                        "user-a",
+                        &["fact"],
+                        vec![candidate_json(1, "fact", &[])],
+                        Some(true),
+                    ),
+                    probe_json("probe-abstains", "user-b", &[], Vec::new(), outcome),
+                ],
+                MetricValues::new(1.0, 1.0, 1.0),
+            )
+        };
+
+        let comparison = compare_eval_reports_with_config(
+            &with_undefined_probe(None),
+            &with_undefined_probe(None),
+            test_bootstrap(),
+        )
+        .expect("a probe with no expected facts must not block the comparison");
+        assert_eq!(comparison.probes_paired, 2);
+        assert_eq!(comparison.mcnemar[0].total_pairs, 1);
+        assert_eq!(comparison.mcnemar[0].both_successes, 1);
+
+        let missing_required = report_with_metrics(
+            vec![probe_json(
+                "probe-expected",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(1, "fact", &[])],
+                None,
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+        let error = compare_eval_reports_with_config(
+            &missing_required,
+            &missing_required,
+            test_bootstrap(),
+        )
+        .expect_err("an expected-fact-bearing probe must carry the binary outcome");
+        assert!(matches!(
+            error,
+            CompareReportsError::MissingBinaryOutcomes { baseline, candidate }
+                if baseline == ["probe-expected"] && candidate == ["probe-expected"]
+        ));
+    }
+
+    #[test]
+    fn comparison_refuses_a_different_or_one_sided_anchor_manifest() {
+        // Pins: the anchor declaration is enforced through the cohort rules, so a
+        // comparison cannot be paired across two different frozen case sets. Each
+        // identity component is load-bearing on its own: a different anchor id, a
+        // different manifest hash under the same id, a different freeze instant,
+        // and a declaration present on only one side are all refused, while two
+        // identical declarations pair and name their anchor in the output.
+        let anchored = |anchor: serde_json::Value| {
+            let mut report: serde_json::Value = serde_json::from_str(&report_with_metrics(
+                vec![probe_json(
+                    "probe-a",
+                    "user-a",
+                    &["fact"],
+                    vec![candidate_json(1, "fact", &[])],
+                    Some(true),
+                )],
+                MetricValues::new(1.0, 1.0, 1.0),
+            ))
+            .expect("fixture should parse");
+            report["manifest"]["anchor"] = anchor;
+            serde_json::to_string(&report).expect("fixture should serialize")
+        };
+        let declaration = |anchor_id: &str, manifest_hash: &str, frozen_at: &str| {
+            json!({
+                "anchor_id": anchor_id,
+                "manifest_hash": manifest_hash,
+                "frozen_at": frozen_at,
+            })
+        };
+        let baseline_declaration = declaration(
+            "retrieval-anchor-2026-01",
+            &"a".repeat(64),
+            "2026-01-01T00:00:00Z",
+        );
+        let baseline = anchored(baseline_declaration.clone());
+
+        let comparison = compare_eval_reports_with_config(&baseline, &baseline, test_bootstrap())
+            .expect("two reports on the same frozen anchor are paired");
+        assert_eq!(
+            comparison.anchor_id.as_deref(),
+            Some("retrieval-anchor-2026-01")
+        );
+
+        for (field, candidate_declaration) in [
+            (
+                "anchor_id",
+                declaration(
+                    "retrieval-anchor-2026-02",
+                    &"a".repeat(64),
+                    "2026-01-01T00:00:00Z",
+                ),
+            ),
+            (
+                "manifest_hash",
+                declaration(
+                    "retrieval-anchor-2026-01",
+                    &"b".repeat(64),
+                    "2026-01-01T00:00:00Z",
+                ),
+            ),
+        ] {
+            let error = compare_eval_reports_with_config(
+                &baseline,
+                &anchored(candidate_declaration),
+                test_bootstrap(),
+            )
+            .expect_err("a different anchor must refuse the comparison");
+            assert!(error.is_pairing_error(), "changed {field}: {error}");
+            assert!(
+                matches!(error, CompareReportsError::AnchorMismatch { .. }),
+                "changed {field} must be reported as an anchor mismatch"
+            );
+        }
+
+        let error = compare_eval_reports_with_config(
+            &baseline,
+            &anchored(declaration(
+                "retrieval-anchor-2026-01",
+                &"a".repeat(64),
+                "2026-02-01T00:00:00Z",
+            )),
+            test_bootstrap(),
+        )
+        .expect_err("a re-frozen anchor must refuse the comparison");
+        assert!(error.is_pairing_error());
+        assert!(matches!(
+            error,
+            CompareReportsError::AnchorFreezeMismatch { .. }
+        ));
+
+        let unanchored = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(1, "fact", &[])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+        for (label, baseline_report, candidate_report) in [
+            ("candidate", baseline.as_str(), unanchored.as_str()),
+            ("baseline", unanchored.as_str(), baseline.as_str()),
+        ] {
+            let error = compare_eval_reports_with_config(
+                baseline_report,
+                candidate_report,
+                test_bootstrap(),
+            )
+            .expect_err("a one-sided anchor declaration must refuse the comparison");
+            assert!(error.is_pairing_error());
+            assert!(
+                matches!(
+                    error,
+                    CompareReportsError::AnchorDeclarationMissing { label: reported }
+                        if reported == label
+                ),
+                "the report missing the declaration must be named: {error}"
+            );
+        }
+
+        // An unanchored corpus still compares, and says so by naming no anchor.
+        let comparison =
+            compare_eval_reports_with_config(&unanchored, &unanchored, test_bootstrap())
+                .expect("an unanchored corpus is comparable");
+        assert_eq!(comparison.anchor_id, None);
+    }
+
+    #[test]
+    fn comparison_refuses_an_incomplete_anchor_declaration() {
+        // Pins: a blank anchor id or hash is refused by the cohort validity rules
+        // rather than treated as "no anchor declared", which would let a report
+        // opt out of the pairing guard by emitting empty strings.
+        let anchored = |anchor_id: &str, manifest_hash: &str| {
+            let mut report: serde_json::Value = serde_json::from_str(&report_with_metrics(
+                vec![probe_json(
+                    "probe-a",
+                    "user-a",
+                    &["fact"],
+                    vec![candidate_json(1, "fact", &[])],
+                    Some(true),
+                )],
+                MetricValues::new(1.0, 1.0, 1.0),
+            ))
+            .expect("fixture should parse");
+            report["manifest"]["anchor"] = json!({
+                "anchor_id": anchor_id,
+                "manifest_hash": manifest_hash,
+                "frozen_at": "2026-01-01T00:00:00Z",
+            });
+            serde_json::to_string(&report).expect("fixture should serialize")
+        };
+
+        for (anchor_id, manifest_hash) in [("  ", "a".repeat(64)), ("anchor-1", String::new())] {
+            let report = anchored(anchor_id, &manifest_hash);
+            let error = compare_eval_reports_with_config(&report, &report, test_bootstrap())
+                .expect_err("an incomplete anchor declaration must refuse the comparison");
+            assert!(error.is_pairing_error());
+            assert!(matches!(
+                error,
+                CompareReportsError::AnchorMismatch {
+                    source: CohortError::MissingField { .. }
+                }
+            ));
+        }
     }
 
     #[test]

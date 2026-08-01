@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use restate_sdk::prelude::*;
 
+pub mod artifact_release_evaluation;
 pub mod consolidate;
 pub(crate) mod errors;
 pub mod execution_node_actions;

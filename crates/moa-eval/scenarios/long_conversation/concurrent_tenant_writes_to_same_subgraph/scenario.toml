@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "concurrent_tenant_writes_to_same_subgraph"
 description = "Two recorded sessions alternate turns while updating the same auth-flow subgraph."
 default_timeout_seconds = 90

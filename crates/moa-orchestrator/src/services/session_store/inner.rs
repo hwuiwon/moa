@@ -458,27 +458,69 @@ pub(crate) async fn resolve_agent_context_for_session(
         return Err(TerminalError::new("agent_context is resolved server-side").into());
     }
 
-    let scope = session_agent_scope(meta);
-    let selected_agent_count =
-        usize::from(agent.installation_uid.is_some()) + usize::from(agent.revision_uid.is_some());
-    if selected_agent_count != 1 {
+    if agent.revision_uid.is_some() {
         return Err(TerminalError::new(
-            "create_agent_session requires exactly one agent installation_uid or revision_uid",
+            "create_agent_session accepts only an active agent installation; exact revisions are evaluation-only",
         )
         .into());
     }
+    let installation_uid = agent.installation_uid.ok_or_else(|| {
+        TerminalError::new("create_agent_session requires one active agent installation_uid")
+    })?;
+    let policy = AgentResolver::new(pool)
+        .resolve_installation(&session_agent_scope(meta), installation_uid)
+        .await
+        .map_err(HandlerError::from)?;
+    Ok(policy.agent_context)
+}
 
+/// Resolves an exact agent revision for an eval-owned experiment session.
+///
+/// This is deliberately separate from public session admission: an evaluator
+/// must preview a candidate without serving it, while a normal session must be
+/// pinned through an activated installation.
+pub(crate) async fn resolve_agent_context_for_evaluation(
+    pool: sqlx::PgPool,
+    meta: &SessionMeta,
+    agent: &AgentSessionSelection,
+    overlay: Option<&moa_artifacts::release::EvalOverlayBinding>,
+) -> Result<AgentContext, HandlerError> {
+    if meta
+        .agent_context
+        .as_ref()
+        .is_some_and(|context| !context.is_system_default())
+    {
+        return Err(TerminalError::new("agent_context is resolved server-side").into());
+    }
+    let scope = session_agent_scope(meta);
     let resolver = AgentResolver::new(pool);
     let policy = match (agent.installation_uid, agent.revision_uid) {
-        (Some(installation_uid), None) => resolver
-            .resolve_installation(&scope, installation_uid)
-            .await
-            .map_err(HandlerError::from)?,
-        (None, Some(revision_uid)) => resolver
-            .resolve_exact_revision(&scope, revision_uid)
-            .await
-            .map_err(HandlerError::from)?,
-        _ => unreachable!("agent selection cardinality checked above"),
+        (Some(installation_uid), None) => match overlay {
+            Some(overlay) => resolver
+                .resolve_installation_with_overlay(&scope, installation_uid, overlay)
+                .await
+                .map_err(HandlerError::from)?,
+            None => resolver
+                .resolve_installation(&scope, installation_uid)
+                .await
+                .map_err(HandlerError::from)?,
+        },
+        (None, Some(revision_uid)) => match overlay {
+            Some(overlay) => resolver
+                .resolve_exact_revision_with_overlay(&scope, revision_uid, overlay)
+                .await
+                .map_err(HandlerError::from)?,
+            None => resolver
+                .resolve_release_candidate(&scope, revision_uid)
+                .await
+                .map_err(HandlerError::from)?,
+        },
+        _ => {
+            return Err(TerminalError::new(
+                "evaluation agent selection requires exactly one installation_uid or revision_uid",
+            )
+            .into());
+        }
     };
     Ok(policy.agent_context)
 }

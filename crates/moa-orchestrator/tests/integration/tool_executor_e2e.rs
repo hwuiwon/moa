@@ -8,6 +8,7 @@ use moa_core::{
     events::Event, traits::Identity, types::events_stream::EventRange,
     types::identifiers::ToolCallId, types::tools::SecuredToolOutput, types::tools::ToolCallRequest,
 };
+use moa_hands::ToolCatalogPin;
 use moa_test_support::postgres::test_database_url;
 use serde_json::json;
 use tempfile::TempDir;
@@ -53,12 +54,17 @@ fn tool_request(
     input: serde_json::Value,
     session_id: moa_core::types::identifiers::SessionId,
     identity: &Identity,
+    catalog: &ToolCatalogPin,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
         caller_identity: identity.clone(),
         provider_tool_use_id: None,
         tool_name: tool_name.to_string(),
+        expected_tool_contract_revision: catalog
+            .contract_revision(tool_name)
+            .expect("E2E tool should have an activated contract")
+            .to_owned(),
         input,
         active_canary: None,
         session_id,
@@ -75,12 +81,17 @@ fn tool_request_with_provider_id(
     input: serde_json::Value,
     session_id: moa_core::types::identifiers::SessionId,
     identity: &Identity,
+    catalog: &ToolCatalogPin,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
         caller_identity: identity.clone(),
         provider_tool_use_id: provider_tool_use_id.map(ToOwned::to_owned),
         tool_name: tool_name.to_string(),
+        expected_tool_contract_revision: catalog
+            .contract_revision(tool_name)
+            .expect("E2E tool should have an activated contract")
+            .to_owned(),
         input,
         active_canary: None,
         session_id,
@@ -88,6 +99,28 @@ fn tool_request_with_provider_id(
         worker_id: None,
         resource_budget: Default::default(),
     }
+}
+
+async fn activated_tool_catalog(
+    client: &reqwest::Client,
+    ingress: &str,
+    identity: &Identity,
+) -> Result<ToolCatalogPin> {
+    with_identity(
+        client.post(format!(
+            "{}/restate/call/ToolExecutor/activated_tool_catalog",
+            ingress.trim_end_matches('/')
+        )),
+        identity,
+    )
+    .send()
+    .await
+    .context("load activated tool catalog")?
+    .error_for_status()
+    .context("activated tool catalog should load")?
+    .json()
+    .await
+    .context("deserialize activated tool catalog")
 }
 
 #[tokio::test]
@@ -126,6 +159,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .await
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
+        let catalog = activated_tool_catalog(&client, ingress, &identity).await?;
 
         // Workers own their sandboxes; the root coordinator may only read
         // trusted skill package files. Scope the write/read pair to one worker
@@ -140,6 +174,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             }),
             session_id,
             &identity,
+            &catalog,
         );
         write_request.worker_id = Some(worker_id.clone());
         let write_output = client
@@ -165,6 +200,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             json!({ "path": "note.txt" }),
             session_id,
             &identity,
+            &catalog,
         );
         read_request.worker_id = Some(worker_id.clone());
         let read_output = client
@@ -196,6 +232,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             json!({ "path": "note.txt" }),
             session_id,
             &identity,
+            &catalog,
         );
         let root_read_output = client
             .post(format!(
@@ -225,6 +262,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             json!({ "cmd": "printf hello-from-bash" }),
             session_id,
             &identity,
+            &catalog,
         );
         let bash_output = client
             .post(format!(
@@ -341,6 +379,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
             .await
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
+        let catalog = activated_tool_catalog(&client, ingress, &identity).await?;
 
         let canary = moa_security::new_canary_token();
         let tool_call_id = ToolCallId::new();
@@ -353,6 +392,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
             }),
             session_id,
             &identity,
+            &catalog,
         );
         write_request.active_canary = Some(canary);
 
@@ -483,6 +523,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .await
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
+        let catalog = activated_tool_catalog(&client, ingress, &identity).await?;
 
         let tool_call_id = ToolCallId::new();
         let provider_tool_use_id = "toolu_preexisting_restate_call";
@@ -494,6 +535,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             input.clone(),
             session_id,
             &identity,
+            &catalog,
         );
 
         client

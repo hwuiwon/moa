@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::adapters::mcp::McpDiscoveredToolRegistration;
+use crate::adapters::mcp::{MCPClient, McpDiscoveredToolRegistration};
 use crate::tools::{memory, session_search, tool_result};
 use moa_config::ToolBudgetConfig;
 use moa_core::{
@@ -24,6 +24,7 @@ use moa_core::{
     types::tools::ToolInputShape,
     types::tools::ToolPolicySpec,
 };
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::tools::sandbox_descriptor::{
@@ -32,8 +33,16 @@ use crate::tools::sandbox_descriptor::{
 
 use super::{DEFAULT_PROVIDER_NAME, ToolRouter};
 
+/// Mutable transport route shared by every tool from one activated connector.
+///
+/// The route lives inside the immutable registry snapshot. Catalog publication
+/// therefore swaps schemas and their clients together, while reconnect can
+/// replace the transport behind an already selected route without rebuilding
+/// the catalog.
+pub(super) type McpClientRoute = Arc<tokio::sync::RwLock<Option<Arc<MCPClient>>>>;
+
 /// One provider route for a hand-routed tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HandRoute {
     /// Registered provider name.
     pub provider: String,
@@ -107,6 +116,46 @@ impl ToolExecution {
     }
 }
 
+/// Computes the canonical governed contract revision for one executable tool.
+///
+/// This is the single hash definition shared by catalog publication and durable
+/// capability construction. It binds every field that can change validation,
+/// authorization, retry, output handling, ownership, or routing.
+pub fn governed_tool_contract_revision(
+    definition: &ToolDefinition,
+    execution: &ToolExecution,
+) -> Result<String> {
+    let owner = match execution {
+        ToolExecution::BuiltIn(_) => serde_json::json!({"kind": "builtin"}),
+        ToolExecution::Hand { routes } => serde_json::json!({"kind": "hand", "routes": routes}),
+        ToolExecution::Mcp {
+            server_name,
+            remote_tool_name,
+            schema_hash,
+        } => serde_json::json!({
+            "kind": "connector",
+            "server": server_name,
+            "remote_tool": remote_tool_name,
+            "schema_revision": schema_hash,
+        }),
+    };
+    let contract = serde_json::json!({
+        "definition": definition,
+        "owner": owner,
+    });
+    let canonical = canonical_json_bytes(&contract).map_err(|error| {
+        MoaError::ConfigError(format!(
+            "canonicalize tool contract for {}: {error}",
+            definition.name
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"moa.tool.governed-contract.v1");
+    hasher.update((canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical);
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// Prefix every server-qualified MCP tool reference carries.
 ///
 /// It is part of the stable reference rather than a display convention: it is
@@ -173,6 +222,7 @@ fn mcp_schema_hash(
 pub(super) struct RegisteredTool {
     pub(super) definition: ToolDefinition,
     pub(super) execution: ToolExecution,
+    pub(super) mcp_client_route: Option<McpClientRoute>,
 }
 
 impl RegisteredTool {
@@ -180,6 +230,7 @@ impl RegisteredTool {
         Self {
             definition: tool.definition(),
             execution: ToolExecution::BuiltIn(tool),
+            mcp_client_route: None,
         }
     }
 
@@ -202,6 +253,7 @@ impl RegisteredTool {
             execution: ToolExecution::Hand {
                 routes: vec![HandRoute::local()],
             },
+            mcp_client_route: None,
         }
     }
 
@@ -211,10 +263,15 @@ impl RegisteredTool {
             execution: ToolExecution::Hand {
                 routes: vec![HandRoute::local()],
             },
+            mcp_client_route: None,
         }
     }
 
-    fn mcp(server_name: &str, registration: McpDiscoveredToolRegistration) -> Result<Self> {
+    fn mcp(
+        server_name: &str,
+        registration: McpDiscoveredToolRegistration,
+        client_route: McpClientRoute,
+    ) -> Result<Self> {
         let idempotency_class = if registration.allows_idempotent_retry() {
             IdempotencyClass::Idempotent
         } else {
@@ -259,6 +316,7 @@ impl RegisteredTool {
                 remote_tool_name,
                 schema_hash,
             },
+            mcp_client_route: Some(client_route),
         })
     }
 }
@@ -360,7 +418,20 @@ impl ToolRegistry {
         server_name: &str,
         tool: impl Into<McpDiscoveredToolRegistration>,
     ) -> Result<String> {
-        let registration = tool.into();
+        self.register_mcp_tool_on_route(
+            server_name,
+            tool.into(),
+            Arc::new(tokio::sync::RwLock::new(None)),
+        )
+    }
+
+    /// Registers a discovered MCP tool on the client route published with it.
+    pub(super) fn register_mcp_tool_on_route(
+        &mut self,
+        server_name: &str,
+        registration: McpDiscoveredToolRegistration,
+        client_route: McpClientRoute,
+    ) -> Result<String> {
         let remote_name = registration.tool().name.clone();
         let name = mcp_tool_reference(server_name, &remote_name);
         if !is_model_safe_tool_name(&name) {
@@ -374,7 +445,7 @@ impl ToolRegistry {
                 "MCP server {server_name} discovered duplicate qualified tool reference {name}"
             )));
         }
-        let registered = RegisteredTool::mcp(server_name, registration)?;
+        let registered = RegisteredTool::mcp(server_name, registration, client_route)?;
         self.tools.insert(name.clone(), registered);
         if !self
             .default_loadout
@@ -435,11 +506,25 @@ impl ToolRegistry {
         }
     }
 
-    /// Returns the registered schema revision of one MCP tool, if it is an MCP tool.
+    /// Returns the canonical governed contract revision of one registered tool.
+    ///
+    /// Unlike the model schema revision, this also binds descriptions, policy,
+    /// retry semantics, output budgets, ownership, and hand routes. Durable
+    /// execution uses it to reject work prepared against any materially
+    /// different contract, not only an input-schema change.
+    pub fn tool_contract_revision(&self, name: &str) -> Option<Result<String>> {
+        let tool = self.tools.get(name)?;
+        Some(governed_tool_contract_revision(
+            &tool.definition,
+            &tool.execution,
+        ))
+    }
+
+    /// Returns the owning server of one registered connector tool.
     #[must_use]
-    pub fn mcp_schema_revision(&self, name: &str) -> Option<&str> {
+    pub fn mcp_owning_server(&self, name: &str) -> Option<&str> {
         match self.tools.get(name).map(|tool| &tool.execution) {
-            Some(ToolExecution::Mcp { schema_hash, .. }) => Some(schema_hash.as_str()),
+            Some(ToolExecution::Mcp { server_name, .. }) => Some(server_name.as_str()),
             _ => None,
         }
     }

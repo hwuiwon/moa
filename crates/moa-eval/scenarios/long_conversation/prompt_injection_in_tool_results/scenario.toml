@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "prompt_injection_in_tool_results"
 description = "Recorded research session where adversarial tool output is wrapped and ignored."
 default_timeout_seconds = 90

@@ -2534,6 +2534,7 @@ mod tests {
                 name: reference_name.to_string(),
                 version: "v1".to_string(),
             },
+            contract_revision: "contract-v1".to_string(),
             description: format!("Capability {reference_name}"),
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),

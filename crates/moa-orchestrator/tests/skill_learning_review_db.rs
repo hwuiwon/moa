@@ -7,7 +7,6 @@ use std::{collections::HashMap, sync::Arc};
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
-use moa_artifacts::validation::validate_for_status;
 use moa_config::MoaConfig;
 use moa_config::RegressionMonitorConfig;
 use moa_core::{
@@ -20,8 +19,9 @@ use moa_core::{
     types::identifiers::SegmentId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::learning::LearningEntry, types::learning::LearningLogSourceRef,
-    types::segments::TaskSegment, types::session::SessionMeta,
+    types::memory::RlsContext, types::segments::TaskSegment, types::session::SessionMeta,
 };
+use moa_db::ScopedConn;
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::learning_review::{
     accept_rollback_candidate_after_authz, accept_skill_candidate_after_authz,
@@ -47,8 +47,8 @@ mod skill_learning_review {
     use super::*;
 
     #[tokio::test]
-    async fn promote_claimed_skill_candidate_publishes_draft_and_appends_learning() {
-        // Pins: promoting a claimed skill candidate publishes its draft artifact for
+    async fn promote_claimed_skill_candidate_activates_draft_and_appends_learning() {
+        // Pins: promoting a claimed skill candidate activates its draft artifact for
         // artifact-backed skill loading, records the review evaluation payload, and appends
         // one promoted learning entry. The regression gate itself is pinned separately;
         // this drives the promote path with explicit passing acceptance checks.
@@ -92,6 +92,13 @@ mod skill_learning_review {
             reviewer_subject: "user:reviewer".to_string(),
             reason: Some("looks reusable".to_string()),
         };
+        let wire_request = LearningCandidateReviewRequest {
+            tenant_id: request.tenant_id,
+            candidate_id: request.candidate_id,
+            action: LearningCandidateReviewAction::Accept,
+            reviewer_subject: request.reviewer_subject.clone(),
+            reason: request.reason.clone(),
+        };
         let review_store = PassthroughReviewStore {
             store: store.clone(),
         };
@@ -111,6 +118,7 @@ mod skill_learning_review {
                 held_out_pass: true,
                 held_out_description: "candidate suite showed no regression".to_string(),
             },
+            &wire_request.replay_digest(),
         )
         .await
         .expect("promote skill candidate");
@@ -122,17 +130,17 @@ mod skill_learning_review {
             Some(draft.revision_uid)
         );
         assert_eq!(
-            outcome.published_artifact_revision_uid,
+            outcome.activated_artifact_revision_uid,
             Some(draft.revision_uid)
         );
 
-        let published = ArtifactRegistry::new(test_db.store().pool().clone())
+        let activated = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
             .await
-            .expect("load published artifact")
-            .expect("published artifact exists");
-        assert_eq!(published.kind, ArtifactKind::Skill);
-        assert_eq!(published.status, ArtifactStatus::Published);
+            .expect("load activated artifact")
+            .expect("activated artifact exists");
+        assert_eq!(activated.kind, ArtifactKind::Skill);
+        assert_eq!(activated.status, ArtifactStatus::Ready);
 
         let promoted = test_db
             .store()
@@ -151,7 +159,7 @@ mod skill_learning_review {
         assert_eq!(evaluation["action"], "accept");
         assert_eq!(evaluation["reason"], "looks reusable");
         assert_eq!(
-            evaluation["published_artifact_revision_uid"],
+            evaluation["activated_artifact_revision_uid"],
             draft.revision_uid.to_string()
         );
         assert!(evaluation.get("skill_uid").is_none());
@@ -175,6 +183,74 @@ mod skill_learning_review {
         assert_eq!(
             learnings[0].payload["candidate_id"],
             candidate.id.to_string()
+        );
+
+        let decisions = test_db
+            .store()
+            .list_learning_candidate_decisions(candidate.id)
+            .await
+            .expect("list accepted-skill decision");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision,
+            moa_core::types::experience::LearningReviewDecision::AcceptedSkill
+        );
+        assert_eq!(
+            decisions[0].request_digest.as_deref().map(<[u8]>::len),
+            Some(32)
+        );
+        assert!(decisions[0].outcome.is_some());
+
+        let replay_request = wire_request;
+        let replay = accept_skill_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            review_config(&test_db),
+            review_providers(),
+            review_tool_router(),
+            replay_request.clone(),
+        )
+        .await
+        .expect("terminal accepted-skill replay returns the committed outcome");
+        assert_eq!(replay.candidate_id, outcome.candidate_id);
+        assert_eq!(replay.status, outcome.status);
+        assert_eq!(replay.artifact_uid, outcome.artifact_uid);
+        assert_eq!(
+            replay.activated_artifact_revision_uid,
+            outcome.activated_artifact_revision_uid
+        );
+
+        let mut changed = replay_request;
+        changed.reason = Some("different acceptance inputs".to_string());
+        let conflict = accept_skill_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            review_config(&test_db),
+            review_providers(),
+            review_tool_router(),
+            changed,
+        )
+        .await
+        .expect_err("changed terminal replay inputs conflict");
+        assert!(format!("{conflict:?}").contains("different inputs"));
+        let activation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moa.artifact_activation_audit \
+             WHERE activated_revision_uid = $1 AND decision_kind = 'activation'",
+        )
+        .bind(draft.revision_uid)
+        .fetch_one(store.pool())
+        .await
+        .expect("count activation audits after replay");
+        assert_eq!(activation_count, 1, "replay does not activate twice");
+        assert_eq!(
+            test_db
+                .store()
+                .list_learning_candidate_decisions(candidate.id)
+                .await
+                .expect("list decisions after replay")
+                .len(),
+            1,
+            "replay does not append another terminal decision"
         );
     }
 
@@ -202,6 +278,11 @@ mod skill_learning_review {
         )
         .await;
         let store = Arc::new(test_db.store().clone());
+        let request = review_request(
+            &storage_partition_id,
+            candidate.id,
+            LearningCandidateReviewAction::Accept,
+        );
 
         let response = accept_skill_candidate_after_authz(
             store.clone(),
@@ -209,17 +290,13 @@ mod skill_learning_review {
             review_config(&test_db),
             review_providers(),
             review_tool_router(),
-            review_request(
-                &storage_partition_id,
-                candidate.id,
-                LearningCandidateReviewAction::Accept,
-            ),
+            request.clone(),
         )
         .await
         .expect("accept disposition for suite-less candidate");
 
         assert_eq!(response.status, LearningCandidateStatus::Rejected);
-        assert_eq!(response.published_artifact_revision_uid, None);
+        assert_eq!(response.activated_artifact_revision_uid, None);
 
         let rejected = test_db
             .store()
@@ -264,6 +341,41 @@ mod skill_learning_review {
             .await
             .expect("list learning entries");
         assert!(learnings.is_empty(), "rejection must not append learning");
+
+        let replay = accept_skill_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            review_config(&test_db),
+            review_providers(),
+            review_tool_router(),
+            request.clone(),
+        )
+        .await
+        .expect("matching gate-rejected retry returns the recorded response");
+        assert_eq!(replay, response);
+        let mut changed = request;
+        changed.reason = Some("changed gate rejection reason".to_string());
+        let conflict = accept_skill_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            review_config(&test_db),
+            review_providers(),
+            review_tool_router(),
+            changed,
+        )
+        .await
+        .expect_err("changed gate-rejected retry conflicts");
+        assert!(format!("{conflict:?}").contains("different inputs"));
+        let decisions = store
+            .list_learning_candidate_decisions(candidate.id)
+            .await
+            .expect("list gate-rejection decisions");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision,
+            moa_core::types::experience::LearningReviewDecision::Rejected
+        );
+        assert!(decisions[0].outcome.is_some());
     }
 
     #[tokio::test]
@@ -451,8 +563,8 @@ mod skill_learning_review {
             .expect("dismiss advisory item");
         assert_eq!(response.status, LearningCandidateStatus::Dismissed);
         assert_eq!(
-            response.published_artifact_revision_uid, None,
-            "a dismissal publishes nothing"
+            response.activated_artifact_revision_uid, None,
+            "a dismissal activates nothing"
         );
 
         let dismissed = test_db
@@ -541,7 +653,7 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn reject_skill_candidate_preserves_draft_without_publishing() {
+    async fn reject_skill_candidate_preserves_draft_without_activation() {
         // Pins: rejecting a skill candidate marks it rejected but keeps the draft artifact for audit.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let storage_partition_id = unique_workspace("review-reject");
@@ -579,7 +691,7 @@ mod skill_learning_review {
             response.draft_artifact_revision_uid,
             Some(draft.revision_uid)
         );
-        assert_eq!(response.published_artifact_revision_uid, None);
+        assert_eq!(response.activated_artifact_revision_uid, None);
 
         let preserved = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
@@ -617,8 +729,8 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn promotion_rolls_back_artifact_publish_when_learning_append_fails() {
-        // Pins: accept promotion publishes, promotes, and appends learning in one transaction.
+    async fn promotion_rolls_back_artifact_activation_when_learning_append_fails() {
+        // Pins: accept promotion activates, promotes, and appends learning in one transaction.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let storage_partition_id = unique_workspace("review-rollback");
         let scope = tenant_scope(&storage_partition_id);
@@ -662,6 +774,7 @@ mod skill_learning_review {
                 held_out_pass: true,
                 held_out_description: "held-out checks satisfied".to_string(),
             },
+            &[7_u8; 32],
         )
         .await
         .expect_err("injected learning append failure should abort promotion");
@@ -680,7 +793,7 @@ mod skill_learning_review {
         assert_eq!(
             artifact.status,
             ArtifactStatus::Draft,
-            "failed promotion must roll back artifact publication"
+            "failed promotion must roll back artifact activation"
         );
         let reloaded = test_db
             .store()
@@ -705,6 +818,109 @@ mod skill_learning_review {
             learnings.is_empty(),
             "failed promotion must not append promoted learning"
         );
+    }
+
+    #[tokio::test]
+    async fn promotion_refuses_a_serving_baseline_that_moved_after_prepare() {
+        // Pins: the regression gate and activation compare the same captured
+        // serving generation; a concurrent promotion cannot silently rebind the
+        // passing report to its newer package.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let storage_partition_id = unique_workspace("review-baseline-cas");
+        let tenant = tenant_id_from_storage_partition_id(&storage_partition_id);
+        let scope = tenant_scope(&storage_partition_id);
+        let skill_name = unique_skill_name("review-baseline-cas");
+        let package = skill_package(&skill_name, "Fence the reviewed serving baseline");
+        let initial = activate_skill_revision(&test_db, &scope, &package).await;
+        let stale_draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
+        let mover_draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
+        let stale_candidate = append_candidate(
+            &test_db,
+            &storage_partition_id,
+            LearningCandidateType::Skill,
+            LearningCandidateStatus::Proposed,
+            "skill_improved",
+            &skill_name,
+            &stale_draft,
+        )
+        .await;
+        let mover_candidate = append_candidate(
+            &test_db,
+            &storage_partition_id,
+            LearningCandidateType::Skill,
+            LearningCandidateStatus::Proposed,
+            "skill_improved",
+            &skill_name,
+            &mover_draft,
+        )
+        .await;
+        let store = PassthroughReviewStore {
+            store: Arc::new(test_db.store().clone()),
+        };
+        let stale_request = SkillReviewRequest {
+            tenant_id: tenant,
+            candidate_id: stale_candidate.id,
+            action: SkillReviewAction::Accept,
+            reviewer_subject: "user:reviewer".to_string(),
+            reason: Some("stale regression result".to_string()),
+        };
+        let mover_request = SkillReviewRequest {
+            candidate_id: mover_candidate.id,
+            reason: Some("concurrent promotion".to_string()),
+            ..stale_request.clone()
+        };
+        let pool = test_db.store().pool().clone();
+        let stale = prepare_skill_acceptance(&store, pool.clone(), &stale_request)
+            .await
+            .expect("capture stale baseline");
+        let mover = prepare_skill_acceptance(&store, pool.clone(), &mover_request)
+            .await
+            .expect("capture mover baseline");
+        assert_eq!(
+            stale.expected_serving.revision_uid,
+            Some(initial.revision_uid)
+        );
+        assert_eq!(stale.expected_serving, mover.expected_serving);
+
+        promote_claimed_skill_candidate(
+            &store,
+            pool.clone(),
+            &mover_request,
+            mover,
+            json!({"regression_execution": "completed", "decision": "accepted"}),
+            passing_acceptance_checks(),
+            &[8_u8; 32],
+        )
+        .await
+        .expect("move serving pointer");
+        let error = promote_claimed_skill_candidate(
+            &store,
+            pool,
+            &stale_request,
+            stale,
+            json!({"regression_execution": "completed", "decision": "accepted"}),
+            passing_acceptance_checks(),
+            &[9_u8; 32],
+        )
+        .await
+        .expect_err("stale baseline must fail closed");
+        assert!(matches!(
+            error,
+            moa_skills::review::SkillReviewError::Conflict(_)
+        ));
+
+        let serving = ArtifactRegistry::new(test_db.store().pool().clone())
+            .load_serving(&scope, ArtifactKind::Skill, &skill_name)
+            .await
+            .expect("load serving skill")
+            .expect("mover remains serving");
+        assert_eq!(serving.revision_uid, mover_draft.revision_uid);
+        let stale_revision = ArtifactRegistry::new(test_db.store().pool().clone())
+            .load_revision(&scope, stale_draft.revision_uid)
+            .await
+            .expect("load stale draft")
+            .expect("stale draft remains");
+        assert_eq!(stale_revision.status, ArtifactStatus::Draft);
     }
 
     #[tokio::test]
@@ -801,10 +1017,14 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn accept_rollback_archives_regressed_revision_and_restores_predecessor() {
-        // Pins: accepting a rollback proposal archives the regressed published revision, restores
-        // the prior published revision as the serving one, flips the original promotion to
-        // RolledBack, invalidates its learning-log entry, and records a skill_rollback entry.
+    async fn accept_rollback_archives_regressed_revision_and_stops_serving() {
+        // Pins: accepting a rollback proposal archives the regressed revision and
+        // leaves the skill serving nothing, flips the original promotion to
+        // RolledBack, invalidates its learning-log entry, and records a
+        // skill_rollback entry. The predecessor is deliberately not restored:
+        // restoring an older revision is itself a serving transition that must pass a
+        // separate learned-skill review, so rollback performs only the safe half:
+        // taking the regressed revision out of service.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let storage_partition_id = unique_workspace("rollback-accept");
         let tenant = tenant_id_from_storage_partition_id(&storage_partition_id);
@@ -812,18 +1032,14 @@ mod skill_learning_review {
         let skill_name = unique_skill_name("rollback-accept");
         let package = skill_package(&skill_name, "Rollback accepted skills");
 
-        let previous = publish_skill_revision(&test_db, &scope, &package).await;
-        let promoted = publish_skill_revision(&test_db, &scope, &package).await;
+        let previous = activate_skill_revision(&test_db, &scope, &package).await;
+        let promoted = activate_skill_revision(&test_db, &scope, &package).await;
         assert_ne!(previous.revision_uid, promoted.revision_uid);
 
-        let promotion_candidate = append_candidate(
+        let promotion_candidate_id = activation_promotion_candidate_id(
             &test_db,
-            &storage_partition_id,
-            LearningCandidateType::Skill,
-            LearningCandidateStatus::Promoted,
-            "skill_improved",
-            &skill_name,
-            &promoted,
+            promoted.artifact_uid,
+            promoted.revision_uid,
         )
         .await;
         seed_promotion_learning(
@@ -831,7 +1047,7 @@ mod skill_learning_review {
             &storage_partition_id,
             &skill_name,
             &promoted,
-            promotion_candidate.id,
+            promotion_candidate_id,
         )
         .await;
         let rollback = append_rollback_candidate(
@@ -841,28 +1057,28 @@ mod skill_learning_review {
             promoted.artifact_uid,
             promoted.revision_uid,
             Some(previous.revision_uid),
-            promotion_candidate.id,
             LearningCandidateStatus::Proposed,
         )
         .await;
 
         let store = Arc::new(test_db.store().clone());
+        let request = review_request(
+            &storage_partition_id,
+            rollback.id,
+            LearningCandidateReviewAction::Accept,
+        );
         let response = accept_rollback_candidate_after_authz(
             store.clone(),
             store.pool().clone(),
-            review_request(
-                &storage_partition_id,
-                rollback.id,
-                LearningCandidateReviewAction::Accept,
-            ),
+            request.clone(),
         )
         .await
         .expect("accept rollback proposal");
 
         assert_eq!(response.status, LearningCandidateStatus::Promoted);
         assert_eq!(
-            response.published_artifact_revision_uid,
-            Some(previous.revision_uid)
+            response.activated_artifact_revision_uid, None,
+            "rollback unserves the regressed revision; it must not report the predecessor as restored"
         );
 
         let registry = ArtifactRegistry::new(test_db.store().pool().clone());
@@ -872,14 +1088,23 @@ mod skill_learning_review {
             .expect("load archived revision")
             .expect("archived revision exists");
         assert_eq!(archived.status, ArtifactStatus::Archived);
-        let serving = registry
-            .load_visible_published(&scope, ArtifactKind::Skill, &skill_name)
+        assert!(
+            registry
+                .load_serving(&scope, ArtifactKind::Skill, &skill_name)
+                .await
+                .expect("load serving revision")
+                .is_none(),
+            "the regressed revision stops serving and no predecessor is auto-restored"
+        );
+        let predecessor = registry
+            .load_revision(&scope, previous.revision_uid)
             .await
-            .expect("load serving published revision")
-            .expect("a published revision still serves");
+            .expect("load predecessor revision")
+            .expect("predecessor revision exists");
         assert_eq!(
-            serving.revision_uid, previous.revision_uid,
-            "the prior revision serves once the regressed one is archived"
+            predecessor.status,
+            ArtifactStatus::Superseded,
+            "the predecessor stays superseded and must go back through release to serve"
         );
 
         let rollback_reloaded = test_db
@@ -892,7 +1117,7 @@ mod skill_learning_review {
 
         let promotion_reloaded = test_db
             .store()
-            .get_learning_candidate(&tenant, promotion_candidate.id)
+            .get_learning_candidate(&tenant, promotion_candidate_id)
             .await
             .expect("reload promotion candidate")
             .expect("promotion candidate exists");
@@ -922,6 +1147,55 @@ mod skill_learning_review {
             rollback_learnings[0].target_label.as_deref(),
             Some(skill_name.as_str())
         );
+
+        let decisions = store
+            .list_learning_candidate_decisions(rollback.id)
+            .await
+            .expect("list accepted rollback decision");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision,
+            moa_core::types::experience::LearningReviewDecision::AcceptedRollback
+        );
+        assert_eq!(
+            decisions[0].request_digest.as_deref().map(<[u8]>::len),
+            Some(32)
+        );
+        assert!(decisions[0].outcome.is_some());
+
+        let replay = accept_rollback_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            request.clone(),
+        )
+        .await
+        .expect("terminal rollback replay returns committed outcome");
+        assert_eq!(replay, response);
+        let mut changed = request;
+        changed.reason = Some("different rollback inputs".to_string());
+        let conflict =
+            accept_rollback_candidate_after_authz(store.clone(), store.pool().clone(), changed)
+                .await
+                .expect_err("changed terminal rollback inputs conflict");
+        assert!(format!("{conflict:?}").contains("different inputs"));
+        let rollback_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moa.artifact_activation_audit \
+             WHERE previous_revision_uid = $1 AND decision_kind = 'rollback'",
+        )
+        .bind(promoted.revision_uid)
+        .fetch_one(store.pool())
+        .await
+        .expect("count rollback transitions after replay");
+        assert_eq!(rollback_audits, 1, "replay does not archive twice");
+        assert_eq!(
+            store
+                .list_learning_candidate_decisions(rollback.id)
+                .await
+                .expect("list rollback decisions after replay")
+                .len(),
+            1,
+            "replay does not append another terminal decision"
+        );
     }
 
     #[tokio::test]
@@ -933,7 +1207,7 @@ mod skill_learning_review {
         let scope = tenant_scope(&storage_partition_id);
         let skill_name = unique_skill_name("rollback-guard");
         let package = skill_package(&skill_name, "Rollback guard skills");
-        let promoted = publish_skill_revision(&test_db, &scope, &package).await;
+        let promoted = activate_skill_revision(&test_db, &scope, &package).await;
 
         let claimed = append_rollback_candidate(
             &test_db,
@@ -942,7 +1216,6 @@ mod skill_learning_review {
             promoted.artifact_uid,
             promoted.revision_uid,
             None,
-            Uuid::now_v7(),
             LearningCandidateStatus::Evaluating,
         )
         .await;
@@ -997,6 +1270,64 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
+    async fn accept_rollback_rejects_payload_ids_that_disagree_with_typed_provenance() {
+        // Pins: payload UUIDs are descriptive only. Destructive rollback
+        // authority is derived from the typed promotion source and immutable
+        // activation audit, so a producer cannot retarget a proposal by changing
+        // either the artifact or promotion candidate in JSON.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let storage_partition_id = unique_workspace("rollback-tampered-payload");
+        let scope = tenant_scope(&storage_partition_id);
+        let skill_name = unique_skill_name("rollback-tampered-payload");
+        let package = skill_package(&skill_name, "Reject tampered rollback authority");
+        let promoted = activate_skill_revision(&test_db, &scope, &package).await;
+        let store = Arc::new(test_db.store().clone());
+
+        for field in ["artifact_uid", "promotion_candidate_id"] {
+            let mut proposal = build_rollback_candidate(
+                &test_db,
+                &storage_partition_id,
+                &skill_name,
+                promoted.artifact_uid,
+                promoted.revision_uid,
+                None,
+                LearningCandidateStatus::Proposed,
+            )
+            .await;
+            proposal.payload[field] = json!(Uuid::now_v7());
+            store
+                .append_learning_candidate(&proposal)
+                .await
+                .expect("append payload-tampered rollback proposal");
+
+            let error = accept_rollback_candidate_after_authz(
+                store.clone(),
+                store.pool().clone(),
+                review_request(
+                    &storage_partition_id,
+                    proposal.id,
+                    LearningCandidateReviewAction::Accept,
+                ),
+            )
+            .await
+            .expect_err("tampered rollback authority must be refused");
+            assert!(
+                format!("{error:?}").contains("does not match its activation provenance"),
+                "{field} mismatch is reported as a provenance failure: {error:?}"
+            );
+            let unchanged = store
+                .get_learning_candidate(
+                    &tenant_id_from_storage_partition_id(&storage_partition_id),
+                    proposal.id,
+                )
+                .await
+                .expect("reload tampered proposal")
+                .expect("tampered proposal remains auditable");
+            assert_eq!(unchanged.status, LearningCandidateStatus::Proposed);
+        }
+    }
+
+    #[tokio::test]
     async fn monitor_files_rollback_proposal_when_improved_skill_regresses() {
         // Pins: the monitor compares a promoted skill's post-promotion resolution rate against
         // its pre-promotion baseline over real seeded segments, resolves the predecessor revision
@@ -1008,16 +1339,14 @@ mod skill_learning_review {
         let skill_name = unique_skill_name("monitor-regress");
         let package = skill_package(&skill_name, "Monitor regression skills");
 
-        let previous = publish_skill_revision(&test_db, &scope, &package).await;
-        let promoted = publish_skill_revision(&test_db, &scope, &package).await;
-        let promotion_candidate_id = Uuid::now_v7();
+        let previous = activate_skill_revision(&test_db, &scope, &package).await;
+        let promoted = activate_skill_revision(&test_db, &scope, &package).await;
         let promoted_at = moa_test_support::fixtures::pg_now() - chrono::Duration::days(1);
         seed_promotion_learning_at(
             &test_db,
             &storage_partition_id,
             &skill_name,
             &promoted,
-            promotion_candidate_id,
             promoted_at,
         )
         .await;
@@ -1081,7 +1410,20 @@ mod skill_learning_review {
 
         assert_eq!(
             proposal.id,
-            moa_skills::rollback::rollback_candidate_id(tenant, &skill_name, promoted.revision_uid)
+            moa_skills::rollback::rollback_candidate_id(
+                tenant,
+                &skill_name,
+                promoted.revision_uid,
+                Uuid::parse_str(
+                    proposal.payload["expected_transition_audit_uid"]
+                        .as_str()
+                        .expect("rollback proposal transition audit uid"),
+                )
+                .expect("valid rollback proposal transition audit uid"),
+                proposal.payload["expected_pointer_version"]
+                    .as_i64()
+                    .expect("rollback proposal pointer version"),
+            )
         );
         assert_eq!(
             proposal.payload["promoted_revision_uid"],
@@ -1090,7 +1432,7 @@ mod skill_learning_review {
         assert_eq!(
             proposal.payload["previous_revision_uid"],
             previous.revision_uid.to_string(),
-            "the artifact join resolves the predecessor revision to restore"
+            "the artifact join records predecessor provenance without restoring it"
         );
         assert_eq!(proposal.payload["post_samples"], 6);
         assert_eq!(proposal.payload["regressed_operation"], "skill_improved");
@@ -1130,10 +1472,81 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
+    async fn monitor_does_not_treat_a_tombstone_revision_as_a_serving_predecessor() {
+        // Pins: reactivation after rollback retains the prior revision UID in
+        // pointer history, but the prior generation was not serving. The monitor
+        // must not export that tombstone as a baseline that rollback could appear
+        // to restore.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let storage_partition_id = unique_workspace("monitor-tombstone-predecessor");
+        let tenant = tenant_id_from_storage_partition_id(&storage_partition_id);
+        let scope = tenant_scope(&storage_partition_id);
+        let release_scope = moa_artifacts::release::TenantScope::new(tenant);
+        let skill_name = unique_skill_name("monitor-tombstone-predecessor");
+        let package = skill_package(&skill_name, "Ignore an unserved tombstone baseline");
+        let _v1 = activate_skill_revision(&test_db, &scope, &package).await;
+        let v2 = activate_skill_revision(&test_db, &scope, &package).await;
+        let registry = ArtifactRegistry::new(test_db.store().pool().clone());
+        let pointer = registry
+            .load_serving_pointer(&release_scope, v2.artifact_uid)
+            .await
+            .expect("load v2 pointer")
+            .expect("v2 serves");
+        let activation_audit_uid = pointer.activation_audit_uid;
+        let mut conn =
+            ScopedConn::begin_as_app(test_db.store().pool(), &RlsContext::tenant(tenant), true)
+                .await
+                .expect("begin rollback");
+        assert_eq!(
+            ArtifactRegistry::rollback_serving_revision_in_tx(
+                conn.as_mut(),
+                &release_scope,
+                v2.revision_uid,
+                activation_audit_uid,
+                pointer.pointer_version,
+                "user:reviewer",
+                Some("remove v2"),
+            )
+            .await
+            .expect("rollback v2"),
+            moa_artifacts::registry::RollbackApplication::Applied
+        );
+        conn.commit().await.expect("commit rollback");
+
+        let v3 = activate_skill_revision(&test_db, &scope, &package).await;
+        assert_eq!(v3.artifact_uid, v2.artifact_uid);
+        seed_promotion_learning_at(
+            &test_db,
+            &storage_partition_id,
+            &skill_name,
+            &v3,
+            moa_test_support::fixtures::pg_now(),
+        )
+        .await;
+
+        let promotions = test_db
+            .store()
+            .list_recent_skill_promotions(
+                &tenant,
+                moa_test_support::fixtures::pg_now() - chrono::Duration::days(1),
+            )
+            .await
+            .expect("list recent promotions");
+        let promotion = promotions
+            .iter()
+            .find(|promotion| promotion.promoted_revision_uid == v3.revision_uid)
+            .expect("v3 promotion is visible");
+        assert_eq!(
+            promotion.previous_revision_uid, None,
+            "a retained tombstone UID is not a serving predecessor"
+        );
+    }
+
+    #[tokio::test]
     async fn accept_rollback_rejects_superseded_proposal() {
         // Pins: a rollback proposal whose promoted revision a newer promotion has
         // superseded is rejected terminally (not applied), leaving the superseded
-        // revision published and the newer revision serving. Without the
+        // revision superseded and the newer revision serving. Without the
         // currentness guard the stale proposal would archive a non-serving
         // revision and report success while the newer revision kept serving.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
@@ -1143,9 +1556,9 @@ mod skill_learning_review {
         let skill_name = unique_skill_name("rollback-superseded");
         let package = skill_package(&skill_name, "Superseded rollback skills");
 
-        let v1 = publish_skill_revision(&test_db, &scope, &package).await;
-        let v2 = publish_skill_revision(&test_db, &scope, &package).await;
-        let v3 = publish_skill_revision(&test_db, &scope, &package).await;
+        let v1 = activate_skill_revision(&test_db, &scope, &package).await;
+        let v2 = activate_skill_revision(&test_db, &scope, &package).await;
+        let v3 = activate_skill_revision(&test_db, &scope, &package).await;
         assert_ne!(v2.revision_uid, v3.revision_uid);
 
         // The proposal targets v2, but v3 has since been promoted and now serves.
@@ -1156,13 +1569,12 @@ mod skill_learning_review {
             v2.artifact_uid,
             v2.revision_uid,
             Some(v1.revision_uid),
-            Uuid::now_v7(),
             LearningCandidateStatus::Proposed,
         )
         .await;
 
         let store = Arc::new(test_db.store().clone());
-        let result = accept_rollback_candidate_after_authz(
+        let response = accept_rollback_candidate_after_authz(
             store.clone(),
             store.pool().clone(),
             review_request(
@@ -1171,11 +1583,9 @@ mod skill_learning_review {
                 LearningCandidateReviewAction::Accept,
             ),
         )
-        .await;
-        assert!(
-            result.is_err(),
-            "a superseded rollback proposal must be refused, not applied"
-        );
+        .await
+        .expect("a superseded rollback proposal is terminally rejected");
+        assert_eq!(response.status, LearningCandidateStatus::Rejected);
 
         let reloaded = test_db
             .store()
@@ -1197,14 +1607,14 @@ mod skill_learning_review {
             .expect("v2 revision exists");
         assert_eq!(
             v2_reloaded.status,
-            ArtifactStatus::Published,
-            "a stale rollback must not archive the superseded revision"
+            ArtifactStatus::Superseded,
+            "a stale rollback must leave the superseded revision alone, not archive it"
         );
         let serving = registry
-            .load_visible_published(&scope, ArtifactKind::Skill, &skill_name)
+            .load_serving(&scope, ArtifactKind::Skill, &skill_name)
             .await
-            .expect("load serving published revision")
-            .expect("a published revision still serves");
+            .expect("load serving activated revision")
+            .expect("an activated revision still serves");
         assert_eq!(
             serving.revision_uid, v3.revision_uid,
             "the newer promoted revision keeps serving"
@@ -1212,11 +1622,196 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn accept_rollback_restores_predecessor_metadata() {
-        // Pins: rolling back a regressed revision restores the predecessor's
-        // serving-side description and tags — not only the SKILL.md body — so
-        // ranking, summaries, and embeddings stop advertising the regressed
-        // identity.
+    async fn rollback_refuses_stale_epoch_for_the_same_serving_revision() {
+        // Pins: revision identity alone is not sufficient rollback authority. A
+        // stale audit uid or pointer epoch must leave even the same revision
+        // serving, closing the reactivation ABA case.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let storage_partition_id = unique_workspace("rollback-generation-cas");
+        let tenant = tenant_id_from_storage_partition_id(&storage_partition_id);
+        let scope = tenant_scope(&storage_partition_id);
+        let skill_name = unique_skill_name("rollback-generation-cas");
+        let package = skill_package(&skill_name, "Fence rollback serving generations");
+        let promoted = activate_skill_revision(&test_db, &scope, &package).await;
+        let release_scope = moa_artifacts::release::TenantScope::new(tenant);
+        let registry = ArtifactRegistry::new(test_db.store().pool().clone());
+        let pointer = registry
+            .load_serving_pointer(&release_scope, promoted.artifact_uid)
+            .await
+            .expect("load serving pointer")
+            .expect("activated revision has a pointer");
+        let transition = pointer.activation_audit_uid;
+
+        for (audit_uid, pointer_version) in [
+            (Uuid::now_v7(), pointer.pointer_version),
+            (transition, pointer.pointer_version + 1),
+        ] {
+            let mut conn =
+                ScopedConn::begin_as_app(test_db.store().pool(), &RlsContext::tenant(tenant), true)
+                    .await
+                    .expect("begin stale rollback transaction");
+            let application = ArtifactRegistry::rollback_serving_revision_in_tx(
+                conn.as_mut(),
+                &release_scope,
+                promoted.revision_uid,
+                audit_uid,
+                pointer_version,
+                "user:reviewer",
+                Some("stale rollback proposal"),
+            )
+            .await
+            .expect("stale rollback is a terminal application result");
+            assert!(matches!(
+                application,
+                moa_artifacts::registry::RollbackApplication::Superseded {
+                    serving_revision_uid
+                } if serving_revision_uid == promoted.revision_uid
+            ));
+            conn.commit()
+                .await
+                .expect("commit no-op stale rollback transaction");
+        }
+
+        let unchanged = registry
+            .load_serving_pointer(&release_scope, promoted.artifact_uid)
+            .await
+            .expect("reload serving pointer")
+            .expect("pointer remains serving");
+        assert_eq!(unchanged, pointer);
+        let revision = registry
+            .load_revision(&scope, promoted.revision_uid)
+            .await
+            .expect("reload promoted revision")
+            .expect("promoted revision remains");
+        assert_eq!(revision.status, ArtifactStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn rollback_proposal_is_rejected_truthfully_when_skill_is_already_unserved() {
+        // Pins: a tombstoned pointer is not reported as though the proposed
+        // revision still serves; the stale proposal is rejected with the actual
+        // unserved state and no additional pointer move.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let storage_partition_id = unique_workspace("rollback-already-unserved");
+        let tenant = tenant_id_from_storage_partition_id(&storage_partition_id);
+        let scope = tenant_scope(&storage_partition_id);
+        let skill_name = unique_skill_name("rollback-already-unserved");
+        let package = skill_package(&skill_name, "Report an already unserved rollback");
+        let promoted = activate_skill_revision(&test_db, &scope, &package).await;
+        let release_scope = moa_artifacts::release::TenantScope::new(tenant);
+        let registry = ArtifactRegistry::new(test_db.store().pool().clone());
+        let active = registry
+            .load_serving_pointer(&release_scope, promoted.artifact_uid)
+            .await
+            .expect("load active pointer")
+            .expect("activated revision has a pointer");
+        let mut conn =
+            ScopedConn::begin_as_app(test_db.store().pool(), &RlsContext::tenant(tenant), true)
+                .await
+                .expect("begin initial rollback");
+        let activation_audit_uid = active.activation_audit_uid;
+        assert_eq!(
+            ArtifactRegistry::rollback_serving_revision_in_tx(
+                conn.as_mut(),
+                &release_scope,
+                promoted.revision_uid,
+                activation_audit_uid,
+                active.pointer_version,
+                "user:first-reviewer",
+                Some("first rollback"),
+            )
+            .await
+            .expect("apply initial rollback"),
+            moa_artifacts::registry::RollbackApplication::Applied
+        );
+        conn.commit().await.expect("commit initial rollback");
+        let tombstone = registry
+            .load_serving_pointer(&release_scope, promoted.artifact_uid)
+            .await
+            .expect("load serving pointer after rollback");
+        assert!(tombstone.is_none(), "rollback removes the serving pointer");
+
+        let proposal = append_rollback_candidate(
+            &test_db,
+            &storage_partition_id,
+            &skill_name,
+            promoted.artifact_uid,
+            promoted.revision_uid,
+            None,
+            LearningCandidateStatus::Proposed,
+        )
+        .await;
+        let store = Arc::new(test_db.store().clone());
+        let request = review_request(
+            &storage_partition_id,
+            proposal.id,
+            LearningCandidateReviewAction::Accept,
+        );
+        let response = accept_rollback_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            request.clone(),
+        )
+        .await
+        .expect("already-unserved rollback proposal is terminally rejected");
+        assert_eq!(response.status, LearningCandidateStatus::Rejected);
+        let rejected = store
+            .get_learning_candidate(&tenant, proposal.id)
+            .await
+            .expect("reload rollback proposal")
+            .expect("rollback proposal remains auditable");
+        assert_eq!(rejected.status, LearningCandidateStatus::Rejected);
+        assert!(
+            rejected
+                .status_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("serves no revision"))
+        );
+        assert_eq!(
+            registry
+                .load_serving_pointer(&release_scope, promoted.artifact_uid)
+                .await
+                .expect("reload tombstone"),
+            tombstone
+        );
+
+        let replay = accept_rollback_candidate_after_authz(
+            store.clone(),
+            store.pool().clone(),
+            request.clone(),
+        )
+        .await
+        .expect("matching stale rollback retry returns its recorded rejection");
+        assert_eq!(replay, response);
+        let mut changed = request;
+        changed.reason = Some("changed stale rollback reason".to_string());
+        let conflict =
+            accept_rollback_candidate_after_authz(store.clone(), store.pool().clone(), changed)
+                .await
+                .expect_err("changed stale rollback retry conflicts");
+        assert!(format!("{conflict:?}").contains("different inputs"));
+        let decisions = store
+            .list_learning_candidate_decisions(proposal.id)
+            .await
+            .expect("list stale rollback decisions");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision,
+            moa_core::types::experience::LearningReviewDecision::Rejected
+        );
+        assert_eq!(
+            decisions[0].request_digest.as_deref().map(<[u8]>::len),
+            Some(32)
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_rollback_stops_advertising_the_regressed_identity() {
+        // Pins: rolling back a regressed revision stops the artifact from serving and
+        // drops its identity embedding, so ranking and summaries stop advertising the
+        // regressed skill. The predecessor's metadata is not silently restored --
+        // that would bypass its own learned-skill review -- so this pins the absence
+        // of any serving identity, which is the fail-closed outcome.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let storage_partition_id = unique_workspace("rollback-metadata");
         let scope = tenant_scope(&storage_partition_id);
@@ -1232,15 +1827,15 @@ mod skill_learning_review {
             "regressed, risky",
         );
 
-        let v1 = publish_skill_revision(&test_db, &scope, &package_v1).await;
-        let v2 = publish_skill_revision(&test_db, &scope, &package_v2).await;
+        let v1 = activate_skill_revision(&test_db, &scope, &package_v1).await;
+        let v2 = activate_skill_revision(&test_db, &scope, &package_v2).await;
 
         let registry = ArtifactRegistry::new(test_db.store().pool().clone());
         let before = registry
-            .load_visible_published(&scope, ArtifactKind::Skill, &skill_name)
+            .load_serving(&scope, ArtifactKind::Skill, &skill_name)
             .await
-            .expect("load serving published revision")
-            .expect("a published revision serves");
+            .expect("load serving revision")
+            .expect("a revision serves");
         assert_eq!(before.revision_uid, v2.revision_uid);
         assert_eq!(
             before.description, v2.document.metadata.description,
@@ -1250,7 +1845,6 @@ mod skill_learning_review {
             v1.document.metadata.description,
             v2.document.metadata.description
         );
-        assert_ne!(v1.document.metadata.tags, v2.document.metadata.tags);
 
         let rollback = append_rollback_candidate(
             &test_db,
@@ -1259,7 +1853,6 @@ mod skill_learning_review {
             v2.artifact_uid,
             v2.revision_uid,
             Some(v1.revision_uid),
-            Uuid::now_v7(),
             LearningCandidateStatus::Proposed,
         )
         .await;
@@ -1276,26 +1869,24 @@ mod skill_learning_review {
         .await
         .expect("accept rollback proposal");
 
-        let serving = registry
-            .load_visible_published(&scope, ArtifactKind::Skill, &skill_name)
-            .await
-            .expect("load serving published revision")
-            .expect("a published revision still serves");
-        assert_eq!(
-            serving.revision_uid, v1.revision_uid,
-            "the predecessor revision serves again"
+        assert!(
+            registry
+                .load_serving(&scope, ArtifactKind::Skill, &skill_name)
+                .await
+                .expect("load serving revision")
+                .is_none(),
+            "nothing serves after the regressed revision is rolled back"
         );
+        let embeddings = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM moa.skill_embedding WHERE artifact_uid = $1",
+        )
+        .bind(v2.artifact_uid)
+        .fetch_one(test_db.store().pool())
+        .await
+        .expect("count skill embeddings");
         assert_eq!(
-            serving.description, v1.document.metadata.description,
-            "the artifact description is restored to the predecessor's"
-        );
-        assert_eq!(
-            serving.tags, v1.document.metadata.tags,
-            "the artifact tags are restored to the predecessor's"
-        );
-        assert_ne!(
-            serving.description, v2.document.metadata.description,
-            "the regressed description no longer serves"
+            embeddings, 0,
+            "the stale identity embedding is dropped so ranking stops advertising it"
         );
     }
 
@@ -1309,7 +1900,7 @@ mod skill_learning_review {
         let skill_name = unique_skill_name("rollback-created");
         let package = skill_package(&skill_name, "Created skill rollback");
 
-        let created = publish_skill_revision(&test_db, &scope, &package).await;
+        let created = activate_skill_revision(&test_db, &scope, &package).await;
         let rollback = append_rollback_candidate(
             &test_db,
             &storage_partition_id,
@@ -1317,7 +1908,6 @@ mod skill_learning_review {
             created.artifact_uid,
             created.revision_uid,
             None,
-            Uuid::now_v7(),
             LearningCandidateStatus::Proposed,
         )
         .await;
@@ -1338,9 +1928,9 @@ mod skill_learning_review {
 
         let registry = ArtifactRegistry::new(test_db.store().pool().clone());
         let serving = registry
-            .load_visible_published(&scope, ArtifactKind::Skill, &skill_name)
+            .load_serving(&scope, ArtifactKind::Skill, &skill_name)
             .await
-            .expect("query serving published revision");
+            .expect("query serving activated revision");
         assert!(
             serving.is_none(),
             "a retired created skill no longer serves any revision"
@@ -1374,9 +1964,9 @@ mod skill_learning_review {
         let package = skill_package(&skill_name, "Latest-only monitor skills");
 
         // v1 predecessor, v2 earlier promotion, v3 latest/serving promotion.
-        let _v1 = publish_skill_revision(&test_db, &scope, &package).await;
-        let v2 = publish_skill_revision(&test_db, &scope, &package).await;
-        let v3 = publish_skill_revision(&test_db, &scope, &package).await;
+        let _v1 = activate_skill_revision(&test_db, &scope, &package).await;
+        let v2 = activate_skill_revision(&test_db, &scope, &package).await;
+        let v3 = activate_skill_revision(&test_db, &scope, &package).await;
         let promoted_v2_at = moa_test_support::fixtures::pg_now() - chrono::Duration::days(5);
         let promoted_v3_at = moa_test_support::fixtures::pg_now() - chrono::Duration::days(2);
         seed_promotion_learning_at(
@@ -1384,7 +1974,6 @@ mod skill_learning_review {
             &storage_partition_id,
             &skill_name,
             &v2,
-            Uuid::now_v7(),
             promoted_v2_at,
         )
         .await;
@@ -1393,7 +1982,6 @@ mod skill_learning_review {
             &storage_partition_id,
             &skill_name,
             &v3,
-            Uuid::now_v7(),
             promoted_v3_at,
         )
         .await;
@@ -1539,9 +2127,14 @@ mod skill_learning_review {
         storage_partition_id: &StoragePartitionId,
         skill_name: &str,
         promoted: &moa_artifacts::registry::StoredArtifactRevision,
-        promotion_candidate_id: Uuid,
         promoted_at: chrono::DateTime<Utc>,
     ) {
+        let promotion_candidate_id = activation_promotion_candidate_id(
+            test_db,
+            promoted.artifact_uid,
+            promoted.revision_uid,
+        )
+        .await;
         seed_promoted_candidate(
             test_db,
             storage_partition_id,
@@ -1551,6 +2144,16 @@ mod skill_learning_review {
             promotion_candidate_id,
         )
         .await;
+        let pointer = ArtifactRegistry::new(test_db.store().pool().clone())
+            .load_serving_pointer(
+                &moa_artifacts::release::TenantScope::new(tenant_id_from_storage_partition_id(
+                    storage_partition_id,
+                )),
+                promoted.artifact_uid,
+            )
+            .await
+            .expect("load promotion pointer")
+            .expect("promotion pointer exists");
         let entry = LearningEntry {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
@@ -1560,7 +2163,9 @@ mod skill_learning_review {
             payload: json!({
                 "candidate_id": promotion_candidate_id,
                 "artifact_uid": promoted.artifact_uid,
-                "published_artifact_revision_uid": promoted.revision_uid,
+                "activated_artifact_revision_uid": promoted.revision_uid,
+                "activation_audit_uid": pointer.activation_audit_uid,
+                "activated_pointer_version": pointer.pointer_version,
             }),
             confidence: None,
             sources: vec![LearningLogSourceRef::ArtifactRevision {
@@ -1579,23 +2184,46 @@ mod skill_learning_review {
             .expect("append promotion learning");
     }
 
-    /// Creates and publishes one skill artifact revision, returning it.
-    async fn publish_skill_revision(
+    /// Creates and activates one skill artifact revision, returning it.
+    async fn activate_skill_revision(
         test_db: &moa_test_support::postgres::TestDb,
         scope: &ActionRuleScope,
         package: &ValidatedSkillPackage,
     ) -> moa_artifacts::registry::StoredArtifactRevision {
         let draft = create_draft_skill_artifact(test_db, scope, package).await;
-        let report = validate_for_status(&draft.document, ArtifactStatus::Published);
+        // A skill reaches serving only through learned-skill activation, so the
+        // fixture drives that path explicitly.
+        moa_artifacts::test_fixtures::activate_revision(
+            test_db.store().pool(),
+            moa_artifacts::release::TenantScope::from_action_rule_scope(scope)
+                .expect("skill fixtures are tenant scoped"),
+            moa_artifacts::release::ActivationTarget::SkillVisibility {
+                artifact_uid: draft.artifact_uid,
+            },
+            draft.revision_uid,
+        )
+        .await
+        .expect("activate skill revision");
         ArtifactRegistry::new(test_db.store().pool().clone())
-            .publish_revision(scope, draft.revision_uid, &report)
+            .load_revision(scope, draft.revision_uid)
             .await
-            .expect("publish skill revision")
+            .expect("load activated skill revision")
+            .expect("activated skill revision exists")
+    }
+
+    async fn activation_promotion_candidate_id(
+        _test_db: &moa_test_support::postgres::TestDb,
+        artifact_uid: Uuid,
+        revision_uid: Uuid,
+    ) -> Uuid {
+        Uuid::from_u128(
+            artifact_uid.as_u128() ^ revision_uid.as_u128() ^ 0x51c1_11ea_4e00_8a11_u128,
+        )
     }
 
     /// Appends one candidate of an explicit proposal kind at its initial status.
     ///
-    /// The informational kinds have no draft to publish, so they carry the same
+    /// The informational kinds have no draft to activate, so they carry the same
     /// typed artifact-revision source as a draft proposal only because the fixture
     /// needs one real referent; the deferred completeness trigger refuses a
     /// candidate that ends its transaction with no source at all.
@@ -1657,10 +2285,20 @@ mod skill_learning_review {
         artifact_uid: Uuid,
         promotion_candidate_id: Uuid,
     ) {
+        let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
+        if test_db
+            .store()
+            .get_learning_candidate(&tenant_id, promotion_candidate_id)
+            .await
+            .expect("look up promoted candidate fixture")
+            .is_some()
+        {
+            return;
+        }
         let now = moa_test_support::fixtures::pg_now();
         let candidate = LearningCandidate {
             id: promotion_candidate_id,
-            tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
+            tenant_id,
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
             proposal_kind: LearningProposalKind::SkillDraft,
@@ -1718,11 +2356,23 @@ mod skill_learning_review {
             learning_type: "skill_improved".to_string(),
             target_id: promoted.artifact_uid.to_string(),
             target_label: Some(skill_name.to_string()),
-            payload: json!({
+            payload: {
+                let scope = moa_artifacts::release::TenantScope::new(
+                    tenant_id_from_storage_partition_id(storage_partition_id),
+                );
+                let pointer = ArtifactRegistry::new(test_db.store().pool().clone())
+                    .load_serving_pointer(&scope, promoted.artifact_uid)
+                    .await
+                    .expect("load promotion pointer")
+                    .expect("promotion pointer exists");
+                json!({
                 "candidate_id": promotion_candidate_id,
                 "artifact_uid": promoted.artifact_uid,
-                "published_artifact_revision_uid": promoted.revision_uid,
-            }),
+                "activated_artifact_revision_uid": promoted.revision_uid,
+                "activation_audit_uid": pointer.activation_audit_uid,
+                "activated_pointer_version": pointer.pointer_version,
+                })
+            },
             confidence: None,
             sources: vec![LearningLogSourceRef::ArtifactRevision {
                 revision_uid: promoted.revision_uid,
@@ -1740,7 +2390,6 @@ mod skill_learning_review {
             .expect("append promotion learning");
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn append_rollback_candidate(
         test_db: &moa_test_support::postgres::TestDb,
         storage_partition_id: &StoragePartitionId,
@@ -1748,16 +2397,53 @@ mod skill_learning_review {
         artifact_uid: Uuid,
         promoted_revision_uid: Uuid,
         previous_revision_uid: Option<Uuid>,
-        promotion_candidate_id: Uuid,
+        status: LearningCandidateStatus,
+    ) -> LearningCandidate {
+        let candidate = build_rollback_candidate(
+            test_db,
+            storage_partition_id,
+            skill_name,
+            artifact_uid,
+            promoted_revision_uid,
+            previous_revision_uid,
+            status,
+        )
+        .await;
+        test_db
+            .store()
+            .append_learning_candidate(&candidate)
+            .await
+            .expect("append rollback candidate");
+        candidate
+    }
+
+    async fn build_rollback_candidate(
+        test_db: &moa_test_support::postgres::TestDb,
+        storage_partition_id: &StoragePartitionId,
+        skill_name: &str,
+        artifact_uid: Uuid,
+        promoted_revision_uid: Uuid,
+        previous_revision_uid: Option<Uuid>,
         status: LearningCandidateStatus,
     ) -> LearningCandidate {
         let now = moa_test_support::fixtures::pg_now();
-        // A rollback reverses a promotion that really happened, and accepting one
-        // writes a learning entry sourced from that promotion's candidate. Seeding
-        // it is what lets the proposal carry the typed `PromotionCandidate` source
-        // the closure walks; without the row, the honest options were to omit the
-        // source (leaving the promotion unreachable from the rollback) or to fail
-        // the foreign key.
+        let (expected_transition_audit_uid, expected_pointer_version) =
+            sqlx::query_as::<_, (Uuid, i64)>(
+                "SELECT audit_uid, activated_pointer_version \
+                 FROM moa.artifact_activation_audit \
+                 WHERE artifact_uid = $1 \
+                   AND activated_revision_uid = $2 \
+                   AND decision_kind = 'activation' \
+                 ORDER BY activated_pointer_version DESC \
+                 LIMIT 1",
+            )
+            .bind(artifact_uid)
+            .bind(promoted_revision_uid)
+            .fetch_one(test_db.store().pool())
+            .await
+            .expect("load exact activation generation for rollback fixture");
+        let promotion_candidate_id =
+            activation_promotion_candidate_id(test_db, artifact_uid, promoted_revision_uid).await;
         seed_promoted_candidate(
             test_db,
             storage_partition_id,
@@ -1767,7 +2453,23 @@ mod skill_learning_review {
             promotion_candidate_id,
         )
         .await;
-        let candidate = LearningCandidate {
+        let mut sources = vec![
+            LearningCandidateSourceRef::ArtifactRevision {
+                revision_uid: promoted_revision_uid,
+            },
+            LearningCandidateSourceRef::PromotionCandidate {
+                candidate_id: promotion_candidate_id,
+            },
+        ];
+        if let Some(previous_revision_uid) = previous_revision_uid {
+            sources.push(LearningCandidateSourceRef::ArtifactRevision {
+                revision_uid: previous_revision_uid,
+            });
+        }
+        // Rollback authority comes from the exact activation audit. The fixture
+        // must not invent an unrelated promoted-candidate UUID and merely repeat
+        // it in payload and sources.
+        LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
             user_id: None,
@@ -1786,20 +2488,15 @@ mod skill_learning_review {
                 "promoted_revision_uid": promoted_revision_uid,
                 "previous_revision_uid": previous_revision_uid,
                 "promotion_candidate_id": promotion_candidate_id,
+                "expected_transition_audit_uid": expected_transition_audit_uid,
+                "expected_pointer_version": expected_pointer_version,
             }),
             evaluation_payload: None,
             // A rollback proposal stands on the revision it would archive AND on
             // the promotion it reverses. Both are real rows, so both are typed
             // sources: the promotion link is what makes the original promotion
             // reachable when an erasure enters through the rollback.
-            sources: vec![
-                LearningCandidateSourceRef::ArtifactRevision {
-                    revision_uid: promoted_revision_uid,
-                },
-                LearningCandidateSourceRef::PromotionCandidate {
-                    candidate_id: promotion_candidate_id,
-                },
-            ],
+            sources,
             confidence: None,
             risk_class: LearningRiskClass::High,
             promotion_requirements: vec!["human_review".to_string()],
@@ -1807,13 +2504,16 @@ mod skill_learning_review {
             batch_id: None,
             created_at: now,
             updated_at: now,
-        };
-        test_db
-            .store()
-            .append_learning_candidate(&candidate)
-            .await
-            .expect("append rollback candidate");
-        candidate
+        }
+    }
+
+    fn passing_acceptance_checks() -> AcceptanceChecks {
+        AcceptanceChecks {
+            held_in_pass: true,
+            held_in_description: "candidate suite passed".to_string(),
+            held_out_pass: true,
+            held_out_description: "held-out suite passed".to_string(),
+        }
     }
 
     /// Delegates every review-store operation to the Postgres store unchanged.
@@ -1865,6 +2565,16 @@ mod skill_learning_review {
         ) -> std::result::Result<(), MoaError> {
             self.store.append_learning_in_tx(conn, entry).await
         }
+
+        async fn record_learning_candidate_decision_in_tx(
+            &self,
+            conn: &mut sqlx::PgConnection,
+            decision: &moa_core::types::experience::LearningCandidateDecisionRecord,
+        ) -> std::result::Result<bool, MoaError> {
+            self.store
+                .record_learning_candidate_decision_in_tx(conn, decision)
+                .await
+        }
     }
 
     #[derive(Clone)]
@@ -1913,6 +2623,14 @@ mod skill_learning_review {
                 "injected learning append failure".to_string(),
             ))
         }
+
+        async fn record_learning_candidate_decision_in_tx(
+            &self,
+            _conn: &mut sqlx::PgConnection,
+            _decision: &moa_core::types::experience::LearningCandidateDecisionRecord,
+        ) -> std::result::Result<bool, MoaError> {
+            unreachable!("learning append fails before decision recording")
+        }
     }
 
     fn review_config(test_db: &moa_test_support::postgres::TestDb) -> Arc<MoaConfig> {
@@ -1951,7 +2669,6 @@ mod skill_learning_review {
             "---\n\
          name: {skill_name}\n\
          description: \"{description}\"\n\
-         allowed-tools: bash file_read\n\
          metadata:\n\
            moa-version: \"1.0\"\n\
            moa-tags: \"review, skill\"\n\
@@ -1974,7 +2691,7 @@ mod skill_learning_review {
     ) -> ValidatedSkillPackage {
         let markdown = format!(
             "---\nname: {skill_name}\ndescription: \"{description}\"\n\
-             allowed-tools: bash file_read\nmetadata:\n  moa-version: \"1.0\"\n  \
+             metadata:\n  moa-version: \"1.0\"\n  \
              moa-tags: \"{tags_csv}\"\n  moa-estimated-tokens: \"300\"\n---\n\n# {skill_name}\n\n\
              Use this reviewed workflow when the task pattern recurs.\n"
         );

@@ -56,11 +56,11 @@ pub const EXECUTION_TERMINAL_MAX_GAPS: usize = 50;
 /// Maximum Unicode scalar values retained in one failure or gap summary.
 pub const EXECUTION_TERMINAL_TEXT_MAX_CHARS: usize = 512;
 
-/// Exact published instruction-skill revision pinned into one execution run.
+/// Exact activated instruction-skill revision pinned into one execution run.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedInstructionSkill {
-    /// Stable published skill reference.
+    /// Stable activated skill reference.
     pub skill_ref: ArtifactRef,
     /// Exact immutable artifact revision.
     pub revision_uid: Uuid,
@@ -70,7 +70,7 @@ pub struct PinnedInstructionSkill {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedExecutionTemplate {
-    /// Stable published skill reference.
+    /// Stable activated skill reference.
     pub skill_ref: ArtifactRef,
     /// Exact immutable artifact revision.
     pub revision_uid: Uuid,
@@ -106,7 +106,7 @@ pub struct ExecutionTemplateAdmissionRequest {
     pub contact_id: Option<ContactId>,
     /// Existing authorized parent Session.
     pub session_id: SessionId,
-    /// Exact immutable published skill-template revision.
+    /// Exact immutable activated skill-template revision.
     pub template: PinnedExecutionTemplateRef,
     /// User-authored objective appended to Session history before planning.
     pub objective: String,

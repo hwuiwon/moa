@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "skill_distillation_after_complex_run_then_reuse"
 description = "Phase one records a complex CI workflow, phase two reuses the distilled skill in fewer turns."
 default_timeout_seconds = 90

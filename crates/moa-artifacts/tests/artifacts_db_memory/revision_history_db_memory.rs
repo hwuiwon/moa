@@ -1,6 +1,5 @@
-use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
+use moa_artifacts::document::{ArtifactDocument, ArtifactKind};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
-use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     error::Result, types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
@@ -11,15 +10,21 @@ use uuid::Uuid;
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> Result<()> {
-    // Pins: agent artifact revisions behave like commits while installation current_revision is the deployed ref.
+    // Pins: agent artifact revisions behave like commits -- immutable and always
+    // loadable by exact id -- while the installation's `current_revision_uid` is
+    // the deployed ref that moves. Revision state is deliberately not asserted
+    // here: this is the storage-level independence of history from the pointer.
+    // Attested pointer movement is covered by the release tests.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
     let registry = ArtifactRegistry::new(pool.clone());
-    let storage_partition_id = StoragePartitionId::new(format!("workspace-{}", Uuid::now_v7()));
-    let scope = ActionRuleScope::Tenant {
-        tenant_id: TenantId::from(Uuid::now_v7()),
-    };
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    // The production storage partition for a tenant-owned installation is the
+    // tenant id; a decorative partition string cannot infer a tenant and the
+    // tenant-column trigger refuses it.
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let name = format!("support-agent-{}", Uuid::now_v7());
 
     let v1_doc = agent_doc(&name, "Support Agent", "Triage support requests.");
@@ -33,13 +38,6 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
                 source_text: v1_source.as_bytes(),
                 files: &[],
             },
-        )
-        .await?;
-    let v1 = registry
-        .publish_revision(
-            &scope,
-            v1.revision_uid,
-            &validate_for_status(&v1_doc, ArtifactStatus::Published),
         )
         .await?;
 
@@ -58,13 +56,6 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
                 source_text: v2_source.as_bytes(),
                 files: &[],
             },
-        )
-        .await?;
-    let v2 = registry
-        .publish_revision(
-            &scope,
-            v2.revision_uid,
-            &validate_for_status(&v2_doc, ArtifactStatus::Published),
         )
         .await?;
 

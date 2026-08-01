@@ -984,7 +984,7 @@ async fn create_new_session(
         .run(|| async move {
             let mut meta = new_session_meta(tenant_id, model, &prepare_identity, call_origin)?;
             let agent_context =
-                resolve_agent_context_for_session(prepare_pool, &meta, &agent).await?;
+                resolve_agent_context_for_evaluation(prepare_pool, &meta, &agent, None).await?;
             apply_agent_model_policy(&mut meta, &agent_context)?;
             meta.agent_context = Some(agent_context);
             Ok::<_, HandlerError>(Json::from(meta))

@@ -50,7 +50,9 @@ definition:
     target_variants:
       - key: agent-loop
         kind: agent_loop
-    simulator_model: gpt-4.1-mini
+    simulator_policy:
+      policy_uid: 10000000-0000-0000-0000-000000000001
+      revision: 1
     target_model: gpt-4.1-mini
     parallelism: 2
     trials_per_combination: 3
@@ -218,7 +220,10 @@ fn plan_validation_rejects_invalid_embedded_simulation_and_wrong_refs() {
                             "kind": "agent_loop"
                         }
                     ],
-                    "simulator_model": "",
+                    "simulator_policy": {
+                        "policy_uid": "00000000-0000-0000-0000-000000000000",
+                        "revision": 0
+                    },
                     "parallelism": 0,
                     "trials_per_combination": 101,
                     "budget": {
@@ -327,7 +332,10 @@ fn minimal_valid_plan() -> String {
                 "target_variants": [
                     { "key": "agent-loop", "kind": "agent_loop" }
                 ],
-                "simulator_model": "gpt-4.1-mini",
+                "simulator_policy": {
+                    "policy_uid": "10000000-0000-0000-0000-000000000001",
+                    "revision": 1
+                },
                 "parallelism": 1,
                 "trials_per_combination": 1,
                 "budget": { "max_total_cents": 1000 }

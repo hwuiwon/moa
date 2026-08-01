@@ -80,13 +80,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
             },
         )
         .await?;
-    ArtifactRegistry::new(graph_pool.clone())
-        .publish_revision(
-            &ActionRuleScope::Tenant { tenant_id },
-            skill_draft.revision_uid,
-            &validate_for_status(&skill_document, ArtifactStatus::Published),
-        )
-        .await?;
+    serve_skill_revision(&graph_pool, tenant_id, &skill_draft).await?;
 
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
@@ -182,8 +176,10 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
 }
 
 #[tokio::test]
-async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publish() -> Result<()> {
-    // Pins: configured-agent sessions install the skill revision locked by the agent, not latest.
+async fn agent_locked_superseded_skill_revision_materializes_exact_files_after_newer_activation()
+-> Result<()> {
+    // Pins: configured-agent sessions install their exact historically activated
+    // skill revision after a newer activation supersedes it.
     let root = TempDir::new()?;
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
@@ -221,13 +217,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             },
         )
         .await?;
-    let first_revision = registry
-        .publish_revision(
-            &scope,
-            first_draft.revision_uid,
-            &validate_for_status(&skill_document, ArtifactStatus::Published),
-        )
-        .await?;
+    serve_skill_revision(&graph_pool, tenant_id, &first_draft).await?;
     let second_draft = registry
         .create_draft(
             &scope,
@@ -239,13 +229,12 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             },
         )
         .await?;
-    registry
-        .publish_revision(
-            &scope,
-            second_draft.revision_uid,
-            &validate_for_status(&skill_document, ArtifactStatus::Published),
-        )
-        .await?;
+    serve_skill_revision(&graph_pool, tenant_id, &second_draft).await?;
+    let first_revision = registry
+        .load_revision(&scope, first_draft.revision_uid)
+        .await?
+        .expect("first skill revision remains available after supersession");
+    assert_eq!(first_revision.status, ArtifactStatus::Superseded);
     let agent_document = agent_artifact_document(
         &format!("locked-agent-{}", Uuid::now_v7().simple()),
         &skill_name,
@@ -262,13 +251,17 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             },
         )
         .await?;
-    let agent_revision = registry
-        .publish_revision(
+    registry
+        .record_validation_report(
             &scope,
             agent_draft.revision_uid,
-            &validate_for_status(&agent_document, ArtifactStatus::Published),
+            &validate_for_status(&agent_document, ArtifactStatus::Ready),
         )
         .await?;
+    let agent_revision = registry
+        .load_revision(&scope, agent_draft.revision_uid)
+        .await?
+        .expect("validated agent candidate remains loadable");
 
     let session_id = session_store
         .create_session(session_meta(
@@ -658,4 +651,26 @@ fn tool_results_by_provider_id(
             _ => None,
         })
         .collect()
+}
+
+/// Activates a skill revision so the tenant serves it.
+///
+/// A turn-loop test that needs the skill resolvable drives the release path. The
+/// fixture runs the real submit, decide, and activate transaction.
+async fn serve_skill_revision(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    revision: &moa_artifacts::registry::StoredArtifactRevision,
+) -> Result<()> {
+    moa_artifacts::test_fixtures::activate_revision(
+        pool,
+        moa_artifacts::release::TenantScope::new(tenant_id),
+        moa_artifacts::release::ActivationTarget::SkillVisibility {
+            artifact_uid: revision.artifact_uid,
+        },
+        revision.revision_uid,
+    )
+    .await
+    .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?;
+    Ok(())
 }

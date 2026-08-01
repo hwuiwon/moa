@@ -253,6 +253,7 @@ async fn start_turn(
             model: None,
             contact: None,
             max_turns: Some(12),
+            resource_budget: Default::default(),
             execution_template: None,
         })
         .send()
@@ -1028,6 +1029,7 @@ impl SupplementaryLiveHarness {
                 model: None,
                 contact: None,
                 max_turns: Some(max_turns),
+                resource_budget: Default::default(),
                 execution_template: None,
             })
             .send()

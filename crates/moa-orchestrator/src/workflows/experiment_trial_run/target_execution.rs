@@ -3,7 +3,7 @@
 use super::finalize::failure_outcome;
 use super::status::{attach_trial_execution_run, attach_trial_session, increment_trial_turn};
 use super::trial_simulator::{
-    SimulatorContext, simulator_completion_request, simulator_done, simulator_turn_from_response,
+    SimulatorContext, simulator_completion_request, simulator_turn_from_response,
 };
 use super::*;
 use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
@@ -126,6 +126,9 @@ struct TargetObservations {
     turns: u32,
     latest_output: Option<String>,
     latest_sequence: u64,
+    simulator_policy: Option<moa_experiments::simulator_policy::registry::SimulatorPolicyBinding>,
+    simulator_decision: Option<SimulatorDecision>,
+    simulator_reason: Option<String>,
 }
 
 impl TargetObservations {
@@ -163,6 +166,9 @@ impl TargetObservations {
                 latest_sequence_num: self.latest_sequence,
                 visible_output: self.latest_output,
                 failure_code: error.as_ref().map(|_| outcome.as_str().to_string()),
+                simulator_policy: self.simulator_policy,
+                simulator_decision: self.simulator_decision,
+                simulator_reason: self.simulator_reason,
             },
             terminal_status: status,
             stop_reason,
@@ -198,7 +204,7 @@ pub(super) async fn run_agent_loop_trial(
     simulator_context: SimulatorContext,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
-    _providers: &Arc<ProviderRegistry>,
+    providers: &Arc<ProviderRegistry>,
 ) -> Result<TrialTargetOutcome, HandlerError> {
     // Scope mismatch is decided before the target payload is used for any
     // session read, session write, or simulator provider call.
@@ -208,6 +214,19 @@ pub(super) async fn run_agent_loop_trial(
             "experiment trial scope does not match the workflow tenant",
         )
         .into());
+    }
+    let components = &trial.simulator.policy.components;
+    let (provider_id, resolved_model) = providers
+        .resolve_provider_id(Some(components.model.as_str()))
+        .map_err(moa_error_to_handler_error)?;
+    if provider_id.as_str() != components.provider || resolved_model != components.model {
+        return Err(bad_request(format!(
+            "simulator policy expects {}:{} but runtime resolves {}:{}",
+            components.provider,
+            components.model,
+            provider_id.as_str(),
+            resolved_model
+        )));
     }
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
@@ -235,6 +254,9 @@ pub(super) async fn run_agent_loop_trial(
         total_cost_cents: prior_cost_cents,
         latest_output: latest_brain_response(&initial_events),
         latest_sequence: transcript_sequence,
+        simulator_policy: Some(trial.simulator.policy.binding),
+        simulator_decision: None,
+        simulator_reason: None,
     };
     if forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
         return Ok(observations.into_outcome(
@@ -400,7 +422,13 @@ pub(super) async fn run_agent_loop_trial(
             },
             turn = simulator_call => {
                 match turn {
-                    Ok(turn) => simulator_turn_from_response(turn.into_inner()),
+                    Ok(turn) => match simulator_turn_from_response(turn.into_inner()) {
+                        Ok(turn) => turn,
+                        Err((usage, error)) => {
+                            resources::reconcile(ctx, &trial, simulator_key, usage, pool).await?;
+                            return Err(error);
+                        }
+                    },
                     Err(error) => {
                         resources::reconcile(
                             ctx,
@@ -416,8 +444,9 @@ pub(super) async fn run_agent_loop_trial(
             }
         };
         resources::reconcile(ctx, &trial, simulator_key, simulator_turn.usage, pool).await?;
-        let simulator_message = simulator_turn.message;
-        if simulator_done(&simulator_message) {
+        observations.simulator_decision = Some(simulator_turn.decision);
+        observations.simulator_reason = Some(simulator_turn.reason);
+        if simulator_turn.decision.is_terminal() {
             return Ok(observations.into_outcome(
                 score_target,
                 session_id,
@@ -426,6 +455,7 @@ pub(super) async fn run_agent_loop_trial(
                 None,
             ));
         }
+        let simulator_message = simulator_turn.message;
 
         // Reserve before the target turn is queued. The queue call is the
         // side-effecting dispatch: once it lands the target starts billing.
@@ -817,6 +847,7 @@ async fn ensure_agent_loop_session(
                 &request.identity,
                 trial_call_origin(trial),
                 agent,
+                request.release_overlay.clone(),
                 pool,
                 session_store,
             )
@@ -1802,6 +1833,7 @@ async fn create_new_session(
     identity: &Identity,
     call_origin: CallOrigin,
     agent: AgentSessionSelection,
+    release_overlay: Option<moa_wire::experiments::ArtifactReleaseExperimentArm>,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
@@ -1810,8 +1842,24 @@ async fn create_new_session(
     let meta = ctx
         .run(|| async move {
             let mut meta = new_session_meta(tenant_id, model, &prepare_identity, call_origin)?;
-            let agent_context =
-                resolve_agent_context_for_session(prepare_pool, &meta, &agent).await?;
+            let overlay_binding = release_overlay.as_ref().map(|arm| {
+                meta.id = SessionId(arm.eval_session_id);
+                moa_artifacts::release::EvalOverlayBinding {
+                    overlay_uid: arm.overlay_uid,
+                    overlay_token: arm.overlay_token.clone(),
+                    eval_session_id: arm.eval_session_id,
+                }
+            });
+            let agent_context = resolve_agent_context_for_evaluation(
+                prepare_pool,
+                &meta,
+                &agent,
+                overlay_binding.as_ref(),
+            )
+            .await?;
+            if let Some(arm) = release_overlay.as_ref() {
+                ensure_release_revision_selected(&agent_context, arm)?;
+            }
             apply_agent_model_policy(&mut meta, &agent_context)?;
             meta.agent_context = Some(agent_context);
             Ok::<_, HandlerError>(Json::from(meta))
@@ -1838,6 +1886,28 @@ async fn create_new_session(
         .name("experiment_trial_create_session")
         .await?
         .into_inner())
+}
+
+fn ensure_release_revision_selected(
+    context: &moa_core::types::agent::AgentContext,
+    arm: &moa_wire::experiments::ArtifactReleaseExperimentArm,
+) -> Result<(), HandlerError> {
+    let selected = context.revision_uid == arm.revision_uid
+        || context
+            .artifact_dependencies
+            .iter()
+            .any(|dependency| dependency.revision_uid == arm.revision_uid);
+    if selected {
+        return Ok(());
+    }
+    Err(TerminalError::new_with_code(
+        409,
+        format!(
+            "artifact release arm {} did not resolve revision {} through the production agent dependency lock",
+            arm.variant_key, arm.revision_uid
+        ),
+    )
+    .into())
 }
 
 async fn observe_session_after(
@@ -2305,11 +2375,9 @@ mod tests {
             data_bundle_ids: Vec::new(),
             artifact_revision_uids: Vec::new(),
             simulator: moa_experiments::model::ExperimentSimulatorConfig {
-                model: ModelId::new("sim"),
-                temperature: None,
+                policy: super::fixture_simulator_policy("sim"),
                 max_turns: 1,
                 token_budget: None,
-                metadata: Value::Null,
             },
             target_model: None,
             seed: None,

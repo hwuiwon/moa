@@ -17,14 +17,24 @@ use crate::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::validation::ValidationReport;
 
 mod contributions;
+#[cfg(feature = "test-support")]
+pub(crate) mod release;
+#[cfg(not(feature = "test-support"))]
+mod release;
 mod revisions;
+mod serving;
 mod skill_embeddings;
 
 pub use contributions::{
     NewRevisionContribution, NewSuiteContribution, RevisionContributionKind,
     StoredSuiteContribution, SuiteContributionKind,
 };
-pub use revisions::{RollbackApplication, insert_published_revision};
+pub use release::{
+    CandidateSubjectInputs, CandidateSubmission, DecisionOutcome, RecordDecision, ReleaseCandidate,
+    ReleaseRepository, SubmitCandidate,
+};
+pub use revisions::RollbackApplication;
+pub use serving::{ActivationProvenance, ServingPointer};
 pub use skill_embeddings::{
     MissingSkillEmbedding, NamedSkillEmbeddingNeighbor, NewSkillEmbedding, SkillEmbeddingNeighbor,
 };
@@ -188,21 +198,6 @@ pub struct NewArtifactDraft<'a> {
     pub files: &'a [NewArtifactFile],
 }
 
-/// Published artifact revision payload to insert inside an existing transaction.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NewPublishedArtifactRevision<'a> {
-    /// Canonical artifact document.
-    pub document: &'a ArtifactDocument,
-    /// Original source format: `json` or `yaml`.
-    pub source_format: &'a str,
-    /// Original submitted source bytes.
-    pub source_text: &'a [u8],
-    /// Optional package files stored with the revision.
-    pub files: &'a [NewArtifactFile],
-    /// Optional caller-owned artifact-local version.
-    pub version: Option<i32>,
-}
-
 /// Stored artifact file row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactFile {
@@ -233,6 +228,16 @@ impl ArtifactRegistry {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Returns the pool this registry reads and writes through.
+    ///
+    /// The release repository and the artifact registry are separate surfaces over
+    /// the same pool; callers that hold one and need the other use this instead of
+    /// threading a second handle everywhere.
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 }
 

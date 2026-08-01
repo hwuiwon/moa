@@ -236,6 +236,23 @@ fn compile_rejects_cycles_before_canonicalization() {
 }
 
 #[test]
+fn compile_rejects_an_unpinned_capability_contract() {
+    // Pins: every durable capability must carry the exact governed contract
+    // revision later checked by policy evaluation and ToolExecutor dispatch.
+    let mut request = valid_request();
+    request.catalog.capabilities[0].contract_revision.clear();
+    request.catalog.catalog_hash = catalog_hash(1, &request.catalog.capabilities)
+        .expect("rehash catalog with missing contract revision");
+
+    let outcome = compile(request);
+    assert!(outcome.compiled.is_none());
+    assert!(outcome.report.issues.iter().any(|issue| {
+        issue.code == "empty_capability_contract_revision"
+            && issue.path == "catalog.capabilities[0].contract_revision"
+    }));
+}
+
+#[test]
 fn compile_rejects_external_schema_refs_unsorted_catalog_and_budget_excess() {
     // Pins: schemas cannot retrieve remote content and catalog/budget admission is deterministic.
     let mut request = valid_request();
@@ -1446,6 +1463,7 @@ fn capability(name: &str) -> ExecutionCapability {
             name: name.to_string(),
             version: "v1".to_string(),
         },
+        contract_revision: "contract-v1".to_string(),
         description: format!("Capability {name}"),
         input_schema: json!({ "type": "object" }),
         output_schema: json!({ "type": "object" }),

@@ -31,7 +31,7 @@ async fn build_simulator_context(
     scope: ActionRuleScope,
     trial: ExperimentTrialRecord,
 ) -> Result<SimulatorContext, HandlerError> {
-    let registry = ArtifactRegistry::new(pool);
+    let registry = ArtifactRegistry::new(pool.clone());
     let plan_revision = registry
         .load_revision(&scope, trial.plan_revision_uid)
         .await
@@ -61,6 +61,29 @@ async fn build_simulator_context(
             "plan revision must contain an experiment_plan definition",
         ));
     };
+    if definition.simulator_policy != trial.simulator.policy.reference() {
+        return Err(bad_request(
+            "persisted simulator policy does not match the pinned experiment plan",
+        ));
+    }
+    let current_policy = SimulatorPolicyStore::new(pool)
+        .resolve_policy(
+            trial.scope.tenant_id(),
+            definition.simulator_policy,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| bad_request(error.to_string()))?;
+    if current_policy != trial.simulator.policy {
+        return Err(bad_request(
+            "persisted simulator policy snapshot no longer matches its certified registry row",
+        ));
+    }
+    if trial.seed.is_some() != trial.simulator.policy.components.decoding.seeded {
+        return Err(bad_request(
+            "persisted simulator seed does not match the certified decoding policy",
+        ));
+    }
     let selection = select_simulation(
         definition,
         trial.scenario_id.as_deref(),
@@ -77,41 +100,25 @@ async fn build_simulator_context(
     })
 }
 
-const SIMULATOR_SYSTEM_PROMPT: &str = "\
-You are the simulated user in a behavior-lab trial.
-Return only the next user-visible message to send to the target agent. Do not call tools. Return \
-DONE when the simulated user should stop.";
-
 fn simulator_context_prompt(
     selection: &PlanSimulationSelection,
     seed: Option<&str>,
 ) -> Result<String, HandlerError> {
-    let mut sections = Vec::new();
-    if let Some(seed) = seed {
-        sections.push(format!("Deterministic seed: {seed}"));
-    }
-    push_simulation_section(&mut sections, "Persona", &selection.persona)?;
-    push_simulation_section(&mut sections, "Profile", &selection.profile)?;
-    push_simulation_section(&mut sections, "Scenario", &selection.scenario)?;
-    for (index, bundle) in selection.data_bundles.iter().enumerate() {
-        push_simulation_section(&mut sections, &format!("Data bundle {}", index + 1), bundle)?;
-    }
-    Ok(sections.join("\n\n"))
-}
-
-fn push_simulation_section<T>(
-    sections: &mut Vec<String>,
-    label: &str,
-    definition: &T,
-) -> Result<(), HandlerError>
-where
-    T: Serialize,
-{
-    let definition = serde_json::to_string_pretty(definition).map_err(|error| {
-        TerminalError::new(format!("serialize {label} simulation failed: {error}"))
+    let payload = serde_json::json!({
+        "deterministic_seed": seed,
+        "persona": selection.persona,
+        "profile": selection.profile,
+        "scenario": selection.scenario,
+        "data_bundles": selection.data_bundles,
+    });
+    let bytes = moa_artifacts::canonical::canonical_json_bytes(&payload).map_err(|error| {
+        TerminalError::new(format!(
+            "serialize canonical simulator context failed: {error}"
+        ))
     })?;
-    sections.push(format!("{label} simulation:\n{definition}"));
-    Ok(())
+    String::from_utf8(bytes).map_err(|error| {
+        TerminalError::new(format!("canonical simulator context is not UTF-8: {error}")).into()
+    })
 }
 
 /// One simulator model call: the message it produced and what it actually cost.
@@ -122,8 +129,12 @@ where
 /// supposed to bound it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SimulatorTurn {
-    /// Next simulated user message, trimmed.
+    /// Typed decision emitted under the certified response protocol.
+    pub(super) decision: SimulatorDecision,
+    /// Next simulated user message, trimmed; empty for terminal decisions.
     pub(super) message: String,
+    /// Bounded audit reason returned by the simulator.
+    pub(super) reason: String,
     /// Actual tokens and cost the call consumed.
     pub(super) usage: ExperimentResourceUsage,
 }
@@ -135,40 +146,61 @@ pub(super) fn simulator_completion_request(
     transcript: &[ContextMessage],
     turn_index: u32,
 ) -> CompletionRequest {
-    let mut request = CompletionRequest::new(format!(
-        "Generate simulator user message number {}.",
+    let instruction = format!(
+        "Produce simulator decision number {} using the required response schema.",
         turn_index + 1
+    );
+    let mut request = CompletionRequest::new("");
+    let components = &trial.simulator.policy.components;
+    request.model = Some(components.model.clone());
+    request.temperature = Some(components.decoding.temperature());
+    request.max_output_tokens =
+        Some(usize::try_from(components.decoding.max_output_tokens).unwrap_or(usize::MAX));
+    request.response_format = Some(JsonResponseFormat::strict_json_schema(
+        "behavior_lab_simulator_turn",
+        "A typed simulated-user decision for one Behavior Lab turn.",
+        simulator_response_schema(),
     ));
-    request.model = Some(trial.simulator.model.clone());
-    request.temperature = trial.simulator.temperature;
-    request.max_output_tokens = Some(512);
     request.tools = Vec::new();
-    request
-        .messages
-        .insert(0, ContextMessage::user(simulator_context.prompt.clone()));
-    request
-        .messages
-        .insert(0, ContextMessage::system(SIMULATOR_SYSTEM_PROMPT));
+    request.messages = vec![
+        ContextMessage::system(components.system_prompt.clone()),
+        ContextMessage::user(simulator_context.prompt.clone()),
+    ];
     request.messages.extend(transcript.iter().cloned());
+    request.messages.push(ContextMessage::user(instruction));
     request
 }
 
 /// Converts one durable gateway response into a metered simulator turn.
-pub(super) fn simulator_turn_from_response(response: CompletionResponse) -> SimulatorTurn {
+pub(super) fn simulator_turn_from_response(
+    response: CompletionResponse,
+) -> Result<SimulatorTurn, (ExperimentResourceUsage, HandlerError)> {
     let usage = response.token_usage();
     let input_tokens = usage.total_input_tokens() as u64;
     let output_tokens = usage.output_tokens as u64;
     let cost_cents = compute_cost_cents(response.model.as_str(), usage) as u64;
     record_simulation_tokens("simulator", input_tokens + output_tokens);
     record_simulation_cost_cents("simulator", cost_cents);
-    SimulatorTurn {
-        message: response.text.trim().to_string(),
-        usage: ExperimentResourceUsage::model_call(
-            input_tokens,
-            output_tokens,
-            cost_cents.saturating_mul(MICRO_USD_PER_CENT),
-        ),
-    }
+    let usage = ExperimentResourceUsage::model_call(
+        input_tokens,
+        output_tokens,
+        cost_cents.saturating_mul(MICRO_USD_PER_CENT),
+    );
+    let parsed = parse_simulator_response(&response.text).map_err(|error| {
+        (
+            usage,
+            TerminalError::new(format!(
+                "simulator violated its certified response protocol: {error}"
+            ))
+            .into(),
+        )
+    })?;
+    Ok(SimulatorTurn {
+        decision: parsed.decision,
+        message: parsed.message,
+        reason: parsed.reason,
+        usage,
+    })
 }
 
 pub(super) fn effective_max_turns(simulator_max_turns: u32, scenario_max_turns: u32) -> u32 {
@@ -176,11 +208,4 @@ pub(super) fn effective_max_turns(simulator_max_turns: u32, scenario_max_turns: 
     scenario_max_turns
         .map(|max_turns| max_turns.min(simulator_max_turns.max(1)))
         .unwrap_or_else(|| simulator_max_turns.max(1))
-}
-
-pub(super) fn simulator_done(message: &str) -> bool {
-    let normalized = message.trim();
-    normalized.is_empty()
-        || normalized.eq_ignore_ascii_case("done")
-        || normalized.eq_ignore_ascii_case("[done]")
 }

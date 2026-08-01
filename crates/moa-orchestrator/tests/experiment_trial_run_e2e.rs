@@ -9,19 +9,41 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
+use moa_agents::AgentResolver;
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
+use moa_artifacts::release::{ActivationTarget, Digest32, TenantScope};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     events::Event, traits::Identity, types::action_policy::ActionRuleScope,
-    types::contact::ContactId, types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::completion::CompletionRequest, types::contact::ContactId,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
     types::execution_planning::PinnedExecutionTemplateRef, types::identifiers::ModelId,
     types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_experiments::{
     model::{
         ExperimentSimulatorConfig, ExperimentTrialRecord, NewExperimentRun, NewExperimentTrial,
+    },
+    simulator_policy::{
+        fidelity::{
+            ClassAgreement, ConfidenceInterval, CriticalClassBound, DisagreementSlice,
+            DomainFidelityBounds, EffectEquivalenceBound, FIDELITY_ARTIFACT_VERSION,
+            FidelityStudyArtifact, FidelityStudyCost, HumanDataAuthorization, IndependentUnit,
+            IntervalMethod, LabelAdjudication, LabelProtocolPin, MinimumSupport, PowerAnalysisPin,
+            TreatmentEffectAgreement,
+        },
+        registry::{
+            CohortPin, ConsentBasis, DeidentificationMethod, ResolvedSimulatorPolicy,
+            ScenarioDomain, SimulatorDecoding, SimulatorPolicy, SimulatorPolicyComponents,
+            ValidityWindow,
+        },
+        runtime::{
+            DEFAULT_SIMULATOR_SYSTEM_PROMPT, production_context_contract_hash, production_protocol,
+        },
+        store::SimulatorPolicyStore,
     },
     store::ExperimentStore,
 };
@@ -58,6 +80,154 @@ mod support;
 
 const K_PROBE_ATTACHED: &str = "attached";
 const SCRIPTED_MODEL: &str = "scripted-loadtest";
+const SCRIPTED_REQUEST_LOG: &str = "experiment-trial-run-requests.jsonl";
+
+fn policy_cohort(id: &str, units: u32, fill: u8) -> CohortPin {
+    CohortPin {
+        cohort_id: id.to_string(),
+        independent_units: units,
+        content_hash: Digest32([fill; 32]),
+        consent_basis: ConsentBasis::AuthorizedInternalDogfood,
+        deidentification: DeidentificationMethod::SyntheticSurrogate,
+    }
+}
+
+async fn register_certified_simulator_policy(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    model: &str,
+    provider: &str,
+) -> Result<ResolvedSimulatorPolicy> {
+    let now = Utc::now();
+    let domain = ScenarioDomain::new("behavior-lab-e2e")?;
+    let components = SimulatorPolicyComponents {
+        domain: domain.clone(),
+        model: ModelId::new(model),
+        provider: provider.to_string(),
+        decoding: SimulatorDecoding {
+            temperature_milli: 0,
+            max_output_tokens: 512,
+            seeded: true,
+        },
+        system_prompt: DEFAULT_SIMULATOR_SYSTEM_PROMPT.to_string(),
+        protocol: production_protocol()?,
+        context_contract_hash: production_context_contract_hash()?,
+        calibration_cohort: policy_cohort("calibration", 40, 0xC0),
+        validity: ValidityWindow {
+            valid_from: now - chrono::Duration::days(1),
+            valid_until: now + chrono::Duration::days(180),
+        },
+    };
+    let policy = SimulatorPolicy {
+        policy_uid: Uuid::now_v7(),
+        revision: 1,
+        components: components.clone(),
+    };
+    let artifact = FidelityStudyArtifact {
+        artifact_version: FIDELITY_ARTIFACT_VERSION,
+        study_uid: Uuid::now_v7(),
+        policy_uid: policy.policy_uid,
+        policy_revision: policy.revision,
+        policy_hash: policy.policy_hash()?,
+        simulator_components: components,
+        domain,
+        bounds: DomainFidelityBounds {
+            domain: ScenarioDomain::new("behavior-lab-e2e")?,
+            independent_unit: IndependentUnit::HumanParticipant,
+            minimum_support: MinimumSupport {
+                selection_units: 60,
+                certification_units: 120,
+                per_critical_class_units: 100,
+                treatment_effect_units_per_arm: 150,
+                per_slice_units: 40,
+                power_analysis: PowerAnalysisPin {
+                    analysis_id: "behavior-lab-e2e-power".to_string(),
+                    analysis_hash: Digest32([0xD3; 32]),
+                    detectable_effect_micro: 50_000,
+                    power_permille: 800,
+                },
+            },
+            class_confidence_permille: 950,
+            critical_classes: vec![CriticalClassBound {
+                class: "handoff_required".to_string(),
+                min_sensitivity_lower_bound_permille: 800,
+                min_specificity_lower_bound_permille: 850,
+            }],
+            effect_equivalence: EffectEquivalenceBound {
+                margin_micro: 50_000,
+                method: IntervalMethod::ClusterBootstrapPercentile {
+                    resamples: 2_000,
+                    seed: 7,
+                },
+                confidence_permille: 950,
+            },
+            max_slice_disagreement_permille: Some(100),
+            recertification_interval_days: 90,
+        },
+        selection_cohort: policy_cohort("selection", 80, 0x51),
+        certification_cohort: policy_cohort("certification", 220, 0xCE),
+        label_protocol: LabelProtocolPin {
+            protocol_id: "behavior-lab-e2e-labels".to_string(),
+            version: 1,
+            rubric_hash: Digest32([0xE4; 32]),
+            adjudication: LabelAdjudication::IndependentWithAdjudication,
+            annotators: 3,
+            agreement_permille: Some(880),
+        },
+        class_agreement: vec![ClassAgreement {
+            class: "handoff_required".to_string(),
+            true_positive: 110,
+            false_negative: 6,
+            true_negative: 100,
+            false_positive: 4,
+            independent_units: 220,
+        }],
+        disagreement_slices: vec![DisagreementSlice {
+            slice: "escalation".to_string(),
+            simulated_rate_permille: 320,
+            human_rate_permille: 280,
+            independent_units: 90,
+        }],
+        effect_agreement: Some(TreatmentEffectAgreement {
+            simulated_effect_micro: 120_000,
+            human_effect_micro: 100_000,
+            difference_interval: ConfidenceInterval {
+                low_micro: -10_000,
+                high_micro: 30_000,
+                confidence_permille: 950,
+                method: IntervalMethod::ClusterBootstrapPercentile {
+                    resamples: 2_000,
+                    seed: 7,
+                },
+            },
+            simulated_units: 400,
+            human_units: 180,
+        }),
+        cost: FidelityStudyCost {
+            budget_micro_usd: 5_000_000,
+            spent_micro_usd: 4_100_000,
+            simulator_calls: 4_400,
+            human_units_consumed: 300,
+        },
+        authorization: HumanDataAuthorization {
+            authorization_id: "behavior-lab-e2e-authorization".to_string(),
+            approved_by: "test-suite".to_string(),
+            approved_at: now - chrono::Duration::days(1),
+            expires_at: now + chrono::Duration::days(180),
+        },
+        observed_at: now,
+    };
+    let store = SimulatorPolicyStore::new(pool.clone());
+    store.register_policy(tenant_id, &policy).await?;
+    let outcome = store.record_study(tenant_id, &artifact, now).await?;
+    if outcome.verdict() != "certified" {
+        bail!("Behavior Lab E2E simulator fixture was not certified: {outcome:?}");
+    }
+    store
+        .resolve_policy(tenant_id, policy.reference(), now)
+        .await
+        .map_err(Into::into)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionTurnWaiterProbeInput {
@@ -136,9 +306,14 @@ fn spawn_orchestrator(
         .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
+        .env("MOA_LINEAGE_SINK", "postgres")
         .env(
             "MOA_PROVIDERS_OVERRIDE",
             format!("scripted:{}", provider_override_fixture.display()),
+        )
+        .env(
+            "MOA_SCRIPTED_PROVIDER_REQUEST_LOG",
+            memory_dir.path().join(SCRIPTED_REQUEST_LOG),
         )
         .env("RUST_LOG", "info")
         .env_remove("MOA_ANTHROPIC_API_KEY")
@@ -207,6 +382,7 @@ fn spawn_orchestrator_no_provider_override_with_fga(
         .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
+        .env("MOA_LINEAGE_SINK", "postgres")
         .env("RUST_LOG", "info")
         .env_remove("MOA_PROVIDERS_OVERRIDE")
         .env_remove("MOA_ANTHROPIC_API_KEY")
@@ -281,6 +457,8 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
             .await
             .context("connect to test Postgres")?;
         let store = ExperimentStore::new(pool.clone());
+        let simulator_policy =
+            register_certified_simulator_policy(&pool, tenant_id, SCRIPTED_MODEL, "openai").await?;
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
         let run = store
             .insert_run(
@@ -289,14 +467,26 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
                     &identity,
                     agent_revision_uid,
                     SCRIPTED_MODEL,
+                    &simulator_policy,
                     fixture_experiment_envelope(),
                 ),
             )
             .await
             .context("seed parent experiment run")?;
-        let plan_revision_uid =
-            publish_trial_plan(&pool, &scope, agent_revision_uid, SCRIPTED_MODEL).await?;
-        let trial = new_trial(run.run_uid, plan_revision_uid, SCRIPTED_MODEL);
+        let plan_revision_uid = publish_trial_plan(
+            &pool,
+            &scope,
+            agent_revision_uid,
+            SCRIPTED_MODEL,
+            &simulator_policy,
+        )
+        .await?;
+        let trial = new_trial(
+            run.run_uid,
+            plan_revision_uid,
+            SCRIPTED_MODEL,
+            &simulator_policy,
+        );
         let trial_key = trial.trial_key.clone();
         let workflow_request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
@@ -305,6 +495,7 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
             variant: baseline_variant(SCRIPTED_MODEL),
             identity: identity.clone(),
             completion_awakeable_id: None,
+            release_overlay: None,
         };
 
         let first = run_trial_workflow(
@@ -317,7 +508,7 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
         )
         .await?;
 
-        assert_eq!(first.status, "completed");
+        assert_eq!(first.status, "completed", "trial failed: {:?}", first.error);
         assert_eq!(first.stop_reason.as_deref(), Some("max_turns"));
         assert_eq!(first.turn_count, 2);
         assert_eq!(first.run_uid, run.run_uid);
@@ -354,6 +545,27 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
                 .any(|record| matches!(record.event, Event::ToolCall { .. })),
             "simulator trial fixture should not expose or exercise target tools"
         );
+        let requests = scripted_requests(&memory_dir)?;
+        let simulator_requests = requests
+            .iter()
+            .filter(|request| {
+                request
+                    .response_format
+                    .as_ref()
+                    .is_some_and(|format| format.name == "behavior_lab_simulator_turn")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(simulator_requests.len(), 2);
+        assert!(simulator_requests.iter().all(|request| {
+            request.model.as_ref().map(ModelId::as_str) == Some(SCRIPTED_MODEL)
+                && request.messages.first().is_some_and(|message| {
+                    message.content == simulator_policy.components.system_prompt
+                })
+                && request
+                    .response_format
+                    .as_ref()
+                    .is_some_and(|format| format.strict)
+        }));
 
         let retry = read_trial_workflow_status(
             &client,
@@ -422,6 +634,7 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let tenant_id = scope.tenant_id();
+    let artifact_scope = ActionRuleScope::Tenant { tenant_id };
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
     grant_tenant_admin(&identity, tenant_id).await?;
@@ -435,10 +648,21 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
             .await
             .context("connect to test Postgres")?;
         let store = ExperimentStore::new(pool.clone());
-        let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
-        let plan_revision_uid =
-            publish_trial_plan(&pool, &scope, agent_revision_uid, SCRIPTED_MODEL).await?;
-        let template_revision_uid = publish_execution_template(&pool, &scope).await?;
+        let simulator_policy =
+            register_certified_simulator_policy(&pool, tenant_id, SCRIPTED_MODEL, "openai").await?;
+        let agent_revision_uid = publish_trial_agent(&pool, &artifact_scope).await?;
+        let plan_revision_uid = publish_trial_plan(
+            &pool,
+            &scope,
+            agent_revision_uid,
+            SCRIPTED_MODEL,
+            &simulator_policy,
+        )
+        .await?;
+        // Agents and execution-template skills are tenant release subjects. The
+        // run, trial, internal Session, and ExecutionRun retain the narrower
+        // contact scope independently.
+        let template_revision_uid = publish_execution_template(&pool, &artifact_scope).await?;
         let template = PinnedExecutionTemplateRef {
             skill_ref: "skill://experiment-trial-output".to_string(),
             revision_uid: template_revision_uid,
@@ -449,11 +673,16 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
         let run = store
             .insert_run(
                 &scope,
-                new_execution_template_parent_run(&identity, target.clone(), variant.clone()),
+                new_execution_template_parent_run(
+                    &identity,
+                    target.clone(),
+                    variant.clone(),
+                    &simulator_policy,
+                ),
             )
             .await
             .context("seed execution-template parent experiment run")?;
-        let trial = new_execution_template_trial(run.run_uid, plan_revision_uid);
+        let trial = new_execution_template_trial(run.run_uid, plan_revision_uid, &simulator_policy);
         let trial_key = trial.trial_key.clone();
         let workflow_request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
@@ -462,6 +691,7 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
             variant,
             identity: identity.clone(),
             completion_awakeable_id: None,
+            release_overlay: None,
         };
 
         let response = run_trial_workflow(
@@ -473,7 +703,11 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
             &workflow_request,
         )
         .await?;
-        assert_eq!(response.status, "completed");
+        assert_eq!(
+            response.status, "completed",
+            "trial failed: {:?}",
+            response.error
+        );
         assert_eq!(response.stop_reason.as_deref(), Some("target_terminal"));
         assert_eq!(response.turn_count, 0);
         let session_id = response
@@ -995,6 +1229,15 @@ fn brain_response_texts(events: &[EventRecord]) -> Vec<String> {
         .collect()
 }
 
+fn scripted_requests(memory_dir: &TempDir) -> Result<Vec<CompletionRequest>> {
+    let journal = fs::read_to_string(memory_dir.path().join(SCRIPTED_REQUEST_LOG))
+        .context("read scripted provider request journal")?;
+    journal
+        .lines()
+        .map(|line| serde_json::from_str(line).context("decode scripted provider request"))
+        .collect()
+}
+
 fn summarize_events(events: &[EventRecord]) -> String {
     if events.is_empty() {
         return "<none>".to_string();
@@ -1011,12 +1254,14 @@ fn new_parent_run(
     identity: &Identity,
     agent_revision_uid: Uuid,
     model: &str,
+    simulator_policy: &ResolvedSimulatorPolicy,
     resource_envelope: moa_experiments::model::ExperimentResourceEnvelope,
 ) -> NewExperimentRun {
     NewExperimentRun {
         plan_artifact_uid: None,
         expected_trials: 1,
         resource_envelope,
+        simulator_policy: Some(simulator_policy.clone()),
         name: "scripted trial workflow".to_string(),
         target: serde_json::from_value(agent_loop_target(agent_revision_uid, model))
             .expect("target fixture should parse"),
@@ -1069,7 +1314,10 @@ async fn publish_trial_plan(
     scope: &ActionRuleScope,
     agent_revision_uid: Uuid,
     model: &str,
+    simulator_policy: &ResolvedSimulatorPolicy,
 ) -> Result<Uuid> {
+    let policy_uid = simulator_policy.binding.policy_uid;
+    let policy_revision = simulator_policy.binding.revision;
     let source = format!(
         r#"
 api_version: moa.artifact/v1
@@ -1106,13 +1354,21 @@ definition:
         config:
           prompt: Start behavior-lab simulation.
           agent_revision_uid: "{agent_revision_uid}"
-    simulator_model: {model}
+    simulator_policy:
+      policy_uid: "{policy_uid}"
+      revision: {policy_revision}
     target_model: {model}
     parallelism: 1
     trials_per_combination: 1
     budget:
       max_total_cents: 1
       max_trial_tokens: 1000
+    scorecard:
+      requirements:
+        - evaluator_id: target_completed
+          evaluator_version: v1
+          config: {{}}
+          effect: blocking
 "#
     );
     publish_artifact_revision(pool, scope, source.as_str(), "trial plan").await
@@ -1142,14 +1398,75 @@ async fn publish_artifact_revision(
         )
         .await
         .with_context(|| format!("create {label} draft"))?;
-    let published = registry
-        .publish_revision(scope, draft.revision_uid, &report)
+    // Skills and agents reach a session through type-owned serving pointers, so
+    // the fixture activates them through the real release path. Other kinds
+    // retain their existing published lifecycle.
+    if !matches!(
+        draft.kind,
+        moa_artifacts::document::ArtifactKind::Skill | moa_artifacts::document::ArtifactKind::Agent
+    ) {
+        let published = registry
+            .publish_unserved_revision(scope, draft.revision_uid, &report)
+            .await
+            .with_context(|| format!("validate {label} revision"))?;
+        return Ok(published.revision_uid);
+    }
+    let release_scope = TenantScope::from_action_rule_scope(scope)?;
+    if draft.kind == moa_artifacts::document::ArtifactKind::Agent {
+        let installation_uid = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO moa.agent_installation (
+                installation_uid, storage_partition_id, artifact_uid, definition_ref,
+                display_name, status, current_revision_uid, serving_pointer_version
+            )
+            VALUES ($1, $2, $3, $4, $5, 'inactive', NULL, 0)
+            "#,
+        )
+        .bind(installation_uid)
+        .bind(release_scope.storage_partition_id().to_string())
+        .bind(draft.artifact_uid)
+        .bind(format!("agent://{}", draft.name))
+        .bind(&draft.name)
+        .execute(pool)
+        .await?;
+        let lock = AgentResolver::new(pool.clone())
+            .resolve_release_candidate(scope, draft.revision_uid)
+            .await?
+            .revision_lock;
+        moa_artifacts::test_fixtures::activate_agent_revision(
+            pool,
+            release_scope,
+            ActivationTarget::AgentDeployment {
+                artifact_uid: draft.artifact_uid,
+                installation_uid,
+            },
+            draft.revision_uid,
+            lock,
+        )
         .await
-        .with_context(|| format!("publish {label} revision"))?;
-    Ok(published.revision_uid)
+        .with_context(|| format!("activate {label} revision"))?;
+    } else {
+        moa_artifacts::test_fixtures::activate_revision(
+            pool,
+            release_scope,
+            ActivationTarget::SkillVisibility {
+                artifact_uid: draft.artifact_uid,
+            },
+            draft.revision_uid,
+        )
+        .await
+        .with_context(|| format!("activate {label} revision"))?;
+    }
+    Ok(draft.revision_uid)
 }
 
-fn new_trial(run_uid: Uuid, plan_revision_uid: Uuid, model: &str) -> NewExperimentTrial {
+fn new_trial(
+    run_uid: Uuid,
+    plan_revision_uid: Uuid,
+    model: &str,
+    simulator_policy: &ResolvedSimulatorPolicy,
+) -> NewExperimentTrial {
     NewExperimentTrial {
         run_uid,
         trial_key: "scripted-multiturn-agent-loop".to_string(),
@@ -1162,11 +1479,9 @@ fn new_trial(run_uid: Uuid, plan_revision_uid: Uuid, model: &str) -> NewExperime
         data_bundle_ids: Vec::new(),
         artifact_revision_uids: Vec::new(),
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new(model),
-            temperature: Some(0.0),
+            policy: simulator_policy.clone(),
             max_turns: 2,
             token_budget: Some(1_000),
-            metadata: json!({ "fixture": "experiment_trial_run_e2e" }),
         },
         target_model: Some(ModelId::new(model)),
         seed: Some("scripted-trial-seed".to_string()),
@@ -1222,11 +1537,13 @@ fn new_execution_template_parent_run(
     identity: &Identity,
     target: Value,
     variant: Value,
+    simulator_policy: &ResolvedSimulatorPolicy,
 ) -> NewExperimentRun {
     NewExperimentRun {
         plan_artifact_uid: None,
         expected_trials: 1,
         resource_envelope: fixture_experiment_envelope(),
+        simulator_policy: Some(simulator_policy.clone()),
         name: "execution-template trial workflow".to_string(),
         target: serde_json::from_value(target).expect("execution-template target should parse"),
         variant: serde_json::from_value(variant).expect("execution-template variant should parse"),
@@ -1249,7 +1566,11 @@ fn new_execution_template_parent_run(
     }
 }
 
-fn new_execution_template_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentTrial {
+fn new_execution_template_trial(
+    run_uid: Uuid,
+    plan_revision_uid: Uuid,
+    simulator_policy: &ResolvedSimulatorPolicy,
+) -> NewExperimentTrial {
     NewExperimentTrial {
         run_uid,
         trial_key: "execution-template-internal-session".to_string(),
@@ -1262,11 +1583,9 @@ fn new_execution_template_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewEx
         data_bundle_ids: Vec::new(),
         artifact_revision_uids: Vec::new(),
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new("scripted-loadtest"),
-            temperature: Some(0.0),
+            policy: simulator_policy.clone(),
             max_turns: 1,
             token_budget: Some(1_000),
-            metadata: json!({ "fixture": "experiment_trial_run_e2e_execution_template" }),
         },
         target_model: Some(ModelId::new("scripted-loadtest")),
         seed: Some("execution-template-trial-seed".to_string()),
@@ -1362,7 +1681,7 @@ fn write_scripted_fixture(path: &Path) -> Result<()> {
     let fixture = json!({
         "default": {
             "completion": {
-                "content": "DONE",
+                "content": r#"{"schema_version":1,"decision":"goal_satisfied","message":"","reason":"The scenario goal is satisfied."}"#,
                 "tool_calls": []
             }
         },
@@ -1376,7 +1695,7 @@ fn write_scripted_fixture(path: &Path) -> Result<()> {
         "responses": [
             {
                 "completion": {
-                    "content": "Hi, I need help with a delayed order.",
+                    "content": r#"{"schema_version":1,"decision":"continue","message":"Hi, I need help with a delayed order.","reason":"The user has not yet received an order-status next step."}"#,
                     "tool_calls": []
                 }
             },
@@ -1388,7 +1707,7 @@ fn write_scripted_fixture(path: &Path) -> Result<()> {
             },
             {
                 "completion": {
-                    "content": "The order id is ORDER-42. Can you check it?",
+                    "content": r#"{"schema_version":1,"decision":"continue","message":"The order id is ORDER-42. Can you check it?","reason":"The target requested the order identifier needed to continue."}"#,
                     "tool_calls": []
                 }
             },
@@ -1427,16 +1746,17 @@ fn billed_live_lane_enabled() -> bool {
 /// Failing loudly here is the point: a live lane that silently degraded to a
 /// scripted provider would report a green billed smoke without ever having
 /// exercised a real model.
-fn require_live_provider_credential() -> Result<(&'static str, String, &'static str)> {
-    for (name, model) in [
-        ("MOA_ANTHROPIC_API_KEY", "claude-sonnet-4-6"),
-        ("MOA_OPENAI_API_KEY", "gpt-5.4"),
-        ("MOA_GOOGLE_API_KEY", "gemini-3-flash-preview"),
+fn require_live_provider_credential() -> Result<(&'static str, String, &'static str, &'static str)>
+{
+    for (name, model, provider) in [
+        ("MOA_ANTHROPIC_API_KEY", "claude-sonnet-4-6", "anthropic"),
+        ("MOA_OPENAI_API_KEY", "gpt-5.4", "openai"),
+        ("MOA_GOOGLE_API_KEY", "gemini-3-flash-preview", "google"),
     ] {
         if let Ok(value) = std::env::var(name)
             && !value.trim().is_empty()
         {
-            return Ok((name, value, model));
+            return Ok((name, value, model, provider));
         }
     }
     bail!(
@@ -1552,7 +1872,7 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
     }
     // Explicitly NOT a silent skip: the operator asked for the billed lane, so a
     // missing credential or budget is a failure rather than a pass.
-    let (credential_name, credential, model) = require_live_provider_credential()?;
+    let (credential_name, credential, model, provider) = require_live_provider_credential()?;
     let budget_micro_usd = require_behavior_lab_budget_micro_usd()?;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -1604,6 +1924,8 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
             .await
             .context("connect to test Postgres")?;
         let store = ExperimentStore::new(pool.clone());
+        let simulator_policy =
+            register_certified_simulator_policy(&pool, tenant_id, model, provider).await?;
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
         let run = store
             .insert_run(
@@ -1612,14 +1934,15 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
                     &identity,
                     agent_revision_uid,
                     model,
+                    &simulator_policy,
                     experiment_envelope(budget_micro_usd),
                 ),
             )
             .await
             .context("seed parent experiment run")?;
         let plan_revision_uid =
-            publish_trial_plan(&pool, &scope, agent_revision_uid, model).await?;
-        let trial = new_trial(run.run_uid, plan_revision_uid, model);
+            publish_trial_plan(&pool, &scope, agent_revision_uid, model, &simulator_policy).await?;
+        let trial = new_trial(run.run_uid, plan_revision_uid, model, &simulator_policy);
         let trial_key = trial.trial_key.clone();
         let request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
@@ -1628,6 +1951,7 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
             variant: baseline_variant(model),
             identity: identity.clone(),
             completion_awakeable_id: None,
+            release_overlay: None,
         };
 
         let response = run_trial_workflow(
@@ -1639,6 +1963,12 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
             &request,
         )
         .await?;
+        let persisted = store
+            .load_trial(&scope, response.trial_uid)
+            .await?
+            .context("live trial must persist before returning")?;
+        assert_eq!(persisted.simulator.policy, simulator_policy);
+        assert_eq!(response.status, "completed");
 
         // The scores must be readable the instant the trial reports terminal, with
         // no additional wait. That is the whole ordering guarantee: evaluate, emit,

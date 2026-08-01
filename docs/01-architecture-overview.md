@@ -155,12 +155,12 @@ values use only whole-value `{ "$ref": "$.input.query" }`,
 non-dependency paths, recursion, and item variables outside a map task. There is
 no string interpolation, script, JSONata, JQ, or general expression evaluator.
 
-Published skills provide pinned reusable plan-template provenance. A selected
-high-confidence template is instantiated without a planning-model call. A
-one-off request instead stores planner model/prompt provenance, candidate JSON,
+Serving skill revisions provide pinned reusable plan-template provenance. A
+selected high-confidence template is instantiated without a planning-model call.
+A one-off request instead stores planner model/prompt provenance, candidate JSON,
 compiler report, and final plan hash with its immutable compiled snapshot. A
-one-off plan is not a published artifact and is never promoted automatically.
-Both sources compile to the same canonical run snapshot.
+one-off plan is not a serving artifact revision and is never promoted
+automatically. Both sources compile to the same canonical run snapshot.
 
 An agent node may reason freely within its declared skills, capabilities,
 turns, and budget, but it cannot mutate the durable graph invisibly. Every task
@@ -190,8 +190,10 @@ Compilation pins a sorted, duplicate-free `ExecutionCapabilityCatalog` and its
 canonical hash. Scheduling requires the caller to supply that exact immutable
 snapshot, rejects any hash drift, validates resolved capability inputs and
 outputs against its Draft 2020-12 schemas, and derives each task reservation
-from the catalog capability estimate. There is no hidden/global catalog refresh
-inside a run revision. Capability estimates declare exactly one logical task;
+from the catalog capability estimate. Each capability also pins the governed
+runtime-contract revision that policy evaluation and dispatch must still serve;
+a live mismatch fails closed rather than mutating the run's catalog. There is no
+hidden/global catalog refresh inside a run revision. Capability estimates declare exactly one logical task;
 retries and agent turns multiply only cost, tokens, tool calls, and retrieved
 bytes. Nonterminal cumulative outcomes charge only their nonnegative usage
 delta and retain the remaining reservation; terminal outcomes release it and
@@ -231,10 +233,10 @@ sidecar stores the selected agent artifact revision, deployment pointers when
 present, policy hash, locked artifact/tool dependencies, and serialized runtime
 policy snapshot. Per-agent guardrail policy is stored in the DB-backed agent
 artifact JSON and pinned into this `session_agent_context` snapshot as
-`guardrail_policy`. The context pipeline still ranks visible published skill
-artifact revisions and materializes selected artifact files for the tool
-router, but that selection now runs inside the configured agent policy for the
-session.
+`guardrail_policy`. The context pipeline still ranks the skill revisions the
+tenant's serving pointers resolve to and materializes selected artifact files for
+the tool router, but that selection now runs inside the configured agent policy
+for the session.
 Execution APIs list, start, inspect, cancel, review, and signal runs through the
 common execution DTOs. Run admission originates from a persisted user message:
 it either selects one exact pinned `skill://...` template revision plus structured
@@ -247,8 +249,49 @@ instances, requirement IDs, generation fence, input/output/error, reserved and
 actual usage, citations, and timestamps. These are the source-of-truth run
 tables. Skill packages remain in `moa.artifact`, `moa.artifact_revision`, and
 `moa.artifact_file`. Automatic learning still follows `skill proposal -> draft
-skill artifact + learning_candidate -> LearningReview accept -> published
-artifact`; live runs never rewrite published revisions.
+skill artifact + learning_candidate -> LearningReview accept -> activation`; the
+last step atomically marks the accepted revision `ready`, marks the predecessor
+`superseded`, and moves the tenant's serving pointer. The pointer, not status,
+is the authority for what serves. Active sessions never mutate skill revisions.
+
+Skill, action, and agent revisions have no `published` status. Storing or
+validating a candidate never makes it visible: normal sessions resolve a
+type-owned serving pointer for skills/actions and the installation pointer for
+agents. A revision becomes `ready` only after deterministic release evidence
+passes; `ready` means activatable, not serving.
+
+`ArtifactRelease/submit` is the hand-authored release entry point. It resolves
+the platform gate server-side, snapshots the candidate, dependency/runtime/tool
+policy and activated tool catalog, writes the candidate plus durable dispatch in
+one transaction, and starts `ArtifactReleaseEvaluation`. That workflow runs one
+production Behavior Lab experiment with paired candidate/baseline variants. A
+server-approved case cohort selects exact scenario, persona, profile, and
+repetition tuples from a published tenant experiment plan; the ordinary plan
+Cartesian product is not run for a release. The approved plan must produce the
+policy's deterministic blocking score rows (`target_completed`,
+`result_produced`, and `privacy_safe_output` in the platform policy), and the
+workflow derives its verdict from those persisted scores and their provenance.
+Only that workflow may mint the expiring single-use activation attestation;
+there is no caller-supplied verdict endpoint. Evaluation-only overlays are bound
+to one secret and one eval-owned session; normal resolution never reads them.
+
+`ArtifactRelease/activate` spends the attestation to compare-and-set a skill or
+action pointer. Agent activation uses `AgentDefinitions/deploy` so the existing
+agent-principal authorization boundary remains intact while the same release
+repository consumes the attestation and writes the exact `AgentRevisionLock`.
+Install creates an inactive, non-serving installation. In all three cases the
+pointer move, attestation consumption, revision state transition, and activation
+audit commit together; serving-baseline, policy, catalog, candidate-byte, and
+pointer drift fail closed. Learned-skill acceptance adapts its regression result
+to this same activation contract rather than maintaining another serving path.
+Submission and activation also re-resolve the published release plan, case
+cohort, evaluator versions, certified simulator policy, and tool catalog. Any
+drift from the digested evaluation subject invalidates the attempt or
+attestation instead of silently changing what was measured.
+
+Migration `V000373` makes `published` unrepresentable for skill, action, and
+agent revisions. `published` survives only for kinds whose activation seam is
+owned elsewhere, including experiment plans and connector catalog snapshots.
 
 Tenant knowledge-base rows are `moa.knowledge_connections`,
 `moa.knowledge_sync_runs`, `moa.knowledge_ingestion_steps`,
@@ -488,8 +531,8 @@ policy.
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
-The central migration inventory currently contains 119 `CREATE TABLE`
-statements covering 111 logical top-level table families. Every family has one
+The central migration inventory currently contains 157 `CREATE TABLE`
+statements covering 149 logical top-level table families. Every family has one
 owner in the `moa-migrations` ownership manifest, and
 `xtask check-migrations` rejects missing or stale ownership entries.
 
@@ -607,7 +650,12 @@ separate surfaces:
   production execution paths. Agent-loop targets always create eval-owned
   `Session` state and queue messages through normal `Session` and
   `TurnExecution` routing.
-  Execution targets invoke a published skill's exact pinned `execution_plan`
+  Experiment plans pin an exact certified simulator policy revision. Admission
+  persists its immutable provider/model, decoding, prompt, context, and response
+  protocol snapshot; `ExperimentTrialRun` verifies that snapshot against the
+  registry and dispatches simulator turns through the production provider
+  gateway. The typed decision and policy binding are terminal evidence.
+  Execution targets invoke a serving skill revision's exact pinned `execution_plan`
   through the same origin-bound planning/admission path, start the common
   `ExecutionRun`, and link its `execution_run_uid`. The `moa.experiment_run` row is the experiment ledger and
   links to the session, execution run, pinned artifact revisions, and
@@ -659,8 +707,10 @@ detached `SkillLearning` workflow after experience persistence, but that
 workflow can only create tenant-scoped draft skill artifacts and proposed
 `LearningCandidateType::Skill` rows. Tenant-learned skills remain tenant-local
 and are never promoted into shared defaults automatically. `LearningReview`
-is the only runtime path that publishes those drafts inside the tenant, records
-`skill_created`/`skill_improved`, and marks the candidate promoted.
+is the only runtime path that can activate those drafts inside the tenant, and it
+does so by atomically appending an activation audit, compare-and-set moving the
+tenant's serving pointer against the baseline evaluated by regression, recording
+`skill_created`/`skill_improved`, and marking the candidate promoted.
 
 `LearningReview` exposes four decisions — `accept_skill`, `accept_rollback`,
 `reject`, and `dismiss` — each reachable through its own authorized HTTP route
@@ -668,8 +718,10 @@ and each admitting only the proposal kinds it can actually apply. They are
 separate handlers rather than one endpoint with an action switch because the
 operations differ in blast radius: accepting a rollback archives a *serving*
 revision, and routing that by a field in a caller-supplied body would put it one
-typo away from a draft promotion. `dismiss` is the only decision an informational
-candidate admits; nothing on this surface can promote one.
+typo away from a draft promotion. Rollback tombstones the pointer and leaves the
+skill unserved; it never restores a predecessor, because selecting a replacement
+requires a separate reviewed activation. `dismiss` is the only decision an
+informational candidate admits; nothing on this surface can promote one.
 
 Future MCP support is a transport adapter over product/default services such as
 `Experiments`, direct edge analytics/lineage reads, `Skills`, and other typed

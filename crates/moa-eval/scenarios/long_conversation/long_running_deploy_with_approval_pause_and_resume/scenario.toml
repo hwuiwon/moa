@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "long_running_deploy_with_approval_pause_and_resume"
 description = "Recorded deploy workflow covering auto-mode shell execution, queued follow-up processing, and final health verification."
 default_timeout_seconds = 60

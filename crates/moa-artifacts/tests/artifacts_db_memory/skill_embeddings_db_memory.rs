@@ -1,10 +1,10 @@
 //! Skill-identity embedding storage coverage for the artifact registry.
 
-use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
+use moa_artifacts::document::ArtifactDocument;
 use moa_artifacts::registry::{
     ArtifactRegistry, MissingSkillEmbedding, NewArtifactDraft, NewArtifactFile, NewSkillEmbedding,
 };
-use moa_artifacts::validation::validate_for_status;
+use moa_artifacts::release::{ActivationTarget, TenantScope};
 use moa_core::{
     error::Result, types::action_policy::ActionRuleScope, types::identifiers::TenantId,
 };
@@ -30,10 +30,15 @@ fn skill_doc(name: &str, description: &str) -> ArtifactDocument {
     serde_json::from_value(source).expect("test skill artifact is valid")
 }
 
-/// Publishes one skill revision and returns nothing; the registry tracks it.
-async fn publish_skill(
+/// Activates one skill revision so the tenant serves it.
+///
+/// Identity embeddings follow the serving pointer, so a draft skill must not be
+/// embeddable: the fixture drives the real release path to make the revision
+/// serve.
+async fn serve_skill(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
+    tenant_id: TenantId,
     name: &str,
     description: &str,
 ) -> Result<()> {
@@ -50,13 +55,16 @@ async fn publish_skill(
             },
         )
         .await?;
-    registry
-        .publish_revision(
-            scope,
-            draft.revision_uid,
-            &validate_for_status(&document, ArtifactStatus::Published),
-        )
-        .await?;
+    moa_artifacts::test_fixtures::activate_revision(
+        registry.pool(),
+        TenantScope::new(tenant_id),
+        ActivationTarget::SkillVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?;
     Ok(())
 }
 
@@ -83,8 +91,7 @@ async fn set_embedding(
         .set_skill_embedding(NewSkillEmbedding {
             artifact_uid: row.artifact_uid,
             revision_uid: row.revision_uid,
-            storage_partition_id: row.storage_partition_id.as_deref(),
-            user_id: row.user_id.as_deref(),
+            storage_partition_id: row.storage_partition_id.as_str(),
             embedding,
             model,
             model_version: 1,
@@ -98,9 +105,9 @@ async fn set_embedding(
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()> {
-    // Pins: published skills without an embedding are selected, a set clears
+    // Pins: serving skills without an embedding are selected, a set clears
     // them, the tenant nearest-neighbor primitive ranks by ascending cosine
-    // distance and honors self-exclusion, and a republish restales the row until
+    // distance and honors self-exclusion, and a re-activation restales the row until
     // it is touched or re-embedded.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
@@ -110,13 +117,13 @@ async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()>
     let name_a = format!("alpha-{}", Uuid::now_v7());
     let name_b = format!("beta-{}", Uuid::now_v7());
 
-    publish_skill(&registry, &scope, &name_a, "first skill").await?;
-    publish_skill(&registry, &scope, &name_b, "second skill").await?;
+    serve_skill(&registry, &scope, tenant, &name_a, "first skill").await?;
+    serve_skill(&registry, &scope, tenant, &name_b, "second skill").await?;
 
     let missing = registry
         .list_skills_missing_embedding("mock-embedding-1024", 1, 10)
         .await?;
-    assert_eq!(missing.len(), 2, "both published skills lack an embedding");
+    assert_eq!(missing.len(), 2, "both serving skills lack an embedding");
     assert!(
         missing
             .iter()
@@ -133,17 +140,13 @@ async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()>
         .find(|row| row.name == name_b)
         .expect("beta listed")
         .clone();
-    let storage_partition = row_a
-        .storage_partition_id
-        .clone()
-        .expect("tenant-scoped skill has a storage partition");
+    let storage_partition = row_a.storage_partition_id.clone();
 
     registry
         .set_skill_embedding(NewSkillEmbedding {
             artifact_uid: row_a.artifact_uid,
             revision_uid: row_a.revision_uid,
-            storage_partition_id: row_a.storage_partition_id.as_deref(),
-            user_id: row_a.user_id.as_deref(),
+            storage_partition_id: row_a.storage_partition_id.as_str(),
             embedding: &one_hot(0),
             model: "mock-embedding-1024",
             model_version: 1,
@@ -155,8 +158,7 @@ async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()>
         .set_skill_embedding(NewSkillEmbedding {
             artifact_uid: row_b.artifact_uid,
             revision_uid: row_b.revision_uid,
-            storage_partition_id: row_b.storage_partition_id.as_deref(),
-            user_id: row_b.user_id.as_deref(),
+            storage_partition_id: row_b.storage_partition_id.as_str(),
             embedding: &one_hot(1),
             model: "mock-embedding-1024",
             model_version: 1,
@@ -197,9 +199,9 @@ async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()>
         "the excluded artifact is dropped from the ranking",
     );
 
-    // A republish bumps artifact.updated_at past the embedding's updated_at, so
+    // A re-activation bumps artifact.updated_at past the embedding's updated_at, so
     // the skill restales and is re-selected until touched.
-    publish_skill(&registry, &scope, &name_a, "first skill v2").await?;
+    serve_skill(&registry, &scope, tenant, &name_a, "first skill v2").await?;
     let restale = registry
         .list_skills_missing_embedding("mock-embedding-1024", 1, 10)
         .await?;
@@ -209,25 +211,33 @@ async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()>
             .map(|row| row.artifact_uid)
             .collect::<Vec<_>>(),
         vec![row_a.artifact_uid],
-        "the republished skill restales; the untouched one stays embedded",
+        "the re-activationed skill restales; the untouched one stays embedded",
     );
     let restaled_row = restale
         .iter()
         .find(|row| row.artifact_uid == row_a.artifact_uid)
-        .expect("republished alpha listed");
+        .expect("re-activationed alpha listed");
 
     // Touching with a stale observed timestamp is refused (the artifact moved on),
     // so the guard cannot mask a concurrent identity change.
     assert!(
         !registry
-            .touch_skill_embedding(row_a.artifact_uid, row_a.artifact_updated_at)
+            .touch_skill_embedding(
+                row_a.artifact_uid,
+                row_a.revision_uid,
+                row_a.artifact_updated_at,
+            )
             .await?,
-        "a touch guarded on the pre-republish timestamp does not apply",
+        "a touch guarded on the pre-re-activation timestamp does not apply",
     );
     // Touching with the freshly-observed timestamp advances updated_at.
     assert!(
         registry
-            .touch_skill_embedding(row_a.artifact_uid, restaled_row.artifact_updated_at)
+            .touch_skill_embedding(
+                row_a.artifact_uid,
+                restaled_row.revision_uid,
+                restaled_row.artifact_updated_at,
+            )
             .await?,
         "touch advances updated_at for an existing embedding",
     );
@@ -258,7 +268,7 @@ async fn skill_embedding_write_refuses_artifact_changed_under_it_db_memory() -> 
     let scope = ActionRuleScope::Tenant { tenant_id: tenant };
     let name = format!("racer-{}", Uuid::now_v7());
 
-    publish_skill(&registry, &scope, &name, "first identity").await?;
+    serve_skill(&registry, &scope, tenant, &name, "first identity").await?;
     let selected = registry
         .list_skills_missing_embedding("mock-embedding-1024", 1, 10)
         .await?;
@@ -270,8 +280,7 @@ async fn skill_embedding_write_refuses_artifact_changed_under_it_db_memory() -> 
             .set_skill_embedding(NewSkillEmbedding {
                 artifact_uid: row.artifact_uid,
                 revision_uid: row.revision_uid,
-                storage_partition_id: row.storage_partition_id.as_deref(),
-                user_id: row.user_id.as_deref(),
+                storage_partition_id: row.storage_partition_id.as_str(),
                 embedding: &one_hot(0),
                 model: "mock-embedding-1024",
                 model_version: 1,
@@ -283,7 +292,7 @@ async fn skill_embedding_write_refuses_artifact_changed_under_it_db_memory() -> 
     );
 
     // The identity changes during what would have been the provider call.
-    publish_skill(&registry, &scope, &name, "second identity").await?;
+    serve_skill(&registry, &scope, tenant, &name, "second identity").await?;
 
     // A write still carrying the pre-change timestamp is refused.
     assert!(
@@ -291,8 +300,7 @@ async fn skill_embedding_write_refuses_artifact_changed_under_it_db_memory() -> 
             .set_skill_embedding(NewSkillEmbedding {
                 artifact_uid: row.artifact_uid,
                 revision_uid: row.revision_uid,
-                storage_partition_id: row.storage_partition_id.as_deref(),
-                user_id: row.user_id.as_deref(),
+                storage_partition_id: row.storage_partition_id.as_str(),
                 embedding: &one_hot(1),
                 model: "mock-embedding-1024",
                 model_version: 1,
@@ -311,7 +319,7 @@ async fn skill_embedding_write_refuses_artifact_changed_under_it_db_memory() -> 
     let restaled_row = restale
         .iter()
         .find(|r| r.artifact_uid == row.artifact_uid)
-        .expect("the republished skill re-selects as stale");
+        .expect("the re-activationed skill re-selects as stale");
     assert_eq!(
         restaled_row.stored_source_hash.as_deref(),
         Some(digest("hash-v0").as_slice()),
@@ -324,8 +332,7 @@ async fn skill_embedding_write_refuses_artifact_changed_under_it_db_memory() -> 
             .set_skill_embedding(NewSkillEmbedding {
                 artifact_uid: restaled_row.artifact_uid,
                 revision_uid: restaled_row.revision_uid,
-                storage_partition_id: restaled_row.storage_partition_id.as_deref(),
-                user_id: restaled_row.user_id.as_deref(),
+                storage_partition_id: restaled_row.storage_partition_id.as_str(),
                 embedding: &one_hot(1),
                 model: "mock-embedding-1024",
                 model_version: 1,
@@ -355,17 +362,14 @@ async fn nearest_skill_embeddings_scoped_filters_by_model_db_memory() -> Result<
     let name_x = format!("scoped-x-{}", Uuid::now_v7());
     let name_y = format!("scoped-y-{}", Uuid::now_v7());
 
-    publish_skill(&registry, &scope, &name_x, "same space").await?;
-    publish_skill(&registry, &scope, &name_y, "other space").await?;
+    serve_skill(&registry, &scope, tenant, &name_x, "same space").await?;
+    serve_skill(&registry, &scope, tenant, &name_y, "other space").await?;
     let listed = registry
         .list_skills_missing_embedding("model-x", 1, 10)
         .await?;
     let row_x = listed.iter().find(|r| r.name == name_x).expect("x listed");
     let row_y = listed.iter().find(|r| r.name == name_y).expect("y listed");
-    let storage_partition = row_x
-        .storage_partition_id
-        .clone()
-        .expect("tenant-scoped skill has a storage partition");
+    let storage_partition = row_x.storage_partition_id.clone();
 
     // Identical direction, different embedders.
     for (row, model) in [(row_x, "model-x"), (row_y, "model-y")] {
@@ -373,8 +377,7 @@ async fn nearest_skill_embeddings_scoped_filters_by_model_db_memory() -> Result<
             .set_skill_embedding(NewSkillEmbedding {
                 artifact_uid: row.artifact_uid,
                 revision_uid: row.revision_uid,
-                storage_partition_id: row.storage_partition_id.as_deref(),
-                user_id: row.user_id.as_deref(),
+                storage_partition_id: row.storage_partition_id.as_str(),
                 embedding: &one_hot(0),
                 model,
                 model_version: 1,
@@ -426,7 +429,7 @@ async fn skill_backfill_reselects_model_mismatched_rows_db_memory() -> Result<()
     let scope = ActionRuleScope::Tenant { tenant_id: tenant };
     let name = format!("mismatch-{}", Uuid::now_v7());
 
-    publish_skill(&registry, &scope, &name, "converge me").await?;
+    serve_skill(&registry, &scope, tenant, &name, "converge me").await?;
     let row = registry
         .list_skills_missing_embedding("old-model", 1, 10)
         .await?
@@ -437,8 +440,7 @@ async fn skill_backfill_reselects_model_mismatched_rows_db_memory() -> Result<()
         .set_skill_embedding(NewSkillEmbedding {
             artifact_uid: row.artifact_uid,
             revision_uid: row.revision_uid,
-            storage_partition_id: row.storage_partition_id.as_deref(),
-            user_id: row.user_id.as_deref(),
+            storage_partition_id: row.storage_partition_id.as_str(),
             embedding: &one_hot(0),
             model: "old-model",
             model_version: 1,
@@ -491,9 +493,9 @@ async fn nearest_named_skill_embeddings_scoped_resolves_names_filters_model_and_
     let name_far = format!("far-{}", Uuid::now_v7());
     let name_other = format!("other-{}", Uuid::now_v7());
 
-    publish_skill(&registry, &scope, &name_near, "near skill").await?;
-    publish_skill(&registry, &scope, &name_far, "far skill").await?;
-    publish_skill(&registry, &scope, &name_other, "other-space skill").await?;
+    serve_skill(&registry, &scope, tenant, &name_near, "near skill").await?;
+    serve_skill(&registry, &scope, tenant, &name_far, "far skill").await?;
+    serve_skill(&registry, &scope, tenant, &name_other, "other-space skill").await?;
 
     let listed = registry
         .list_skills_missing_embedding("model-x", 1, 10)
@@ -508,10 +510,7 @@ async fn nearest_named_skill_embeddings_scoped_resolves_names_filters_model_and_
     let near = row_of(&name_near);
     let far = row_of(&name_far);
     let other = row_of(&name_other);
-    let storage_partition = near
-        .storage_partition_id
-        .clone()
-        .expect("tenant-scoped skill has a storage partition");
+    let storage_partition = near.storage_partition_id.clone();
 
     // near shares the probe's direction and far is orthogonal, both in model-x;
     // other shares the probe direction but lives in the model-y space.

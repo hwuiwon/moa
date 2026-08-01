@@ -207,6 +207,8 @@ pub enum CapabilityCatalogDiagnosticCode {
 pub struct ExecutionCapability {
     /// Stable capability reference.
     pub reference: CapabilityReference,
+    /// Exact governed runtime contract admitted for dispatch.
+    pub contract_revision: String,
     /// Human-readable capability description.
     pub description: String,
     /// Draft 2020-12 input schema.
@@ -277,12 +279,6 @@ pub enum CapabilitySource {
         /// matching alongside the built-in and hand variants, which is the
         /// mistake this shape exists to prevent.
         remote_name: String,
-        /// Schema revision this tool was discovered at.
-        ///
-        /// Provenance, not identity: the capability version already covers the
-        /// input schema, so this records which discovery produced the entry
-        /// without making the version unreconstructable outside the router.
-        schema_revision: String,
     },
     /// Published standalone action artifact backed by a registered tool.
     ActionArtifact {
@@ -304,22 +300,22 @@ pub enum CapabilitySource {
         /// Registered backing tool name.
         tool_name: String,
     },
-    /// Action declared by a published skill.
+    /// Action declared by an activated skill.
     SkillAction {
-        /// Published skill reference.
+        /// Activated skill reference.
         skill_ref: ArtifactRef,
-        /// Exact published skill revision.
+        /// Exact activated skill revision.
         revision_uid: uuid::Uuid,
         /// Skill action identifier.
         action_id: String,
         /// Registered backing tool name.
         tool_name: String,
     },
-    /// Code entrypoint declared by a published skill.
+    /// Code entrypoint declared by an activated skill.
     SkillCode {
-        /// Published skill reference.
+        /// Activated skill reference.
         skill_ref: ArtifactRef,
-        /// Exact published skill revision.
+        /// Exact activated skill revision.
         revision_uid: uuid::Uuid,
         /// Skill code entrypoint.
         entrypoint: String,
@@ -534,6 +530,7 @@ mod tests {
                 name: name.to_string(),
                 version: "implementation".to_string(),
             },
+            contract_revision: "contract-v1".to_string(),
             description: format!("{name} description"),
             input_schema: json!({"type": "object"}),
             output_schema: json!({}),
@@ -599,7 +596,6 @@ mod tests {
                     server: "first".to_string(),
                     tool_name: "mcp__first__search".to_string(),
                     remote_name: "search".to_string(),
-                    schema_revision: "revision-a".to_string(),
                 },
             ),
             capability(
@@ -608,7 +604,6 @@ mod tests {
                     server: "second".to_string(),
                     tool_name: "mcp__second__search".to_string(),
                     remote_name: "search".to_string(),
-                    schema_revision: "revision-b".to_string(),
                 },
             ),
         ])

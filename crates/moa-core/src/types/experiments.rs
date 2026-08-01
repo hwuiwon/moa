@@ -147,15 +147,79 @@ pub struct ScorecardFinding {
     pub detail: String,
 }
 
+/// Whether a scorecard group has enough independent modeled cases to decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScorecardSupportStatus {
+    /// The group meets its declared independent-case floor.
+    Sufficient,
+    /// The group has identified cases, but too few distinct cases.
+    InsufficientIndependentUnits,
+    /// At least one observation lacks the modeled-case identity needed to count support.
+    CaseIdentityUnavailable,
+}
+
+/// Independent modeled-case support behind a scorecard group rollup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScorecardSupportSummary {
+    /// Distinct scenario, persona, and profile identities observed.
+    pub independent_units: usize,
+    /// Independent units required before the group may be eligible.
+    pub required_independent_units: usize,
+    /// Why the support is or is not sufficient.
+    pub status: ScorecardSupportStatus,
+}
+
+impl ScorecardSupportSummary {
+    /// Builds support from a complete set of modeled-case identities.
+    #[must_use]
+    pub fn from_counts(independent_units: usize, required_independent_units: usize) -> Self {
+        let status =
+            if required_independent_units > 0 && independent_units >= required_independent_units {
+                ScorecardSupportStatus::Sufficient
+            } else {
+                ScorecardSupportStatus::InsufficientIndependentUnits
+            };
+        Self {
+            independent_units,
+            required_independent_units,
+            status,
+        }
+    }
+
+    /// Builds fail-closed support when one or more observations lack case identity.
+    #[must_use]
+    pub const fn case_identity_unavailable(
+        independent_units: usize,
+        required_independent_units: usize,
+    ) -> Self {
+        Self {
+            independent_units,
+            required_independent_units,
+            status: ScorecardSupportStatus::CaseIdentityUnavailable,
+        }
+    }
+
+    /// Returns whether this support may participate in an eligible rollup.
+    #[must_use]
+    pub const fn is_sufficient(&self) -> bool {
+        matches!(self.status, ScorecardSupportStatus::Sufficient)
+            && self.required_independent_units > 0
+            && self.independent_units >= self.required_independent_units
+    }
+}
+
 /// One group of trials rolled up into a single eligibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScorecardGroupRollup {
     /// Group key, such as a scenario ID or variant key.
     pub key: String,
-    /// Worst eligibility across the group's trials.
+    /// Eligibility after combining trial outcomes with support sufficiency.
     pub eligibility: ScorecardEligibility,
     /// Number of trials in the group.
     pub trials: usize,
+    /// Independent modeled-case support behind this decision.
+    pub support: ScorecardSupportSummary,
 }
 
 /// Reasons a scorecard is structurally invalid.
@@ -300,6 +364,34 @@ mod tests {
             config: json!({}),
             effect,
         }
+    }
+
+    #[test]
+    fn scorecard_support_reports_sufficient_insufficient_and_unavailable_offline() {
+        // Pins: rollup consumers can distinguish too few independent cases from
+        // observations whose case identity was unavailable.
+        let insufficient = ScorecardSupportSummary::from_counts(1, 2);
+        assert!(!insufficient.is_sufficient());
+        assert_eq!(
+            insufficient.status,
+            ScorecardSupportStatus::InsufficientIndependentUnits
+        );
+
+        let sufficient = ScorecardSupportSummary::from_counts(2, 2);
+        assert!(sufficient.is_sufficient());
+        assert_eq!(sufficient.status, ScorecardSupportStatus::Sufficient);
+
+        let unavailable = ScorecardSupportSummary::case_identity_unavailable(1, 2);
+        assert!(!unavailable.is_sufficient());
+        assert_eq!(
+            unavailable.status,
+            ScorecardSupportStatus::CaseIdentityUnavailable
+        );
+        assert_eq!(unavailable.independent_units, 1);
+        assert_eq!(
+            serde_json::to_value(unavailable).expect("support serializes")["status"],
+            "case_identity_unavailable"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
     ArtifactFile, ArtifactRegistry, MAX_FILE_SIZE_BYTES, NewArtifactDraft, NewArtifactFile,
 };
+use moa_artifacts::release::{ActivationTarget, TenantScope};
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
@@ -165,15 +166,20 @@ fn file_by_path<'a>(files: &'a [ArtifactFile], path: &str) -> &'a ArtifactFile {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn registry_preserves_tenant_published_revision_history() -> Result<()> {
-    // Pins: artifact visibility and revision history are tenant-scoped.
+async fn registry_serves_the_activated_revision_and_keeps_history_db_memory() -> Result<()> {
+    // Pins: what a tenant serves is the activated revision named by the serving
+    // pointer, not the newest revision and not any status. Creating a second
+    // revision changes nothing until it is activated, activation moves the pointer
+    // and bumps its version, and the superseded revision stays loadable by exact
+    // id so pinned sessions keep working.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
-    let registry = ArtifactRegistry::new(store.pool().clone());
+    let pool = store.pool().clone();
+    let registry = ArtifactRegistry::new(pool.clone());
     let name = format!("artifact-scope-{}", Uuid::now_v7());
-    let tenant_scope = ActionRuleScope::Tenant {
-        tenant_id: TenantId::from(Uuid::now_v7()),
-    };
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let tenant_scope = ActionRuleScope::Tenant { tenant_id };
+    let release_scope = TenantScope::new(tenant_id);
 
     let tenant_doc = skill_doc(&name, "tenant-v1");
     let tenant_source = tenant_doc.to_yaml().expect("serialize tenant doc");
@@ -191,20 +197,38 @@ async fn registry_preserves_tenant_published_revision_history() -> Result<()> {
             },
         )
         .await?;
-    registry
-        .publish_revision(
-            &tenant_scope,
-            tenant_v1.revision_uid,
-            &validate_for_status(&tenant_doc, ArtifactStatus::Published),
-        )
-        .await?;
 
-    let visible_tenant = registry
-        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
+    // A draft serves nothing. This is the property that made a service-only
+    // publish hook pointless: import alone must not change what runs.
+    assert!(
+        registry
+            .load_serving(&tenant_scope, ArtifactKind::Skill, &name)
+            .await?
+            .is_none(),
+        "an imported draft must not serve"
+    );
+    assert_eq!(tenant_v1.status, ArtifactStatus::Draft);
+
+    let target = ActivationTarget::SkillVisibility {
+        artifact_uid: tenant_v1.artifact_uid,
+    };
+    let first = moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        release_scope,
+        target,
+        tenant_v1.revision_uid,
+    )
+    .await
+    .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    assert_eq!(first.pointer_version, 1);
+
+    let serving_v1 = registry
+        .load_serving(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
-        .expect("tenant artifact visible");
-    assert_eq!(visible_tenant.scope, "tenant");
-    assert_eq!(visible_tenant.version, 1);
+        .expect("activated revision serves");
+    assert_eq!(serving_v1.revision_uid, tenant_v1.revision_uid);
+    assert_eq!(serving_v1.version, 1);
+    assert_eq!(serving_v1.status, ArtifactStatus::Ready);
 
     let tenant_v2_doc = skill_doc(&name, "tenant-v2");
     let tenant_v2_source = tenant_v2_doc.to_yaml().expect("serialize tenant v2 doc");
@@ -219,40 +243,57 @@ async fn registry_preserves_tenant_published_revision_history() -> Result<()> {
             },
         )
         .await?;
-    registry
-        .publish_revision(
-            &tenant_scope,
-            tenant_v2.revision_uid,
-            &validate_for_status(&tenant_v2_doc, ArtifactStatus::Published),
-        )
-        .await?;
-    let visible_tenant_v2 = registry
-        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
+    let still_v1 = registry
+        .load_serving(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
-        .expect("tenant artifact v2 visible");
-    assert_eq!(visible_tenant_v2.version, 2);
-    assert_eq!(visible_tenant_v2.description, "tenant-v2");
+        .expect("previous revision keeps serving");
+    assert_eq!(
+        still_v1.revision_uid, tenant_v1.revision_uid,
+        "a newer revision must not serve merely by existing"
+    );
+
+    let second = moa_artifacts::test_fixtures::activate_revision(
+        &pool,
+        release_scope,
+        target,
+        tenant_v2.revision_uid,
+    )
+    .await
+    .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    assert_eq!(
+        second.pointer_version, 2,
+        "each activation advances the compare-and-set token"
+    );
+
+    let serving_v2 = registry
+        .load_serving(&tenant_scope, ArtifactKind::Skill, &name)
+        .await?
+        .expect("second revision serves");
+    assert_eq!(serving_v2.revision_uid, tenant_v2.revision_uid);
+    assert_eq!(serving_v2.version, 2);
+    assert_eq!(serving_v2.description, "tenant-v2");
+
     let loaded_tenant_v1 = registry
         .load_revision(&tenant_scope, tenant_v1.revision_uid)
         .await?
         .expect("tenant v1 remains loadable by exact revision id");
     assert_eq!(loaded_tenant_v1.version, 1);
-    assert_eq!(loaded_tenant_v1.status, ArtifactStatus::Published);
+    assert_eq!(loaded_tenant_v1.status, ArtifactStatus::Superseded);
     assert_eq!(loaded_tenant_v1.valid_to, None);
 
-    let summaries = registry
-        .list_visible(
-            &tenant_scope,
-            Some(ArtifactKind::Skill),
-            Some(ArtifactStatus::Published),
-        )
+    let serving = registry
+        .list_serving(&tenant_scope, ArtifactKind::Skill)
         .await?;
-    let matching = summaries
+    let matching = serving
         .iter()
         .filter(|summary| summary.name == name)
         .collect::<Vec<_>>();
-    assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].scope, "tenant");
+    assert_eq!(
+        matching.len(),
+        1,
+        "exactly one revision serves per artifact"
+    );
+    assert_eq!(matching[0].revision_uid, tenant_v2.revision_uid);
 
     let files = registry
         .load_files(&tenant_scope, tenant_v1.revision_uid)
@@ -264,105 +305,81 @@ async fn registry_preserves_tenant_published_revision_history() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn registry_contact_scope_overrides_tenant_without_leaking_to_peers() -> Result<()> {
-    // Pins: contact-scoped artifacts are visible only to that contact, while tenant artifacts remain the fallback.
+async fn registry_refuses_contact_scoped_release_gated_artifacts_db_memory() -> Result<()> {
+    // Pins: a contact-scoped skill, action, or agent is unrepresentable, because it
+    // has no release subject and so could never be evaluated. Kinds whose
+    // activation seam is owned elsewhere keep three-tier contact overrides, so the
+    // refusal is about release subjects rather than a blanket loss of contact
+    // scope.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let registry = ArtifactRegistry::new(store.pool().clone());
     let tenant_id = TenantId::from(Uuid::now_v7());
     let contact_id = ContactId(Uuid::now_v7());
-    let peer_contact_id = ContactId(Uuid::now_v7());
     let tenant_scope = ActionRuleScope::Tenant { tenant_id };
     let contact_scope = ActionRuleScope::Contact {
         tenant_id,
         contact_id,
     };
-    let peer_scope = ActionRuleScope::Contact {
-        tenant_id,
-        contact_id: peer_contact_id,
-    };
     let name = format!("artifact-contact-scope-{}", Uuid::now_v7());
 
-    let tenant_doc = skill_doc(&name, "tenant fallback");
-    let tenant_source = tenant_doc.to_yaml().expect("serialize tenant doc");
-    let tenant_revision = registry
+    for document in [
+        skill_doc(&name, "contact override"),
+        action_doc(&name),
+        agent_doc(&name),
+    ] {
+        let source = document.to_yaml().expect("serialize doc");
+        let error = registry
+            .create_draft(
+                &contact_scope,
+                NewArtifactDraft {
+                    document: &document,
+                    source_format: "yaml",
+                    source_text: source.as_bytes(),
+                    files: &[NewArtifactFile::new("SKILL.md", b"# Contact\n".to_vec())],
+                },
+            )
+            .await
+            .expect_err("a contact-scoped release-gated draft must be refused");
+        assert!(
+            matches!(error, MoaError::ValidationError(ref message) if message.contains("tenant")),
+            "unexpected refusal for {}: {error}",
+            document.kind
+        );
+    }
+
+    // The same contact scope still overrides a non-release-gated kind.
+    let connector = connector_doc(&name);
+    let connector_source = connector.to_yaml().expect("serialize connector");
+    let contact_connector = registry
         .create_draft(
-            &tenant_scope,
+            &contact_scope,
             NewArtifactDraft {
-                document: &tenant_doc,
+                document: &connector,
                 source_format: "yaml",
-                source_text: tenant_source.as_bytes(),
-                files: &[NewArtifactFile::new("SKILL.md", b"# Tenant\n".to_vec())],
+                source_text: connector_source.as_bytes(),
+                files: &[],
             },
         )
         .await?;
     registry
-        .publish_revision(
-            &tenant_scope,
-            tenant_revision.revision_uid,
-            &validate_for_status(&tenant_doc, ArtifactStatus::Published),
-        )
-        .await?;
-
-    let contact_before_override = registry
-        .load_visible_published(&contact_scope, ArtifactKind::Skill, &name)
-        .await?
-        .expect("contact should inherit tenant artifact before override");
-    assert_eq!(contact_before_override.scope, "tenant");
-    assert_eq!(contact_before_override.description, "tenant fallback");
-
-    let contact_doc = skill_doc(&name, "contact override");
-    let contact_source = contact_doc.to_yaml().expect("serialize contact doc");
-    let contact_revision = registry
-        .create_draft(
+        .publish_unserved_revision(
             &contact_scope,
-            NewArtifactDraft {
-                document: &contact_doc,
-                source_format: "yaml",
-                source_text: contact_source.as_bytes(),
-                files: &[NewArtifactFile::new("SKILL.md", b"# Contact\n".to_vec())],
-            },
+            contact_connector.revision_uid,
+            &validate_for_status(&connector, ArtifactStatus::Published),
         )
         .await?;
-    registry
-        .publish_revision(
-            &contact_scope,
-            contact_revision.revision_uid,
-            &validate_for_status(&contact_doc, ArtifactStatus::Published),
-        )
-        .await?;
-
     let visible_contact = registry
-        .load_visible_published(&contact_scope, ArtifactKind::Skill, &name)
+        .load_visible_published(&contact_scope, ArtifactKind::Connector, &name)
         .await?
-        .expect("contact artifact should be visible to owning contact");
+        .expect("contact-scoped connector is visible to its contact");
     assert_eq!(visible_contact.scope, "contact");
-    assert_eq!(
-        visible_contact.user_id.as_ref().map(ToString::to_string),
-        Some(contact_id.to_string())
-    );
-    assert_eq!(visible_contact.description, "contact override");
-
-    let visible_peer = registry
-        .load_visible_published(&peer_scope, ArtifactKind::Skill, &name)
-        .await?
-        .expect("peer contact should still see tenant fallback");
-    assert_eq!(visible_peer.scope, "tenant");
-    assert_eq!(visible_peer.description, "tenant fallback");
-
-    let visible_tenant = registry
-        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
-        .await?
-        .expect("tenant scope should still see tenant artifact");
-    assert_eq!(visible_tenant.scope, "tenant");
-    assert_eq!(visible_tenant.description, "tenant fallback");
-
-    let contact_files = registry
-        .load_files(&contact_scope, contact_revision.revision_uid)
-        .await?;
-    assert_eq!(
-        file_by_path(&contact_files, "SKILL.md").content,
-        b"# Contact\n"
+    assert!(
+        registry
+            .load_visible_published(&tenant_scope, ArtifactKind::Connector, &name)
+            .await?
+            .is_none(),
+        "a contact override must not leak into tenant scope"
     );
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
@@ -394,7 +411,7 @@ async fn registry_persists_behavior_lab_artifact_kinds() -> Result<()> {
         )
         .await?;
     let published = registry
-        .publish_revision(
+        .publish_unserved_revision(
             &workspace_scope,
             draft.revision_uid,
             &validate_for_status(&document, ArtifactStatus::Published),
@@ -449,6 +466,65 @@ fn skill_doc(name: &str, description: &str) -> ArtifactDocument {
         }
     });
     serde_json::from_value(source).expect("test skill artifact is valid")
+}
+
+fn action_doc(name: &str) -> ArtifactDocument {
+    let source = json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "action",
+        "metadata": { "name": name, "description": "contact action", "tags": [] },
+        "definition": {
+            "type": "action",
+            "spec": {
+                "id": "do_thing",
+                "description": "Do one thing.",
+                "input_schema": { "type": "object" },
+                "output_schema": { "type": "object" }
+            }
+        }
+    });
+    serde_json::from_value(source).expect("test action artifact is valid")
+}
+
+fn agent_doc(name: &str) -> ArtifactDocument {
+    let source = json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "agent",
+        "metadata": { "name": name, "description": "contact agent", "tags": [] },
+        "definition": {
+            "type": "agent",
+            "spec": {
+                "display_name": "Contact Agent",
+                "purpose": {
+                    "summary": "Answer one contact's questions.",
+                    "expected_outputs": ["answer"]
+                },
+                "tool_policy": { "mode": "allowlist", "tools": ["file_read"] }
+            }
+        }
+    });
+    serde_json::from_value(source).expect("test agent artifact is valid")
+}
+
+fn connector_doc(name: &str) -> ArtifactDocument {
+    let source = json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "connector",
+        "metadata": { "name": name, "description": "contact connector", "tags": [] },
+        "definition": {
+            "type": "connector",
+            "spec": {
+                "provider": "fixture",
+                "actions": [{
+                    "id": "ping",
+                    "description": "Ping the fixture provider.",
+                    "input_schema": { "type": "object" },
+                    "output_schema": { "type": "object" }
+                }]
+            }
+        }
+    });
+    serde_json::from_value(source).expect("test connector artifact is valid")
 }
 
 fn experiment_plan_doc(name: &str) -> ArtifactDocument {

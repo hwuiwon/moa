@@ -68,16 +68,38 @@ impl FromStr for ArtifactKind {
 }
 
 /// Lifecycle status for an artifact revision.
+///
+/// For release-gated kinds (skill, action, agent) this is the candidate
+/// lifecycle, and none of its states serve: a session resolves the type-owned
+/// serving pointer, never a status. [`Self::Ready`] means "evaluated and
+/// activatable", not "visible". Migration `V000373` installs a trigger that makes
+/// [`Self::Published`] unrepresentable for those kinds.
+///
+/// [`Self::Published`] survives only for kinds whose activation seam is owned
+/// elsewhere: a connector catalog snapshot is activated by the platform, and an
+/// experiment plan is evaluation configuration rather than served behavior. The
+/// same trigger makes the candidate states unrepresentable for those kinds, so
+/// the two state spaces cannot be mixed.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactStatus {
-    /// Editable artifact that may contain unresolved references.
+    /// Immutable candidate that has not been submitted for evaluation.
     #[default]
     Draft,
-    /// Runtime-visible artifact revision.
-    Published,
+    /// A release attempt holds this artifact's active run slot.
+    Evaluating,
+    /// Deterministic evidence passed the gate; activation may be requested.
+    Ready,
+    /// Deterministic assertions failed for this revision.
+    Rejected,
+    /// Evidence was incomplete or the gate could not resolve; retryable.
+    Inconclusive,
+    /// Replaced by a newer candidate or activation.
+    Superseded,
     /// Hidden artifact revision retained for history.
     Archived,
+    /// Validated revision of a kind whose activation seam is owned elsewhere.
+    Published,
 }
 
 impl ArtifactStatus {
@@ -86,9 +108,24 @@ impl ArtifactStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Draft => "draft",
-            Self::Published => "published",
+            Self::Evaluating => "evaluating",
+            Self::Ready => "ready",
+            Self::Rejected => "rejected",
+            Self::Inconclusive => "inconclusive",
+            Self::Superseded => "superseded",
             Self::Archived => "archived",
+            Self::Published => "published",
         }
+    }
+
+    /// Returns whether every declared reference must resolve at this status.
+    ///
+    /// A candidate is evaluated as the exact thing that would serve, so the
+    /// activatable and platform-validated statuses both demand resolution; the
+    /// non-serving candidate states do not.
+    #[must_use]
+    pub fn requires_resolved_references(&self) -> bool {
+        matches!(self, Self::Ready | Self::Published)
     }
 }
 
@@ -104,8 +141,13 @@ impl FromStr for ArtifactStatus {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "draft" => Ok(Self::Draft),
-            "published" => Ok(Self::Published),
+            "evaluating" => Ok(Self::Evaluating),
+            "ready" => Ok(Self::Ready),
+            "rejected" => Ok(Self::Rejected),
+            "inconclusive" => Ok(Self::Inconclusive),
+            "superseded" => Ok(Self::Superseded),
             "archived" => Ok(Self::Archived),
+            "published" => Ok(Self::Published),
             _ => Err(Error::InvalidReference {
                 reference: value.to_string(),
                 message: "unsupported artifact status".to_string(),

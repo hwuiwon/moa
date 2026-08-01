@@ -49,6 +49,7 @@ use crate::objects::worker::{
     MAX_WORKER_TURNS_PER_WORKFLOW, WorkerClearInputRequest, WorkerClient,
 };
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
+use crate::tool_invocation::governed::completion_tool_catalog_pin;
 use crate::tool_invocation::governed::{
     GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
     invoke_governed_tool, record_segment_tool_use as record_governed_segment_tool_use,
@@ -86,6 +87,7 @@ enum WorkerIterationOutcome {
 struct WorkerIterationInput<'a> {
     request: &'a RunWorkerTurnRequest,
     completion_request: CompletionRequest,
+    tool_catalog_pin: moa_hands::ToolCatalogPin,
     active_canary: Option<String>,
     meta: SessionMeta,
     parent_session: SessionId,
@@ -318,34 +320,37 @@ async fn run_worker_inside_workflow(
         .call()
         .await?
         .into_inner();
-        let (completion_request, active_canary, meta, parent_session) = match preparation {
-            WorkerTurnPreparation::Outcome { outcome } => {
-                return Ok(workflow_outcome_from_core(request, outcome));
-            }
-            WorkerTurnPreparation::Request {
-                request,
-                active_canary,
-                session_meta,
-                parent_session,
-            } => {
-                last_request_meta = Some((*session_meta).clone());
-                last_parent_session = Some(parent_session);
-                let mut completion_request = *request;
-                let mut active_canary = active_canary;
-                if continuing_action_review {
-                    // No tools on a continuation, so there is nothing for a canary to
-                    // protect and nothing that could raise a second review from here.
-                    completion_request.tools.clear();
-                    active_canary = None;
+        let (completion_request, tool_catalog_pin, active_canary, meta, parent_session) =
+            match preparation {
+                WorkerTurnPreparation::Outcome { outcome } => {
+                    return Ok(workflow_outcome_from_core(request, outcome));
                 }
-                (
-                    completion_request,
+                WorkerTurnPreparation::Request {
+                    request,
                     active_canary,
-                    *session_meta,
+                    session_meta,
                     parent_session,
-                )
-            }
-        };
+                } => {
+                    last_request_meta = Some((*session_meta).clone());
+                    last_parent_session = Some(parent_session);
+                    let mut completion_request = *request;
+                    let mut active_canary = active_canary;
+                    if continuing_action_review {
+                        // No tools on a continuation, so there is nothing for a canary to
+                        // protect and nothing that could raise a second review from here.
+                        completion_request.tools.clear();
+                        active_canary = None;
+                    }
+                    let tool_catalog_pin = completion_tool_catalog_pin(&completion_request)?;
+                    (
+                        completion_request,
+                        tool_catalog_pin,
+                        active_canary,
+                        *session_meta,
+                        parent_session,
+                    )
+                }
+            };
         let turn_span = worker_turn_span(
             &meta,
             &request.worker_id,
@@ -362,6 +367,7 @@ async fn run_worker_inside_workflow(
                 WorkerIterationInput {
                     request,
                     completion_request,
+                    tool_catalog_pin,
                     active_canary,
                     meta,
                     parent_session,
@@ -562,6 +568,7 @@ async fn run_worker_iteration(
             active_canary: input.active_canary.as_deref(),
             trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
             selected_skills: &selected_skills,
+            tool_catalog_pin: &input.tool_catalog_pin,
             disabled_capabilities: &mut *input.disabled_capabilities,
         };
         if handle_tool_call(
@@ -654,6 +661,7 @@ struct WorkerToolContext<'a> {
     /// Skills the root turn activated on the active segment, used to detect which a worker
     /// tool call engaged so worker skill use is credited to the root segment.
     selected_skills: &'a [String],
+    tool_catalog_pin: &'a moa_hands::ToolCatalogPin,
     disabled_capabilities: &'a mut BTreeMap<String, moa_core::types::security::ToolCapabilityId>,
 }
 
@@ -727,6 +735,9 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
+            expected_tool_contract_revision: tool_context
+                .tool_catalog_pin
+                .contract_revision(&tool_call.invocation.name),
             active_canary: tool_context.active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::Worker {

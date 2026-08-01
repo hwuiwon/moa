@@ -1,6 +1,21 @@
-//! Parent-process MCP capability fixture for deterministic execution-run tests.
+//! Parent-process MCP capability fixture with scripted, deterministic outcomes.
+//!
+//! One in-process streamable-HTTP MCP server whose declared tools return exactly
+//! the scripted outcomes a test asked for, including malformed structured
+//! content, terminal tool errors, and bounded HTTP failures. It exists so tests
+//! that need a connector to *misbehave in one specific way* share one fixture
+//! rather than each growing a bespoke fake whose fidelity drifts.
+//!
+//! Available on its own (feature `capability-fixture`) as well as through the
+//! full orchestrator fixture, because connector-catalog staging has to be tested
+//! without Docker, Restate, or Postgres. The map-item-key and execution-task-id
+//! helpers need `moa-execution`, so they are gated on `orchestrator-fixture`:
+//! that keeps the standalone fixture's dependency graph to an HTTP server and
+//! stops an unrelated crate's build state from breaking connector-catalog tests.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(feature = "orchestrator-fixture")]
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
@@ -10,11 +25,10 @@ use axum::http::{HeaderValue, StatusCode, header::RETRY_AFTER};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moa_execution::bindings::extract_map_key;
-use moa_execution::state::ExecutionTaskId;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
+#[cfg(feature = "orchestrator-fixture")]
 use uuid::Uuid;
 
 const FIXTURE_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -179,7 +193,12 @@ impl FixtureCapabilityController {
     }
 
     /// Derives stable task IDs for unique map item keys using production algorithms.
-    pub fn derived_task_ids(&self, run_uid: Uuid, node_id: &str) -> Result<Vec<ExecutionTaskId>> {
+    #[cfg(feature = "orchestrator-fixture")]
+    pub fn derived_task_ids(
+        &self,
+        run_uid: Uuid,
+        node_id: &str,
+    ) -> Result<Vec<moa_execution::state::ExecutionTaskId>> {
         let calls = self.calls();
         let mut seen = BTreeSet::new();
         let mut task_ids = Vec::new();
@@ -193,7 +212,7 @@ impl FixtureCapabilityController {
             let Some(pointer) = tool.item_key_pointer.as_deref() else {
                 continue;
             };
-            let item_key = extract_map_key(&call.input, pointer)
+            let item_key = fixture_map_key(&call.input, pointer)
                 .with_context(|| format!("derive map item key for `{}`", call.capability))?;
             if item_key != call.item_key {
                 bail!(
@@ -202,7 +221,9 @@ impl FixtureCapabilityController {
                 );
             }
             if seen.insert(item_key.clone()) {
-                task_ids.push(ExecutionTaskId::derive(run_uid, node_id, &item_key)?);
+                task_ids.push(moa_execution::state::ExecutionTaskId::derive(
+                    run_uid, node_id, &item_key,
+                )?);
             }
         }
         Ok(task_ids)
@@ -222,7 +243,8 @@ impl FixtureCapabilityController {
     }
 }
 
-pub(super) struct FixtureCapabilityRuntime {
+/// One running fixture MCP capability server and its graceful-shutdown handle.
+pub struct FixtureCapabilityRuntime {
     controller: FixtureCapabilityController,
     endpoint: String,
     shutdown: Option<oneshot::Sender<()>>,
@@ -230,7 +252,8 @@ pub(super) struct FixtureCapabilityRuntime {
 }
 
 impl FixtureCapabilityRuntime {
-    pub(super) async fn start(options: FixtureCapabilityOptions) -> Result<Self> {
+    /// Starts one fixture MCP server on an ephemeral loopback port.
+    pub async fn start(options: FixtureCapabilityOptions) -> Result<Self> {
         let state = Arc::new(FixtureCapabilityState::new(options.tools)?);
         let controller = FixtureCapabilityController {
             state: Arc::clone(&state),
@@ -260,15 +283,18 @@ impl FixtureCapabilityRuntime {
         })
     }
 
-    pub(super) fn controller(&self) -> &FixtureCapabilityController {
+    /// Returns the observation and release controller for this server.
+    pub fn controller(&self) -> &FixtureCapabilityController {
         &self.controller
     }
 
-    pub(super) fn endpoint(&self) -> &str {
+    /// Returns the base URL an MCP client should be configured with.
+    pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    pub(super) fn stop(&mut self) {
+    /// Stops the server and aborts its accept task.
+    pub fn stop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -363,7 +389,7 @@ impl FixtureCapabilityState {
             .get(&capability)
             .with_context(|| format!("unknown fixture capability `{capability}`"))?;
         let item_key = match tool.item_key_pointer.as_deref() {
-            Some(pointer) => extract_map_key(&input, pointer)
+            Some(pointer) => fixture_map_key(&input, pointer)
                 .with_context(|| format!("extract fixture map key for `{capability}`"))?,
             None => String::new(),
         };
@@ -673,6 +699,26 @@ fn json_rpc_error(id: Value, code: i64, message: impl Into<String>) -> Response 
         .into_response()
 }
 
+/// Derives one canonical map item key with the production algorithm.
+#[cfg(feature = "orchestrator-fixture")]
+fn fixture_map_key(input: &Value, pointer: &str) -> Result<String> {
+    Ok(moa_execution::bindings::extract_map_key(input, pointer)?)
+}
+
+/// Refuses map item keys when the production algorithm is not compiled in.
+///
+/// The standalone capability fixture deliberately does not depend on
+/// `moa-execution`, so a test that declares `item_key_pointer` without the
+/// `orchestrator-fixture` feature fails loudly rather than silently keying every
+/// call the same.
+#[cfg(not(feature = "orchestrator-fixture"))]
+fn fixture_map_key(_input: &Value, pointer: &str) -> Result<String> {
+    bail!(
+        "fixture capability map item keys (pointer `{pointer}`) require the \
+         `orchestrator-fixture` feature"
+    )
+}
+
 fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -680,7 +726,10 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-#[cfg(test)]
+// The fixture's own tests exercise the production map-key and task-id algorithms,
+// so they compile only when those are available. A workspace-wide test run
+// unifies `orchestrator-fixture` on and runs them.
+#[cfg(all(test, feature = "orchestrator-fixture"))]
 mod tests {
     use std::time::Duration;
 

@@ -1,9 +1,11 @@
+mod support;
+
 use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::experiments::{
     ExperimentCancelSignal, ExperimentScorecard, ScorecardEffect, ScorecardRequirement,
-    ScorecardValueType,
+    ScorecardSupportStatus, ScorecardValueType,
 };
 use moa_core::types::memory::RlsContext;
 use moa_core::types::resource::ResourceAmounts;
@@ -65,11 +67,13 @@ async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
     let store = ExperimentStore::new(test_db.store().pool().clone());
     let scope = tenant_scope("experiment-round-trip");
     let artifact_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
-    let new_run = new_experiment(
+    let mut new_run = new_experiment(
         "round-trip",
         Some("round-trip-key"),
         vec![artifact_revision_uid],
     );
+    let simulator_policy = support::simulator_policy("gpt-5.1-mini");
+    new_run.simulator_policy = Some(simulator_policy.clone());
 
     let inserted = store.insert_run(&scope, new_run).await?;
     let loaded = store
@@ -92,6 +96,7 @@ async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
     assert_eq!(loaded.artifact_revision_uids, [artifact_revision_uid]);
     assert_eq!(loaded.idempotency_key.as_deref(), Some("round-trip-key"));
     assert_eq!(loaded.created_by_identity["id"], "experimenter");
+    assert_eq!(loaded.simulator_policy, Some(simulator_policy));
     assert_eq!(loaded.created_at, inserted.created_at);
     assert_score_run_exists(test_db.store().pool(), &scope, loaded.score_run_id).await?;
     assert_artifact_revision_links(
@@ -1549,6 +1554,7 @@ fn new_experiment(
         plan_artifact_uid: None,
         expected_trials: 1,
         resource_envelope: fixture_experiment_envelope(),
+        simulator_policy: None,
     }
 }
 
@@ -1589,11 +1595,9 @@ fn new_trial(
         data_bundle_ids: Vec::new(),
         artifact_revision_uids,
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new("gpt-5.1-mini"),
-            temperature: Some(0.0),
+            policy: support::simulator_policy("gpt-5.1-mini"),
             max_turns: 6,
             token_budget: Some(4_000),
-            metadata: json!({ "fixture": "db" }),
         },
         target_model: Some(ModelId::new("gpt-5.1")),
         seed: Some("seed-fixture".to_string()),
@@ -1733,10 +1737,15 @@ async fn insert_execution_run(
     let run_uid = Uuid::now_v7();
     let planning_hash = "1".repeat(64);
     let plan_hash = "2".repeat(64);
+    // The typed columns and the provenance JSON must agree: `source_kind` carries a
+    // CHECK that an `experiment_template` run names a canonical skill template, so a
+    // fixture that set only the JSON would be rejected by the schema.
+    let skill_template_ref = "skill://experiment-link";
+    let skill_template_revision_uid = Uuid::now_v7();
     let source_provenance = json!({
         "kind": "experiment_template",
-        "skill_template_ref": "skill://experiment-link",
-        "skill_template_revision_uid": Uuid::now_v7(),
+        "skill_template_ref": skill_template_ref,
+        "skill_template_revision_uid": skill_template_revision_uid,
         "experiment_run_uid": experiment_run_uid,
         "score_run_id": score_run_id,
         "trial_uid": trial_uid,
@@ -1768,14 +1777,16 @@ async fn insert_execution_run(
             originating_user_sequence_num, planning_context_uid, planning_context_hash,
             owner_user_id, goal_contract, initial_plan, active_plan,
             initial_plan_hash, active_plan_hash, capability_catalog,
-            authorization_envelope, source_provenance, input, status
+            authorization_envelope, source_provenance, input, status,
+            source_kind, skill_template_ref, skill_template_revision_uid
         )
         VALUES (
             $1, $2, $3, $4, 1, $5, $6, $7,
             '{}'::JSONB, '{}'::JSONB, '{}'::JSONB, $8, $8,
             '{"schema_version":1}'::JSONB,
             '{"capability_refs":[],"skill_refs":[]}'::JSONB,
-            $9, '{}'::JSONB, 'queued'
+            $9, '{}'::JSONB, 'queued',
+            'experiment_template', $10, $11
         )
         "#,
     )
@@ -1788,6 +1799,8 @@ async fn insert_execution_run(
     .bind(&owner_user_id)
     .bind(&plan_hash)
     .bind(source_provenance)
+    .bind(skill_template_ref)
+    .bind(skill_template_revision_uid)
     .execute(conn.as_mut())
     .await
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
@@ -1825,7 +1838,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
             canonical_hash, source_format, source_text, status, validation_report, version,
             published_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'published', $9, 1, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'ready', $9, 1, now())
         "#,
     )
     .bind(revision_uid)
@@ -2275,11 +2288,10 @@ async fn seeded_score_rows_without_provenance_never_satisfy_the_scorecard_db() -
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() -> Result<()> {
-    // Pins the full eligibility ladder on the real read path: one complete,
-    // correctly linked trial is Eligible; removing that trial's only required
-    // result drops it — and the scenario and variant and run above it — to
-    // Incomplete. Every level is derived from the same trial rows, so a scenario
-    // cannot look healthier than the trial inside it.
+    // Pins the full eligibility ladder on the real read path: a correctly linked
+    // trial is individually Eligible, but groups with no modeled-case identity
+    // remain Incomplete. Removing another trial's required result also keeps its
+    // groups Incomplete.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
@@ -2358,7 +2370,7 @@ async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() 
         .iter()
         .map(|rollup| (rollup.key.as_str(), rollup.eligibility.as_str()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(scenarios.get("scenario-a").copied(), Some("eligible"));
+    assert_eq!(scenarios.get("scenario-a").copied(), Some("incomplete"));
     assert_eq!(scenarios.get("scenario-b").copied(), Some("incomplete"));
 
     let variants = response
@@ -2366,7 +2378,7 @@ async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() 
         .iter()
         .map(|rollup| (rollup.key.as_str(), rollup.eligibility.as_str()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(variants.get("variant-a").copied(), Some("eligible"));
+    assert_eq!(variants.get("variant-a").copied(), Some("incomplete"));
     assert_eq!(variants.get("variant-b").copied(), Some("incomplete"));
 
     assert_eq!(
@@ -2375,6 +2387,10 @@ async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() 
         "one unproven trial must keep the whole run from being eligible"
     );
     assert_eq!(response.run_scorecard.trials, 2);
+    assert_eq!(
+        response.run_scorecard.support.status,
+        ScorecardSupportStatus::CaseIdentityUnavailable
+    );
     Ok(())
 }
 

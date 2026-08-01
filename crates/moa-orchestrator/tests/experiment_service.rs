@@ -1,12 +1,15 @@
 //! Experiment service helper coverage.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use chrono::{TimeZone, Utc};
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::types::experiments::{
     ExperimentScorecard, ScorecardEffect, ScorecardFinding, ScorecardGroupRollup,
-    ScorecardRequirement, ScorecardValueType,
+    ScorecardRequirement, ScorecardSupportSummary, ScorecardValueType,
 };
 use moa_core::{
     types::action_policy::ActionRuleScope, types::execution_planning::PinnedExecutionTemplateRef,
@@ -17,7 +20,7 @@ use moa_experiments::app::{
     ExperimentLearningProposalEvidence, ExperimentRunScorecards, TrialScorecardAssessment,
     build_experiment_learning_candidate,
 };
-use moa_experiments::eligibility::{ScorecardAssessment, ScorecardEligibility, roll_up_group};
+use moa_experiments::eligibility::{ScorecardAssessment, ScorecardEligibility};
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget,
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant,
@@ -85,12 +88,15 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         score_run_id: None,
         idempotency_key: Some("run-key".to_string()),
         agent_revision_variants: Vec::new(),
+        release_evaluation: None,
     });
     assert_has_tenant_id(ExperimentGeneratePlanRequest {
         tenant_id,
         description: "Simulate damaged-food-order support behavior.".to_string(),
         model: Some("gpt-5.4".to_string()),
         artifact_refs: vec!["skill://damaged-food-order".to_string()],
+        simulator_policy_uid: fixture_uuid(3),
+        simulator_policy_revision: 1,
     });
     assert_has_tenant_id(ExperimentGeneratePlanResponse {
         tenant_id,
@@ -350,6 +356,15 @@ fn experiment_score_responses_serialize_typed_trial_and_scenario_breakdowns() {
         scenario_id.to_string()
     );
     assert_eq!(encoded["run_scorecard"]["eligibility"], "incomplete");
+    assert_eq!(encoded["run_scorecard"]["support"]["independent_units"], 1);
+    assert_eq!(
+        encoded["run_scorecard"]["support"]["required_independent_units"],
+        moa_experiments::eligibility::group_support_floor()
+    );
+    assert_eq!(
+        encoded["run_scorecard"]["support"]["status"],
+        "insufficient_independent_units"
+    );
     assert_eq!(encoded["scenario_scorecards"][0]["trials"], 1);
     assert_eq!(encoded["variant_scorecards"][0]["key"], "candidate");
 }
@@ -475,7 +490,15 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
         mean_or_rate: Some(1.0),
     }];
     let scorecards = ExperimentRunScorecards {
-        run: roll_up_group(run.run_uid.to_string(), &[ScorecardEligibility::Eligible]),
+        run: ScorecardGroupRollup {
+            key: run.run_uid.to_string(),
+            eligibility: ScorecardEligibility::Eligible,
+            trials: 1,
+            support: ScorecardSupportSummary::from_counts(
+                moa_experiments::eligibility::group_support_floor(),
+                moa_experiments::eligibility::group_support_floor(),
+            ),
+        },
         scenarios: Vec::new(),
         variants: Vec::new(),
         trials: vec![TrialScorecardAssessment {
@@ -484,6 +507,8 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
             trial_key: trials[0].trial_key.clone(),
             variant_key: trials[0].variant_key.clone(),
             scenario_id: trials[0].scenario_id.clone(),
+            persona_id: trials[0].persona_id.clone(),
+            profile_id: trials[0].profile_id.clone(),
             assessment: ScorecardAssessment {
                 eligibility: ScorecardEligibility::Eligible,
                 findings: Vec::new(),
@@ -649,6 +674,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
     ExperimentRunRecord {
         plan_artifact_uid: None,
         resource_envelope: fixture_experiment_envelope(),
+        simulator_policy: None,
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::new(),
         },
@@ -711,11 +737,9 @@ fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         data_bundle_ids: vec![fixture_uuid(10).to_string()],
         artifact_revision_uids: vec![fixture_uuid(21)],
         simulator: ExperimentSimulatorConfig {
-            model: ModelId::new("gpt-5.4"),
-            temperature: Some(0.2),
+            policy: support::simulator_policy::fixture("gpt-5.4"),
             max_turns: 3,
             token_budget: Some(1000),
-            metadata: json!({"fixture": true}),
         },
         target_model: Some(ModelId::new("gpt-5.4")),
         seed: Some("seed".to_string()),
@@ -781,7 +805,10 @@ fn minimal_valid_generated_plan() -> String {
                 "target_variants": [
                     { "key": "agent-loop", "kind": "agent_loop" }
                 ],
-                "simulator_model": "gpt-5.4-mini",
+                "simulator_policy": {
+                    "policy_uid": "10000000-0000-0000-0000-000000000001",
+                    "revision": 1
+                },
                 "parallelism": 1,
                 "trials_per_combination": 1,
                 "budget": { "max_total_cents": 1000 },
@@ -805,10 +832,16 @@ fn scorecard_rollup(
     eligibility: ScorecardEligibility,
     trials: usize,
 ) -> ScorecardGroupRollup {
+    let required = moa_experiments::eligibility::group_support_floor();
     ScorecardGroupRollup {
         key: key.to_string(),
         eligibility,
         trials,
+        support: if eligibility == ScorecardEligibility::Eligible {
+            ScorecardSupportSummary::from_counts(required, required)
+        } else {
+            ScorecardSupportSummary::from_counts(required.saturating_sub(1), required)
+        },
     }
 }
 

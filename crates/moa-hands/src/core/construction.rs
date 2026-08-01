@@ -43,14 +43,18 @@ impl ToolRouter {
         providers: HashMap<String, Arc<dyn HandProvider>>,
         deployment_sandbox_policy: SandboxPolicySnapshot,
     ) -> Self {
+        let catalog_owner_id = uuid::Uuid::now_v7();
         Self {
-            catalog: std::sync::RwLock::new(Arc::new(ToolCatalogSnapshot::new(registry))),
+            catalog: std::sync::RwLock::new(Arc::new(ToolCatalogSnapshot::new(
+                catalog_owner_id,
+                registry,
+            ))),
+            catalog_owner_id,
             providers,
             deployment_sandbox_policy,
             tenant_sandbox_policy: None,
             hand_lease_reaper_installed: false,
             local_provider: None,
-            mcp_clients: tokio::sync::RwLock::new(HashMap::new()),
             mcp_servers: HashMap::new(),
             mcp_health: tokio::sync::RwLock::new(std::collections::BTreeMap::new()),
             mcp_credentials: McpDeploymentCredentials::default(),
@@ -405,13 +409,37 @@ impl ToolRouter {
     /// tools sees them all from the same catalog revision even if a background
     /// refresh publishes between its calls.
     pub(super) fn registry(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.activated_catalog().registry)
+    }
+
+    /// Returns one immutable publication of schemas, contracts, and routes.
+    ///
+    /// Consumers that need more than one catalog fact must retain this handle
+    /// for the whole decision instead of making independent router reads that a
+    /// refresh can split across revisions.
+    #[must_use]
+    pub fn activated_catalog(&self) -> Arc<ToolCatalogSnapshot> {
         Arc::clone(
             &self
                 .catalog
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .registry,
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// Rejects a snapshot minted by a different router instance.
+    pub(super) fn require_owned_catalog(&self, catalog: &ToolCatalogSnapshot) -> Result<()> {
+        if catalog.owner_id != self.catalog_owner_id {
+            return Err(MoaError::ValidationError(
+                "tool catalog snapshot belongs to a different router instance".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the cached pin from the same snapshot dispatch reads.
+    pub(super) fn catalog_pin(&self) -> Result<super::ToolCatalogPin> {
+        self.activated_catalog().pin()
     }
 
     /// Publishes a new catalog snapshot and the prompt schemas derived from it.
@@ -419,11 +447,15 @@ impl ToolRouter {
     /// Both are replaced under the same publication so no caller can compile a
     /// prompt from one catalog revision and dispatch against another.
     pub(super) fn publish_registry(&self, registry: ToolRegistry) {
+        self.publish_catalog_snapshot(ToolCatalogSnapshot::new(self.catalog_owner_id, registry));
+    }
+
+    /// Publishes a fully derived immutable catalog in one lock acquisition.
+    pub(super) fn publish_catalog_snapshot(&self, snapshot: ToolCatalogSnapshot) {
         *self
             .catalog
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Arc::new(ToolCatalogSnapshot::new(registry));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(snapshot);
     }
 
     /// Returns the ordered tool schemas for prompt compilation.
@@ -441,13 +473,7 @@ impl ToolRouter {
     /// catalog refresh has already changed or withdrawn.
     #[must_use]
     pub fn tool_schema_snapshot(&self) -> Arc<Vec<serde_json::Value>> {
-        Arc::clone(
-            &self
-                .catalog
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .tool_schemas,
-        )
+        self.activated_catalog().tool_schema_snapshot()
     }
 
     /// Returns the prompt schemas for the read-only agentic memory tools.
@@ -487,17 +513,6 @@ impl ToolRouter {
             .tools
             .get(name)
             .map(|registered| registered.definition.clone())
-    }
-
-    /// Returns the live schema revision of one registered MCP tool.
-    ///
-    /// Durable execution compares this with the revision pinned in its immutable
-    /// capability catalog immediately before governed dispatch.
-    #[must_use]
-    pub fn mcp_schema_revision(&self, name: &str) -> Option<String> {
-        self.registry()
-            .mcp_schema_revision(name)
-            .map(ToOwned::to_owned)
     }
 
     /// Returns every registered tool definition in stable name order.

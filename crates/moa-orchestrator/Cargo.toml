@@ -116,6 +116,7 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-artifacts = { workspace = true, features = ["test-support"] }
 clickhouse = { workspace = true, features = ["test-util"] }
 moa-analytics-export = { workspace = true }
 moa-eval-core.workspace = true

@@ -25,6 +25,9 @@ const SCORE_ID_NAMESPACE: Uuid = Uuid::from_u128(0x8f3d_41b6_9a27_5c04_b1e8_60f5
 /// Domain separator for deterministic score-id derivation.
 const SCORE_ID_DOMAIN: &str = "moa.experiment.score-id";
 
+/// Reserved evaluator id for an outcome producer the trial runtime does not yet provide.
+const UNSUPPORTED_SCENARIO_OUTCOME_EVALUATOR_ID: &str = "scenario_outcome";
+
 /// Whether an evaluator returns the same answer for the same evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,6 +188,11 @@ pub enum EvaluatorError {
         /// Requested evaluator ID.
         evaluator_id: String,
     },
+    /// Scenario outcome evaluation has no durable evidence producer.
+    #[error(
+        "scenario outcome evaluation is unavailable because trials do not persist objective scenario evidence"
+    )]
+    ScenarioEvaluationUnavailable,
 }
 
 /// Value one evaluator produced.
@@ -281,6 +289,9 @@ pub fn validate_scorecard(scorecard: &ExperimentScorecard) -> Result<(), Evaluat
 /// evaluator is marked blocking, or the deterministic configuration is missing
 /// or unusable.
 pub fn validate_requirement(requirement: &ScorecardRequirement) -> Result<(), EvaluatorError> {
+    if requirement.evaluator_id == UNSUPPORTED_SCENARIO_OUTCOME_EVALUATOR_ID {
+        return Err(EvaluatorError::ScenarioEvaluationUnavailable);
+    }
     let descriptor = descriptor(&requirement.evaluator_id, &requirement.evaluator_version)?;
     if requirement.effect.is_blocking() && !descriptor.determinism.permits_blocking() {
         return Err(EvaluatorError::StochasticBlocking {
@@ -503,6 +514,9 @@ mod tests {
             latest_sequence_num: 20,
             visible_output: Some("your refund is on the way".to_string()),
             failure_code: None,
+            simulator_policy: None,
+            simulator_decision: None,
+            simulator_reason: None,
         }
     }
 
@@ -557,6 +571,17 @@ mod tests {
             EvaluatorError::StochasticBlocking {
                 evaluator_id: "scenario_quality".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn scenario_outcome_requirement_is_rejected_without_a_durable_evidence_producer_offline() {
+        // Pins: reserving the evaluator id must not make a scenario gate runnable
+        // before trials persist objective evidence for it.
+        assert_eq!(
+            validate_requirement(&blocking("scenario_outcome", json!({})))
+                .expect_err("unsupported scenario evaluator"),
+            EvaluatorError::ScenarioEvaluationUnavailable
         );
     }
 

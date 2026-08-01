@@ -1,18 +1,19 @@
 //! Restate service for human-reviewed learning candidate promotion.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
 use moa_artifacts::registry::ArtifactRegistry;
+use moa_artifacts::release::{ActivationTargetClass, TenantScope};
 use moa_authz::fga_subject;
 use moa_authz_schema::Relation;
 use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::{
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateStatusUpdate, types::experience::LearningProposalKind,
-    types::identifiers::TenantId, types::learning::LearningEntry,
-    types::learning::LearningLogSourceRef,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::experience::LearningProposalKind, types::identifiers::TenantId,
+    types::learning::LearningEntry, types::learning::LearningLogSourceRef,
 };
 use moa_db::ScopedConn;
 use moa_hands::ToolRouter;
@@ -306,6 +307,16 @@ impl LearningReviewStore for SessionLearningReviewStore {
     ) -> std::result::Result<(), moa_core::error::MoaError> {
         self.store.append_learning_in_tx(conn, entry).await
     }
+
+    async fn record_learning_candidate_decision_in_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        decision: &moa_core::types::experience::LearningCandidateDecisionRecord,
+    ) -> std::result::Result<bool, moa_core::error::MoaError> {
+        self.store
+            .record_learning_candidate_decision_in_tx(conn, decision)
+            .await
+    }
 }
 
 /// Records one skill-learning review decision.
@@ -313,6 +324,86 @@ impl LearningReviewStore for SessionLearningReviewStore {
 /// Best-effort telemetry: recording never changes the review result.
 fn record_review_decision(action: &str, outcome: &str) {
     moa_observability::runtime_metrics::record_skill_learning_review_decision(action, outcome);
+}
+
+async fn replay_terminal_review(
+    store: &PostgresSessionStore,
+    request: &LearningCandidateReviewRequest,
+) -> Result<Option<LearningCandidateReviewResponse>, HandlerError> {
+    let decisions = store
+        .list_learning_candidate_decisions(request.candidate_id)
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+    let Some(decision) = decisions
+        .into_iter()
+        .rev()
+        .find(|decision| decision.request_digest.is_some() || decision.outcome.is_some())
+    else {
+        return Ok(None);
+    };
+    if decision.tenant_id != request.tenant_id {
+        return Err(TerminalError::new_with_code(404, "learning candidate not found").into());
+    }
+    let digest = request.replay_digest();
+    if decision.request_digest.as_deref() != Some(digest.as_slice()) {
+        return Err(TerminalError::new_with_code(
+            409,
+            "learning review was already committed with different inputs",
+        )
+        .into());
+    }
+    let outcome = decision.outcome.ok_or_else(|| {
+        TerminalError::new_with_code(500, "committed learning review has no replay outcome")
+    })?;
+    serde_json::from_value(outcome).map(Some).map_err(|error| {
+        TerminalError::new_with_code(
+            500,
+            format!("committed learning review outcome is invalid: {error}"),
+        )
+        .into()
+    })
+}
+
+async fn record_terminal_review_decision_in_tx(
+    store: &PostgresSessionStore,
+    conn: &mut sqlx::PgConnection,
+    request: &LearningCandidateReviewRequest,
+    request_digest: &[u8],
+    decision: moa_core::types::experience::LearningReviewDecision,
+    from_status: LearningCandidateStatus,
+    outcome: &LearningCandidateReviewResponse,
+) -> Result<(), HandlerError> {
+    let to_status = outcome.status;
+    let outcome = serde_json::to_value(outcome).map_err(|error| {
+        moa_error_to_status_handler_error(moa_core::error::MoaError::SerializationError(
+            error.to_string(),
+        ))
+    })?;
+    let inserted = store
+        .record_learning_candidate_decision_in_tx(
+            conn,
+            &moa_core::types::experience::LearningCandidateDecisionRecord {
+                id: Uuid::now_v7(),
+                candidate_id: request.candidate_id,
+                tenant_id: request.tenant_id,
+                decision,
+                from_status,
+                to_status,
+                reviewer_subject: Some(request.reviewer_subject.clone()),
+                reason: request.reason.clone(),
+                request_digest: Some(request_digest.to_vec()),
+                outcome: Some(outcome),
+                decided_at: Utc::now(),
+            },
+        )
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+    if !inserted {
+        return Err(
+            TerminalError::new_with_code(409, "learning review decision already exists").into(),
+        );
+    }
+    Ok(())
 }
 
 /// Loads one candidate after the caller has authorized tenant operator access.
@@ -336,15 +427,23 @@ pub async fn accept_skill_candidate_after_authz(
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
     ensure_requested_action(request.action, LearningCandidateReviewAction::Accept)?;
+    if let Some(replay) = replay_terminal_review(store.as_ref(), &request).await? {
+        record_review_decision("accept_skill", "replayed");
+        return Ok(replay);
+    }
+    let request_digest = request.replay_digest();
     let review_request = skill_review_request(&request, SkillReviewAction::Accept);
     let mut review_store = SessionLearningReviewStore::new(store.clone());
     let prepared = prepare_skill_acceptance(&review_store, pool.clone(), &review_request)
         .await
         .map_err(skill_review_error_to_handler_error)?;
+    let previous_package = SkillRegistry::new(pool.clone())
+        .load_package_by_name(&prepared.scope, &prepared.draft.name)
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
     let regression_gate = match skill_acceptance_regression_report(
         config.as_ref().clone(),
         providers,
-        SkillRegistry::new(pool.clone()),
         store,
         prepared.scope,
         prepared.candidate.clone(),
@@ -352,6 +451,7 @@ pub async fn accept_skill_candidate_after_authz(
             router,
             draft: prepared.draft.clone(),
             draft_files: prepared.draft_files.clone(),
+            previous_package,
         },
     )
     .await
@@ -381,10 +481,12 @@ pub async fn accept_skill_candidate_after_authz(
     if !regression_gate.allow_promotion {
         let outcome = reject_claimed_skill_candidate(
             &review_store,
+            pool.clone(),
             &review_request,
             &prepared,
             regression_gate.report,
             regression_gate.rejection_reason,
+            &request_digest,
         )
         .await
         .map_err(skill_review_error_to_handler_error)?;
@@ -401,6 +503,7 @@ pub async fn accept_skill_candidate_after_authz(
         prepared,
         regression_gate.report,
         acceptance_checks,
+        &request_digest,
     )
     .await
     .map_err(skill_review_error_to_handler_error)?;
@@ -467,23 +570,21 @@ fn acceptance_checks_for_gate(gate: &SkillRegressionGate) -> AcceptanceChecks {
 ///
 /// * the **rollback proposal** candidate moves `Proposed -> Evaluating` (claim)
 ///   `-> Promoted`, carrying `operation = skill_rollback` and the archived and
-///   restored revision uids — `Promoted` means the proposal was accepted and its
+///   predecessor revision uids — `Promoted` means the proposal was accepted and its
 ///   action executed, exactly as for `accept_skill`;
-/// * the regressed **published revision** is archived and the prior published
-///   revision (if any) is restored as the serving revision;
+/// * the regressed **activated revision** is archived and the serving pointer is
+///   removed; a predecessor (if any) must earn its own release attestation;
 /// * the **original promotion** candidate moves `Promoted -> RolledBack`
 ///   (best-effort compare-and-set) and its append-only `learning_log` entry is
 ///   invalidated with `valid_to`, matching rollback semantics;
 /// * a new `skill_rollback` `learning_log` entry records the reviewer and the
-///   archived/restored revisions.
+///   archived revision plus the predecessor that may be re-released.
 ///
 /// Currentness is enforced transactionally: if a newer promotion has superseded
 /// the proposal's revision (it is no longer the serving one), nothing is archived
 /// and the proposal is moved `Evaluating -> Rejected` with a `409`, because a
-/// retry would fail identically. A rollback with a predecessor restores that
-/// predecessor's serving-side `description`/`tags` and drops the stale identity
-/// embedding; a created-skill rollback (no predecessor) retires the artifact
-/// identity and its embedding.
+/// retry would fail identically. A rollback drops the stale identity embedding;
+/// a created-skill rollback (no predecessor) also retires the artifact identity.
 ///
 /// The claim is released back to `Proposed` only if the transactional rollback
 /// fails for an operational reason, so a transient error never strands the
@@ -501,13 +602,34 @@ pub async fn accept_rollback_candidate_after_authz(
         .map_err(moa_error_to_status_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "learning candidate not found"))?;
 
-    ensure_rollback_proposal(&candidate)?;
+    ensure_rollback_proposal_kind(&candidate)?;
+    if let Some(replay) = replay_terminal_review(store.as_ref(), &request).await? {
+        record_review_decision("accept_rollback", "replayed");
+        return Ok(replay);
+    }
+    ensure_proposed_rollback(&candidate)?;
+    let request_digest = request.replay_digest();
     let skill_name = candidate.target_label.clone().unwrap_or_default();
     let artifact_uid = required_payload_uuid(&candidate.payload, "artifact_uid")?;
     let promoted_revision_uid = required_payload_uuid(&candidate.payload, "promoted_revision_uid")?;
     let previous_revision_uid = optional_payload_uuid(&candidate.payload, "previous_revision_uid")?;
     let promotion_candidate_id =
         required_payload_uuid(&candidate.payload, "promotion_candidate_id")?;
+    let expected_activation_audit_uid =
+        required_payload_uuid(&candidate.payload, "expected_transition_audit_uid")?;
+    let expected_pointer_version =
+        required_payload_i64(&candidate.payload, "expected_pointer_version")?;
+    let execution = RollbackExecution {
+        tenant_id,
+        skill_name: &skill_name,
+        artifact_uid,
+        promoted_revision_uid,
+        previous_revision_uid,
+        promotion_candidate_id,
+        expected_activation_audit_uid,
+        expected_pointer_version,
+    };
+    validate_rollback_provenance(&pool, &candidate, &execution).await?;
 
     // Claim the proposal so a concurrent reviewer cannot double-execute it.
     let claim = LearningCandidateStatusUpdate {
@@ -531,17 +653,11 @@ pub async fn accept_rollback_candidate_after_authz(
 
     let executed = execute_rollback(
         &store,
-        pool,
+        pool.clone(),
         &request,
         &candidate,
-        RollbackExecution {
-            tenant_id,
-            skill_name: &skill_name,
-            artifact_uid,
-            promoted_revision_uid,
-            previous_revision_uid,
-            promotion_candidate_id,
-        },
+        &request_digest,
+        execution,
     )
     .await;
 
@@ -556,37 +672,61 @@ pub async fn accept_rollback_candidate_after_authz(
             // The proposal targets a revision a newer promotion has since
             // superseded, so it can never serve again — reject it terminally
             // rather than release it for a retry that would fail identically.
-            let reject = LearningCandidateStatusUpdate {
+            let status_reason = serving_revision_uid.map_or_else(
+                || format!("rollback proposal is stale: skill `{skill_name}` serves no revision"),
+                |revision_uid| {
+                    format!(
+                        "rollback proposal superseded: revision {revision_uid} now serves skill \
+                         `{skill_name}`"
+                    )
+                },
+            );
+            let response = LearningCandidateReviewResponse {
                 candidate_id: candidate.id,
                 status: LearningCandidateStatus::Rejected,
-                status_reason: Some(format!(
-                    "rollback proposal superseded: revision {serving_revision_uid} now serves \
-                     skill `{skill_name}`"
-                )),
-                evaluation_payload: None,
-                updated_at: Utc::now(),
+                artifact_uid: Some(artifact_uid),
+                draft_artifact_revision_uid: None,
+                activated_artifact_revision_uid: None,
             };
+            let mut conn = ScopedConn::begin(&pool, &RlsContext::tenant(tenant_id))
+                .await
+                .map_err(moa_error_to_status_handler_error)?;
             let rejected = store
-                .update_learning_candidate_status_from(&reject, LearningCandidateStatus::Evaluating)
+                .update_learning_candidate_status_from_in_tx(
+                    conn.as_mut(),
+                    &LearningCandidateStatusUpdate {
+                        candidate_id: candidate.id,
+                        status: LearningCandidateStatus::Rejected,
+                        status_reason: Some(status_reason),
+                        evaluation_payload: None,
+                        updated_at: Utc::now(),
+                    },
+                    LearningCandidateStatus::Evaluating,
+                )
                 .await
                 .map_err(moa_error_to_status_handler_error)?;
             if !rejected {
                 return Err(TerminalError::new_with_code(
                     409,
-                    "rollback proposal changed status before its superseded rejection could be \
-                     applied",
+                    "rollback proposal changed status before its stale rejection could be applied",
                 )
                 .into());
             }
-            record_review_decision("accept_rollback", "superseded");
-            Err(TerminalError::new_with_code(
-                409,
-                format!(
-                    "rollback proposal is stale: revision {serving_revision_uid} now serves skill \
-                     `{skill_name}`; the proposal was rejected"
-                ),
+            record_terminal_review_decision_in_tx(
+                store.as_ref(),
+                conn.as_mut(),
+                &request,
+                &request_digest,
+                moa_core::types::experience::LearningReviewDecision::Rejected,
+                LearningCandidateStatus::Evaluating,
+                &response,
             )
-            .into())
+            .await?;
+            conn.commit()
+                .await
+                .map_err(moa_error_to_status_handler_error)?;
+            record_review_decision("accept_rollback", "superseded");
+            Ok(response)
         }
         Err(error) => {
             record_review_decision("accept_rollback", "error");
@@ -631,6 +771,8 @@ struct RollbackExecution<'a> {
     promoted_revision_uid: Uuid,
     previous_revision_uid: Option<Uuid>,
     promotion_candidate_id: Uuid,
+    expected_activation_audit_uid: Uuid,
+    expected_pointer_version: i64,
 }
 
 /// Result of one rollback execution attempt.
@@ -639,8 +781,8 @@ enum RollbackOutcome {
     Applied(LearningCandidateReviewResponse),
     /// A newer revision now serves; the transaction changed nothing.
     Superseded {
-        /// Revision currently serving the skill.
-        serving_revision_uid: Uuid,
+        /// Revision currently serving the skill, or `None` when it is unserved.
+        serving_revision_uid: Option<Uuid>,
     },
 }
 
@@ -654,16 +796,25 @@ async fn execute_rollback(
     pool: sqlx::PgPool,
     request: &LearningCandidateReviewRequest,
     candidate: &LearningCandidate,
+    request_digest: &[u8],
     execution: RollbackExecution<'_>,
 ) -> Result<RollbackOutcome, HandlerError> {
     let mut conn = ScopedConn::begin(&pool, &RlsContext::tenant(execution.tenant_id))
         .await
         .map_err(moa_error_to_status_handler_error)?;
 
-    match ArtifactRegistry::rollback_published_revision_in_tx(
+    // A rollback un-serves the regressed revision. It does not promote the
+    // predecessor: restoring an older revision is itself a serving transition and
+    // has to earn its own attestation, so the safe half runs here and the restore
+    // goes back through the release surface.
+    match ArtifactRegistry::rollback_serving_revision_in_tx(
         conn.as_mut(),
+        &TenantScope::new(execution.tenant_id),
         execution.promoted_revision_uid,
-        execution.previous_revision_uid,
+        execution.expected_activation_audit_uid,
+        execution.expected_pointer_version,
+        request.reviewer_subject.as_str(),
+        request.reason.as_deref(),
     )
     .await
     .map_err(moa_error_to_status_handler_error)?
@@ -675,7 +826,14 @@ async fn execute_rollback(
             // Nothing was archived; drop the transaction and let the caller
             // terminally reject the stale proposal.
             return Ok(RollbackOutcome::Superseded {
-                serving_revision_uid,
+                serving_revision_uid: Some(serving_revision_uid),
+            });
+        }
+        moa_artifacts::registry::RollbackApplication::NotServing => {
+            // The skill already serves nothing, so the proposal is stale in the
+            // same terminal way: report the promoted revision as the one it named.
+            return Ok(RollbackOutcome::Superseded {
+                serving_revision_uid: None,
             });
         }
     }
@@ -687,7 +845,7 @@ async fn execute_rollback(
         "skill_name": execution.skill_name,
         "artifact_uid": execution.artifact_uid,
         "archived_revision_uid": execution.promoted_revision_uid,
-        "restored_revision_uid": execution.previous_revision_uid,
+        "predecessor_revision_uid": execution.previous_revision_uid,
         "promotion_candidate_id": execution.promotion_candidate_id,
     });
 
@@ -763,6 +921,24 @@ async fn execute_rollback(
         .await
         .map_err(moa_error_to_status_handler_error)?;
 
+    let response = LearningCandidateReviewResponse {
+        candidate_id: candidate.id,
+        status: LearningCandidateStatus::Promoted,
+        artifact_uid: Some(execution.artifact_uid),
+        draft_artifact_revision_uid: None,
+        activated_artifact_revision_uid: None,
+    };
+    record_terminal_review_decision_in_tx(
+        store.as_ref(),
+        conn.as_mut(),
+        request,
+        request_digest,
+        moa_core::types::experience::LearningReviewDecision::AcceptedRollback,
+        LearningCandidateStatus::Evaluating,
+        &response,
+    )
+    .await?;
+
     conn.commit()
         .await
         .map_err(moa_error_to_status_handler_error)?;
@@ -775,13 +951,7 @@ async fn execute_rollback(
         "skill_regression_rollback_executed"
     );
 
-    Ok(RollbackOutcome::Applied(LearningCandidateReviewResponse {
-        candidate_id: candidate.id,
-        status: LearningCandidateStatus::Promoted,
-        artifact_uid: Some(execution.artifact_uid),
-        draft_artifact_revision_uid: None,
-        published_artifact_revision_uid: execution.previous_revision_uid,
-    }))
+    Ok(RollbackOutcome::Applied(response))
 }
 
 fn rollback_learning_entry(
@@ -832,7 +1002,7 @@ fn rollback_learning_entry(
 /// a row change. The state machine already makes a wrong-kind row unreachable
 /// here, so this check exists to answer a wrong request with a 400 rather than
 /// letting it reach the transactional rollback and fail as a constraint error.
-fn ensure_rollback_proposal(candidate: &LearningCandidate) -> Result<(), HandlerError> {
+fn ensure_rollback_proposal_kind(candidate: &LearningCandidate) -> Result<(), HandlerError> {
     if candidate.proposal_kind != LearningProposalKind::SkillRollback {
         return Err(TerminalError::new_with_code(
             400,
@@ -840,10 +1010,66 @@ fn ensure_rollback_proposal(candidate: &LearningCandidate) -> Result<(), Handler
         )
         .into());
     }
+    Ok(())
+}
+
+fn ensure_proposed_rollback(candidate: &LearningCandidate) -> Result<(), HandlerError> {
     if candidate.status != LearningCandidateStatus::Proposed {
         return Err(TerminalError::new_with_code(
             400,
             "rollback proposal must be proposed before review",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn validate_rollback_provenance(
+    pool: &sqlx::PgPool,
+    candidate: &LearningCandidate,
+    execution: &RollbackExecution<'_>,
+) -> Result<(), HandlerError> {
+    let promotion_sources = candidate
+        .sources
+        .iter()
+        .filter_map(|source| match source {
+            LearningCandidateSourceRef::PromotionCandidate { candidate_id } => Some(*candidate_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let revision_sources = candidate
+        .sources
+        .iter()
+        .filter_map(|source| match source {
+            LearningCandidateSourceRef::ArtifactRevision { revision_uid } => Some(*revision_uid),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut expected_revisions = BTreeSet::from([execution.promoted_revision_uid]);
+    if let Some(previous_revision_uid) = execution.previous_revision_uid {
+        expected_revisions.insert(previous_revision_uid);
+    }
+    let typed_sources_match = promotion_sources.as_slice() == [execution.promotion_candidate_id]
+        && revision_sources == expected_revisions;
+
+    let activation = ArtifactRegistry::new(pool.clone())
+        .load_activation_provenance(
+            &TenantScope::new(candidate.tenant_id),
+            execution.expected_activation_audit_uid,
+        )
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+    let audit_matches = activation.is_some_and(|activation| {
+        activation.artifact_uid == execution.artifact_uid
+            && activation.activated_revision_uid == execution.promoted_revision_uid
+            && activation.previous_revision_uid == execution.previous_revision_uid
+            && activation.activated_pointer_version == execution.expected_pointer_version
+            && activation.activation_target == ActivationTargetClass::SkillVisibility
+    });
+    if !typed_sources_match || !audit_matches {
+        return Err(TerminalError::new_with_code(
+            400,
+            "rollback payload does not match its activation provenance",
         )
         .into());
     }
@@ -866,6 +1092,13 @@ fn optional_payload_uuid(payload: &Value, key: &str) -> Result<Option<Uuid>, Han
     };
     Uuid::parse_str(value).map(Some).map_err(|error| {
         TerminalError::new_with_code(400, format!("rollback payload {key} is invalid: {error}"))
+            .into()
+    })
+}
+
+fn required_payload_i64(payload: &Value, key: &str) -> Result<i64, HandlerError> {
+    payload.get(key).and_then(Value::as_i64).ok_or_else(|| {
+        TerminalError::new_with_code(400, format!("rollback payload {key} is missing or invalid"))
             .into()
     })
 }
@@ -972,6 +1205,8 @@ pub async fn dismiss_learning_candidate_after_authz(
                 to_status: LearningCandidateStatus::Dismissed,
                 reviewer_subject: Some(request.reviewer_subject.clone()),
                 reason: request.reason.clone(),
+                request_digest: None,
+                outcome: None,
                 decided_at: now,
             },
         )
@@ -992,7 +1227,7 @@ fn dismissal_response(candidate_id: Uuid) -> LearningCandidateReviewResponse {
         status: LearningCandidateStatus::Dismissed,
         artifact_uid: None,
         draft_artifact_revision_uid: None,
-        published_artifact_revision_uid: None,
+        activated_artifact_revision_uid: None,
     }
 }
 
@@ -1002,9 +1237,15 @@ pub async fn reject_learning_candidate_after_authz(
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
     ensure_requested_action(request.action, LearningCandidateReviewAction::Reject)?;
+    if let Some(replay) = replay_terminal_review(store.as_ref(), &request).await? {
+        record_review_decision("reject", "replayed");
+        return Ok(replay);
+    }
+    let request_digest = request.replay_digest();
+    let pool = store.pool().clone();
     let review_store = SessionLearningReviewStore::new(store);
     let review_request = skill_review_request(&request, SkillReviewAction::Reject);
-    let outcome = reject_learning_candidate(&review_store, &review_request)
+    let outcome = reject_learning_candidate(&review_store, pool, &review_request, &request_digest)
         .await
         .map_err(skill_review_error_to_handler_error)?;
 
@@ -1055,7 +1296,7 @@ fn review_response_from_outcome(outcome: SkillReviewOutcome) -> LearningCandidat
         status: outcome.status,
         artifact_uid: outcome.artifact_uid,
         draft_artifact_revision_uid: outcome.draft_artifact_revision_uid,
-        published_artifact_revision_uid: outcome.published_artifact_revision_uid,
+        activated_artifact_revision_uid: outcome.activated_artifact_revision_uid,
     }
 }
 

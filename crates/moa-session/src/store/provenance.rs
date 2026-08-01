@@ -12,6 +12,7 @@ use super::*;
 
 use std::collections::HashMap;
 
+use serde_json::Value;
 use sqlx::PgConnection;
 
 use moa_core::types::experience::{LearningCandidateDecisionRecord, LearningCandidateSourceRef};
@@ -253,9 +254,10 @@ impl PostgresSessionStore {
         let inserted = sqlx::query(&format!(
             "INSERT INTO {learning_candidate_decision} \
              (id, candidate_id, tenant_id, storage_partition_id, user_id, decision, \
-              from_status, to_status, reviewer_subject, reason, decided_at) \
+              from_status, to_status, reviewer_subject, reason, request_digest, outcome, \
+              decided_at) \
              SELECT $1, candidate.id, candidate.tenant_id, candidate.storage_partition_id, \
-                    candidate.user_id, $3, $4, $5, $6, $7, $8 \
+                    candidate.user_id, $3, $4, $5, $6, $7, $8, $9, $10 \
              FROM {learning_candidates} AS candidate \
              WHERE candidate.id = $2 \
              ON CONFLICT (candidate_id, decision) DO NOTHING"
@@ -267,6 +269,8 @@ impl PostgresSessionStore {
         .bind(decision.to_status.as_str())
         .bind(decision.reviewer_subject.as_deref())
         .bind(decision.reason.as_deref())
+        .bind(decision.request_digest.as_deref())
+        .bind(decision.outcome.as_ref().map(sqlx::types::Json))
         .bind(decision.decided_at)
         .execute(&mut *conn)
         .await
@@ -283,7 +287,7 @@ impl PostgresSessionStore {
         let learning_candidate_decision = self.table_name("learning_candidate_decision");
         let rows = sqlx::query(&format!(
             "SELECT id, candidate_id, tenant_id, decision, from_status, to_status, \
-                    reviewer_subject, reason, decided_at \
+                    reviewer_subject, reason, request_digest, outcome, decided_at \
              FROM {learning_candidate_decision} \
              WHERE candidate_id = $1 ORDER BY decided_at, id"
         ))
@@ -488,6 +492,10 @@ fn decision_from_row(row: &sqlx::postgres::PgRow) -> Result<LearningCandidateDec
         )?,
         reviewer_subject: row.col::<Option<String>>("reviewer_subject")?,
         reason: row.col::<Option<String>>("reason")?,
+        request_digest: row.col::<Option<Vec<u8>>>("request_digest")?,
+        outcome: row
+            .col::<Option<sqlx::types::Json<Value>>>("outcome")?
+            .map(|value| value.0),
         decided_at: row.col::<DateTime<Utc>>("decided_at")?,
     })
 }

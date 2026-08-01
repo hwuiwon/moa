@@ -30,6 +30,8 @@ pub struct PrepareActionReviewRequest {
     pub session: SessionMeta,
     /// Tool invocation that is about to execute.
     pub invocation: ToolInvocation,
+    /// Governed contract revision that admitted the invocation.
+    pub expected_tool_contract_revision: String,
     /// Stable review identifier to embed in the envelope when review is needed.
     pub review_id: Uuid,
     /// Stable tool-call identifier for event correlation.
@@ -198,8 +200,33 @@ async fn prepare_action_review_inner(
     router: Arc<ToolRouter>,
     request: PrepareActionReviewRequest,
 ) -> Result<PreparedActionReviewResponse, HandlerError> {
+    let expected_revision = request.expected_tool_contract_revision.as_str();
+    let catalog = router.activated_catalog();
+    match catalog.contract_revision(&request.invocation.name) {
+        Some(activated_revision) if activated_revision == expected_revision => {}
+        Some(activated_revision) => {
+            return Err(TerminalError::new_with_code(
+                409,
+                format!(
+                    "tool {} governed contract drifted from {expected_revision} to {activated_revision} before policy evaluation",
+                    request.invocation.name
+                ),
+            )
+            .into());
+        }
+        None => {
+            return Err(TerminalError::new_with_code(
+                409,
+                format!(
+                    "tool {} is no longer registered at its admitted governed contract revision",
+                    request.invocation.name
+                ),
+            )
+            .into());
+        }
+    }
     let prepared = match router
-        .prepare_invocation(&request.session, &request.invocation)
+        .prepare_invocation_from_catalog(&catalog, &request.session, &request.invocation)
         .await
     {
         Ok(prepared) => prepared,
@@ -404,6 +431,7 @@ mod tests {
             moa_hands::local_development_sandbox_policy(),
         ));
         let request = policy_request(
+            router.as_ref(),
             SessionMeta::default(),
             ToolInvocation {
                 id: Some("invalid-input-call".to_string()),
@@ -420,6 +448,33 @@ mod tests {
             panic!("expected InvalidInput, got {response:?}");
         };
         assert!(reason.contains(&github_issue_create), "reason: {reason}");
+    }
+
+    #[tokio::test]
+    async fn action_policy_refuses_stale_governed_contracts() {
+        // Pins: policy evaluation must use the contract that admitted the call;
+        // otherwise a rolling deployment can authorize one policy and dispatch another.
+        let router = Arc::new(ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        ));
+        let invocation = ToolInvocation {
+            id: Some("contract-drift-call".to_string()),
+            name: "file_read".to_string(),
+            input: json!({"path": "README.md"}),
+        };
+        let mut request = policy_request(router.as_ref(), SessionMeta::default(), invocation, None);
+
+        request.expected_tool_contract_revision = "stale-contract".to_string();
+        let stale = prepare_action_review_inner(router, request)
+            .await
+            .expect_err("a stale policy request must fail closed");
+        let stale = <restate_sdk::prelude::HandlerError as AsRef<
+            dyn std::error::Error + Send + Sync,
+        >>::as_ref(&stale)
+        .to_string();
+        assert!(stale.contains("drifted"), "error: {stale}");
     }
 
     #[tokio::test]
@@ -512,8 +567,9 @@ mod tests {
                 name: tool_name.to_string(),
                 input,
             };
-            let root = policy_request(session.clone(), invocation.clone(), None);
+            let root = policy_request(router.as_ref(), session.clone(), invocation.clone(), None);
             let execution = policy_request(
+                router.as_ref(),
                 session,
                 invocation,
                 Some(ExecutionTaskOrigin {
@@ -554,6 +610,7 @@ mod tests {
     }
 
     fn policy_request(
+        router: &ToolRouter,
         session: SessionMeta,
         invocation: ToolInvocation,
         execution_origin: Option<ExecutionTaskOrigin>,
@@ -568,6 +625,11 @@ mod tests {
             },
         };
         PrepareActionReviewRequest {
+            expected_tool_contract_revision: router
+                .activated_catalog()
+                .contract_revision(&invocation.name)
+                .expect("policy fixture tool should have an activated contract")
+                .to_owned(),
             session,
             invocation,
             review_id: Uuid::now_v7(),

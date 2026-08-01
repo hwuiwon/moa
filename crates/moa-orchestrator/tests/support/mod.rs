@@ -15,6 +15,7 @@ pub mod restate_identity;
 pub mod restate_ports;
 pub mod restate_register;
 pub mod session_fixtures;
+pub mod simulator_policy;
 
 /// Facade aggregating the helpers used to drive a live Restate runtime.
 pub mod restate_runtime {

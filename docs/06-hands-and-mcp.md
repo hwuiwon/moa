@@ -180,9 +180,9 @@ whether the turn needs them.
 
 The execution capability catalog is the planner/compiler source of truth over
 these governed operations. Each entry has a stable reference and version,
-description, input/output schemas, action/risk and idempotency classes,
-execution class (`data`, `compute`, `model`, or `external`), source provenance,
-authorization metadata, and optional integer cost estimate. It includes typed
+governed runtime-contract revision, description, input/output schemas,
+action/risk and idempotency classes, execution class (`data`, `compute`,
+`model`, or `external`), source provenance, authorization metadata, and optional integer cost estimate. It includes typed
 built-ins, actions, skill actions/code, memory operations, connected MCP tools
 whose schemas and policies are stable, and datasource reads only when a typed
 query operation exists. A connection identifier alone is not executable.
@@ -204,9 +204,11 @@ already run.
 
 The router publishes the executable registry and its model-visible schemas as
 one immutable snapshot. A refresh cannot expose a new executor with stale
-prompt schemas, or the reverse. Durable execution pins each MCP tool's schema
-revision in the compiled capability catalog and refuses dispatch when the live
-router revision no longer matches.
+prompt schemas, or the reverse. Every conversational prompt and durable
+execution capability pins each admitted tool's complete governed-contract
+revision. Policy evaluation and dispatch refuse that tool when the live
+revision no longer matches, including schema, policy, retry, output, ownership,
+annotation, and routing changes.
 
 ## Lifecycle
 
@@ -386,13 +388,11 @@ model's loadout. The catalog is published as a whole snapshot, so no prompt
 compilation, capability listing, or dispatch ever observes a half-refreshed
 connector.
 
-Each discovered tool carries a schema revision hash. It is the provenance
-recorded on the capability's catalog source, and because the capability version
-covers the input schema, a connector that changes a tool's schema invalidates a
-pinned execution run's authorization envelope instead of letting the run invoke
-a changed contract. **Conversational turns have no equivalent pin** — see
-`LockedToolRef::identity_hash`, which documents the gap and the two ways to
-close it.
+Each registered tool carries a governed-contract revision. The revision is
+recorded on compiled capabilities and paired atomically with the exact tool
+schemas offered in conversational prompts. A changed or withdrawn contract is
+therefore rejected before policy evaluation and checked again against the
+immutable snapshot used for dispatch, including across rolling deployments.
 
 ### Credentials
 

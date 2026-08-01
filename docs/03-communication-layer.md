@@ -237,7 +237,7 @@ server does not mirror them as MCP resources or prompts.
 
 Execution controls use the common typed run APIs: list, start, status, cancel,
 review decision, signal delivery, and bounded task-result listing. A start
-request identifies a published skill's exact pinned `execution_plan` template
+request identifies an activated skill's exact pinned `execution_plan` template
 revision plus objective and structured input, then enters the session-originated
 planning/admission path. Model-facing clients submit neither a compiled-plan
 identifier nor raw graph JSON.

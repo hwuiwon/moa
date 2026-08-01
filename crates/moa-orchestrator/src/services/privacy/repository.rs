@@ -715,6 +715,8 @@ async fn collect_learning_decisions(
                     'to_status', decision.to_status,
                     'reviewer_subject', decision.reviewer_subject,
                     'reason', decision.reason,
+                    'request_digest', encode(decision.request_digest, 'hex'),
+                    'outcome', decision.outcome,
                     'decided_at', decision.decided_at,
                     'privacy_subject_user_id', $3,
                     'privacy_subject_provenance', $4
@@ -1028,10 +1030,11 @@ async fn collect_skills(
                 )
                 FROM moa.artifact a
                 JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
-                WHERE a.valid_to IS NULL
-                  AND r.valid_to IS NULL
-                  AND a.kind = 'skill'
-                  AND r.status = 'published'
+                WHERE a.kind = 'skill'
+                  -- A privacy export covers every retained revision that could
+                  -- contain the subject's data, including archived or invalidated
+                  -- history. Lifecycle status controls serving, not whether bytes
+                  -- still held by MOA are attributable to the subject.
                   AND ($1::text IS NULL OR a.storage_partition_id = $1)
                   AND (
                       a.user_id = $2

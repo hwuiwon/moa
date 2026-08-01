@@ -1,4 +1,5 @@
 [suite]
+schema_version = 2
 name = "code_task_30_turns_with_str_replace_and_recovery"
 description = "Recorded 30-turn code task with str_replace edits, deliberate tool errors, recovery, and final test pass."
 default_timeout_seconds = 60

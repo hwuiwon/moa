@@ -55,7 +55,6 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 mod client;
 mod conversation;
-mod fixture_capability;
 mod openfga;
 mod otlp_capture;
 mod postgres;
@@ -64,12 +63,12 @@ mod redis;
 mod restate;
 mod scripted_provider;
 
-pub use client::{TestApiClient, TestSessionHandle};
-pub use conversation::{ConversationOptions, drive_conversation};
-pub use fixture_capability::{
+pub use crate::fixture_capability::{
     FixtureCapabilityAttempt, FixtureCapabilityCall, FixtureCapabilityController,
     FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
 };
+pub use client::{TestApiClient, TestSessionHandle};
+pub use conversation::{ConversationOptions, drive_conversation};
 pub use otlp_capture::OtlpCapture;
 
 use openfga::{
@@ -111,7 +110,7 @@ pub struct OrchestratorTestFixture {
     orchestrator: Mutex<Option<Child>>,
     _orchestrator_binary_snapshot: Option<FixtureBinarySnapshot>,
     restart_config: Option<OrchestratorRestartConfig>,
-    fixture_capability: Option<fixture_capability::FixtureCapabilityRuntime>,
+    fixture_capability: Option<crate::fixture_capability::FixtureCapabilityRuntime>,
     otlp_capture: Option<OtlpCapture>,
 }
 
@@ -258,9 +257,7 @@ impl OrchestratorTestFixture {
         );
         wait_for_postgres(&postgres_url).await?;
 
-        let restate = start_restate_container().await?;
-        let ingress_port = fixture_host_port_ipv4(&restate, "restate ingress", 8080.tcp()).await?;
-        let admin_port = fixture_host_port_ipv4(&restate, "restate admin", 9070.tcp()).await?;
+        let (restate, ingress_port, admin_port) = start_restate_container().await?;
         let ingress_url = format!("http://127.0.0.1:{ingress_port}");
         let admin_url = format!("http://127.0.0.1:{admin_port}");
         wait_for_restate_admin(&admin_url).await?;
@@ -340,15 +337,16 @@ impl OrchestratorTestFixture {
         }
         let fixture_capability = match capability_options {
             Some(options) => {
-                let runtime = fixture_capability::FixtureCapabilityRuntime::start(options).await?;
+                let runtime =
+                    crate::fixture_capability::FixtureCapabilityRuntime::start(options).await?;
                 let mcp_servers = serde_json::to_string(&json!([{
                     "name": "fixture-capability",
                     "url": runtime.endpoint(),
                     "trust_tool_annotations": true,
-                    // This loopback fixture intentionally accepts arbitrary synthetic
-                    // lifecycle payloads; production MCP servers retain the fail-closed
-                    // empty allowlist unless operators explicitly configure otherwise.
-                    "allowed_data_classes": ["pii", "phi", "restricted"]
+                    // The fixture uses plain loopback HTTP, so it must retain the
+                    // production-default egress policy: only unclassified synthetic
+                    // payloads may leave the orchestrator.
+                    "allowed_data_classes": []
                 }]))
                 .context("serialize fixture MCP server configuration")?;
                 extra_env.push(("MOA_MCP_SERVERS_JSON".to_string(), mcp_servers));
@@ -595,7 +593,7 @@ impl OrchestratorTestFixture {
     pub fn fixture_capability(&self) -> Option<&FixtureCapabilityController> {
         self.fixture_capability
             .as_ref()
-            .map(fixture_capability::FixtureCapabilityRuntime::controller)
+            .map(crate::fixture_capability::FixtureCapabilityRuntime::controller)
     }
 
     /// Grants the provided identity tenant-operator access.

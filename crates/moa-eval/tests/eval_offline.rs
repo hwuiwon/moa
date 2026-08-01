@@ -3,6 +3,8 @@
 #[path = "memory_eval_support/common.rs"]
 mod common;
 
+#[path = "eval_offline/corpus_provenance.rs"]
+mod corpus_provenance;
 #[path = "eval_offline/evaluators.rs"]
 mod evaluators;
 #[path = "eval_offline/execution_calibration.rs"]
@@ -43,3 +45,5 @@ mod memory_eval_corpus;
 mod memory_eval_judge;
 #[path = "eval_offline/memory_eval_metrics.rs"]
 mod memory_eval_metrics;
+#[path = "eval_offline/suite_controls.rs"]
+mod suite_controls;

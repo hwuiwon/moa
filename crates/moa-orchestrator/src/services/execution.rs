@@ -14,6 +14,7 @@ use moa_artifacts::execution_plan::{
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
+use moa_artifacts::release::TenantScope;
 use moa_artifacts::skill::{SkillActionDefinition, SkillActionKind};
 use moa_authz_schema::Relation;
 use moa_config::ExecutionConfig;
@@ -1011,7 +1012,7 @@ async fn planning_context_inner(
         },
     );
     let registry = ArtifactRegistry::new(pool.clone());
-    let revisions = load_published_revisions(&registry, &scope)
+    let revisions = load_serving_revisions(&registry, &scope)
         .await
         .map_err(moa_error_to_status_handler_error)?;
     let skill_policy = parent
@@ -1136,15 +1137,15 @@ fn build_planning_skill_context(
         .map(|reference| canonical_skill_policy_ref(reference))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let mut non_skill_revisions = Vec::new();
-    let mut published_skills = BTreeMap::new();
+    let mut resolved_skills = BTreeMap::new();
     for revision in revisions {
         if !matches!(revision.document.definition, ArtifactDefinition::Skill(_)) {
             non_skill_revisions.push(revision);
             continue;
         }
         let reference = skill_revision_ref(&revision)?;
-        if let Some(previous) = published_skills.insert(reference.clone(), revision) {
-            let duplicate_uid = published_skills
+        if let Some(previous) = resolved_skills.insert(reference.clone(), revision) {
+            let duplicate_uid = resolved_skills
                 .get(&reference)
                 .map(|current| current.revision_uid == previous.revision_uid)
                 .unwrap_or(false);
@@ -1154,7 +1155,7 @@ fn build_planning_skill_context(
                     previous.revision_uid
                 )
             } else {
-                format!("multiple published revisions for planning skill: {reference}")
+                format!("multiple serving revisions for planning skill: {reference}")
             });
         }
     }
@@ -1177,7 +1178,7 @@ fn build_planning_skill_context(
             });
         }
     }
-    let mut ordered = published_skills.into_iter().collect::<Vec<_>>();
+    let mut ordered = resolved_skills.into_iter().collect::<Vec<_>>();
     match policy.mode {
         moa_core::types::agent::AgentSkillPolicyMode::Auto => {}
         moa_core::types::agent::AgentSkillPolicyMode::Allowlist => {
@@ -1260,7 +1261,7 @@ fn build_planning_skill_context(
                 != 1
         {
             return Err(
-                "requested execution template is not an exact permitted pinned published revision"
+                "requested execution template is not an exact permitted pinned activated revision"
                     .to_string(),
             );
         }
@@ -1295,12 +1296,14 @@ fn canonical_skill_policy_ref(reference: &str) -> Result<String, String> {
 }
 
 fn skill_revision_ref(revision: &StoredArtifactRevision) -> Result<String, String> {
-    if revision.status != ArtifactStatus::Published
-        || !matches!(revision.document.definition, ArtifactDefinition::Skill(_))
+    if !matches!(
+        revision.status,
+        ArtifactStatus::Ready | ArtifactStatus::Superseded
+    ) || !matches!(revision.document.definition, ArtifactDefinition::Skill(_))
     {
         return Err(format!(
-            "planning skill revision is not published skill content: {}",
-            revision.revision_uid
+            "planning skill revision {} is {} and is not executable exact-pinned skill content",
+            revision.revision_uid, revision.status
         ));
     }
     ArtifactRef::artifact(ArtifactKind::Skill, revision.name.clone())
@@ -2704,7 +2707,7 @@ async fn list_capabilities_inner(
         tenant_id: request.tenant_id,
     };
     let registry = ArtifactRegistry::new(pool.clone());
-    let revisions = load_published_revisions(&registry, &scope)
+    let revisions = load_serving_revisions(&registry, &scope)
         .await
         .map_err(moa_error_to_status_handler_error)?;
     let connection_refs = load_connection_refs(pool, request.tenant_id)
@@ -2764,7 +2767,7 @@ pub(crate) fn build_capability_response(
                             admin_review_required: action.admin_review_required,
                             definition,
                             execution,
-                        }));
+                        })?);
                     }
                     None => diagnostics.push(unresolved_action_diagnostic(
                         action_ref.to_string(),
@@ -2786,7 +2789,7 @@ pub(crate) fn build_capability_response(
                                 action,
                                 definition,
                                 execution,
-                            ));
+                            )?);
                         }
                         None => diagnostics.push(unresolved_action_diagnostic(
                             action_ref.to_string(),
@@ -2815,7 +2818,7 @@ pub(crate) fn build_capability_response(
                 skill_ref: skill_ref.clone(),
                 revision_uid: revision.revision_uid,
                 action,
-            });
+            })?;
         }
     }
 
@@ -2853,7 +2856,7 @@ pub(crate) async fn resolve_skill_regression_compile_authority(
     }
 
     let registry = ArtifactRegistry::new(pool.clone());
-    let mut revisions = load_published_revisions(&registry, &scope).await?;
+    let mut revisions = load_serving_revisions(&registry, &scope).await?;
     let connection_refs = load_connection_refs(pool, scope.tenant_id()).await?;
     revisions.push(draft);
     build_skill_regression_compile_authority(&registrations, &revisions, &connection_refs)
@@ -2894,6 +2897,7 @@ fn registered_tool_capability(
     definition: &ToolDefinition,
     execution: &ToolExecution,
 ) -> moa_execution::Result<ExecutionCapability> {
+    let contract_revision = tool_contract_revision(definition, execution)?;
     let (source, execution_class, domain, owner) = match execution {
         ToolExecution::BuiltIn(_) if definition.name.starts_with("memory_") => (
             CapabilitySource::Memory {
@@ -2931,7 +2935,6 @@ fn registered_tool_capability(
         ToolExecution::Mcp {
             server_name,
             remote_tool_name,
-            schema_hash,
             ..
         } => (
             // `definition.name` is the server-qualified reference; the source
@@ -2941,7 +2944,6 @@ fn registered_tool_capability(
                 server: server_name.clone(),
                 tool_name: definition.name.clone(),
                 remote_name: remote_tool_name.clone(),
-                schema_revision: schema_hash.clone(),
             },
             ExecutionClass::External,
             "moa.execution.capability.mcp",
@@ -2964,6 +2966,7 @@ fn registered_tool_capability(
             name: definition.name.clone(),
             version,
         },
+        contract_revision,
         description: definition.description.clone(),
         input_schema: definition.schema.clone(),
         output_schema: generic_json_output_schema(),
@@ -2988,7 +2991,9 @@ struct ActionCapabilityRequest<'a> {
     execution: &'a ToolExecution,
 }
 
-fn action_capability(request: ActionCapabilityRequest<'_>) -> ExecutionCapability {
+fn action_capability(
+    request: ActionCapabilityRequest<'_>,
+) -> moa_execution::Result<ExecutionCapability> {
     let ActionCapabilityRequest {
         action_ref,
         revision_uid,
@@ -2999,11 +3004,12 @@ fn action_capability(request: ActionCapabilityRequest<'_>) -> ExecutionCapabilit
         definition,
         execution,
     } = request;
-    ExecutionCapability {
+    Ok(ExecutionCapability {
         reference: CapabilityReference {
             name: action_ref.to_string(),
             version: revision_uid.to_string(),
         },
+        contract_revision: tool_contract_revision(definition, execution)?,
         description: description.to_string(),
         input_schema: input_schema.clone(),
         output_schema: output_schema.clone(),
@@ -3018,7 +3024,7 @@ fn action_capability(request: ActionCapabilityRequest<'_>) -> ExecutionCapabilit
             tool_name: definition.name.clone(),
         },
         estimate: single_tool_estimate(definition.max_output_tokens),
-    }
+    })
 }
 
 fn connector_action_capability(
@@ -3028,12 +3034,13 @@ fn connector_action_capability(
     action: &moa_artifacts::connector::ConnectorActionDefinition,
     definition: &ToolDefinition,
     execution: &ToolExecution,
-) -> ExecutionCapability {
-    ExecutionCapability {
+) -> moa_execution::Result<ExecutionCapability> {
+    Ok(ExecutionCapability {
         reference: CapabilityReference {
             name: action_ref.to_string(),
             version: revision_uid.to_string(),
         },
+        contract_revision: tool_contract_revision(definition, execution)?,
         description: action.description.clone(),
         input_schema: action.input_schema.clone(),
         output_schema: action.output_schema.clone(),
@@ -3049,7 +3056,7 @@ fn connector_action_capability(
             tool_name: definition.name.clone(),
         },
         estimate: single_tool_estimate(definition.max_output_tokens),
-    }
+    })
 }
 
 struct SkillActionContext<'a> {
@@ -3062,7 +3069,7 @@ struct SkillActionContext<'a> {
     action: &'a SkillActionDefinition,
 }
 
-fn append_skill_action(context: SkillActionContext<'_>) {
+fn append_skill_action(context: SkillActionContext<'_>) -> moa_execution::Result<()> {
     let SkillActionContext {
         capabilities,
         diagnostics,
@@ -3079,7 +3086,7 @@ fn append_skill_action(context: SkillActionContext<'_>) {
             reference,
             message: "skill code has no registered typed execution owner".to_string(),
         });
-        return;
+        return Ok(());
     }
     let tool_name = action.artifact_ref.as_ref().and_then(|artifact_ref| {
         artifact_tools
@@ -3095,13 +3102,14 @@ fn append_skill_action(context: SkillActionContext<'_>) {
             reference,
             tool_name.as_deref(),
         ));
-        return;
+        return Ok(());
     };
     capabilities.push(ExecutionCapability {
         reference: CapabilityReference {
             name: reference,
             version: revision_uid.to_string(),
         },
+        contract_revision: tool_contract_revision(definition, execution)?,
         description: action.description.clone(),
         input_schema: action.input_schema.clone(),
         output_schema: action.output_schema.clone(),
@@ -3118,6 +3126,21 @@ fn append_skill_action(context: SkillActionContext<'_>) {
         },
         estimate: single_tool_estimate(definition.max_output_tokens),
     });
+    Ok(())
+}
+
+fn tool_contract_revision(
+    definition: &ToolDefinition,
+    execution: &ToolExecution,
+) -> moa_execution::Result<String> {
+    moa_hands::governed_tool_contract_revision(definition, execution).map_err(|error| {
+        moa_execution::Error::InvalidProjection {
+            message: format!(
+                "failed to pin governed contract for tool {}: {error}",
+                definition.name
+            ),
+        }
+    })
 }
 
 fn resolve_tool<'a>(
@@ -3183,23 +3206,29 @@ fn generic_json_output_schema() -> Value {
     })
 }
 
-async fn load_published_revisions(
+/// Loads the artifact revisions a tenant actually serves for plan compilation.
+///
+/// Skills come from their type-owned serving pointers. Actions and connectors
+/// still come from validated `published` revisions because their activation
+/// seams are not part of the skill-only release gate.
+async fn load_serving_revisions(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
 ) -> MoaResult<Vec<StoredArtifactRevision>> {
     let mut revisions = Vec::new();
-    for kind in [
-        ArtifactKind::Action,
-        ArtifactKind::Connector,
-        ArtifactKind::Skill,
-    ] {
-        let summaries = registry
+    for kind in [ArtifactKind::Action, ArtifactKind::Connector] {
+        for summary in registry
             .list_visible(scope, Some(kind), Some(ArtifactStatus::Published))
-            .await?;
-        for summary in summaries {
+            .await?
+        {
             if let Some(revision) = registry.load_revision(scope, summary.revision_uid).await? {
                 revisions.push(revision);
             }
+        }
+    }
+    for summary in registry.list_serving(scope, ArtifactKind::Skill).await? {
+        if let Some(revision) = registry.load_revision(scope, summary.revision_uid).await? {
+            revisions.push(revision);
         }
     }
     Ok(revisions)
@@ -3225,6 +3254,7 @@ async fn load_locked_skill_revisions(
     });
 
     let mut revisions = Vec::with_capacity(dependencies.len());
+    let release_scope = TenantScope::new(scope.tenant_id());
     for dependency in dependencies {
         let canonical_ref =
             canonical_skill_policy_ref(&dependency.reference).map_err(invalid_execution_request)?;
@@ -3234,11 +3264,21 @@ async fn load_locked_skill_revisions(
             .map_err(moa_error_to_status_handler_error)?
             .ok_or_else(|| {
                 invalid_execution_request(format!(
-                    "session skill lock revision is not visible: {}",
+                    "session skill lock revision is not loadable: {}",
                     dependency.revision_uid
                 ))
             })?;
         let revision_ref = skill_revision_ref(&revision).map_err(invalid_execution_request)?;
+        if !registry
+            .was_ever_activated(&release_scope, revision.revision_uid)
+            .await
+            .map_err(moa_error_to_status_handler_error)?
+        {
+            return Err(invalid_execution_request(format!(
+                "session skill lock revision was never activated: {}",
+                dependency.revision_uid
+            )));
+        }
         if revision_ref != canonical_ref
             || revision.name != dependency.name
             || revision.artifact_uid != dependency.artifact_uid
@@ -3346,7 +3386,7 @@ mod tests {
             canonical_hash: vec![1],
             source_format: "json".to_string(),
             source_text: Vec::new(),
-            status: ArtifactStatus::Published,
+            status: ArtifactStatus::Ready,
             validation_report: json!({}),
             version: 1,
             published_at: Some(Utc::now()),
@@ -3408,6 +3448,17 @@ mod tests {
         )
     }
 
+    fn skill_revision_with_status(
+        name: &str,
+        revision_uid: u128,
+        status: ArtifactStatus,
+    ) -> StoredArtifactRevision {
+        let mut revision = skill_revision(name, revision_uid);
+        revision.status = status.clone();
+        revision.document.status = status;
+        revision
+    }
+
     fn selected_skill_refs(context: &super::PlanningSkillContext) -> Vec<(String, Uuid)> {
         context
             .pinned_instruction_skills
@@ -3453,7 +3504,11 @@ mod tests {
         };
         let context = build_planning_skill_context(
             vec![skill_revision("alpha", 2), skill_revision("beta", 4)],
-            vec![skill_revision("alpha", 1)],
+            vec![skill_revision_with_status(
+                "alpha",
+                1,
+                ArtifactStatus::Superseded,
+            )],
             &policy,
             None,
         )
@@ -3620,7 +3675,7 @@ mod tests {
 
     #[test]
     fn planning_context_rejects_explicit_disallowed_template() {
-        // Pins: an exact published template remains unusable when the session allowlist excludes it.
+        // Pins: an exact activated template remains unusable when the session allowlist excludes it.
         let policy = AgentSkillPolicy {
             mode: AgentSkillPolicyMode::Allowlist,
             refs: vec!["skill://alpha".to_string()],
@@ -3639,8 +3694,40 @@ mod tests {
         .expect_err("disallowed exact template must fail closed");
         assert_eq!(
             error,
-            "requested execution template is not an exact permitted pinned published revision"
+            "requested execution template is not an exact permitted pinned activated revision"
         );
+    }
+
+    #[test]
+    fn planning_context_rejects_non_executable_exact_skill_statuses() {
+        // Pins: exact pins may preserve activated history through supersession,
+        // but draft, published, and archived revisions never gain execution
+        // authority from an agent dependency lock.
+        for status in [
+            ArtifactStatus::Draft,
+            ArtifactStatus::Published,
+            ArtifactStatus::Archived,
+        ] {
+            let revision = skill_revision_with_status("alpha", 1, status.clone());
+            let error = super::skill_revision_ref(&revision)
+                .expect_err("non-executable exact skill status must fail closed");
+            assert_eq!(
+                error,
+                format!(
+                    "planning skill revision {} is {status} and is not executable exact-pinned skill content",
+                    revision.revision_uid
+                )
+            );
+        }
+
+        for status in [ArtifactStatus::Ready, ArtifactStatus::Superseded] {
+            let revision = skill_revision_with_status("alpha", 1, status);
+            assert_eq!(
+                super::skill_revision_ref(&revision)
+                    .expect("activated exact skill status should remain executable"),
+                "skill://alpha"
+            );
+        }
     }
 
     #[test]
@@ -3662,7 +3749,7 @@ mod tests {
                 &policy,
                 None,
             )
-            .expect("locked policy revision should replace the latest publication");
+            .expect("locked policy revision should replace the latest activation");
             assert_selected_skill_revisions(
                 &locked,
                 &[("skill://alpha".to_string(), Uuid::from_u128(1))],
@@ -4056,12 +4143,12 @@ mod tests {
         );
         assert!(matches!(
             &mcp.source,
-            CapabilitySource::McpTool { server, tool_name, remote_name, schema_revision }
+            CapabilitySource::McpTool { server, tool_name, remote_name }
                 if server == "github"
                     && tool_name == &moa_hands::mcp_tool_reference("github", "github_issue_create")
                     && remote_name == "github_issue_create"
-                    && !schema_revision.is_empty()
         ));
+        assert!(!mcp.contract_revision.is_empty());
         assert!(!mcp.reference.version.is_empty());
 
         assert!(!response.catalog.capabilities.iter().any(|entry| {

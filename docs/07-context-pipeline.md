@@ -115,16 +115,17 @@ raw guarded text.
 
 ## Skill Injection
 
-`SkillInjector` loads visible tenant skill metadata from Postgres artifact
-revisions and ranks skills with:
+`SkillInjector` loads tenant skill metadata through Postgres artifact serving
+pointers and ranks skills with:
 
 - keyword overlap against the current query
 - tenant-level skill resolution rates from `skill_resolution_rates`
 - task-conditioned strategy success from `task_strategy_success_rates`
 
-When multiple visible skills share a name, the latest published tenant row wins.
-There is no contact-scoped skill inheritance, and tenant-learned skills stay
-tenant-local.
+For each tenant skill name, the exact revision named by its active serving
+pointer is authoritative. Neither the latest artifact row nor revision status
+can make a skill visible. There is no contact-scoped skill inheritance, and
+tenant-learned skills stay tenant-local.
 
 When a configured-agent policy is pinned to the session, selection first applies
 that policy. Pinned skills are included before ranked fill, allowlists bound the
@@ -141,7 +142,7 @@ Artifact-backed skills can expose named actions. When present, action names are
 included in the compact manifest so the model can choose a linked capability
 without loading the full package body.
 
-The manifest also states whether a published revision carries a pinned
+The manifest also states whether an activated revision carries a pinned
 `execution_plan` template and its stable reference/hash. Instruction-only
 skills remain fully valid and selectable in Inline Execute and in Durable
 `Agent` nodes. Skills are optional execution inputs: selection, absence, or a

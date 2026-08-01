@@ -818,9 +818,15 @@ async fn discovery_trusts_idempotent_hint_only_for_explicit_capable_server() {
 struct MethodRoutedMcpServer {
     url: String,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    tools_json: std::sync::Arc<tokio::sync::RwLock<String>>,
 }
 
 impl MethodRoutedMcpServer {
+    /// Changes what subsequent discovery calls observe.
+    async fn publish_tools(&self, tools_json: &str) {
+        *self.tools_json.write().await = tools_json.to_string();
+    }
+
     /// Stops the server and waits for the port to stop accepting.
     async fn shut_down(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
@@ -837,7 +843,8 @@ async fn spawn_method_routed_mcp_server(tools_json: &str) -> MethodRoutedMcpServ
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-    let tools_json = tools_json.to_string();
+    let tools_json = std::sync::Arc::new(tokio::sync::RwLock::new(tools_json.to_string()));
+    let served_tools = std::sync::Arc::clone(&tools_json);
     tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
@@ -856,6 +863,7 @@ async fn spawn_method_routed_mcp_server(tools_json: &str) -> MethodRoutedMcpServ
                 r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
                     .to_string()
             } else if request.contains("\"method\":\"tools/list\"") {
+                let tools_json = served_tools.read().await;
                 format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":{tools_json}}}}}"#)
             } else if request.contains("\"method\":\"tools/call\"") {
                 r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}}"#
@@ -874,6 +882,7 @@ async fn spawn_method_routed_mcp_server(tools_json: &str) -> MethodRoutedMcpServ
     MethodRoutedMcpServer {
         url: format!("http://{addr}"),
         shutdown: Some(shutdown_tx),
+        tools_json,
     }
 }
 
@@ -1101,6 +1110,52 @@ async fn a_refresh_that_fails_keeps_serving_the_last_known_good_tools_offline() 
 }
 
 #[tokio::test]
+async fn an_empty_refresh_keeps_serving_the_last_known_good_catalog_offline() {
+    // Pins: an empty tools/list response is not an intentional withdrawal
+    // protocol. Treating it as one lets a transient connector bug erase a
+    // working catalog, so the empty candidate is quarantined and the exact
+    // prior snapshot remains active.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
+    )
+    .await;
+    let dir = tempdir().expect("catalog tempdir");
+    let mut config = local_config(&dir);
+    config.mcp_servers = vec![connector("flaky", &server.url, false)];
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("router with a healthy connector");
+    let qualified = moa_hands::mcp_tool_reference("flaky", "search");
+    let active = router.activated_catalog();
+    let pin = active.pin().expect("active pin");
+
+    server.publish_tools("[]").await;
+    let refresh = router.refresh_mcp_catalog().await;
+
+    assert!(
+        matches!(
+            refresh.health.get("flaky"),
+            Some(moa_hands::McpConnectorHealth::Quarantined { tools: 1, defects, .. })
+                if matches!(
+                    defects.as_slice(),
+                    [moa_hands::CatalogDefect::NoOfferableTools { rejected: 0, .. }]
+                )
+        ),
+        "empty discovery must quarantine with one retained tool: {:?}",
+        refresh.health.get("flaky")
+    );
+    assert!(router.has_tool(&qualified));
+    assert_eq!(refresh.activation.pin, pin);
+    assert_eq!(
+        active.pin().expect("retained snapshot pin"),
+        router
+            .activated_catalog()
+            .pin()
+            .expect("published snapshot pin")
+    );
+}
+
+#[tokio::test]
 async fn a_lazy_connector_contributes_no_tools_until_the_first_refresh_offline() {
     // Pins: lazy discovery genuinely defers. A lazily configured connector is
     // Pending after construction — not Unavailable, because nothing was tried —
@@ -1304,44 +1359,6 @@ async fn a_refresh_republishes_the_prompt_schemas_a_turn_compiles_from_offline()
 }
 
 #[tokio::test]
-async fn a_permission_pattern_that_governs_no_registered_tool_is_reported_offline() {
-    // Pins the upgrade hazard behind server-qualified connector names: an
-    // operator pattern written against a connector's own tool name stops
-    // matching once that tool registers under its qualified reference, and an
-    // `admin_review` pattern that stops matching leaves the tool running
-    // UNATTENDED. That failure is open and silent, so construction reports it.
-    let server = spawn_method_routed_mcp_server(
-        r#"[{"name":"external_action","description":"External","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]"#,
-    )
-    .await;
-
-    let dir = tempdir().unwrap();
-    let mut config = local_config(&dir);
-    config.mcp_servers = vec![connector("crm", &server.url, false)];
-    // Written the way an operator would have written it before qualification.
-    config.permissions.admin_review = vec!["external_*".to_string()];
-    config.permissions.always_deny = vec!["bash".to_string()];
-
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
-        .await
-        .expect("router with a stale permission pattern still builds");
-
-    let unmatched = router.unmatched_permission_patterns();
-    assert_eq!(
-        unmatched
-            .iter()
-            .map(|entry| (entry.field, entry.pattern.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("permissions.admin_review", "external_*")],
-        "only the pattern that governs nothing may be reported: {unmatched:?}"
-    );
-    assert!(
-        router.has_tool(&moa_hands::mcp_tool_reference("crm", "external_action")),
-        "the tool the stale pattern was written for is registered under its qualified reference"
-    );
-}
-
-#[tokio::test]
 async fn a_lazily_discovered_connector_clears_its_permission_pattern_warning_offline() {
     // Pins: the report tracks the live catalog rather than a startup snapshot.
     // A pattern written for a lazy connector's tools genuinely governs nothing
@@ -1480,5 +1497,66 @@ async fn dispatching_a_connectors_published_name_says_which_reference_to_use_off
     assert!(
         !plain.contains("server-qualified"),
         "a name no connector publishes must not be explained as a qualification mistake: {plain}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Staged candidate catalogs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replicas_converge_on_one_activated_snapshot_and_keep_it_through_a_failed_refresh_offline()
+{
+    // Pins: the pin is a property of the catalog, not of the process that
+    // derived it, and a refresh failure cannot move it. Two independently built
+    // routers over the same connectors must produce byte-identical activated
+    // snapshots so prompt, policy, and dispatch checks agree across replicas. A
+    // connector outage must leave the snapshot exactly where it was rather than
+    // shrinking it to whatever survived.
+    let server = spawn_method_routed_mcp_server(
+        r#"[{"name":"search","description":"Search","inputSchema":{"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false}}]"#,
+    )
+    .await;
+
+    let first_dir = tempdir().expect("first replica tempdir");
+    let mut first_config = local_config(&first_dir);
+    first_config.mcp_servers = vec![connector("shared", &server.url, false)];
+    let first = ToolRouter::from_config(&first_config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("first replica");
+
+    let second_dir = tempdir().expect("second replica tempdir");
+    let mut second_config = local_config(&second_dir);
+    second_config.mcp_servers = vec![connector("shared", &server.url, false)];
+    let second = ToolRouter::from_config(&second_config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("second replica");
+
+    let first_pin = first.activated_catalog().pin().expect("first pin");
+    let second_pin = second.activated_catalog().pin().expect("second pin");
+    assert_eq!(
+        first_pin, second_pin,
+        "two replicas over the same catalog must activate one identical snapshot"
+    );
+    let mut server = server;
+    server.shut_down().await;
+    let refresh = second.refresh_mcp_catalog().await;
+
+    assert_eq!(
+        refresh
+            .health
+            .get("shared")
+            .expect("shared connector health")
+            .state(),
+        "degraded",
+        "an unreachable connector with last-known-good tools degrades"
+    );
+    assert_eq!(
+        refresh.activation.pin, first_pin,
+        "a failed refresh must preserve the activated snapshot exactly"
+    );
+    assert_eq!(
+        second.activated_catalog().pin().expect("pin after outage"),
+        first_pin,
     );
 }

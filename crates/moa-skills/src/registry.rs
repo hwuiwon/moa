@@ -2,28 +2,22 @@
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{
-    ArtifactFile, ArtifactRegistry, ArtifactScopeParts, NewPublishedArtifactRevision,
-    StoredArtifactRevision, insert_published_revision,
-};
+use moa_artifacts::registry::{ArtifactFile, ArtifactRegistry, StoredArtifactRevision};
+use moa_artifacts::release::TenantScope;
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
     types::identifiers::TenantId, types::identifiers::UserId, types::memory::SkillMetadata,
 };
-use moa_db::ScopedConn;
 use moa_memory_types::MemoryScope;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::artifact::{
-    artifact_file_from_skill_file, skill_artifact_document_from_package, skill_artifact_source_text,
-};
 use crate::format::build_skill_path;
 use crate::package::{
     SKILL_MD_PATH, SkillPackage, SkillPackageFile, SkillPackageManifest, ValidatedSkillPackage,
     ValidatedSkillPackageFile,
 };
-use crate::util::{artifact_scope_context, tenant_artifact_scope};
+use crate::util::tenant_artifact_scope;
 
 /// One active or historical skill package loaded from a skill artifact revision.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,30 +80,6 @@ impl Skill {
     }
 }
 
-/// New skill package revision to publish as a skill artifact.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewSkill {
-    /// Scope that owns the skill.
-    pub scope: ActionRuleScope,
-    /// Submitted package files.
-    pub package: SkillPackage,
-}
-
-impl NewSkill {
-    /// Builds an insertable skill from a submitted package.
-    pub fn from_package(scope: ActionRuleScope, package: SkillPackage) -> Self {
-        Self { scope, package }
-    }
-
-    /// Builds an insertable one-file skill package from rendered `SKILL.md` markdown.
-    pub fn from_skill_markdown(scope: ActionRuleScope, markdown: String) -> Self {
-        Self {
-            scope,
-            package: SkillPackage::from_skill_markdown(markdown),
-        }
-    }
-}
-
 /// Stored skill package with its package files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredSkillPackage {
@@ -145,29 +115,23 @@ impl SkillRegistry {
         Self { pool }
     }
 
-    /// Returns all visible published skills for the provided scope.
+    /// Returns every skill this scope currently serves.
     pub async fn load_for_scope(&self, scope: &ActionRuleScope) -> Result<Vec<Skill>> {
         let packages = self.load_packages_for_scope(scope).await?;
         Ok(packages.into_iter().map(|package| package.skill).collect())
     }
 
-    /// Returns the sorted, de-duplicated names of a tenant's published skills
+    /// Returns the sorted, de-duplicated names of the skills a tenant serves,
     /// without loading package file trees.
     ///
-    /// Backed by a single visible-artifact listing query, so it is cheap enough
+    /// Backed by a single serving-pointer listing query, so it is cheap enough
     /// for latency-critical paths (such as execution routing) that only need a
     /// coverage hint, unlike [`Self::list_for_pipeline`], which loads every
     /// package's full file tree.
     pub async fn list_skill_names(&self, tenant_id: TenantId) -> Result<Vec<String>> {
         let scope = tenant_artifact_scope(tenant_id);
         let registry = ArtifactRegistry::new(self.pool.clone());
-        let summaries = registry
-            .list_visible(
-                &scope,
-                Some(ArtifactKind::Skill),
-                Some(ArtifactStatus::Published),
-            )
-            .await?;
+        let summaries = registry.list_serving(&scope, ArtifactKind::Skill).await?;
         let mut names = summaries
             .into_iter()
             .map(|summary| summary.name)
@@ -208,7 +172,7 @@ impl SkillRegistry {
         .await
     }
 
-    /// Loads the most specific visible published skill matching the provided name.
+    /// Loads the skill this scope serves under the provided name.
     pub async fn load_by_name(
         &self,
         scope: &ActionRuleScope,
@@ -233,7 +197,10 @@ impl SkillRegistry {
         Ok(package.skill_markdown()?.to_string())
     }
 
-    /// Loads the most specific visible package matching the provided name.
+    /// Loads the package this scope serves under the provided name.
+    ///
+    /// Serving is the type-owned pointer, so revision status alone never makes
+    /// a skill resolvable here.
     pub async fn load_package_by_name(
         &self,
         scope: &ActionRuleScope,
@@ -241,7 +208,7 @@ impl SkillRegistry {
     ) -> Result<Option<StoredSkillPackage>> {
         let registry = ArtifactRegistry::new(self.pool.clone());
         let Some(revision) = registry
-            .load_visible_published(scope, ArtifactKind::Skill, skill_name)
+            .load_serving(scope, ArtifactKind::Skill, skill_name)
             .await?
         else {
             return Ok(None);
@@ -250,7 +217,13 @@ impl SkillRegistry {
         stored_package_from_revision(&revision, files).map(Some)
     }
 
-    /// Loads a visible package by skill artifact revision id.
+    /// Loads a package by exact skill artifact revision id.
+    ///
+    /// Accepts an executable `ready` or `superseded` revision with activation
+    /// history, so a session pinned to an exact revision keeps working after a
+    /// newer one activates. Draft and published revisions never qualify, and
+    /// rollback makes an archived revision terminal even though its immutable
+    /// activation history remains.
     pub(crate) async fn load_package_by_uid(
         &self,
         scope: &ActionRuleScope,
@@ -260,26 +233,37 @@ impl SkillRegistry {
         let Some(revision) = registry.load_revision(scope, skill_uid).await? else {
             return Ok(None);
         };
-        if revision.kind != ArtifactKind::Skill || revision.status != ArtifactStatus::Published {
+        if revision.kind != ArtifactKind::Skill {
+            return Ok(None);
+        }
+        if !matches!(
+            revision.status,
+            ArtifactStatus::Ready | ArtifactStatus::Superseded
+        ) {
+            return Err(MoaError::ValidationError(format!(
+                "artifact revision {} is {} and is not executable skill content",
+                revision.revision_uid, revision.status
+            )));
+        }
+        let release_scope = TenantScope::from_action_rule_scope(scope)
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        let served = registry
+            .was_ever_activated(&release_scope, skill_uid)
+            .await?;
+        if !served {
             return Ok(None);
         }
         let files = registry.load_files(scope, revision.revision_uid).await?;
         stored_package_from_revision(&revision, files).map(Some)
     }
 
-    /// Loads all visible published packages from the provided scope.
+    /// Loads every package this scope serves.
     pub async fn load_packages_for_scope(
         &self,
         scope: &ActionRuleScope,
     ) -> Result<Vec<StoredSkillPackage>> {
         let registry = ArtifactRegistry::new(self.pool.clone());
-        let summaries = registry
-            .list_visible(
-                scope,
-                Some(ArtifactKind::Skill),
-                Some(ArtifactStatus::Published),
-            )
-            .await?;
+        let summaries = registry.list_serving(scope, ArtifactKind::Skill).await?;
         let mut packages = Vec::with_capacity(summaries.len());
         for summary in summaries {
             let Some(revision) = registry.load_revision(scope, summary.revision_uid).await? else {
@@ -295,80 +279,13 @@ impl SkillRegistry {
         packages.sort_by(|left, right| left.skill.name.cmp(&right.skill.name));
         Ok(packages)
     }
-
-    /// Publishes a new skill artifact revision.
-    pub async fn create(&self, skill: NewSkill) -> Result<Uuid> {
-        let skill = ValidatedNewSkill::from_new(skill)?;
-        publish_skill_revision(&self.pool, &skill).await
-    }
-
-    /// Publishes a new artifact revision when the package changed, otherwise returns the current revision.
-    pub async fn upsert_by_name(&self, skill: NewSkill) -> Result<Uuid> {
-        let skill = ValidatedNewSkill::from_new(skill)?;
-        if let Some(existing) = self
-            .load_package_by_name(&skill.scope, &skill.package.name)
-            .await?
-            .filter(|existing| existing.skill.package_hash == skill.package.package_hash)
-        {
-            return Ok(existing.skill.skill_uid);
-        }
-        publish_skill_revision(&self.pool, &skill).await
-    }
-}
-
-struct ValidatedNewSkill {
-    scope: ActionRuleScope,
-    package: ValidatedSkillPackage,
-}
-
-impl ValidatedNewSkill {
-    fn from_new(skill: NewSkill) -> Result<Self> {
-        Ok(Self {
-            scope: skill.scope,
-            package: skill.package.validate()?,
-        })
-    }
-}
-
-async fn publish_skill_revision(pool: &PgPool, skill: &ValidatedNewSkill) -> Result<Uuid> {
-    let mut conn = ScopedConn::begin(pool, &artifact_scope_context(&skill.scope)).await?;
-    let revision_uid = insert_skill_artifact(conn.as_mut(), skill).await?;
-    conn.commit().await?;
-    Ok(revision_uid)
 }
 
 fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {
     MemoryScope::Tenant { tenant_id }
 }
 
-async fn insert_skill_artifact(
-    conn: &mut sqlx::PgConnection,
-    skill: &ValidatedNewSkill,
-) -> Result<Uuid> {
-    let document = skill_artifact_document_from_package(&skill.package, ArtifactStatus::Published)?;
-    let source_text = skill_artifact_source_text(&skill.package, &document)?;
-    let artifact_files = skill
-        .package
-        .files
-        .iter()
-        .map(artifact_file_from_skill_file)
-        .collect::<Vec<_>>();
-
-    insert_published_revision(
-        conn,
-        &ArtifactScopeParts::from_scope(&skill.scope),
-        NewPublishedArtifactRevision {
-            document: &document,
-            source_format: "yaml",
-            source_text: &source_text,
-            files: &artifact_files,
-            version: None,
-        },
-    )
-    .await
-}
-
-fn stored_package_from_revision(
+pub(crate) fn stored_package_from_revision(
     revision: &StoredArtifactRevision,
     files: Vec<ArtifactFile>,
 ) -> Result<StoredSkillPackage> {
@@ -378,10 +295,13 @@ fn stored_package_from_revision(
             revision.revision_uid
         )));
     }
-    if revision.status != ArtifactStatus::Published {
+    if matches!(
+        revision.status,
+        ArtifactStatus::Draft | ArtifactStatus::Archived | ArtifactStatus::Published
+    ) {
         return Err(MoaError::ValidationError(format!(
-            "artifact revision {} must be published before skill loading",
-            revision.revision_uid
+            "artifact revision {} is {} and is not executable skill content",
+            revision.revision_uid, revision.status
         )));
     }
     let package_files = files

@@ -7,6 +7,7 @@ pub mod admin_maintenance;
 pub mod agent_definitions;
 pub mod agents;
 pub mod api_keys;
+pub mod artifact_release;
 pub mod artifacts;
 pub mod authz_admin;
 pub mod authz_challenges;

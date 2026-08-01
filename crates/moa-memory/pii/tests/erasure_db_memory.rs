@@ -252,7 +252,7 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
             (revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id,
              definition, canonical_hash, source_format, source_text, status,
              validation_report, version, published_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'published',
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'ready',
                  '{}'::JSONB, 1, now())",
     )
     .bind(revision_uid)

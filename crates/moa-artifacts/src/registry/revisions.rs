@@ -1,21 +1,35 @@
 //! Artifact revision and package-file persistence.
 
 use super::*;
+use crate::release::{ActivationTargetClass, TenantScope};
 use crate::validation::validate_for_status;
 use moa_core::types::contact::ContactId;
 
-/// Outcome of attempting to roll a published skill revision back.
+/// Outcome of attempting to roll a serving skill revision back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollbackApplication {
-    /// The promoted revision was still serving and was archived; any predecessor
-    /// was restored as the serving revision.
+    /// The regressed revision was serving; the serving pointer was removed and
+    /// the revision archived. The artifact now serves nothing.
     Applied,
-    /// A newer published revision now serves, so nothing was changed. The
-    /// rollback proposal is stale and must not be retried.
+    /// A different revision serves now, so nothing was changed. The rollback
+    /// proposal is stale and must not be retried.
     Superseded {
-        /// Revision currently serving (highest-version published revision).
+        /// Revision the serving pointer names.
         serving_revision_uid: Uuid,
     },
+    /// Nothing was serving for this artifact, so there was nothing to roll back.
+    NotServing,
+}
+
+/// Returns the activation target label a serving pointer of this kind carries.
+fn pointer_activation_target(kind: &ArtifactKind) -> Result<&'static str> {
+    ActivationTargetClass::for_artifact_kind(kind)
+        .map(|class| class.as_str())
+        .ok_or_else(|| {
+            MoaError::StorageError(format!(
+                "artifact kind {kind} has no release-gated serving pointer"
+            ))
+        })
 }
 
 impl ArtifactRegistry {
@@ -41,6 +55,20 @@ impl ArtifactRegistry {
         draft: NewArtifactDraft<'_>,
     ) -> Result<StoredArtifactRevision> {
         validate_source_format(draft.source_format)?;
+        // A contact-scoped skill, action, or agent has no representable release
+        // subject, so it could never be evaluated and could never serve. Refusing
+        // it here is what makes contact-scoped release subjects unrepresentable
+        // rather than merely unactivatable: migration V000373 archived the ones
+        // that already existed, and this is why none can come back.
+        if ActivationTargetClass::is_release_gated(&draft.document.kind)
+            && matches!(scope, ActionRuleScope::Contact { .. })
+        {
+            return Err(MoaError::ValidationError(format!(
+                "artifact kind {} cannot be contact-scoped; release subjects accept a tenant \
+                 scope only",
+                draft.document.kind
+            )));
+        }
         let parts = ArtifactScopeParts::from_scope(scope);
         let artifact_uid = ensure_artifact(conn, &parts, draft.document).await?;
         let version = next_revision_version(conn, artifact_uid).await?;
@@ -92,41 +120,62 @@ impl ArtifactRegistry {
         load_revision_by_uid(conn, revision_uid).await
     }
 
-    /// Marks a draft revision as published without invalidating older published revisions.
-    pub async fn publish_revision(
+    /// Validates a draft revision of a kind whose activation seam is owned elsewhere.
+    ///
+    /// This is deliberately not a generic publish helper. Release-gated kinds
+    /// (skill, action, agent) are refused: their serving pointer moves only
+    /// through [`crate::registry::ReleaseRepository::activate`], and a helper that
+    /// could mark them published would be exactly the bypass that made
+    /// `Artifacts/publish`-only hooks pointless. What remains is the connector and
+    /// experiment-plan path, where "published" means validated configuration and
+    /// no session-visible serving transition happens here.
+    pub async fn publish_unserved_revision(
         &self,
         scope: &ActionRuleScope,
         revision_uid: Uuid,
         report: &ValidationReport,
     ) -> Result<StoredArtifactRevision> {
         let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
-        let stored = Self::publish_revision_in_tx(conn.as_mut(), revision_uid, report).await?;
+        let stored =
+            Self::publish_unserved_revision_in_tx(conn.as_mut(), revision_uid, report).await?;
         conn.commit().await?;
         Ok(stored)
     }
 
-    /// Marks a draft revision as published using the caller's open transaction.
+    /// Validates an unserved revision using the caller's open transaction.
     ///
     /// The caller owns commit or rollback and should apply matching MOA scope GUCs before calling
     /// this method when row-level security is relevant.
-    pub async fn publish_revision_in_tx(
+    pub async fn publish_unserved_revision_in_tx(
         conn: &mut PgConnection,
         revision_uid: Uuid,
         report: &ValidationReport,
     ) -> Result<StoredArtifactRevision> {
-        let artifact_uid = sqlx::query_scalar::<_, Uuid>(
+        let row = sqlx::query(
             r#"
-            SELECT artifact_uid
-            FROM moa.artifact_revision
-            WHERE revision_uid = $1
-              AND valid_to IS NULL
-            FOR UPDATE
+            SELECT r.artifact_uid, a.kind
+            FROM moa.artifact_revision r
+            JOIN moa.artifact a ON a.artifact_uid = r.artifact_uid
+            WHERE r.revision_uid = $1
+              AND r.valid_to IS NULL
+            FOR UPDATE OF r
             "#,
         )
         .bind(revision_uid)
         .fetch_one(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
+        let artifact_uid: Uuid = row.try_get("artifact_uid").map_err(map_sqlx_error)?;
+        let kind_text: String = row.try_get("kind").map_err(map_sqlx_error)?;
+        let kind: ArtifactKind = kind_text
+            .parse()
+            .map_err(|error: crate::Error| MoaError::StorageError(error.to_string()))?;
+        if ActivationTargetClass::is_release_gated(&kind) {
+            return Err(MoaError::ValidationError(format!(
+                "artifact kind {kind} is release-gated; revision {revision_uid} can only serve \
+                 through an attested activation"
+            )));
+        }
 
         let validation_report = serde_json::to_value(report)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?;
@@ -159,35 +208,32 @@ impl ArtifactRegistry {
         load_revision_by_uid(conn, revision_uid).await
     }
 
-    /// Rolls the serving revision of a skill back, archiving it and restoring a
-    /// prior one — but only when the promoted revision is still the serving one.
+    /// Rolls a serving skill revision back by un-serving it.
     ///
-    /// Publishing a newer revision does not archive older published ones
-    /// ([`Self::publish_revision_in_tx`]), and the serving revision is the
-    /// highest-version published revision ([`Self::load_visible_published`]
-    /// orders by `version DESC`). So a rollback proposal filed against an
-    /// already-superseded revision would archive a revision that is not serving
-    /// and repoint metadata around the one that is — reporting success while the
-    /// newer revision keeps serving. This method therefore first checks
-    /// currentness: if a higher-version published revision exists it applies
-    /// nothing and returns [`RollbackApplication::Superseded`]. The caller must
-    /// treat that as terminal (the proposal is stale) rather than retry.
+    /// A rollback stops a regressed revision from serving. It does not promote a
+    /// predecessor: restoring an older revision is itself a serving transition,
+    /// and every serving transition fails closed through an attested activation.
+    /// So this deletes the serving pointer, archives the regressed revision, and
+    /// drops the stale identity embedding so nearest-neighbour consumers stop
+    /// advertising it. A skill whose regressed revision is the only one that ever
+    /// served has its artifact identity retired as well, since nothing is left to
+    /// advertise; when an earlier revision did serve, the identity survives so that
+    /// revision can be re-released through the gate.
     ///
-    /// When current, archiving the promoted revision (`status = 'archived'`)
-    /// removes it from the serving path so the highest remaining published
-    /// revision serves again. With a predecessor, the artifact's
-    /// `latest_revision_uid` pointer and its serving-side `description`/`tags`
-    /// are restored from that predecessor's document (they are mutated on every
-    /// publish, so they otherwise keep advertising the regressed metadata), and
-    /// the stale identity embedding is dropped so nearest-neighbor consumers stop
-    /// seeing it. With no predecessor (a created skill), the artifact identity is
-    /// retired (`valid_to` set) along with its embedding, since nothing should
-    /// continue to advertise the regressed skill. The caller owns commit or
-    /// rollback and should apply matching MOA scope GUCs before calling.
-    pub async fn rollback_published_revision_in_tx(
+    /// The pointer row is read `FOR UPDATE`, so a concurrent activation either
+    /// happens entirely before this rollback or fails its compare-and-set.
+    /// A proposal filed against a revision that no longer serves changes nothing
+    /// and reports [`RollbackApplication::Superseded`]; the caller must treat that
+    /// as terminal rather than retry. The caller owns commit or rollback and
+    /// should apply matching MOA scope GUCs before calling.
+    pub async fn rollback_serving_revision_in_tx(
         conn: &mut PgConnection,
+        scope: &TenantScope,
         promoted_revision_uid: Uuid,
-        restore_revision_uid: Option<Uuid>,
+        expected_activation_audit_uid: Uuid,
+        expected_pointer_version: i64,
+        actor: &str,
+        reason: Option<&str>,
     ) -> Result<RollbackApplication> {
         let artifact_uid = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -195,7 +241,6 @@ impl ArtifactRegistry {
             FROM moa.artifact_revision
             WHERE revision_uid = $1
               AND valid_to IS NULL
-              AND status = 'published'
             FOR UPDATE
             "#,
         )
@@ -204,31 +249,45 @@ impl ArtifactRegistry {
         .await
         .map_err(map_sqlx_error)?
         .ok_or_else(|| {
-            MoaError::ValidationError(
-                "promoted artifact revision is not published or no longer exists".to_string(),
-            )
+            MoaError::ValidationError("promoted artifact revision no longer exists".to_string())
         })?;
 
-        // Currentness guard: the promoted revision must still be the serving
-        // (highest-version published) revision, or the proposal is stale.
-        let serving_revision_uid = sqlx::query_scalar::<_, Uuid>(
+        super::release::lock_artifact_serving_pointer(conn, scope, artifact_uid)
+            .await
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        let Some(pointer) =
+            super::serving::load_serving_pointer_in_tx(conn, scope, artifact_uid, false).await?
+        else {
+            return Ok(RollbackApplication::NotServing);
+        };
+        if pointer.revision_uid != promoted_revision_uid {
+            return Ok(RollbackApplication::Superseded {
+                serving_revision_uid: pointer.revision_uid,
+            });
+        }
+        let removed: i64 = sqlx::query_scalar(
             r#"
-            SELECT revision_uid
-            FROM moa.artifact_revision
-            WHERE artifact_uid = $1
-              AND status = 'published'
-              AND valid_to IS NULL
-            ORDER BY version DESC
-            LIMIT 1
+            SELECT moa.apply_artifact_rollback_transition(
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+            )
             "#,
         )
+        .bind(Uuid::now_v7())
+        .bind(scope.storage_partition_id().to_string())
         .bind(artifact_uid)
+        .bind(pointer_activation_target(&pointer.kind)?)
+        .bind(expected_activation_audit_uid)
+        .bind(promoted_revision_uid)
+        .bind(expected_pointer_version)
+        .bind(expected_pointer_version.saturating_add(1))
+        .bind(actor)
+        .bind(reason)
         .fetch_one(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
-        if serving_revision_uid != promoted_revision_uid {
+        if removed != 1 {
             return Ok(RollbackApplication::Superseded {
-                serving_revision_uid,
+                serving_revision_uid: pointer.revision_uid,
             });
         }
 
@@ -246,44 +305,42 @@ impl ArtifactRegistry {
         .await
         .map_err(map_sqlx_error)?;
 
-        if let Some(restore_revision_uid) = restore_revision_uid {
-            // Restore the pointer and the serving-side identity (description and
-            // tags) from the predecessor's stored document in one statement.
-            let restored = sqlx::query(
-                r#"
-                UPDATE moa.artifact a
-                SET latest_revision_uid = r.revision_uid,
-                    description = COALESCE(r.definition->'metadata'->>'description', ''),
-                    tags = COALESCE(
-                        (SELECT array_agg(t)
-                         FROM jsonb_array_elements_text(r.definition->'metadata'->'tags') AS t),
-                        ARRAY[]::text[]
-                    ),
-                    updated_at = now()
-                FROM moa.artifact_revision r
-                WHERE a.artifact_uid = $2
-                  AND r.revision_uid = $1
-                  AND r.artifact_uid = $2
-                  AND r.status = 'published'
-                  AND r.valid_to IS NULL
-                "#,
+        sqlx::query(
+            r#"
+            UPDATE moa.artifact_release_candidate
+            SET slot = 'released',
+                updated_at = now()
+            WHERE revision_uid = $1
+            "#,
+        )
+        .bind(promoted_revision_uid)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        super::skill_embeddings::delete_skill_embedding_in_tx(conn, artifact_uid).await?;
+
+        // A created skill -- one no other revision ever served for -- has nothing
+        // left to advertise, so its identity is retired rather than left as an empty
+        // shell that listings and rankings still enumerate. When an earlier revision
+        // did serve, the identity survives so that revision can be re-released.
+        let served_before = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM moa.artifact_activation_audit
+                WHERE artifact_uid = $1
+                  AND decision_kind = 'activation'
+                  AND activated_revision_uid IS DISTINCT FROM $2
             )
-            .bind(restore_revision_uid)
-            .bind(artifact_uid)
-            .execute(&mut *conn)
-            .await
-            .map_err(map_sqlx_error)?
-            .rows_affected();
-            if restored == 0 {
-                return Err(MoaError::ValidationError(
-                    "revision to restore is not a published revision of the same artifact"
-                        .to_string(),
-                ));
-            }
-            super::skill_embeddings::delete_skill_embedding_in_tx(conn, artifact_uid).await?;
-        } else {
-            // Created skill with no predecessor: retire the identity entirely so
-            // no serving path, ranking, or embedding keeps advertising it.
+            "#,
+        )
+        .bind(artifact_uid)
+        .bind(promoted_revision_uid)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        if !served_before {
             sqlx::query(
                 r#"
                 UPDATE moa.artifact
@@ -296,9 +353,7 @@ impl ArtifactRegistry {
             .execute(&mut *conn)
             .await
             .map_err(map_sqlx_error)?;
-            super::skill_embeddings::delete_skill_embedding_in_tx(conn, artifact_uid).await?;
         }
-
         Ok(RollbackApplication::Applied)
     }
 
@@ -312,7 +367,12 @@ impl ArtifactRegistry {
         load_visible_with_status(&self.pool, scope, kind, name, None).await
     }
 
-    /// Loads the most specific visible published artifact revision by kind and name.
+    /// Loads the most specific visible `published` artifact revision by kind and name.
+    ///
+    /// Only kinds whose activation seam is owned elsewhere reach `published` --
+    /// connector catalogs and experiment plans -- so this is not a serving lookup
+    /// for release-gated kinds. Skill, action, and agent resolution goes through
+    /// [`Self::load_serving`] and the agent installation pointer instead.
     pub async fn load_visible_published(
         &self,
         scope: &ActionRuleScope,
@@ -358,6 +418,71 @@ impl ArtifactRegistry {
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
         row.as_ref().map(revision_from_row).transpose()
+    }
+
+    /// Stores a validation report against a revision without changing its status.
+    ///
+    /// Generic validation makes an immutable revision eligible for evaluation. It
+    /// does not make it visible: a release-gated revision stays a draft here, and
+    /// only an attested activation can move its serving pointer.
+    pub async fn record_validation_report(
+        &self,
+        scope: &ActionRuleScope,
+        revision_uid: Uuid,
+        report: &ValidationReport,
+    ) -> Result<StoredArtifactRevision> {
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let stored =
+            Self::record_validation_report_in_tx(conn.as_mut(), revision_uid, report).await?;
+        conn.commit().await?;
+        Ok(stored)
+    }
+
+    /// Stores a validation report using the caller's open transaction.
+    ///
+    /// The caller owns commit or rollback and should apply matching MOA scope GUCs
+    /// before calling. Used by the skill-learning review, whose regression run is
+    /// the eligibility step for a distilled candidate.
+    pub async fn record_validation_report_in_tx(
+        conn: &mut PgConnection,
+        revision_uid: Uuid,
+        report: &ValidationReport,
+    ) -> Result<StoredArtifactRevision> {
+        let validation_report = serde_json::to_value(report)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE moa.artifact_revision
+            SET validation_report = $2,
+                updated_at = now()
+            WHERE revision_uid = $1
+              AND valid_to IS NULL
+            "#,
+        )
+        .bind(revision_uid)
+        .bind(validation_report)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        if updated != 1 {
+            return Err(MoaError::ValidationError(format!(
+                "artifact revision {revision_uid} does not exist or was invalidated"
+            )));
+        }
+        load_revision_by_uid(conn, revision_uid).await
+    }
+
+    /// Loads one artifact revision by id using the caller's open transaction.
+    ///
+    /// Scope filtering is the caller's responsibility here: the caller already
+    /// opened the transaction with the matching MOA scope GUCs, so row-level
+    /// security is what bounds the read.
+    pub async fn load_revision_in_tx(
+        conn: &mut PgConnection,
+        revision_uid: Uuid,
+    ) -> Result<StoredArtifactRevision> {
+        load_revision_by_uid(conn, revision_uid).await
     }
 
     /// Lists active artifact revisions visible from the provided scope.
@@ -411,69 +536,6 @@ impl ArtifactRegistry {
         conn.commit().await?;
         Ok(files)
     }
-}
-
-/// Inserts a published artifact revision inside an existing transaction.
-pub async fn insert_published_revision(
-    conn: &mut PgConnection,
-    parts: &ArtifactScopeParts,
-    revision: NewPublishedArtifactRevision<'_>,
-) -> Result<Uuid> {
-    validate_source_format(revision.source_format)?;
-    let artifact_uid = ensure_artifact(conn, parts, revision.document).await?;
-
-    let version = match revision.version {
-        Some(version) => version,
-        None => next_revision_version(conn, artifact_uid).await?,
-    };
-    let revision_uid = Uuid::now_v7();
-    let definition = serde_json::to_value(revision.document)
-        .map_err(|error| MoaError::SerializationError(error.to_string()))?;
-    let canonical_hash = canonical_hash(revision.document)
-        .map_err(|error| MoaError::SerializationError(error.to_string()))?
-        .to_vec();
-    let validation_report = serde_json::to_value(validate_for_status(
-        revision.document,
-        ArtifactStatus::Published,
-    ))
-    .map_err(|error| MoaError::SerializationError(error.to_string()))?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id, definition,
-            canonical_hash, source_format, source_text, status, validation_report,
-            version, published_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published', $10, $11, now())
-        "#,
-    )
-    .bind(revision_uid)
-    .bind(artifact_uid)
-    .bind(parts.tenant_id)
-    .bind(parts.storage_partition_id.as_deref())
-    .bind(parts.user_id.as_deref())
-    .bind(definition)
-    .bind(canonical_hash)
-    .bind(revision.source_format)
-    .bind(revision.source_text)
-    .bind(validation_report)
-    .bind(version)
-    .execute(&mut *conn)
-    .await
-    .map_err(map_sqlx_error)?;
-
-    sqlx::query(
-        "UPDATE moa.artifact SET latest_revision_uid = $1, updated_at = now() WHERE artifact_uid = $2",
-    )
-    .bind(revision_uid)
-    .bind(artifact_uid)
-    .execute(&mut *conn)
-    .await
-    .map_err(map_sqlx_error)?;
-
-    insert_files(conn, parts, artifact_uid, revision_uid, revision.files).await?;
-    Ok(revision_uid)
 }
 
 async fn load_visible_with_status(
@@ -722,13 +784,13 @@ fn parse_contact_user_id(value: &str) -> Result<ContactId> {
 ///
 /// The order here must stay in lockstep with [`revision_from_row`], which reads
 /// each column by name; keep both in sync when columns are added or removed.
-const REVISION_COLUMNS: &str = "a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope, \
+pub(super) const REVISION_COLUMNS: &str = "a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope, \
      a.kind, a.name, a.description, a.tags, r.definition, \
      r.canonical_hash, r.source_format, r.source_text, r.status, \
      r.validation_report, r.version, r.published_at, r.valid_to, \
      r.created_at, r.updated_at";
 
-fn revision_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredArtifactRevision> {
+pub(super) fn revision_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredArtifactRevision> {
     let kind_text: String = row.try_get("kind").map_err(map_sqlx_error)?;
     let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
     let definition: Value = row.try_get("definition").map_err(map_sqlx_error)?;
@@ -770,7 +832,7 @@ fn revision_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredArtifactRevisi
     })
 }
 
-fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactSummary> {
+pub(super) fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactSummary> {
     let kind_text: String = row.try_get("kind").map_err(map_sqlx_error)?;
     let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
     Ok(ArtifactSummary {

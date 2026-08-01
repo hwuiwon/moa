@@ -14,7 +14,8 @@ use tracing::Instrument;
 
 use super::dispatch::McpDispatch;
 use super::lifecycle::{hand_id, scope_key};
-use super::{HandRoute, ToolCallScope, ToolExecution, ToolRouter};
+use super::registration::McpClientRoute;
+use super::{HandRoute, ToolCallScope, ToolCatalogSnapshot, ToolExecution, ToolRouter};
 
 const MAX_TOOL_RETRIES: u32 = 3;
 const MAX_TOOL_REPROVISIONS: u32 = 2;
@@ -34,6 +35,7 @@ struct McpFailureContext<'a> {
     server_name: &'a str,
     idempotency_class: IdempotencyClass,
     active_canary: Option<&'a str>,
+    client_route: &'a McpClientRoute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +52,7 @@ impl ToolRouter {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_authorized_with_recovery_inner(
         &self,
+        catalog: &ToolCatalogSnapshot,
         session: &SessionMeta,
         caller_identity: &Identity,
         worker_id: Option<&str>,
@@ -58,7 +61,7 @@ impl ToolRouter {
         active_canary: Option<&str>,
         scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
-        let registry = self.registry();
+        let registry = &catalog.registry;
         let Some(registered_tool) = registry.tools.get(&invocation.name) else {
             // An unknown tool has no registry entry to resolve a capability from,
             // so the identity is the requested name under the built-in namespace.
@@ -76,13 +79,14 @@ impl ToolRouter {
         let capability = registered_tool.execution.capability_id(&invocation.name);
 
         match &registered_tool.execution {
-            ToolExecution::BuiltIn(_) => {
+            ToolExecution::BuiltIn(tool) => {
                 let result = self
                     .execute_builtin_once(
                         session,
                         caller_identity,
                         invocation,
                         &registered_tool.definition,
+                        tool,
                         active_canary,
                         scope,
                     )
@@ -115,6 +119,12 @@ impl ToolRouter {
                 remote_tool_name,
                 ..
             } => {
+                let client_route = registered_tool.mcp_client_route.clone().ok_or_else(|| {
+                    MoaError::ConfigError(format!(
+                        "MCP tool {} has no client route in its catalog snapshot",
+                        invocation.name
+                    ))
+                })?;
                 self.execute_mcp_with_recovery(
                     session,
                     invocation,
@@ -122,6 +132,7 @@ impl ToolRouter {
                     McpDispatch {
                         server_name,
                         remote_tool_name,
+                        client_route,
                         tool_call_id,
                     },
                     active_canary,
@@ -524,7 +535,7 @@ impl ToolRouter {
                     session,
                     invocation,
                     tool_definition,
-                    dispatch,
+                    dispatch.clone(),
                     active_canary,
                     scope,
                 )
@@ -550,6 +561,7 @@ impl ToolRouter {
                                 server_name,
                                 idempotency_class: tool_definition.idempotency_class,
                                 active_canary,
+                                client_route: &dispatch.client_route,
                             },
                             class,
                             RecoveryStage::AfterUncertainExecution,
@@ -692,7 +704,10 @@ impl ToolRouter {
                 Ok(None)
             }
             ToolFailureClass::ReProvision { .. } if reprovisions < MAX_TOOL_REPROVISIONS => {
-                if let Err(error) = self.reconnect_mcp_client(ctx.server_name).await {
+                if let Err(error) = self
+                    .reconnect_mcp_client(ctx.server_name, ctx.client_route)
+                    .await
+                {
                     return Ok(secured(classify_tool_error(&error, 0)));
                 }
                 self.record_reprovision(ctx.server_name, &ctx.invocation.name)

@@ -559,13 +559,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         "queue_message"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/eval/mod.rs",
-        "run",
-        TRACE_HELPER,
-        "EvalClient",
-        "execute_run"
-    ),
-    sender!(
         "crates/moa-orchestrator/src/services/execution.rs",
         "apply_amendment",
         TRACE_HELPER,
@@ -622,6 +615,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "execution_run_started"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/artifact_release.rs",
+        "submit",
+        TRACE_HELPER,
+        "ArtifactReleaseEvaluationClient",
+        "run"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/services/experiments.rs",
         "cancel",
         TRACE_HELPER,
@@ -665,14 +665,14 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/services/llm_gateway.rs",
-        "complete",
+        "record_completion",
         TRACE_HELPER,
         "IngestionVOClient",
         "ingest_turn"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/llm_gateway.rs",
-        "complete",
+        "record_completion",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
@@ -788,6 +788,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "ActionPolicyClient",
         "prepare_action_review"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/tool_invocation/governed.rs",
+        "current_tool_contract_drift",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "activated_tool_catalog"
     ),
     sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",
@@ -918,21 +925,42 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
-        "forward_pending_child_cancellation",
+        "forward_child_cancellation_signal",
         IDENTITY_TRACE_HELPER,
         "SessionClient",
         "request_cancel"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
-        "forward_pending_child_cancellation",
+        "forward_child_cancellation_signal",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "cancel"
     ),
     sender!(
+        "crates/moa-orchestrator/src/workflows/artifact_release_evaluation/mod.rs",
+        "run",
+        TRACE_HELPER,
+        "ArtifactReleaseEvaluationClient",
+        "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/artifact_release_evaluation/mod.rs",
+        "run",
+        IDENTITY_TRACE_HELPER,
+        "ExperimentsClient",
+        "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/artifact_release_evaluation/mod.rs",
+        "wait_for_terminal_experiment",
+        IDENTITY_TRACE_HELPER,
+        "ExperimentsClient",
+        "status"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/workflows/experiment_run.rs",
-        "fan_out_cancellation_to_active_trials",
+        "fan_out_cancellation_to_cancelled_trials",
         TRACE_HELPER,
         "ExperimentTrialRunClient",
         "request_cancel"
@@ -977,6 +1005,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run_agent_loop_target",
         IDENTITY_TRACE_HELPER,
         "SessionClient",
+        "request_cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
+        "run_agent_loop_target",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
         "set_meta"
     ),
     sender!(
@@ -992,6 +1027,20 @@ const SENDERS: &[SenderManifestEntry] = &[
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "start"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
+        "wait_for_direct_turn",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "attach_turn_waiter"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
+        "wait_for_direct_turn",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "remove_turn_waiter"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
@@ -1013,6 +1062,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
+        "authorize_resumed_trial_session",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "status"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
@@ -1041,6 +1097,20 @@ const SENDERS: &[SenderManifestEntry] = &[
         IDENTITY_TRACE_HELPER,
         "SessionClient",
         "status"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
+        "remove_target_turn_waiter",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "remove_turn_waiter"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
+        "run_agent_loop_trial",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "complete_bounded"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
@@ -1083,13 +1153,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         IDENTITY_TRACE_HELPER,
         "SessionClient",
         "attach_turn_waiter"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
-        "wait_for_target_after_turn",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "remove_turn_waiter"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/skill_learning.rs",
@@ -1138,21 +1201,21 @@ const SENDERS: &[SenderManifestEntry] = &[
         "evaluate_input_guardrail",
         TRACE_HELPER,
         "LLMGatewayClient",
-        "complete"
+        "complete_bounded"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/guardrails.rs",
         "visible_response_after_output_guardrail",
         TRACE_HELPER,
         "LLMGatewayClient",
-        "complete"
+        "complete_bounded"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
         "complete",
         TRACE_HELPER,
         "LLMGatewayClient",
-        "complete"
+        "complete_bounded"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
@@ -1169,7 +1232,7 @@ const SENDERS: &[SenderManifestEntry] = &[
         "start"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
+        "crates/moa-orchestrator/src/workflows/turn_execution/responses.rs",
         "ingest_deferred_session_turn",
         TRACE_HELPER,
         "IngestionVOClient",
@@ -1208,7 +1271,7 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run_once_inside_workflow",
         TRACE_HELPER,
         "LLMGatewayClient",
-        "complete"
+        "complete_bounded"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/segments.rs",
@@ -1450,6 +1513,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         },
     },
     ReceiverManifestEntry {
+        client: "ArtifactReleaseEvaluationClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/workflows/artifact_release_evaluation/mod.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
         client: "ConsolidateClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/workflows/consolidate.rs",
@@ -1461,14 +1532,6 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "CronJobClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/objects/cron_job.rs",
-            symbol: "*",
-            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
-        },
-    },
-    ReceiverManifestEntry {
-        client: "EvalClient",
-        receiver: ReceiverKind::MoaHandler {
-            path: "crates/moa-orchestrator/src/services/eval/mod.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
@@ -1493,6 +1556,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "ExecutionTaskClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/workflows/execution_task.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExperimentsClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/experiments.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },

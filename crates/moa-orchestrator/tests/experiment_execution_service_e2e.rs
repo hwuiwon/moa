@@ -47,7 +47,7 @@ use crate::execution_execution_support::assertions::{
     final_brain_response, journal_requests, journal_roles, planning_audits, sole_event_sequence,
 };
 use crate::execution_execution_support::fixtures::{
-    POLL_INTERVAL, SERVICE_TIMEOUT, await_session_settled, list_execution_tasks, publish_skill,
+    POLL_INTERVAL, SERVICE_TIMEOUT, activate_skill, await_session_settled, list_execution_tasks,
     raw_events,
 };
 
@@ -62,7 +62,7 @@ const FINAL_RESPONSE: &str = "The canonical experiment execution completed.";
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn experiment_execution_template_runs_through_execution_run_service_e2e() -> Result<()> {
-    // Pins: an API-imported and published exact skill revision admitted through Experiments/run
+    // Pins: an API-imported and activated exact skill revision admitted through Experiments/run
     // must use Execution/planning_context and Execution/start, persist ExperimentTemplate
     // provenance, export stable ExperimentRun -> execution-run correlation, finish its canonical
     // task, run inside a session stamped with the run's own eval-owned call origin, and register
@@ -82,7 +82,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         .identity()
         .context("fixture test client must carry identity headers")?
         .tenant_id;
-    let published = publish_skill(
+    let activated = activate_skill(
         &fixture,
         test.client(),
         tenant_id,
@@ -92,8 +92,8 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
     )
     .await?;
     let exact_template = PinnedExecutionTemplateRef {
-        skill_ref: published.skill_ref.clone(),
-        revision_uid: published.revision_uid,
+        skill_ref: activated.skill_ref.clone(),
+        revision_uid: activated.revision_uid,
     };
     let run_input = json!({
         "case_id": "EXP-500",
@@ -109,7 +109,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         session_id: None,
         idempotency_key: Some(format!("execution-template-{}", Uuid::now_v7())),
     };
-    let variant = template_variant(&exact_template, published.revision_uid);
+    let variant = template_variant(&exact_template, activated.revision_uid);
     let scorecard = template_scorecard();
     let score_run_id = Uuid::now_v7();
     let experiment_idempotency_key = format!("experiment-execution-{}", Uuid::now_v7());
@@ -123,6 +123,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         score_run_id: Some(score_run_id),
         idempotency_key: Some(experiment_idempotency_key.clone()),
         agent_revision_variants: Vec::new(),
+        release_evaluation: None,
     };
 
     let otlp_capture = fixture.otlp_capture()?;
@@ -190,7 +191,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
     assert_eq!(experiment_record.execution_run_uid, Some(execution_run_uid));
     assert_eq!(
         experiment_record.artifact_revision_uids,
-        vec![published.revision_uid]
+        vec![activated.revision_uid]
     );
     assert_eq!(
         experiment_record.idempotency_key.as_deref(),
@@ -540,7 +541,7 @@ async fn experiment_execution_template_admits_only_its_own_eval_session_service_
         .context("fixture test client must carry identity headers")?
         .clone();
     let tenant_id = identity.tenant_id;
-    let published = publish_skill(
+    let activated = activate_skill(
         &fixture,
         test.client(),
         tenant_id,
@@ -550,14 +551,14 @@ async fn experiment_execution_template_admits_only_its_own_eval_session_service_
     )
     .await?;
     let exact_template = PinnedExecutionTemplateRef {
-        skill_ref: published.skill_ref.clone(),
-        revision_uid: published.revision_uid,
+        skill_ref: activated.skill_ref.clone(),
+        revision_uid: activated.revision_uid,
     };
     let run_input = json!({
         "case_id": "EXP-501",
         "resolution": "caller-named-session"
     });
-    let variant = template_variant(&exact_template, published.revision_uid);
+    let variant = template_variant(&exact_template, activated.revision_uid);
     let scorecard = template_scorecard();
 
     // A production session is exactly what an ordinary caller can create and
@@ -594,6 +595,7 @@ async fn experiment_execution_template_admits_only_its_own_eval_session_service_
                 score_run_id: Some(Uuid::now_v7()),
                 idempotency_key: Some(format!("production-session-experiment-{}", Uuid::now_v7())),
                 agent_revision_variants: Vec::new(),
+                release_evaluation: None,
             },
         )
         .await
@@ -654,6 +656,7 @@ async fn experiment_execution_template_admits_only_its_own_eval_session_service_
                 plan_artifact_uid: None,
                 expected_trials: 1,
                 resource_envelope: fixture_experiment_envelope(),
+                simulator_policy: None,
                 name: "eval-owned-session execution-template experiment".to_string(),
                 target: ExperimentTarget::ExecutionTemplate {
                     template: exact_template.clone(),
@@ -667,7 +670,7 @@ async fn experiment_execution_template_admits_only_its_own_eval_session_service_
                 score_run_id,
                 session_id: None,
                 execution_run_uid: None,
-                artifact_revision_uids: vec![published.revision_uid],
+                artifact_revision_uids: vec![activated.revision_uid],
                 idempotency_key: Some(format!("eval-owned-session-{}", Uuid::now_v7())),
                 created_by_identity: serde_json::to_value(&identity)?,
             },
@@ -705,6 +708,7 @@ async fn experiment_execution_template_admits_only_its_own_eval_session_service_
                 identity: identity.clone(),
                 score_run_id,
                 agent_revision_variants: Vec::new(),
+                release_evaluation: None,
             },
         )
         .await
@@ -752,13 +756,13 @@ fn script() -> Value {
     })
 }
 
-/// Builds the variant that pins the exact published template revision.
+/// Builds the variant that pins the exact activated template revision.
 fn template_variant(
     exact_template: &PinnedExecutionTemplateRef,
     revision_uid: Uuid,
 ) -> ExperimentVariant {
     ExperimentVariant {
-        name: "exact-published-template".to_string(),
+        name: "exact-activated-template".to_string(),
         model: Some(ModelId::new("scripted-loadtest")),
         artifact_revision_uids: vec![revision_uid],
         skill_refs: Vec::new(),

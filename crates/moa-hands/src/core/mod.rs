@@ -37,10 +37,13 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::local::LocalHandProvider;
-use crate::adapters::mcp::MCPClient;
 
 use leases::HandLeaseStore;
-pub use mcp_catalog::{McpCatalogRefresh, McpConnectorHealth, spawn_mcp_catalog_refresh};
+pub use mcp_catalog::{
+    CandidateConnector, CatalogDefect, McpCatalogActivation, McpCatalogRefresh, McpConnectorHealth,
+    PinnedToolContract, PinnedToolOwner, ToolCatalogDrift, ToolCatalogPin,
+    spawn_mcp_catalog_refresh,
+};
 pub use policy::{ActionOrigin, PreparedActionInvocation};
 pub use profile::TenantSandboxPolicyStore;
 pub use profile::{
@@ -49,7 +52,8 @@ pub use profile::{
 };
 pub use reaper::{HandLeaseReaper, HandLeaseReaperConfig, PostgresExpiredHandLeaseClaims};
 pub use registration::{
-    HandRoute, MCP_TOOL_REFERENCE_PREFIX, ToolExecution, ToolRegistry, mcp_tool_reference,
+    HandRoute, MCP_TOOL_REFERENCE_PREFIX, ToolExecution, ToolRegistry,
+    governed_tool_contract_revision, mcp_tool_reference,
 };
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
@@ -176,19 +180,55 @@ impl<'a> ToolCallScope<'a> {
     }
 }
 
-/// One immutable publication of the executable registry and its prompt schemas.
-struct ToolCatalogSnapshot {
+/// One immutable publication of the executable registry, routes, and metadata.
+pub struct ToolCatalogSnapshot {
+    owner_id: uuid::Uuid,
     registry: Arc<ToolRegistry>,
     tool_schemas: Arc<Vec<serde_json::Value>>,
+    pin: std::result::Result<ToolCatalogPin, String>,
 }
 
 impl ToolCatalogSnapshot {
-    fn new(registry: ToolRegistry) -> Self {
+    fn new(owner_id: uuid::Uuid, registry: ToolRegistry) -> Self {
         let tool_schemas = Arc::new(registry.default_tool_schemas());
+        let pin = ToolCatalogPin::from_registry(&registry).map_err(|error| error.to_string());
         Self {
+            owner_id,
             registry: Arc::new(registry),
             tool_schemas,
+            pin,
         }
+    }
+
+    /// Returns the precomputed pin for this exact immutable publication.
+    pub fn pin(&self) -> Result<ToolCatalogPin> {
+        self.pin
+            .clone()
+            .map_err(|error| MoaError::ConfigError(format!("pin tool catalog: {error}")))
+    }
+
+    /// Returns the shared model-facing schemas in authored loadout order.
+    #[must_use]
+    pub fn tool_schema_snapshot(&self) -> Arc<Vec<serde_json::Value>> {
+        Arc::clone(&self.tool_schemas)
+    }
+
+    /// Returns one definition from this exact catalog publication.
+    #[must_use]
+    pub fn tool_definition(&self, name: &str) -> Option<moa_core::types::tools::ToolDefinition> {
+        self.registry.get(name).cloned()
+    }
+
+    /// Returns whether the named tool provisions a hand in this publication.
+    #[must_use]
+    pub fn tool_requires_sandbox(&self, name: &str) -> bool {
+        self.registry.tool_requires_sandbox(name)
+    }
+
+    /// Returns one tool's canonical governed contract revision.
+    #[must_use]
+    pub fn contract_revision(&self, name: &str) -> Option<&str> {
+        self.pin.as_ref().ok()?.contract_revision(name)
     }
 }
 
@@ -201,9 +241,10 @@ pub struct ToolRouter {
     /// reader takes one snapshot and works from it, and no prompt compilation,
     /// capability listing, or dispatch can observe a half-refreshed connector.
     catalog: std::sync::RwLock<Arc<ToolCatalogSnapshot>>,
+    /// Runtime identity that prevents snapshots crossing router instances.
+    catalog_owner_id: uuid::Uuid,
     providers: HashMap<String, Arc<dyn HandProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
-    mcp_clients: RwLock<HashMap<String, Arc<MCPClient>>>,
     mcp_servers: HashMap<String, McpServerConfig>,
     /// Last observed discovery outcome for every configured connector.
     ///

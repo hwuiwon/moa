@@ -14,6 +14,7 @@ mod experience;
 mod guardrails;
 pub mod implementation;
 mod request;
+mod responses;
 mod segments;
 mod tools;
 
@@ -40,7 +41,6 @@ use moa_core::{
     types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
     types::completion::{CompletionRequest, CompletionResponse, CompletionStream, TokenUsage},
     types::context::ContextMessage,
-    types::events_stream::EventRecord,
     types::execution_planning::{
         AdmittedDurableUpgrade, DurableUpgradeSignal, DurableUpgradeTransitionError,
         ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
@@ -49,7 +49,6 @@ use moa_core::{
     },
     types::identifiers::{ModelId, SessionId},
     types::model::ModelCapabilities,
-    types::provider::ModelTier,
     types::segment_assessment::AssessmentPhase,
     types::session::SessionMeta,
     types::session::TurnOutcome as CoreTurnOutcome,
@@ -59,7 +58,6 @@ use moa_execution::repository::{
     RouteAuditWriteOutcome,
 };
 use moa_lineage_core::TurnId;
-use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
 use moa_observability::restate_observability::{
     emit_turn_coordination_summary, emit_turn_latency_summary, emit_turn_replay_summary,
     llm_call_span, session_turn_span,
@@ -83,6 +81,11 @@ use self::event_queries::{
 use self::guardrails::{evaluate_input_guardrail, visible_response_after_output_guardrail};
 use self::implementation::TurnExecutionImpl;
 use self::request::{BuiltTurnRequest, build_request_inside_workflow};
+use self::responses::{
+    append_brain_response_from_completion, append_clarification_response, has_user_message_origin,
+    ingest_deferred_session_turn, is_action_review_turn, is_execution_synthesis_turn,
+    last_response_cutoff_before_seq, record_last_response_sequence,
+};
 use self::segments::{
     PostOutcomeAssessment, capture_current_active_segment_assessment, ensure_current_segment,
     run_post_outcome_assessment,
@@ -99,6 +102,7 @@ use crate::services::{
     llm_gateway::{BoundedCompletionRequest, LLMGatewayClient},
     session_store::RestateSessionStoreClient,
 };
+use crate::tool_invocation::governed::completion_tool_catalog_pin;
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
     ensure_delegation_tool_schemas, exclude_reserved_control_tool_schemas, response_tool_calls,
@@ -1130,109 +1134,6 @@ async fn execute_durable_admission(
     })
 }
 
-fn has_user_message_origin(request: &RunTurnRequest) -> bool {
-    request.trigger == TurnTrigger::UserMessage
-}
-
-fn is_execution_synthesis_turn(request: &RunTurnRequest) -> bool {
-    request.trigger == TurnTrigger::ExecutionSynthesis
-}
-
-fn is_action_review_turn(request: &RunTurnRequest) -> bool {
-    request.trigger == TurnTrigger::ActionReview
-}
-
-async fn append_clarification_response(
-    appender: &TurnEventAppender,
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    meta: &SessionMeta,
-    missing_inputs: &[String],
-) -> Result<String, HandlerError> {
-    let text = match missing_inputs {
-        [] => "What information should I use to continue?".to_string(),
-        [field] => format!("I need {field} before I can continue. Please provide it."),
-        fields => {
-            let fields = fields
-                .iter()
-                .map(|field| format!("- {field}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("I need the following information before I can continue:\n\n{fields}")
-        }
-    };
-    append_zero_cost_assistant_response(appender, ctx, session_id, meta, text).await
-}
-
-async fn append_brain_response_from_completion(
-    appender: &TurnEventAppender,
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    response: &CompletionResponse,
-) -> Result<EventRecord, HandlerError> {
-    let usage = response.token_usage();
-    let cost_cents =
-        crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), usage);
-    append_session_event(
-        appender,
-        ctx,
-        session_id,
-        Event::BrainResponse {
-            text: response.text.clone(),
-            thought_signature: response.thought_signature.clone(),
-            model: response.model.clone(),
-            model_tier: ModelTier::Main,
-            input_tokens_uncached: usage.input_tokens_uncached,
-            input_tokens_cache_write: usage.input_tokens_cache_write,
-            input_tokens_cache_read: usage.input_tokens_cache_read,
-            output_tokens: usage.output_tokens,
-            cost_cents,
-            duration_ms: response.duration_ms,
-            llm_ttft_ms: None,
-        },
-    )
-    .await
-}
-
-fn record_last_response_sequence(ctx: &WorkflowContext<'_>, sequence_num: u64) {
-    ctx.set(
-        driver_progress::RootTurnStateKey::LAST_RESPONSE_SEQUENCE,
-        Json::from(sequence_num),
-    );
-}
-
-async fn last_response_cutoff_before_seq(
-    ctx: &WorkflowContext<'_>,
-) -> Result<Option<u64>, HandlerError> {
-    Ok(ctx
-        .get::<Json<u64>>(driver_progress::RootTurnStateKey::LAST_RESPONSE_SEQUENCE)
-        .await?
-        .map(Json::into_inner)
-        .map(|sequence_num| sequence_num.saturating_add(1)))
-}
-
-async fn ingest_deferred_session_turn(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    request: &CompletionRequest,
-    response_sequence_num: u64,
-) -> Result<(), HandlerError> {
-    let finalized_at = durable_utc_now(ctx, "workflow_utc_now").await?;
-    if let Some(turn) = crate::services::llm_gateway::session_turn_from_completion_request(
-        request,
-        session_id,
-        response_sequence_num,
-        finalized_at,
-    ) {
-        crate::restate_identity::replay_safe_request(
-            ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
-                .ingest_turn(Json(turn)),
-        )
-        .send();
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_once_inside_workflow(
     workflow: &TurnExecutionImpl,
@@ -1313,6 +1214,7 @@ async fn run_once_inside_workflow(
         serde_json::json!(true),
     );
     let allowed_tools = allowed_tool_names(&request);
+    let tool_catalog_pin = completion_tool_catalog_pin(&request)?;
     let request_model = request
         .model
         .as_ref()
@@ -1413,6 +1315,7 @@ async fn run_once_inside_workflow(
             turn_id: turn_context.workflow_turn_id,
             generation: turn_context.generation,
             active_canary: active_canary.as_deref(),
+            tool_catalog_pin: &tool_catalog_pin,
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
             selected_skills: &selected_skills,
             objective: turn_context.objective,

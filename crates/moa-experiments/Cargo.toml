@@ -9,6 +9,7 @@ blake3.workspace = true
 chrono.workspace = true
 moa-artifacts.workspace = true
 moa-core.workspace = true
+moa-eval-core.workspace = true
 moa-wire.workspace = true
 moa-db.workspace = true
 moa-memory-pii.workspace = true
@@ -22,5 +23,6 @@ uuid.workspace = true
 workspace-hack.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 moa-test-support.workspace = true
 tokio.workspace = true

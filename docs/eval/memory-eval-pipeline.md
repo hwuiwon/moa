@@ -349,7 +349,7 @@ data and task-segment outcomes after `memory.retrieval.lineage_enabled` is
 enabled. Quality scores are an outcome-gated ranking prior: no lineage row
 contributes until it maps to a persisted task-segment outcome, and only
 `resolved` outcomes count as successes. The scorer does not create learning
-candidates, publish skills, cache retrieval results, or autonomously promote
+candidates, activate learned skills, cache retrieval results, or autonomously promote
 memory; it updates only the sidecar `moa.node_index.quality_score` field.
 
 Lineage capture is dark by default. When

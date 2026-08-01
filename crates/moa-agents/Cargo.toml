@@ -17,5 +17,6 @@ uuid.workspace = true
 workspace-hack.workspace = true
 
 [dev-dependencies]
+moa-artifacts = { workspace = true, features = ["test-support"] }
 moa-session.workspace = true
 tokio.workspace = true

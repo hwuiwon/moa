@@ -395,6 +395,7 @@ pub(super) struct RootToolContext<'a> {
     /// Session turn generation that admitted this turn.
     pub(super) generation: u64,
     pub(super) active_canary: Option<&'a str>,
+    pub(super) tool_catalog_pin: &'a moa_hands::ToolCatalogPin,
     pub(super) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     /// Skills injected into this turn's manifest, used to detect which the model engaged.
     pub(super) selected_skills: &'a [String],
@@ -548,6 +549,9 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
+            expected_tool_contract_revision: tool_context
+                .tool_catalog_pin
+                .contract_revision(&tool_call.invocation.name),
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn {
@@ -574,6 +578,9 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
+            expected_tool_contract_revision: tool_context
+                .tool_catalog_pin
+                .contract_revision(&tool_call.invocation.name),
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn {

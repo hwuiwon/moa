@@ -12,6 +12,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+/// Stable plan variant key for an artifact-release control or serving baseline.
+pub const ARTIFACT_RELEASE_BASELINE_VARIANT_KEY: &str = "release_baseline";
+/// Stable plan variant key for the artifact-release candidate.
+pub const ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY: &str = "release_candidate";
+
 /// Request payload for accepting a live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRunRequest {
@@ -42,6 +47,57 @@ pub struct ExperimentRunRequest {
     /// Optional exact agent revision variants used when executing an agent-loop plan.
     #[serde(default)]
     pub agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
+    /// Internal release-evaluation arms executed as variants of this plan-backed run.
+    ///
+    /// The artifact-release workflow is the only producer. Normal Behavior Lab
+    /// callers leave this absent and retain the plan's authored variants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_evaluation: Option<ArtifactReleaseExperimentBinding>,
+}
+
+/// One artifact-release attempt bound to a production experiment run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReleaseExperimentBinding {
+    /// Durable release dispatch record that owns these arms.
+    pub outbox_uid: Uuid,
+    /// Release target class (`skill_visibility`, `action_visibility`, or `agent_deployment`).
+    pub activation_target: String,
+    /// Candidate first, followed by the serving baseline when one exists.
+    pub arms: Vec<ArtifactReleaseExperimentArm>,
+    /// Exact approved case tuples and repetition counts this run must expand.
+    pub cases: Vec<ArtifactReleaseExperimentCase>,
+}
+
+/// One approved sparse case in an artifact-release experiment.
+///
+/// Unlike a normal Behavior Lab plan, a release pack is not a Cartesian
+/// product. Each row selects one scenario/persona/profile tuple and declares
+/// its own paired repetition count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReleaseExperimentCase {
+    /// Scenario ID in the pinned experiment plan.
+    pub scenario_id: String,
+    /// Persona ID in the pinned experiment plan.
+    pub persona_id: String,
+    /// Profile ID in the pinned experiment plan.
+    pub profile_id: String,
+    /// Paired repetitions emitted for every release arm.
+    pub repetitions: u32,
+}
+
+/// One candidate or baseline arm of an artifact-release experiment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReleaseExperimentArm {
+    /// Stable plan variant key recorded on every trial in this arm.
+    pub variant_key: String,
+    /// Exact artifact revision this arm substitutes.
+    pub revision_uid: Uuid,
+    /// Evaluation overlay row identifier.
+    pub overlay_uid: Uuid,
+    /// Plaintext capability token held only in Restate journals and process memory.
+    pub overlay_token: String,
+    /// Eval-owned session identifier the overlay is allowed to answer for.
+    pub eval_session_id: Uuid,
 }
 
 /// Request payload for generating a draft experiment plan artifact.
@@ -57,6 +113,10 @@ pub struct ExperimentGeneratePlanRequest {
     /// Optional artifact references the generated plan should use.
     #[serde(default)]
     pub artifact_refs: Vec<String>,
+    /// Certified simulator policy the generated plan must pin.
+    pub simulator_policy_uid: Uuid,
+    /// Exact certified simulator policy revision.
+    pub simulator_policy_revision: i32,
 }
 
 /// Response payload returned after generating a draft experiment plan artifact.
