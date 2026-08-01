@@ -11,17 +11,21 @@
 //!   `transcript` key fails to deserialize before it ever reaches an assertion --
 //!   the same rule the `V000374` check constraint states in the schema.
 //! * [`CohortVisibility`] separates the authoring cases a tenant may see from the
-//!   hidden release cohort that decides, and [`MergedCasePlan`] is built so a
-//!   tenant supplement can only add.
+//!   hidden release cohort that decides, and [`MergedCasePlan`] accepts only the
+//!   platform-owned plan revision shared by both packs.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use moa_artifacts::release::Digest32;
+use moa_artifacts::release::{ActivationTargetClass, Digest32};
 use moa_artifacts::simulation::MAX_PLAN_TRIALS_PER_COMBINATION;
 use moa_core::types::identifiers::TenantId;
+use moa_eval_core::assertion::{AssertionCategory, AssertionSpec, GateEffect};
+use moa_eval_core::evaluators::action_assertions::ProhibitedActionsConfig;
+use moa_eval_core::evaluators::{PROHIBITED_ACTIONS_EVALUATOR_ID, TEXT_MATCH_EVALUATOR_ID};
+use moa_eval_core::types::ExpectedOutput;
 use moa_wire::experiments::ArtifactReleaseExperimentCase;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -65,7 +69,8 @@ pub enum DispatchStatus {
     Dispatched,
     /// A deterministic decision consumed it.
     Settled,
-    /// A newer subject replaced it, so its result can decide nothing.
+    /// The dispatch can decide nothing because its subject was superseded or its
+    /// evaluation failed terminally before producing evidence.
     Abandoned,
 }
 
@@ -195,7 +200,7 @@ pub enum ScenarioSource {
 /// `deny_unknown_fields` is the point: a case body carrying `transcript`,
 /// `messages`, `events`, or `turns` fails to deserialize here, which is the Rust
 /// half of the `V000374` schema check.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseCase {
     /// Stable case identifier, unique within a pack.
@@ -206,12 +211,12 @@ pub struct ReleaseCase {
     pub profile: String,
     /// How many paired repetitions this case contributes.
     pub repetitions: i32,
-    /// Registered assertion identifiers this case evaluates.
-    pub assertions: Vec<String>,
+    /// Versioned, data-only assertions this case evaluates.
+    pub assertions: Vec<AssertionSpec>,
 }
 
 /// A versioned, server-resolved approved plan/scenario pack.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ReleaseCasePack {
     /// Pack row identifier.
     pub pack_uid: Uuid,
@@ -219,8 +224,6 @@ pub struct ReleaseCasePack {
     pub name: String,
     /// Pack revision; an edit is a new revision, never an in-place change.
     pub revision: i32,
-    /// Owning tenant, or `None` for a platform pack.
-    pub tenant_id: Option<TenantId>,
     /// Whether this pack is authoring signal or the hidden cohort.
     pub visibility: CohortVisibility,
     /// Rotation epoch of the hidden cohort.
@@ -232,12 +235,12 @@ pub struct ReleaseCasePack {
     /// How many attempts one artifact may spend against one epoch.
     pub max_attempts_per_epoch: Option<i32>,
     /// Pinned experiment plan revision the pack executes.
-    pub plan_revision_uid: Option<Uuid>,
+    pub plan_revision_uid: Uuid,
     /// Cases held by this pack. For a hidden pack this is the reserve, not the
     /// per-epoch cohort.
     pub cases: Vec<ReleaseCase>,
-    /// Assertion identifiers every case in this pack must evaluate.
-    pub mandatory_assertions: Vec<String>,
+    /// Typed assertions every case in this pack must evaluate.
+    pub mandatory_assertions: Vec<AssertionSpec>,
     /// Where the pack's scenario content came from.
     pub scenario_source: ScenarioSource,
     /// Canonical hash over the pack body.
@@ -248,7 +251,7 @@ pub struct ReleaseCasePack {
 ///
 /// Both arms run this same plan with the same seeds, which is what makes the
 /// comparison paired rather than two independent samples.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MergedCasePlan {
     /// Approved platform authoring pack identity.
     pub authoring_pack_uid: Uuid,
@@ -263,7 +266,7 @@ pub struct MergedCasePlan {
     /// Hidden cohort cases for this epoch. Never surfaced to a tenant.
     pub hidden_cases: Vec<ReleaseCase>,
     /// Union of every mandatory assertion, platform first.
-    pub mandatory_assertions: Vec<String>,
+    pub mandatory_assertions: Vec<AssertionSpec>,
 }
 
 impl MergedCasePlan {
@@ -293,6 +296,7 @@ impl MergedCasePlan {
                     persona_id: case.persona_ref.clone(),
                     profile_id: case.profile.clone(),
                     repetitions,
+                    assertions: merged_assertions(case, &self.mandatory_assertions)?,
                 })
             })
             .collect()
@@ -307,18 +311,38 @@ impl MergedCasePlan {
     }
 }
 
-/// Merges an optional tenant supplement into the approved platform packs.
+fn merged_assertions(
+    case: &ReleaseCase,
+    mandatory: &[AssertionSpec],
+) -> Result<Vec<AssertionSpec>, Error> {
+    let mut assertions = Vec::with_capacity(case.assertions.len() + mandatory.len());
+    for assertion in case.assertions.iter().chain(mandatory) {
+        if let Some(existing) = assertions
+            .iter()
+            .find(|existing: &&AssertionSpec| existing.id == assertion.id)
+        {
+            if *existing != *assertion {
+                return Err(Error::CasePackInvalid(format!(
+                    "release case `{}` conflicts with mandatory assertion `{}`",
+                    case.case_id, assertion.id
+                )));
+            }
+        } else {
+            assertions.push(assertion.clone());
+        }
+    }
+    validate_scenario_assertions(&case.case_id, &assertions, true)?;
+    Ok(assertions)
+}
+
+/// Merges the immutable platform authoring pack and current hidden cohort.
 ///
-/// A tenant pack may only add. Every platform case survives, every platform
-/// mandatory assertion survives, a tenant case that reuses a platform case id is
-/// refused rather than allowed to shadow it, and a tenant pack that declares
-/// itself hidden is refused outright -- the hidden cohort is the platform's gate,
-/// and a tenant that could contribute to it could weaken it.
+/// Both packs must name the same server-owned experiment plan. There is no
+/// tenant-supplied plan or case supplement in the release authority path.
 pub fn merge_case_packs(
     authoring: &ReleaseCasePack,
     hidden: &ReleaseCasePack,
     hidden_cases: Vec<ReleaseCase>,
-    tenant_supplement: Option<&ReleaseCasePack>,
 ) -> Result<MergedCasePlan, Error> {
     if authoring.visibility != CohortVisibility::Authoring {
         return Err(Error::CasePackInvalid(format!(
@@ -338,65 +362,55 @@ pub fn merge_case_packs(
             hidden.pack_uid, hidden.cohort_epoch
         )));
     }
-    let plan_revision_uid = tenant_supplement
-        .and_then(|pack| pack.plan_revision_uid)
-        .or(authoring.plan_revision_uid)
-        .ok_or_else(|| {
-            Error::CasePackInvalid(format!(
-                "approved pack {} names no experiment plan revision, so there is nothing to execute",
-                authoring.pack_uid
-            ))
-        })?;
+    if authoring.plan_revision_uid != hidden.plan_revision_uid {
+        return Err(Error::CasePackInvalid(format!(
+            "platform authoring pack {} and hidden pack {} name different experiment plans",
+            authoring.pack_uid, hidden.pack_uid
+        )));
+    }
 
-    let mut authoring_cases = authoring.cases.clone();
+    let authoring_cases = authoring.cases.clone();
     let mut mandatory_assertions = authoring.mandatory_assertions.clone();
-    for assertion in &hidden.mandatory_assertions {
-        if !mandatory_assertions.contains(assertion) {
-            mandatory_assertions.push(assertion.clone());
-        }
-    }
-
-    if let Some(supplement) = tenant_supplement {
-        if supplement.visibility != CohortVisibility::Authoring {
-            return Err(Error::CasePackInvalid(format!(
-                "tenant pack {} declares hidden visibility; the hidden cohort is platform-owned",
-                supplement.pack_uid
-            )));
-        }
-        let platform_ids = authoring_cases
-            .iter()
-            .map(|case| case.case_id.clone())
-            .collect::<BTreeSet<_>>();
-        for case in &supplement.cases {
-            if platform_ids.contains(&case.case_id) {
-                return Err(Error::CasePackInvalid(format!(
-                    "tenant case `{}` shadows an approved platform case",
-                    case.case_id
-                )));
-            }
-            authoring_cases.push(case.clone());
-        }
-        // Supplement assertions are added, never subtracted: the union is taken in
-        // this direction so a tenant pack that omits a platform assertion has not
-        // removed it.
-        for assertion in &supplement.mandatory_assertions {
-            if !mandatory_assertions.contains(assertion) {
-                mandatory_assertions.push(assertion.clone());
-            }
-        }
-    }
+    merge_assertion_sets(
+        "platform mandatory assertions",
+        &mut mandatory_assertions,
+        &hidden.mandatory_assertions,
+    )?;
 
     validate_release_cases(authoring_cases.iter().chain(hidden_cases.iter()))?;
+    validate_scenario_assertions("mandatory release assertions", &mandatory_assertions, false)?;
 
-    Ok(MergedCasePlan {
+    let merged = MergedCasePlan {
         authoring_pack_uid: authoring.pack_uid,
         hidden_pack_uid: hidden.pack_uid,
         cohort_epoch: hidden.cohort_epoch,
-        plan_revision_uid,
+        plan_revision_uid: authoring.plan_revision_uid,
         authoring_cases,
         hidden_cases,
         mandatory_assertions,
-    })
+    };
+    merged.experiment_cases()?;
+    Ok(merged)
+}
+
+fn merge_assertion_sets(
+    owner: &str,
+    destination: &mut Vec<AssertionSpec>,
+    additions: &[AssertionSpec],
+) -> Result<(), Error> {
+    for assertion in additions {
+        if let Some(existing) = destination.iter().find(|entry| entry.id == assertion.id) {
+            if existing != assertion {
+                return Err(Error::CasePackInvalid(format!(
+                    "{owner} conflict on assertion id `{}`",
+                    assertion.id
+                )));
+            }
+        } else {
+            destination.push(assertion.clone());
+        }
+    }
+    Ok(())
 }
 
 fn validate_release_cases<'a>(cases: impl Iterator<Item = &'a ReleaseCase>) -> Result<(), Error> {
@@ -427,8 +441,111 @@ fn validate_release_cases<'a>(cases: impl Iterator<Item = &'a ReleaseCase>) -> R
                 case.case_id
             )));
         }
+        validate_scenario_assertions(&case.case_id, &case.assertions, false)?;
     }
     Ok(())
+}
+
+fn validate_scenario_assertions(
+    owner: &str,
+    assertions: &[AssertionSpec],
+    require_positive: bool,
+) -> Result<(), Error> {
+    if assertions.is_empty() {
+        if !require_positive {
+            return Ok(());
+        }
+        return Err(Error::CasePackInvalid(format!(
+            "release case `{owner}` declares no deterministic scenario assertions"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    let mut has_positive = false;
+    for assertion in assertions {
+        if !seen.insert(assertion.id.as_str()) {
+            return Err(Error::CasePackInvalid(format!(
+                "release case `{owner}` duplicates scenario assertion `{}`",
+                assertion.id
+            )));
+        }
+        moa_eval_core::assertion::builtin_registry()
+            .check_spec(assertion)
+            .map_err(|error| {
+                Error::CasePackInvalid(format!(
+                    "release case `{owner}` declares unusable scenario assertion `{}`: {error}",
+                    assertion.id
+                ))
+            })?;
+        if assertion.gate_effect != GateEffect::Blocking {
+            return Err(Error::CasePackInvalid(format!(
+                "release case `{owner}` scenario assertion `{}` is not blocking",
+                assertion.id
+            )));
+        }
+        match (assertion.category, assertion.evaluator.id.as_str()) {
+            (AssertionCategory::Action, PROHIBITED_ACTIONS_EVALUATOR_ID) => {
+                let config: ProhibitedActionsConfig = scenario_assertion_config(owner, assertion)?;
+                if config.names.is_empty() || config.names.iter().any(|name| name.trim().is_empty())
+                {
+                    return Err(Error::CasePackInvalid(format!(
+                        "release case `{owner}` scenario assertion `{}` declares no usable prohibited action names",
+                        assertion.id
+                    )));
+                }
+            }
+            (AssertionCategory::Communication, TEXT_MATCH_EVALUATOR_ID) => {
+                let config: ExpectedOutput = scenario_assertion_config(owner, assertion)?;
+                let positive_rules = config.contains.len()
+                    + config.facts.len()
+                    + usize::from(config.regex.is_some())
+                    + usize::from(config.exact.is_some());
+                let has_blank_rule = config
+                    .contains
+                    .iter()
+                    .chain(&config.facts)
+                    .any(|rule| rule.trim().is_empty())
+                    || config
+                        .regex
+                        .as_deref()
+                        .is_some_and(|rule| rule.trim().is_empty())
+                    || config
+                        .exact
+                        .as_deref()
+                        .is_some_and(|rule| rule.trim().is_empty());
+                if positive_rules == 0 || has_blank_rule {
+                    return Err(Error::CasePackInvalid(format!(
+                        "release case `{owner}` scenario assertion `{}` has no usable positive response rule",
+                        assertion.id
+                    )));
+                }
+                has_positive = true;
+            }
+            _ => {
+                return Err(Error::CasePackInvalid(format!(
+                    "release case `{owner}` scenario assertion `{}` is not supported by complete production evidence; supported evaluators are text_match@1 and prohibited_actions@1",
+                    assertion.id
+                )));
+            }
+        }
+    }
+    if require_positive && !has_positive {
+        return Err(Error::CasePackInvalid(format!(
+            "release case `{owner}` declares safety assertions but no positive deterministic scenario assertion"
+        )));
+    }
+    Ok(())
+}
+
+fn scenario_assertion_config<T: serde::de::DeserializeOwned>(
+    owner: &str,
+    assertion: &AssertionSpec,
+) -> Result<T, Error> {
+    serde_json::from_value(assertion.config.clone()).map_err(|error| {
+        Error::CasePackInvalid(format!(
+            "release case `{owner}` scenario assertion `{}` has invalid config: {error}",
+            assertion.id
+        ))
+    })
 }
 
 /// One durable dispatch record.
@@ -468,11 +585,15 @@ pub struct DispatchRecord {
     pub attempt_no: i32,
 }
 
-/// One provisioned evaluation arm.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProvisionedArm {
-    /// Which arm this is.
+/// One exact release trial provisioned before experiment dispatch.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ProvisionedTrial {
+    /// Canonical plan trial key, including arm and repetition.
+    pub trial_key: String,
+    /// Which paired arm this trial belongs to.
     pub role: ArmRole,
+    /// Exact approved case this trial executes.
+    pub case: ArtifactReleaseExperimentCase,
     /// Overlay row identifier.
     pub overlay_uid: Uuid,
     /// Secret that must be presented to resolve the overlay.
@@ -482,28 +603,28 @@ pub struct ProvisionedArm {
     pub overlay_token: String,
     /// Revision this arm resolves the target artifact to.
     pub revision_uid: Uuid,
-    /// Eval-owned session identity reserved for this arm.
+    /// Eval-owned session identity reserved for this trial only.
     pub eval_session_id: Uuid,
-    /// Writable copy-on-write fixture environment for this arm.
-    pub fixture_uid: Uuid,
 }
 
 /// Everything one release attempt needs in order to dispatch.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProvisionedAttempt {
     /// Attempt row identifier on the release review surface.
     pub attempt_uid: Uuid,
+    /// Activation class read from the exact fenced release subject.
+    pub activation_target: ActivationTargetClass,
     /// The exact case plan both arms run.
     pub plan: MergedCasePlan,
-    /// Provisioned arms, candidate first. A first activation has no baseline arm.
-    pub arms: Vec<ProvisionedArm>,
+    /// Exact trial bindings, in deterministic plan expansion order.
+    pub trials: Vec<ProvisionedTrial>,
 }
 
 impl ProvisionedAttempt {
-    /// Returns the arm with the given role.
+    /// Returns whether at least one trial was provisioned for the given role.
     #[must_use]
-    pub fn arm(&self, role: ArmRole) -> Option<&ProvisionedArm> {
-        self.arms.iter().find(|arm| arm.role == role)
+    pub fn has_role(&self, role: ArmRole) -> bool {
+        self.trials.iter().any(|trial| trial.role == role)
     }
 }
 
@@ -633,7 +754,33 @@ mod tests {
             persona_ref: "persona://platform/cooperative".to_string(),
             profile: "default".to_string(),
             repetitions: 3,
-            assertions: vec!["target_completed".to_string()],
+            assertions: vec![positive("visible_result", "result")],
+        }
+    }
+
+    fn positive(id: &str, text: &str) -> AssertionSpec {
+        AssertionSpec {
+            id: id.to_string(),
+            category: AssertionCategory::Communication,
+            gate_effect: GateEffect::Blocking,
+            evaluator: moa_eval_core::assertion::EvaluatorRef::deterministic(
+                TEXT_MATCH_EVALUATOR_ID,
+                1,
+            ),
+            config: json!({ "contains": [text] }),
+        }
+    }
+
+    fn prohibited(id: &str, action: &str) -> AssertionSpec {
+        AssertionSpec {
+            id: id.to_string(),
+            category: AssertionCategory::Action,
+            gate_effect: GateEffect::Blocking,
+            evaluator: moa_eval_core::assertion::EvaluatorRef::deterministic(
+                PROHIBITED_ACTIONS_EVALUATOR_ID,
+                1,
+            ),
+            config: json!({ "names": [action] }),
         }
     }
 
@@ -645,15 +792,14 @@ mod tests {
             }),
             name: "pack".to_string(),
             revision: 1,
-            tenant_id: None,
             visibility,
             cohort_epoch: 1,
             cohort_size: matches!(visibility, CohortVisibility::Hidden).then_some(2),
             rotates_at: None,
             max_attempts_per_epoch: matches!(visibility, CohortVisibility::Hidden).then_some(3),
-            plan_revision_uid: Some(Uuid::from_u128(9)),
+            plan_revision_uid: Uuid::from_u128(9),
             cases,
-            mandatory_assertions: vec!["privacy_safe_output".to_string()],
+            mandatory_assertions: vec![prohibited("no_email", "send_email")],
             scenario_source: ScenarioSource::ApprovedPack,
             pack_hash: Digest32([7_u8; 32]),
         }
@@ -728,79 +874,95 @@ mod tests {
         );
     }
 
-    // Pins: a tenant supplement can only add. It cannot drop a platform case,
-    // shadow one, remove a mandatory assertion, or contribute hidden cases.
+    // Pins: release cases and their executable plan are platform-owned; the
+    // authoring and hidden packs cannot disagree on the plan or weaken evidence.
     #[test]
-    fn tenant_supplement_cannot_replace_or_weaken_the_approved_pack_offline() {
+    fn platform_case_packs_are_immutable_executable_authority_offline() {
         let authoring = pack(CohortVisibility::Authoring, vec![case("platform.a")]);
         let hidden = pack(CohortVisibility::Hidden, vec![case("hidden.a")]);
         let hidden_cases = vec![case("hidden.a")];
 
-        let mut supplement = pack(CohortVisibility::Authoring, vec![case("tenant.a")]);
-        supplement.pack_uid = Uuid::from_u128(3);
-        supplement.mandatory_assertions = vec!["tenant.extra".to_string()];
-        let merged = merge_case_packs(&authoring, &hidden, hidden_cases.clone(), Some(&supplement))
-            .expect("supplement merges");
+        let merged = merge_case_packs(&authoring, &hidden, hidden_cases.clone())
+            .expect("platform packs merge");
         assert_eq!(
             merged
                 .authoring_cases
                 .iter()
                 .map(|case| case.case_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["platform.a", "tenant.a"]
+            vec!["platform.a"]
         );
         assert!(
             merged
                 .mandatory_assertions
-                .contains(&"privacy_safe_output".to_string()),
-            "a supplement that omits a platform assertion has not removed it"
-        );
-        assert!(
-            merged
-                .mandatory_assertions
-                .contains(&"tenant.extra".to_string())
+                .iter()
+                .any(|assertion| assertion.id == "no_email"),
+            "the platform mandatory assertion must survive the merge"
         );
         assert_eq!(merged.hidden_cases, hidden_cases);
-        assert_eq!(merged.total_repetitions(), 9);
+        assert_eq!(merged.total_repetitions(), 6);
+        assert_eq!(
+            merged.experiment_cases().expect("project executable cases")[0].assertions,
+            vec![
+                positive("visible_result", "result"),
+                prohibited("no_email", "send_email"),
+            ]
+        );
 
-        let mut shadowing = supplement.clone();
-        shadowing.cases = vec![case("platform.a")];
-        assert!(matches!(
-            merge_case_packs(&authoring, &hidden, hidden_cases.clone(), Some(&shadowing)),
-            Err(Error::CasePackInvalid(_))
-        ));
-
-        let mut hidden_supplement = supplement.clone();
-        hidden_supplement.visibility = CohortVisibility::Hidden;
-        assert!(matches!(
-            merge_case_packs(
-                &authoring,
-                &hidden,
-                hidden_cases.clone(),
-                Some(&hidden_supplement)
-            ),
-            Err(Error::CasePackInvalid(_))
-        ));
-
-        let mut planless = authoring.clone();
-        planless.plan_revision_uid = None;
-        let mut planless_supplement = supplement.clone();
-        planless_supplement.plan_revision_uid = None;
+        let mut safety_only = authoring.clone();
+        safety_only.cases[0].assertions.clear();
         assert!(
             matches!(
-                merge_case_packs(
-                    &planless,
-                    &hidden,
-                    hidden_cases.clone(),
-                    Some(&planless_supplement)
-                ),
+                merge_case_packs(&safety_only, &hidden, hidden_cases.clone()),
                 Err(Error::CasePackInvalid(_))
             ),
-            "a pack with no plan revision has nothing to execute and must fail closed"
+            "successful completion plus only a prohibited-action assertion cannot prove the case succeeded"
+        );
+
+        let mut duplicated = authoring.clone();
+        duplicated.cases[0].assertions = vec![
+            prohibited("no_email", "send_email"),
+            prohibited("no_email", "send_email"),
+        ];
+        assert!(matches!(
+            merge_case_packs(&duplicated, &hidden, hidden_cases.clone()),
+            Err(Error::CasePackInvalid(_))
+        ));
+
+        let mut unknown = authoring.clone();
+        let mut unsupported = prohibited("tenant_assertion", "send_email");
+        unsupported.evaluator.id = "tenant.executable_assertion".to_string();
+        unknown.cases[0].assertions = vec![unsupported];
+        assert!(matches!(
+            merge_case_packs(&unknown, &hidden, hidden_cases.clone()),
+            Err(Error::CasePackInvalid(_))
+        ));
+
+        let mut required_action = authoring.clone();
+        let mut unsupported = prohibited("refund_required", "issue_refund");
+        unsupported.evaluator.id = "required_actions".to_string();
+        unsupported.config = json!({ "actions": [{ "name": "issue_refund" }] });
+        required_action.cases[0].assertions = vec![unsupported];
+        assert!(
+            matches!(
+                merge_case_packs(&required_action, &hidden, hidden_cases.clone()),
+                Err(Error::CasePackInvalid(_))
+            ),
+            "required actions cannot block a release until reviewed effects have stable approval correlation"
+        );
+
+        let mut divergent_hidden = hidden.clone();
+        divergent_hidden.plan_revision_uid = Uuid::from_u128(10);
+        assert!(
+            matches!(
+                merge_case_packs(&authoring, &divergent_hidden, hidden_cases.clone()),
+                Err(Error::CasePackInvalid(_))
+            ),
+            "platform packs cannot select different executable plan revisions"
         );
 
         assert!(matches!(
-            merge_case_packs(&authoring, &hidden, Vec::new(), None),
+            merge_case_packs(&authoring, &hidden, Vec::new()),
             Err(Error::CasePackInvalid(_))
         ));
     }

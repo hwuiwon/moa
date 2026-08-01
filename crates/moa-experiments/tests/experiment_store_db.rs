@@ -1,6 +1,7 @@
 mod support;
 
 use chrono::Utc;
+use moa_artifacts::release::PLATFORM_RELEASE_PLAN_REVISION_UID;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::experiments::{
@@ -131,6 +132,43 @@ async fn missing_artifact_revision_rejects_experiment_insert_db() -> Result<()> 
         error.to_string().contains("artifact revision"),
         "expected link-table FK failure, got {error}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn migrated_global_plan_revision_is_visible_to_tenant_experiment_admission_db() -> Result<()>
+{
+    // Pins: exact global revision identities are valid experiment inputs under
+    // tenant RLS. The adjacent missing- and cross-tenant-revision tests ensure
+    // this global fallback does not weaken exact revision visibility.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = tenant_scope("experiment-global-platform-plan");
+
+    let inserted = store
+        .insert_run(
+            &scope,
+            new_experiment(
+                "global-platform-plan",
+                None,
+                vec![PLATFORM_RELEASE_PLAN_REVISION_UID],
+            ),
+        )
+        .await?;
+
+    assert_eq!(
+        inserted.artifact_revision_uids,
+        [PLATFORM_RELEASE_PLAN_REVISION_UID]
+    );
+    assert_artifact_revision_links(
+        test_db.store().pool(),
+        &scope,
+        inserted.run_uid,
+        &[PLATFORM_RELEASE_PLAN_REVISION_UID],
+    )
+    .await?;
     Ok(())
 }
 

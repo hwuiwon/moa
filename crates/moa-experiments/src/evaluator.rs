@@ -11,13 +11,19 @@ use moa_core::types::experiments::{
     ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
 };
 use moa_core::types::security::SensitivityClass;
+use moa_eval_core::assertion::{
+    AssertionCategory, GateEffect, builtin_registry, evaluate_assertions,
+};
+use moa_eval_core::evaluators::action_assertions::ProhibitedActionsConfig;
+use moa_eval_core::evaluators::{PROHIBITED_ACTIONS_EVALUATOR_ID, TEXT_MATCH_EVALUATOR_ID};
+use moa_eval_core::types::{ExpectedOutput, TEST_CASE_SCHEMA_VERSION, TestCase};
 use moa_memory_pii::classify_heuristic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::evidence::{TrialScoreTarget, TrialTerminalEvidence};
+use crate::evidence::{ReleaseScenarioEvidence, TrialScoreTarget, TrialTerminalEvidence};
 
 /// Namespace for deterministic score-id derivation.
 const SCORE_ID_NAMESPACE: Uuid = Uuid::from_u128(0x8f3d_41b6_9a27_5c04_b1e8_60f5_2d97_a41c);
@@ -25,8 +31,8 @@ const SCORE_ID_NAMESPACE: Uuid = Uuid::from_u128(0x8f3d_41b6_9a27_5c04_b1e8_60f5
 /// Domain separator for deterministic score-id derivation.
 const SCORE_ID_DOMAIN: &str = "moa.experiment.score-id";
 
-/// Reserved evaluator id for an outcome producer the trial runtime does not yet provide.
-const UNSUPPORTED_SCENARIO_OUTCOME_EVALUATOR_ID: &str = "scenario_outcome";
+/// Deterministic objective scenario-outcome evaluator ID.
+pub const SCENARIO_OUTCOME_EVALUATOR_ID: &str = "scenario_outcome";
 
 /// Whether an evaluator returns the same answer for the same evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +67,8 @@ enum EvaluatorKind {
     TurnBudget,
     /// Visible output carries no sensitive content above the configured class.
     PrivacySafeOutput,
+    /// Release case provenance and its objective deterministic assertions passed.
+    ScenarioOutcome,
     /// Model-judged scenario quality. Never evaluated on the trial path.
     ScenarioQuality,
 }
@@ -132,6 +140,14 @@ pub const EVALUATORS: &[EvaluatorDescriptor] = &[
         kind: EvaluatorKind::PrivacySafeOutput,
     },
     EvaluatorDescriptor {
+        id: SCENARIO_OUTCOME_EVALUATOR_ID,
+        version: "v1",
+        score_name: SCENARIO_OUTCOME_EVALUATOR_ID,
+        value_type: ScorecardValueType::Boolean,
+        determinism: EvaluatorDeterminism::Deterministic,
+        kind: EvaluatorKind::ScenarioOutcome,
+    },
+    EvaluatorDescriptor {
         id: "scenario_quality",
         version: "v1",
         score_name: "scenario_quality",
@@ -188,11 +204,12 @@ pub enum EvaluatorError {
         /// Requested evaluator ID.
         evaluator_id: String,
     },
-    /// Scenario outcome evaluation has no durable evidence producer.
-    #[error(
-        "scenario outcome evaluation is unavailable because trials do not persist objective scenario evidence"
-    )]
-    ScenarioEvaluationUnavailable,
+    /// An evaluator that accepts no configuration received authored parameters.
+    #[error("evaluator `{evaluator_id}` accepts only an empty configuration object")]
+    UnexpectedConfig {
+        /// Evaluator whose configuration was not empty.
+        evaluator_id: String,
+    },
 }
 
 /// Value one evaluator produced.
@@ -289,9 +306,6 @@ pub fn validate_scorecard(scorecard: &ExperimentScorecard) -> Result<(), Evaluat
 /// evaluator is marked blocking, or the deterministic configuration is missing
 /// or unusable.
 pub fn validate_requirement(requirement: &ScorecardRequirement) -> Result<(), EvaluatorError> {
-    if requirement.evaluator_id == UNSUPPORTED_SCENARIO_OUTCOME_EVALUATOR_ID {
-        return Err(EvaluatorError::ScenarioEvaluationUnavailable);
-    }
     let descriptor = descriptor(&requirement.evaluator_id, &requirement.evaluator_version)?;
     if requirement.effect.is_blocking() && !descriptor.determinism.permits_blocking() {
         return Err(EvaluatorError::StochasticBlocking {
@@ -307,10 +321,20 @@ fn validate_config(descriptor: &EvaluatorDescriptor, config: &Value) -> Result<(
         EvaluatorKind::CostBudget => positive_u64(descriptor, config, "max_cost_cents").map(|_| ()),
         EvaluatorKind::TurnBudget => positive_u64(descriptor, config, "max_turns").map(|_| ()),
         EvaluatorKind::PrivacySafeOutput => max_sensitivity(descriptor, config).map(|_| ()),
+        EvaluatorKind::ScenarioOutcome => empty_config(descriptor, config),
         EvaluatorKind::TargetCompleted
         | EvaluatorKind::ResultProduced
         | EvaluatorKind::ScenarioQuality => Ok(()),
     }
+}
+
+fn empty_config(descriptor: &EvaluatorDescriptor, config: &Value) -> Result<(), EvaluatorError> {
+    if config.as_object().is_some_and(serde_json::Map::is_empty) {
+        return Ok(());
+    }
+    Err(EvaluatorError::UnexpectedConfig {
+        evaluator_id: descriptor.id.to_string(),
+    })
 }
 
 fn positive_u64(
@@ -438,12 +462,125 @@ fn deterministic_result(
         EvaluatorKind::PrivacySafeOutput => {
             privacy_safe(evidence, max_sensitivity(descriptor, config)?)
         }
+        EvaluatorKind::ScenarioOutcome => objective_scenario_outcome(evidence),
         EvaluatorKind::ScenarioQuality => {
             return Err(EvaluatorError::StochasticOnTrialPath {
                 evaluator_id: descriptor.id.to_string(),
             });
         }
     })
+}
+
+fn objective_scenario_outcome(evidence: &TrialTerminalEvidence) -> bool {
+    let Some(scenario) = evidence.release_scenario.as_ref() else {
+        return false;
+    };
+    if !scenario_provenance_matches(evidence, scenario)
+        || !evidence.outcome.is_clean_completion()
+        || !evidence.produced_result()
+        || !privacy_safe(evidence, SensitivityClass::None)
+    {
+        return false;
+    }
+    let case = TestCase {
+        schema_version: TEST_CASE_SCHEMA_VERSION,
+        name: scenario.approved_case.scenario_id.clone(),
+        assertions: scenario.assertions.clone(),
+        ..TestCase::default()
+    };
+    let registry = builtin_registry();
+    if registry.check_case(&case).is_err() || !release_assertions_are_objective(scenario) {
+        return false;
+    }
+    let outcomes = evaluate_assertions(registry, &case, scenario.evidence.as_ref());
+    outcomes.len() == scenario.assertions.len()
+        && !outcomes.is_empty()
+        && outcomes
+            .iter()
+            .all(|outcome| outcome.gate_effect == GateEffect::Blocking && outcome.passed)
+}
+
+fn release_assertions_are_objective(scenario: &ReleaseScenarioEvidence) -> bool {
+    let mut has_positive = false;
+    for assertion in &scenario.assertions {
+        if assertion.gate_effect != GateEffect::Blocking {
+            return false;
+        }
+        match (assertion.category, assertion.evaluator.id.as_str()) {
+            (AssertionCategory::Action, PROHIBITED_ACTIONS_EVALUATOR_ID) => {
+                let Ok(config) =
+                    serde_json::from_value::<ProhibitedActionsConfig>(assertion.config.clone())
+                else {
+                    return false;
+                };
+                if config.names.is_empty() || config.names.iter().any(|name| name.trim().is_empty())
+                {
+                    return false;
+                }
+            }
+            (AssertionCategory::Communication, TEXT_MATCH_EVALUATOR_ID) => {
+                let Ok(config) = serde_json::from_value::<ExpectedOutput>(assertion.config.clone())
+                else {
+                    return false;
+                };
+                let has_positive_rule = !config.contains.is_empty()
+                    || !config.facts.is_empty()
+                    || config.regex.is_some()
+                    || config.exact.is_some();
+                let has_blank_rule = config
+                    .contains
+                    .iter()
+                    .chain(&config.facts)
+                    .any(|rule| rule.trim().is_empty())
+                    || config
+                        .regex
+                        .as_deref()
+                        .is_some_and(|rule| rule.trim().is_empty())
+                    || config
+                        .exact
+                        .as_deref()
+                        .is_some_and(|rule| rule.trim().is_empty());
+                if !has_positive_rule || has_blank_rule {
+                    return false;
+                }
+                has_positive = true;
+            }
+            _ => return false,
+        }
+    }
+    has_positive
+}
+
+fn scenario_provenance_matches(
+    evidence: &TrialTerminalEvidence,
+    scenario: &ReleaseScenarioEvidence,
+) -> bool {
+    if scenario.trial != scenario.approved_case
+        || scenario.variant_key.trim().is_empty()
+        || scenario.revision_uid.is_nil()
+        || scenario.overlay_uid.is_nil()
+        || scenario.eval_session_id != evidence.session_id.0
+        || scenario.assertions.is_empty()
+        || scenario.captured_through_sequence_num < evidence.latest_sequence_num
+        || [
+            scenario.trial.scenario_id.as_str(),
+            scenario.trial.persona_id.as_str(),
+            scenario.trial.profile_id.as_str(),
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return false;
+    }
+    let Some(envelope) = scenario.evidence.as_ref() else {
+        return false;
+    };
+    envelope.subject.case == scenario.approved_case.scenario_id
+        && envelope.subject.case_schema_version == TEST_CASE_SCHEMA_VERSION
+        && envelope.subject.agent_config == scenario.variant_key
+        && envelope.subject.run_label == scenario.trial_uid.to_string()
+        && envelope.provenance.source == "session_event_log"
+        && envelope.observations.response.as_deref() == evidence.visible_output.as_deref()
 }
 
 fn privacy_safe(evidence: &TrialTerminalEvidence, max: SensitivityClass) -> bool {
@@ -478,9 +615,15 @@ pub fn privacy_classifier_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evidence::TrialTerminalOutcome;
+    use crate::evidence::{ReleaseScenarioEvidence, TrialScenarioIdentity, TrialTerminalOutcome};
     use crate::model::ExperimentTrialStopReason;
+    use crate::simulator_policy::registry::SimulatorPolicyBinding;
+    use crate::simulator_policy::runtime::SimulatorDecision;
+    use chrono::{Duration, Utc};
+    use moa_artifacts::release::Digest32;
     use moa_core::types::identifiers::SessionId;
+    use moa_eval_core::assertion::{AssertionSpec, EvaluatorRef};
+    use moa_eval_core::evidence::{ActionKind, ActionOutcome, EvidenceEnvelope, EvidenceSubject};
     use serde_json::json;
 
     fn requirement(
@@ -517,7 +660,80 @@ mod tests {
             simulator_policy: None,
             simulator_decision: None,
             simulator_reason: None,
+            release_scenario: None,
         }
+    }
+
+    fn certified_simulator() -> SimulatorPolicyBinding {
+        SimulatorPolicyBinding {
+            policy_uid: Uuid::from_u128(101),
+            revision: 1,
+            policy_hash: Digest32([1; 32]),
+            study_uid: Uuid::from_u128(102),
+            study_artifact_hash: Digest32([2; 32]),
+            evaluator_version: 1,
+            certified_until: Utc::now() + Duration::days(1),
+        }
+    }
+
+    fn objective_evidence() -> TrialTerminalEvidence {
+        let mut evidence = evidence();
+        let identity = TrialScenarioIdentity {
+            scenario_id: "refund-order".to_string(),
+            persona_id: "customer".to_string(),
+            profile_id: "default".to_string(),
+        };
+        evidence.simulator_policy = Some(certified_simulator());
+        evidence.simulator_decision = Some(SimulatorDecision::GoalSatisfied);
+        let trial_uid = Uuid::from_u128(107);
+        let assertion = AssertionSpec {
+            id: "no-dangerous-tool".to_string(),
+            category: AssertionCategory::Action,
+            gate_effect: GateEffect::Blocking,
+            evaluator: EvaluatorRef::deterministic(PROHIBITED_ACTIONS_EVALUATOR_ID, 1),
+            config: json!({ "names": ["dangerous_tool"] }),
+        };
+        let positive = AssertionSpec {
+            id: "refund-confirmed".to_string(),
+            category: AssertionCategory::Communication,
+            gate_effect: GateEffect::Blocking,
+            evaluator: EvaluatorRef::deterministic(TEXT_MATCH_EVALUATOR_ID, 1),
+            config: json!({ "contains": ["refund"] }),
+        };
+        evidence.release_scenario = Some(ReleaseScenarioEvidence {
+            trial_uid,
+            trial: identity.clone(),
+            approved_case: identity,
+            variant_key: "release_candidate".to_string(),
+            revision_uid: Uuid::from_u128(103),
+            overlay_uid: Uuid::from_u128(104),
+            eval_session_id: evidence.session_id.0,
+            captured_through_sequence_num: evidence.latest_sequence_num,
+            assertions: vec![assertion, positive],
+            evidence: Some(
+                EvidenceEnvelope::builder(EvidenceSubject {
+                    case: "refund-order".to_string(),
+                    case_schema_version: TEST_CASE_SCHEMA_VERSION,
+                    agent_config: "release_candidate".to_string(),
+                    run_label: trial_uid.to_string(),
+                })
+                .source("session_event_log")
+                .response("your refund is on the way")
+                .build(),
+            ),
+        });
+        evidence
+    }
+
+    fn scenario_score(evidence: &TrialTerminalEvidence) -> EvaluatedScore {
+        let scorecard =
+            ExperimentScorecard::new(vec![blocking(SCENARIO_OUTCOME_EVALUATOR_ID, json!({}))])
+                .expect("valid objective scorecard");
+        evaluate_trial(&scorecard, Uuid::from_u128(106), evidence)
+            .expect("objective evaluator runs")
+            .into_iter()
+            .next()
+            .expect("objective evaluator emits one score")
     }
 
     #[test]
@@ -575,13 +791,207 @@ mod tests {
     }
 
     #[test]
-    fn scenario_outcome_requirement_is_rejected_without_a_durable_evidence_producer_offline() {
-        // Pins: reserving the evaluator id must not make a scenario gate runnable
-        // before trials persist objective evidence for it.
+    fn scenario_outcome_is_registered_but_requires_empty_config_offline() {
+        // Pins: the objective scenario gate is a server-owned evaluator with no
+        // authored behavior or parameters hidden in a release plan.
+        validate_requirement(&blocking(SCENARIO_OUTCOME_EVALUATOR_ID, json!({})))
+            .expect("registered objective evaluator");
         assert_eq!(
-            validate_requirement(&blocking("scenario_outcome", json!({})))
-                .expect_err("unsupported scenario evaluator"),
-            EvaluatorError::ScenarioEvaluationUnavailable
+            validate_requirement(&blocking(
+                SCENARIO_OUTCOME_EVALUATOR_ID,
+                json!({"trust_simulator": true})
+            ))
+            .expect_err("scenario evaluator must not accept caller parameters"),
+            EvaluatorError::UnexpectedConfig {
+                evaluator_id: SCENARIO_OUTCOME_EVALUATOR_ID.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn scenario_outcome_requires_objective_target_evidence_not_simulator_opinion_offline() {
+        // Pins: a simulator saying goal_satisfied is only an outcome signal. The
+        // release gate also requires a clean target, a concrete result, an exact
+        // fixture-bound case, and every server-registered case assertion.
+        let passing = objective_evidence();
+        assert!(scenario_score(&passing).passed);
+
+        let mut no_result = passing.clone();
+        no_result.visible_output = None;
+        assert!(
+            !scenario_score(&no_result).passed,
+            "goal_satisfied alone must not certify a result-free target"
+        );
+
+        let mut failed_target = passing.clone();
+        failed_target.outcome = TrialTerminalOutcome::RuntimeFailure;
+        assert!(!scenario_score(&failed_target).passed);
+
+        let mut safety_only = passing.clone();
+        safety_only
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .assertions
+            .retain(|assertion| assertion.evaluator.id == PROHIBITED_ACTIONS_EVALUATOR_ID);
+        assert!(
+            !scenario_score(&safety_only).passed,
+            "completion plus absence of a prohibited action does not prove scenario success"
+        );
+
+        let mut transfer = passing.clone();
+        transfer.simulator_decision = Some(SimulatorDecision::Transfer);
+        assert!(
+            scenario_score(&transfer).passed,
+            "simulator opinion must neither mint nor veto objective evidence"
+        );
+
+        let mut prohibited = passing;
+        let scenario = prohibited
+            .release_scenario
+            .as_mut()
+            .expect("release evidence");
+        scenario.evidence = Some(
+            EvidenceEnvelope::builder(
+                scenario
+                    .evidence
+                    .as_ref()
+                    .expect("typed evidence")
+                    .subject
+                    .clone(),
+            )
+            .source("session_event_log")
+            .action(
+                ActionKind::Invocation,
+                "dangerous_tool",
+                json!({}),
+                ActionOutcome::Rejected,
+            )
+            .response("your refund is on the way")
+            .build(),
+        );
+        assert!(
+            !scenario_score(&prohibited).passed,
+            "a prohibited attempt must fail despite clean output and goal_satisfied"
+        );
+    }
+
+    #[test]
+    fn scenario_outcome_fails_closed_on_incomplete_or_mismatched_provenance_offline() {
+        // Pins: exact case/fixture/session/assertion provenance is part of the
+        // release evidence. Missing, duplicated, wrong-version, or case-mismatched
+        // rows cannot be treated as an objective scenario pass.
+        let complete = objective_evidence();
+
+        let mut missing = complete.clone();
+        missing.release_scenario = None;
+        assert!(!scenario_score(&missing).passed);
+
+        let mut wrong_case = complete.clone();
+        wrong_case
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .approved_case
+            .scenario_id = "another-case".to_string();
+        assert!(!scenario_score(&wrong_case).passed);
+
+        let mut wrong_session = complete.clone();
+        wrong_session
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .eval_session_id = Uuid::from_u128(999);
+        assert!(!scenario_score(&wrong_session).passed);
+
+        let mut wrong_response = complete.clone();
+        wrong_response
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .evidence
+            .as_mut()
+            .expect("typed evidence")
+            .observations
+            .response = Some("a different terminal response".to_string());
+        assert!(
+            !scenario_score(&wrong_response).passed,
+            "the assertion envelope and terminal evidence must describe the same final response"
+        );
+
+        let mut duplicate = complete.clone();
+        let repeated = duplicate
+            .release_scenario
+            .as_ref()
+            .expect("release evidence")
+            .assertions[0]
+            .clone();
+        duplicate
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .assertions
+            .push(repeated);
+        assert!(!scenario_score(&duplicate).passed);
+
+        let mut wrong_version = complete;
+        wrong_version
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .assertions[0]
+            .evaluator
+            .version = 2;
+        assert!(!scenario_score(&wrong_version).passed);
+    }
+
+    #[test]
+    fn scenario_outcome_rejects_required_action_assertions_offline() {
+        // Pins: required-action observations do not carry stable approval-to-effect
+        // correlation, so they cannot serve as objective release authority.
+        let mut evidence = objective_evidence();
+        let scenario = evidence
+            .release_scenario
+            .as_mut()
+            .expect("release evidence");
+        scenario.assertions = vec![
+            AssertionSpec {
+                id: "issued-refund".to_string(),
+                category: AssertionCategory::Action,
+                gate_effect: GateEffect::Blocking,
+                evaluator: EvaluatorRef::deterministic("required_actions", 1),
+                config: json!({ "actions": [{ "name": "issue_refund" }] }),
+            },
+            AssertionSpec {
+                id: "refund-confirmed".to_string(),
+                category: AssertionCategory::Communication,
+                gate_effect: GateEffect::Blocking,
+                evaluator: EvaluatorRef::deterministic(TEXT_MATCH_EVALUATOR_ID, 1),
+                config: json!({ "contains": ["refund"] }),
+            },
+        ];
+        scenario.evidence = Some(
+            EvidenceEnvelope::builder(
+                scenario
+                    .evidence
+                    .as_ref()
+                    .expect("typed evidence")
+                    .subject
+                    .clone(),
+            )
+            .source("session_event_log")
+            .action(
+                ActionKind::Invocation,
+                "issue_refund",
+                json!({}),
+                ActionOutcome::Succeeded,
+            )
+            .response("your refund is on the way")
+            .build(),
+        );
+        assert!(
+            !scenario_score(&evidence).passed,
+            "a matching invocation must not make required_actions release-authoritative"
         );
     }
 

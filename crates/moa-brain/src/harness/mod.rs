@@ -10,7 +10,7 @@ use std::sync::Arc;
 use moa_core::{
     error::MoaError, error::Result, traits::Identity, traits::LLMProvider, traits::LineageHandle,
     traits::NullLineageHandle, traits::SessionStore, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::session::SessionSignal,
+    types::identifiers::SessionId, types::resource::ResourceBudget, types::session::SessionSignal,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -77,6 +77,8 @@ pub struct StreamedTurnRequest<'a> {
     pub cancel_token: Option<CancellationToken>,
     /// Optional hard-cancellation token.
     pub hard_cancel_token: Option<CancellationToken>,
+    /// Remaining caller-owned resource allowance, decremented before dispatch.
+    pub resource_budget: &'a mut ResourceBudget,
     /// Optional live signal state used by the Restate orchestration path.
     pub signal_state: Option<StreamedTurnSignalState<'a>>,
     /// Lineage sink for context and generation events.
@@ -86,12 +88,14 @@ pub struct StreamedTurnRequest<'a> {
 /// Runs one buffered turn of the brain harness with optional tool execution support.
 pub async fn run_brain_turn(turn: BrainTurnRequest<'_>) -> Result<TurnResult> {
     let (runtime_tx, _) = broadcast::channel(256);
+    let mut resource_budget = ResourceBudget::UNBOUNDED;
     let streamed = run_streamed_turn(StreamedTurnRequest {
         turn,
         runtime_tx: &runtime_tx,
         event_tx: None,
         cancel_token: None,
         hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
         signal_state: None,
         lineage: Arc::new(NullLineageHandle),
     })

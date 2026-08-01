@@ -1009,7 +1009,7 @@ async fn plan_run_inputs(
     if let Some(binding) = release_evaluation {
         projection
             .artifact_revision_uids
-            .extend(binding.arms.iter().map(|arm| arm.revision_uid));
+            .extend(binding.trials.iter().map(|trial| trial.arm.revision_uid));
         projection.artifact_revision_uids.sort_unstable();
         projection.artifact_revision_uids.dedup();
     }
@@ -1033,38 +1033,91 @@ fn plan_matrix_shape_for_release(
     let Some(binding) = release_evaluation else {
         return plan_matrix_shape(definition).map_err(bad_request_from);
     };
-    if binding.arms.is_empty() {
+    if binding.trials.is_empty() {
         return Err(bad_request(
             "artifact release experiment must declare at least one arm",
+        ));
+    }
+    if definition.target_variants.len() != 1 {
+        return Err(bad_request(
+            "artifact release experiment plan must declare exactly one agent-loop target template",
         ));
     }
     let template = definition
         .target_variants
         .first()
         .ok_or_else(|| bad_request("artifact release experiment plan has no target variant"))?;
-    let mut effective = definition.clone();
-    let mut variants = Vec::with_capacity(binding.arms.len() + 1);
-    if !binding
-        .arms
-        .iter()
-        .any(|arm| arm.variant_key == moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY)
-    {
-        let mut control = template.clone();
-        control.key = moa_wire::experiments::ARTIFACT_RELEASE_BASELINE_VARIANT_KEY.to_string();
-        variants.push(control);
+    if template.kind != moa_artifacts::simulation::ExperimentTargetKind::AgentLoop {
+        return Err(bad_request(
+            "artifact release evaluation currently supports only production agent-loop targets",
+        ));
     }
-    variants.extend(binding.arms.iter().map(|arm| {
-        moa_artifacts::simulation::ExperimentTargetVariant {
-            key: arm.variant_key.clone(),
-            kind: template.kind,
-            config: template.config.clone(),
-            ui: template.ui.clone(),
-        }
-    }));
-    effective.target_variants = variants;
-    let cases = binding
-        .cases
+    let mut effective = definition.clone();
+    let mut variant_keys = BTreeSet::new();
+    let variants = binding
+        .trials
         .iter()
+        .filter(|trial| variant_keys.insert(trial.arm.variant_key.as_str()))
+        .map(|trial| {
+            let mut config = template.config.clone();
+            if binding.activation_target == "agent_deployment" {
+                if let Some(object) = config.as_object_mut() {
+                    object.remove("agent");
+                    object.remove("agent_installation_uid");
+                    object.insert(
+                        "agent_revision_uid".to_string(),
+                        serde_json::json!(trial.arm.revision_uid),
+                    );
+                } else {
+                    config = serde_json::json!({ "agent_revision_uid": trial.arm.revision_uid });
+                }
+            }
+            moa_artifacts::simulation::ExperimentTargetVariant {
+                key: trial.arm.variant_key.clone(),
+                kind: template.kind,
+                config,
+                ui: template.ui.clone(),
+            }
+        })
+        .collect();
+    effective.target_variants = variants;
+    for variant in &effective.target_variants {
+        let target =
+            crate::plan::target_for_plan_variant(&effective, variant).map_err(bad_request_from)?;
+        let ExperimentTarget::AgentLoop { agent, .. } = target else {
+            return Err(bad_request(
+                "artifact release evaluation currently supports only production agent-loop targets",
+            ));
+        };
+        if agent
+            .and_then(|selection| selection.revision_uid)
+            .is_none_or(|revision_uid| revision_uid.is_nil())
+        {
+            return Err(bad_request(
+                "skill and action release evaluation plans must pin an exact host agent revision",
+            ));
+        }
+    }
+    let mut unique_cases = BTreeMap::new();
+    for trial in &binding.trials {
+        let key = (
+            trial.case.scenario_id.clone(),
+            trial.case.persona_id.clone(),
+            trial.case.profile_id.clone(),
+        );
+        if let Some(existing) = unique_cases.get(&key) {
+            if existing != &trial.case {
+                return Err(bad_request(format!(
+                    "artifact release case {}/{}/{} has conflicting definitions",
+                    key.0, key.1, key.2
+                )));
+            }
+        } else {
+            unique_cases.insert(key, trial.case.clone());
+        }
+    }
+    let cases = unique_cases
+        .into_values()
         .map(|case| PlanCaseSelection {
             scenario_id: case.scenario_id.clone(),
             persona_id: case.persona_id.clone(),
@@ -1072,7 +1125,23 @@ fn plan_matrix_shape_for_release(
             repetitions: case.repetitions,
         })
         .collect::<Vec<_>>();
-    selected_plan_matrix_shape(&effective, &cases).map_err(bad_request_from)
+    let shape = selected_plan_matrix_shape(&effective, &cases).map_err(bad_request_from)?;
+    if usize::try_from(shape.total_trials).ok() != Some(binding.trials.len()) {
+        return Err(bad_request(
+            "artifact release per-trial binding count does not match the selected plan matrix",
+        ));
+    }
+    let mut trial_keys = BTreeSet::new();
+    if binding
+        .trials
+        .iter()
+        .any(|trial| trial.trial_key.trim().is_empty() || !trial_keys.insert(&trial.trial_key))
+    {
+        return Err(bad_request(
+            "artifact release experiment has missing or duplicate trial keys",
+        ));
+    }
+    Ok(shape)
 }
 
 async fn load_published_plan_revision(
@@ -2194,6 +2263,7 @@ mod tests {
         ExperimentRunRecord {
             scope: ActionRuleScope::Tenant { tenant_id },
             plan_artifact_uid: None,
+            expected_trials: 0,
             resource_envelope: fixture_resource_envelope(),
             simulator_policy: None,
             run_uid: fixture_uuid(1),

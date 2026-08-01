@@ -7,8 +7,19 @@ use moa_brain::{
     TurnResult, pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
     runtime_events::RuntimeEvent,
 };
-use moa_core::{types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope, types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionResponse, types::completion::CompletionStream, events::Event, types::events_stream::EventRange, types::events_stream::EventRecord, events::EventType, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation, types::identifiers::UserId};
 use moa_config::MoaConfig;
+use moa_core::{
+    error::Result, events::Event, events::EventType, traits::LLMProvider, traits::SessionStore,
+    types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
+    types::action_policy::ActionRuleScope, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::contact::SessionActorRef, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::UserId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    types::session::SessionMeta,
+};
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicyRuleStore;
 use serde_json::json;
@@ -52,7 +63,9 @@ impl LLMProvider for MockLlmProvider {
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
         Ok(CompletionStream::from_response(CompletionResponse {
             text: "Hi there".to_string(),
-            content: vec![moa_core::types::completion::CompletionContent::Text("Hi there".to_string())],
+            content: vec![moa_core::types::completion::CompletionContent::Text(
+                "Hi there".to_string(),
+            )],
             stop_reason: StopReason::EndTurn,
             model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             usage: token_usage(32, 8),
@@ -91,11 +104,156 @@ impl LLMProvider for CapturingTextLlmProvider {
         self.requests.lock().await.push(request);
         Ok(CompletionStream::from_response(CompletionResponse {
             text: self.text.clone(),
-            content: vec![moa_core::types::completion::CompletionContent::Text(self.text.clone())],
+            content: vec![moa_core::types::completion::CompletionContent::Text(
+                self.text.clone(),
+            )],
             stop_reason: StopReason::EndTurn,
             model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             usage: token_usage(32, 8),
             duration_ms: 25,
+            thought_signature: None,
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct PartialUsageToolLlmProvider {
+    usage: TokenUsage,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+impl PartialUsageToolLlmProvider {
+    fn new(usage: TokenUsage) -> Self {
+        Self {
+            usage,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for PartialUsageToolLlmProvider {
+    fn name(&self) -> &str {
+        "partial-usage-tool"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.requests.lock().await.push(request);
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: String::new(),
+            content: vec![CompletionContent::ToolCall(ToolCallContent {
+                invocation: ToolInvocation {
+                    id: Some("missing-usage-tool-call".to_string()),
+                    name: "bash".to_string(),
+                    input: json!({ "cmd": "printf must-not-run" }),
+                },
+                provider_metadata: None,
+            })],
+            stop_reason: StopReason::ToolUse,
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+            usage: self.usage,
+            duration_ms: 10,
+            thought_signature: None,
+        }))
+    }
+}
+
+#[derive(Clone, Default)]
+struct SubMicroToolLoopLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for SubMicroToolLoopLlmProvider {
+    fn name(&self) -> &str {
+        "sub-micro-tool-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        let mut capabilities = MockLlmProvider.capabilities();
+        capabilities.pricing = TokenPricing {
+            input_per_mtok: 0.000_001,
+            output_per_mtok: 0.000_001,
+            cached_input_per_mtok: Some(0.000_001),
+            cache_write_5m_per_mtok: Some(0.000_001),
+            cache_write_1h_per_mtok: None,
+        };
+        capabilities
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("sub-micro-tool-call".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({ "cmd": "printf submicro" }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+                usage: token_usage(1, 1),
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        } else {
+            CompletionResponse {
+                text: "must not reach the second response".to_string(),
+                content: vec![CompletionContent::Text(
+                    "must not reach the second response".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+                usage: token_usage(1, 1),
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Clone, Default)]
+struct CappedOutputLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for CappedOutputLlmProvider {
+    fn name(&self) -> &str {
+        "capped-output"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        let mut capabilities = MockLlmProvider.capabilities();
+        capabilities.pricing = TokenPricing {
+            input_per_mtok: 0.0,
+            output_per_mtok: 1.0,
+            cached_input_per_mtok: Some(0.0),
+            cache_write_5m_per_mtok: Some(0.0),
+            cache_write_1h_per_mtok: None,
+        };
+        capabilities
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.requests.lock().await.push(request);
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: "bounded response".to_string(),
+            content: vec![CompletionContent::Text("bounded response".to_string())],
+            stop_reason: StopReason::EndTurn,
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+            usage: token_usage(3, 2),
+            duration_ms: 10,
             thought_signature: None,
         }))
     }
@@ -551,7 +709,8 @@ impl LLMProvider for CanaryLeakLlmProvider {
         } else {
             assert!(request.messages.iter().any(|message| matches!(
                 message.role,
-                moa_core::types::context::MessageRole::System | moa_core::types::context::MessageRole::Tool
+                moa_core::types::context::MessageRole::System
+                    | moa_core::types::context::MessageRole::Tool
             ) && message.content.contains("canary")));
             CompletionResponse {
                 text: "blocked".to_string(),

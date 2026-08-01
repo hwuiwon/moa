@@ -6,7 +6,7 @@ Behavior Lab is the product surface for testing how target agents or execution
 runs behave under simulated users, profiles, data bundles, and scenarios.
 Behavior Lab is the only tenant evaluation product. It is not the
 regression-eval system: regression evals remain in `moa-eval`, which is a
-platform-only library, CLI, and `xtask` surface with no hosted service, no
+platform-only library and feature-gated `xtask` surface with no hosted service, no
 tenant MCP tool, and no public route.
 
 ## Product Boundary
@@ -18,6 +18,8 @@ Behavior Lab uses existing typed services:
   runs, proposes reviewed improvements, and reads score summaries.
 - `ExperimentRun` owns run-level workflow orchestration.
 - `ExperimentTrialRun` owns per-trial simulator turns and target execution.
+- `ArtifactRelease` submits candidates, activates attested revisions, and lists
+  and reviews release attempts.
 - Direct edge analytics routes read product insights from scoped analytics views.
 
 The public edge routes are:
@@ -39,6 +41,10 @@ The public edge routes are:
 | `POST /v1/experiments/agent-revision-simulations/compare` | `Experiments/compare_agent_revision_simulation` |
 | `POST /v1/agent-simulations` | `Experiments/run_agent_revision_simulation` |
 | `POST /v1/agent-simulations/{run_uid}/compare` | `Experiments/compare_agent_revision_simulation` |
+| `POST /v1/artifact-releases/submit` | `ArtifactRelease/submit` |
+| `POST /v1/artifact-releases/activate` | `ArtifactRelease/activate` |
+| `POST /v1/artifact-releases/attempts/list` | `ArtifactRelease/list_attempts` |
+| `POST /v1/artifact-releases/attempts/review` | `ArtifactRelease/review_attempt` |
 
 There is no public `/v1/evals/*` product route and no public
 `/v1/experiments/run` alias.
@@ -82,6 +88,17 @@ binding and component snapshot on the experiment run and every simulator trial.
 The snapshot owns the provider, model, decoding controls, system prompt,
 structured response protocol, and context contract; plan authors cannot
 override those certified runtime controls.
+
+The global simulator used by artifact release has a stricter authority boundary
+than tenant-authored studies. A fixed migration-owned mandate predeclares the
+policy identity and hash, bounds and interval methods, cohort identities and
+hashes, minimum support, label protocol, human-data authorization, budget,
+study window, and external source-manifest digest. `moa_promoter` may append an
+evidence import for the exact canonical study hash, but cannot update or delete
+the mandate. The submitted study must match both records exactly. The initial
+mandate is explicitly unprovisioned and therefore keeps the platform policy in
+`draft`; a reviewed code-and-migration revision with real external evidence pins
+is an operational prerequisite, not data the study-import command may invent.
 
 Postgres stores the canonical artifact document as JSON. YAML is an
 authoring/import/export format only; importing YAML produces the same typed

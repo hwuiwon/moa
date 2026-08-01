@@ -224,6 +224,45 @@ CREATE TRIGGER artifact_revision_state_guard
 -- 4. Server-side release policies
 -- ---------------------------------------------------------------------------
 
+-- Canonical digest of every field that can change a release decision. The
+-- JSONB text form gives stable key ordering while arrays preserve the policy's
+-- declared assertion and metric order. Identity fields are included so the
+-- digest cannot be retained while a row is relabelled as another revision or
+-- target class.
+CREATE OR REPLACE FUNCTION moa.artifact_release_policy_content_hash(
+    p_name TEXT,
+    p_revision INT,
+    p_target_class TEXT,
+    p_blocking_assertions JSONB,
+    p_primary_gate_family JSONB,
+    p_attestation_ttl_secs BIGINT,
+    p_resource_policy_hash BYTEA
+) RETURNS BYTEA
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+STRICT
+AS $$
+    SELECT digest(
+        jsonb_build_object(
+            'schema', 'moa.artifact_release_policy/v1',
+            'name', p_name,
+            'revision', p_revision,
+            'target_class', p_target_class,
+            'blocking_assertions', p_blocking_assertions,
+            'primary_gate_family', p_primary_gate_family,
+            'attestation_ttl_secs', p_attestation_ttl_secs,
+            'resource_policy_hash', encode(p_resource_policy_hash, 'hex')
+        )::TEXT,
+        'sha256'
+    );
+$$;
+
+COMMENT ON FUNCTION moa.artifact_release_policy_content_hash(
+    TEXT, INT, TEXT, JSONB, JSONB, BIGINT, BYTEA
+) IS
+    'Canonical SHA-256 digest of the complete artifact-release policy authority, including identity, blockers, metric declarations, attestation TTL, and resource policy.';
+
 CREATE TABLE IF NOT EXISTS moa.artifact_release_policy (
     policy_uid UUID PRIMARY KEY,
     -- NULL storage partition makes the row `global` scope: readable from every
@@ -275,42 +314,133 @@ SELECT moa.apply_three_tier_rls('moa.artifact_release_policy'::REGCLASS);
 COMMENT ON TABLE moa.artifact_release_policy IS
     'Server-resolved release gate. Platform defaults are global rows no tenant role can write; a tenant override is written under the tenant admin relation, never chosen by a candidate submitter.';
 
+CREATE OR REPLACE FUNCTION moa.artifact_release_policy_guard() RETURNS trigger AS $$
+DECLARE
+    expected_hash BYTEA;
+BEGIN
+    expected_hash := moa.artifact_release_policy_content_hash(
+        NEW.name,
+        NEW.revision,
+        NEW.target_class,
+        NEW.blocking_assertions,
+        NEW.primary_gate_family,
+        NEW.attestation_ttl_secs,
+        NEW.resource_policy_hash
+    );
+    IF NEW.policy_hash <> expected_hash THEN
+        RAISE EXCEPTION
+            'artifact release policy % revision % hash does not match its authority',
+            NEW.name, NEW.revision
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF TG_OP = 'UPDATE'
+        AND (
+            NEW.policy_uid IS DISTINCT FROM OLD.policy_uid
+            OR NEW.storage_partition_id IS DISTINCT FROM OLD.storage_partition_id
+            OR NEW.user_id IS DISTINCT FROM OLD.user_id
+            OR NEW.name IS DISTINCT FROM OLD.name
+            OR NEW.revision IS DISTINCT FROM OLD.revision
+            OR NEW.target_class IS DISTINCT FROM OLD.target_class
+            OR NEW.blocking_assertions IS DISTINCT FROM OLD.blocking_assertions
+            OR NEW.primary_gate_family IS DISTINCT FROM OLD.primary_gate_family
+            OR NEW.attestation_ttl_secs IS DISTINCT FROM OLD.attestation_ttl_secs
+            OR NEW.resource_policy_hash IS DISTINCT FROM OLD.resource_policy_hash
+            OR NEW.policy_hash IS DISTINCT FROM OLD.policy_hash
+            OR NEW.valid_from IS DISTINCT FROM OLD.valid_from
+            OR NEW.created_at IS DISTINCT FROM OLD.created_at
+            OR (
+                OLD.valid_to IS NOT NULL
+                AND NEW.valid_to IS DISTINCT FROM OLD.valid_to
+            )
+        )
+    THEN
+        RAISE EXCEPTION
+            'artifact release policy % revision % is immutable; insert a new revision',
+            OLD.name, OLD.revision
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION moa.artifact_release_policy_guard() IS
+    'Validates the canonical policy digest on insert and permits only the first valid_to lifecycle closure on update; policy rotation is insert-new-revision.';
+
+DROP TRIGGER IF EXISTS artifact_release_policy_immutable
+    ON moa.artifact_release_policy;
+CREATE TRIGGER artifact_release_policy_immutable
+    BEFORE INSERT OR UPDATE ON moa.artifact_release_policy
+    FOR EACH ROW EXECUTE FUNCTION moa.artifact_release_policy_guard();
+
 -- Platform default policies. Without a resolvable policy the release surface
 -- rejects a candidate before evaluation, so these rows are what make the gate
--- usable at all; they are deliberately the strictest available shape.
+-- usable at all. The six independent-unit requirement is a diagnostic evidence
+-- floor over scenario/persona/profile clusters; repetitions do not satisfy it.
+-- Comparative results do not authorize activation until the exact production
+-- design has a passing operating-characteristic assessment.
+WITH policy_identity (policy_uid, name, revision, target_class) AS (
+    VALUES
+        (
+            '00000000-0000-4000-8000-0000000d7301'::UUID,
+            'platform-default-skill-visibility'::TEXT,
+            2::INT,
+            'skill_visibility'::TEXT
+        ),
+        (
+            '00000000-0000-4000-8000-0000000d7302',
+            'platform-default-action-visibility',
+            2,
+            'action_visibility'
+        ),
+        (
+            '00000000-0000-4000-8000-0000000d7303',
+            'platform-default-agent-deployment',
+            2,
+            'agent_deployment'
+        )
+),
+policy_body (
+    blocking_assertions,
+    primary_gate_family,
+    attestation_ttl_secs,
+    resource_policy_hash
+) AS (
+    VALUES (
+        '[{"id":"scenario_outcome","version":"v1","determinism":"deterministic"},{"id":"target_completed","version":"v1","determinism":"deterministic"},{"id":"result_produced","version":"v1","determinism":"deterministic"},{"id":"privacy_safe_output","version":"v1","determinism":"deterministic"}]'::JSONB,
+        '[{"metric":"result_produced","direction":"higher_is_better","estimand":"paired difference in result-production probability","target_population":"approved artifact-release scenarios","independent_unit":"scenario_persona_profile","cluster_key":"scenario_persona_profile","paired_key":"scenario_persona_profile_repetition","confidence_method":"cluster_matched_risk_difference_bootstrap","unit":"proportion","margin_bp":500,"alpha_bp":250,"acceptable_alternative_bp":0,"unacceptable_alternative_bp":-1000,"resamples":2000,"min_independent_units":6,"holm_regression_alpha_bp":250}]'::JSONB,
+        86400::BIGINT,
+        digest('moa.release.resource_policy.v1', 'sha256')
+    )
+)
 INSERT INTO moa.artifact_release_policy (
     policy_uid, storage_partition_id, user_id, name, revision, target_class,
     blocking_assertions, primary_gate_family, attestation_ttl_secs,
     resource_policy_hash, policy_hash
 )
-VALUES
-    (
-        '00000000-0000-4000-8000-0000000d7301',
-        NULL, NULL, 'platform-default-skill-visibility', 1, 'skill_visibility',
-        '[{"id":"target_completed","version":"v1","determinism":"deterministic"},{"id":"result_produced","version":"v1","determinism":"deterministic"},{"id":"privacy_safe_output","version":"v1","determinism":"deterministic"}]'::JSONB,
-        '[{"metric":"result_produced","direction":"higher_is_better","margin_bp":500}]'::JSONB,
-        86400,
-        digest('moa.release.resource_policy.v1', 'sha256'),
-        digest('moa.release.policy.platform-default-skill-visibility.v1', 'sha256')
-    ),
-    (
-        '00000000-0000-4000-8000-0000000d7302',
-        NULL, NULL, 'platform-default-action-visibility', 1, 'action_visibility',
-        '[{"id":"target_completed","version":"v1","determinism":"deterministic"},{"id":"result_produced","version":"v1","determinism":"deterministic"},{"id":"privacy_safe_output","version":"v1","determinism":"deterministic"}]'::JSONB,
-        '[{"metric":"result_produced","direction":"higher_is_better","margin_bp":500}]'::JSONB,
-        86400,
-        digest('moa.release.resource_policy.v1', 'sha256'),
-        digest('moa.release.policy.platform-default-action-visibility.v1', 'sha256')
-    ),
-    (
-        '00000000-0000-4000-8000-0000000d7303',
-        NULL, NULL, 'platform-default-agent-deployment', 1, 'agent_deployment',
-        '[{"id":"target_completed","version":"v1","determinism":"deterministic"},{"id":"result_produced","version":"v1","determinism":"deterministic"},{"id":"privacy_safe_output","version":"v1","determinism":"deterministic"}]'::JSONB,
-        '[{"metric":"result_produced","direction":"higher_is_better","margin_bp":500}]'::JSONB,
-        86400,
-        digest('moa.release.resource_policy.v1', 'sha256'),
-        digest('moa.release.policy.platform-default-agent-deployment.v1', 'sha256')
+SELECT
+    identity.policy_uid,
+    NULL,
+    NULL,
+    identity.name,
+    identity.revision,
+    identity.target_class,
+    body.blocking_assertions,
+    body.primary_gate_family,
+    body.attestation_ttl_secs,
+    body.resource_policy_hash,
+    moa.artifact_release_policy_content_hash(
+        identity.name,
+        identity.revision,
+        identity.target_class,
+        body.blocking_assertions,
+        body.primary_gate_family,
+        body.attestation_ttl_secs,
+        body.resource_policy_hash
     )
+FROM policy_identity AS identity
+CROSS JOIN policy_body AS body
 ON CONFLICT (policy_uid) DO NOTHING;
 
 -- ---------------------------------------------------------------------------

@@ -4,9 +4,10 @@ use std::collections::{BTreeSet, HashMap};
 
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument};
 use moa_core::{
-    error::MoaError, error::Result, types::agent::AgentSkillPolicyMode,
-    types::agent::ResolvedArtifactRevisionRef, types::context::WorkingContext,
-    types::context::estimate_text_tokens, types::hands::SandboxFile, types::memory::SkillMetadata,
+    error::MoaError, error::Result, types::action_policy::CallOrigin,
+    types::agent::AgentSkillPolicyMode, types::agent::ResolvedArtifactRevisionRef,
+    types::context::WorkingContext, types::context::estimate_text_tokens,
+    types::hands::SandboxFile, types::memory::SkillMetadata,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -75,6 +76,7 @@ async fn load_locked_skills(
         .iter()
         .map(|dependency| dependency.revision_uid)
         .collect::<Vec<_>>();
+    let allow_unpublished = allows_unpublished_locked_skills(ctx);
     let rows = sqlx::query(
         r#"
         SELECT a.name, a.description, a.tags, r.revision_uid, r.definition, r.source_text
@@ -83,23 +85,28 @@ async fn load_locked_skills(
         WHERE r.revision_uid = ANY($2::uuid[])
           AND a.valid_to IS NULL
           AND r.valid_to IS NULL
-          AND r.status IN ('ready', 'superseded')
           AND a.kind = 'skill'
           AND a.storage_partition_id = $1
           AND a.user_id IS NULL
-          -- Exact pinned access is historical only while the revision remains
-          -- executable. Ready and superseded revisions also need serving
-          -- provenance; rollback archives the revision and is terminal even
-          -- though its activation audit remains immutable.
           AND (
-              EXISTS (
-                  SELECT 1 FROM moa.artifact_serving_pointer p
-                  WHERE p.revision_uid = r.revision_uid
-              )
-              OR EXISTS (
-                  SELECT 1 FROM moa.artifact_activation_audit audit
-                  WHERE audit.activated_revision_uid = r.revision_uid
-                    AND audit.decision_kind = 'activation'
+              -- Eval-owned sessions may preview only the exact unpublished
+              -- revisions already named by their durable agent lock.
+              ($3::boolean AND r.status IN ('draft', 'evaluating'))
+              OR (
+                  -- Production and evaluation both require serving provenance
+                  -- for activated or historical exact pins.
+                  r.status IN ('ready', 'superseded')
+                  AND (
+                      EXISTS (
+                          SELECT 1 FROM moa.artifact_serving_pointer p
+                          WHERE p.revision_uid = r.revision_uid
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM moa.artifact_activation_audit audit
+                          WHERE audit.activated_revision_uid = r.revision_uid
+                            AND audit.decision_kind = 'activation'
+                      )
+                  )
               )
           )
         ORDER BY array_position($2::uuid[], r.revision_uid), a.name ASC
@@ -107,6 +114,7 @@ async fn load_locked_skills(
     )
     .bind(&tenant_id)
     .bind(&revision_uids)
+    .bind(allow_unpublished)
     .fetch_all(pool)
     .await
     .map_err(map_sqlx_error)?;
@@ -177,6 +185,7 @@ pub(super) async fn load_selected_skill_files(
             ))
         })
         .collect::<Result<HashMap<_, _>>>()?;
+    let allow_unpublished = allows_unpublished_locked_skills(ctx);
     let rows = sqlx::query(
         r#"
         WITH requested AS (
@@ -190,21 +199,26 @@ pub(super) async fn load_selected_skill_files(
         JOIN moa.artifact_file f ON f.revision_uid = r.revision_uid
         WHERE a.valid_to IS NULL
           AND r.valid_to IS NULL
-          AND r.status IN ('ready', 'superseded')
           AND a.kind = 'skill'
           AND a.storage_partition_id = $1
           AND a.user_id IS NULL
-          -- Archived package bytes remain auditable after rollback, but can
-          -- never be materialized into a runtime sandbox.
           AND (
-              EXISTS (
-                  SELECT 1 FROM moa.artifact_serving_pointer p
-                  WHERE p.revision_uid = r.revision_uid
-              )
-              OR EXISTS (
-                  SELECT 1 FROM moa.artifact_activation_audit audit
-                  WHERE audit.activated_revision_uid = r.revision_uid
-                    AND audit.decision_kind = 'activation'
+              -- The same origin/status fence used by metadata loading protects
+              -- the package bytes materialized into the runtime sandbox.
+              ($3::boolean AND r.status IN ('draft', 'evaluating'))
+              OR (
+                  r.status IN ('ready', 'superseded')
+                  AND (
+                      EXISTS (
+                          SELECT 1 FROM moa.artifact_serving_pointer p
+                          WHERE p.revision_uid = r.revision_uid
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM moa.artifact_activation_audit audit
+                          WHERE audit.activated_revision_uid = r.revision_uid
+                            AND audit.decision_kind = 'activation'
+                      )
+                  )
               )
           )
         ORDER BY requested.ord ASC, f.path ASC
@@ -212,6 +226,7 @@ pub(super) async fn load_selected_skill_files(
     )
     .bind(&tenant_id)
     .bind(&revision_uids)
+    .bind(allow_unpublished)
     .fetch_all(pool)
     .await
     .map_err(|error| MoaError::StorageError(error.to_string()))?;
@@ -298,6 +313,10 @@ fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> 
     })
 }
 
+fn allows_unpublished_locked_skills(ctx: &WorkingContext) -> bool {
+    matches!(ctx.call_origin, CallOrigin::Experiment { .. })
+}
+
 fn skill_base_path(skill_md_path: &str) -> Result<&str> {
     skill_md_path
         .rsplit_once('/')
@@ -340,12 +359,134 @@ mod tests {
         release::TenantScope,
     };
     use moa_core::types::{
-        action_policy::ActionRuleScope, identifiers::TenantId, model::ModelCapabilities,
+        action_policy::{ActionRuleScope, CallOrigin},
+        agent::{AgentContext, AgentSkillPolicyMode, ResolvedArtifactRevisionRef},
+        identifiers::TenantId,
+        model::ModelCapabilities,
         session::SessionMeta,
     };
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn experiment_origin_loads_only_exact_unpublished_locked_skills_db_memory() -> Result<()>
+    {
+        // Pins: an artifact-release trial can execute its exact draft/evaluating
+        // skill lock, while the same revisions remain unavailable to production
+        // and an experiment origin alone never exposes unrelated drafts.
+        let (store, database_url, schema_name) =
+            moa_session::testing::create_isolated_test_store().await?;
+        let pool = store.pool().clone();
+        let registry = ArtifactRegistry::new(pool.clone());
+        let tenant_id = TenantId::from(Uuid::now_v7());
+        let scope = ActionRuleScope::Tenant { tenant_id };
+        let draft_name = format!("eval-draft-{}", Uuid::now_v7().simple());
+        let evaluating_name = format!("eval-running-{}", Uuid::now_v7().simple());
+        let unrelated_name = format!("eval-unlocked-{}", Uuid::now_v7().simple());
+        let draft = create_skill_draft(&registry, &scope, &draft_name, b"# exact draft\n").await?;
+        let evaluating =
+            create_skill_draft(&registry, &scope, &evaluating_name, b"# exact evaluating\n")
+                .await?;
+        let _unrelated =
+            create_skill_draft(&registry, &scope, &unrelated_name, b"# unrelated draft\n").await?;
+        sqlx::query(
+            "UPDATE moa.artifact_revision SET status = 'evaluating' WHERE revision_uid = $1",
+        )
+        .bind(evaluating.revision_uid)
+        .execute(&pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let agent_context =
+            locked_agent_context(&[(&draft_name, &draft), (&evaluating_name, &evaluating)]);
+        let experiment_ctx = context_for_origin(
+            tenant_id,
+            CallOrigin::Experiment {
+                run_uid: Uuid::now_v7(),
+                trial_uid: Some(Uuid::now_v7()),
+            },
+            agent_context.clone(),
+        );
+        let loaded = load_skills(&pool, &experiment_ctx).await?;
+        let loaded_revisions = loaded
+            .iter()
+            .map(|skill| {
+                (
+                    skill.name.clone(),
+                    skill
+                        .artifact_revision_uid
+                        .expect("registry metadata carries the exact revision"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            loaded_revisions,
+            vec![
+                (draft_name.clone(), draft.revision_uid),
+                (evaluating_name.clone(), evaluating.revision_uid),
+            ]
+        );
+        assert!(
+            loaded_revisions
+                .iter()
+                .all(|(name, _)| name != &unrelated_name),
+            "an experiment origin must not discover an unlocked draft"
+        );
+
+        let files = load_selected_skill_files(&pool, &experiment_ctx, &loaded).await?;
+        let files_by_path = files
+            .into_iter()
+            .map(|file| (file.path, file.content))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(files_by_path.len(), 2);
+        assert_eq!(
+            files_by_path.get(&format!(".moa/skills/{draft_name}/SKILL.md")),
+            Some(&b"# exact draft\n".to_vec())
+        );
+        assert_eq!(
+            files_by_path.get(&format!(".moa/skills/{evaluating_name}/SKILL.md")),
+            Some(&b"# exact evaluating\n".to_vec())
+        );
+
+        let unlocked_experiment_ctx = context_for_origin(
+            tenant_id,
+            CallOrigin::Experiment {
+                run_uid: Uuid::now_v7(),
+                trial_uid: Some(Uuid::now_v7()),
+            },
+            AgentContext::system_default(),
+        );
+        assert_eq!(
+            load_skills(&pool, &unlocked_experiment_ctx).await?,
+            Vec::new(),
+            "experiment provenance alone must not expose any tenant draft"
+        );
+
+        let production_ctx = context_for_origin(tenant_id, CallOrigin::Production, agent_context);
+        let error = load_skills(&pool, &production_ctx)
+            .await
+            .expect_err("production must reject exact unpublished skill locks");
+        match error {
+            MoaError::StorageError(message) => assert_eq!(
+                message,
+                "agent policy locked 2 skill revisions but 0 are executable"
+            ),
+            other => panic!("expected production metadata fence, got {other:?}"),
+        }
+        let error = load_selected_skill_files(&pool, &production_ctx, &loaded)
+            .await
+            .expect_err("production must reject unpublished package bytes too");
+        match error {
+            MoaError::StorageError(message) => assert_eq!(
+                message,
+                "selected 2 exact skill revisions but 0 have executable package files"
+            ),
+            other => panic!("expected production package fence, got {other:?}"),
+        }
+
+        moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+    }
 
     #[tokio::test]
     async fn exact_files_load_for_superseded_revision_and_reject_archived_revision_db_memory()
@@ -482,6 +623,54 @@ mod tests {
                 },
             )
             .await
+    }
+
+    fn locked_agent_context(revisions: &[(&str, &StoredArtifactRevision)]) -> AgentContext {
+        let dependencies = revisions
+            .iter()
+            .map(|(name, revision)| ResolvedArtifactRevisionRef {
+                reference: format!("skill://{name}"),
+                kind: "skill".to_string(),
+                name: (*name).to_string(),
+                artifact_uid: revision.artifact_uid,
+                revision_uid: revision.revision_uid,
+                version: revision.version,
+            })
+            .collect::<Vec<_>>();
+        let mut context = AgentContext::system_default();
+        let mut snapshot = context
+            .parsed_policy_snapshot()
+            .expect("system default agent policy snapshot is valid");
+        snapshot.skill_policy.mode = AgentSkillPolicyMode::Allowlist;
+        snapshot.skill_policy.refs = dependencies
+            .iter()
+            .map(|dependency| dependency.reference.clone())
+            .collect();
+        snapshot
+            .revision_lock
+            .as_mut()
+            .expect("system default agent carries a revision lock")
+            .artifact_dependencies = dependencies.clone();
+        context.artifact_dependencies = dependencies;
+        context.policy_snapshot =
+            serde_json::to_value(snapshot).expect("locked experiment policy snapshot serializes");
+        context
+    }
+
+    fn context_for_origin(
+        tenant_id: TenantId,
+        call_origin: CallOrigin,
+        agent_context: AgentContext,
+    ) -> WorkingContext {
+        WorkingContext::new(
+            &SessionMeta {
+                tenant_id,
+                agent_context: Some(agent_context),
+                call_origin,
+                ..SessionMeta::default()
+            },
+            ModelCapabilities::default(),
+        )
     }
 
     fn selected_metadata(name: &str, revision_uid: Uuid) -> SkillMetadata {

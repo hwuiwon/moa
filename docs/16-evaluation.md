@@ -4,16 +4,27 @@ _Long-conversation harness, score cards, budgets, and triage._
 
 ## Scope
 
-`moa-eval` is a platform-only regression harness: a library, CLI, and `xtask`
-surface driven by CI, nightly jobs, explicit live lanes, and the internal
+`moa-eval` is a platform-only regression harness: a library and feature-gated
+`xtask` surface driven by CI, nightly jobs, explicit live lanes, and the internal
 skill-regression gate. It is not a tenant product. There is no hosted `Eval`
 Restate service, no tenant eval MCP tool, and no public `/v1/evals/*` route.
 Tenant-facing evaluation is Behavior Lab (`moa-experiments`), documented in
 [Behavior Lab](product/behavior-lab.md).
+Hand-authored release evaluation enters Behavior Lab through the public
+ArtifactRelease routes listed there; it does not restore a hosted generic Eval
+service.
 
 Behavior Lab persists score lineage through `analytics.score_run` and
 `analytics.scores`. The platform harness produces the same typed `ScoreRecord`
 contract for comparison, but leaves persistence to its caller.
+
+Artifact-release simulator fidelity is not established by a caller-authored
+aggregate report. Its operator path requires the fixed migration-owned
+certification mandate and a separately imported approval for the exact canonical
+study hash and external source-manifest digest. The migration does not seed a
+passing study. Its initial mandate is deliberately unprovisioned, so release
+evaluation remains unavailable until reviewed external evidence is pinned by a
+new code-and-migration revision.
 
 ## Purpose
 

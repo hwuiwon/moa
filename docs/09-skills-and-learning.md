@@ -98,7 +98,7 @@ Every entry includes a stable reference/version, description, input/output
 schemas, action/risk and idempotency classes, execution class, source
 provenance, authorization metadata, and optional cost estimate.
 
-The catalog merges typed built-ins, published actions and connector actions,
+The catalog merges typed built-ins, serving actions and connector actions,
 serving skill actions/code, memory operations, currently connected MCP tools
 with stable schemas and policies, and datasource reads backed by typed query
 operations. A connection ID alone is not a capability. Every invocation goes
@@ -120,6 +120,14 @@ The context pipeline reads the skill artifact revisions the tenant's serving
 pointers resolve to. There is no separate active skill mirror for turn context
 injection.
 
+Normal sessions remain serving/activation-fenced. They may materialize a skill
+only through its current serving pointer or an exact activation-pinned revision
+in the session's `AgentContext` dependency lock; revision status by itself is
+never visibility. Eval-owned `Experiment` sessions have one narrow exception:
+they may materialize an exact `draft` or `evaluating` skill only when that exact
+revision is already pinned in their `AgentContext` lock. This preview does not
+move a pointer or expose the revision to ordinary sessions.
+
 Skill packages use tenant scope, not runtime memory scope:
 
 | Scope | Stored as | Visibility | Typical use |
@@ -135,19 +143,25 @@ learning regression adapter. Neither path can make a revision visible by
 changing status alone. There is no contact-scoped skill inheritance.
 
 Hand-authored release evaluation executes the exact server-approved case tuples
-against candidate and serving-baseline overlays with paired seeds. The tenant's
-active authoring supplement binds the platform-owned cases to a published
-experiment-plan revision; submission fails closed when that plan omits a case,
-persona, profile, or deterministic blocking evaluator required by the release
-policy. Hidden cases remain platform-owned and are exposed only to the internal
-experiment binding.
+against the candidate and, after first activation, a diagnostic serving-baseline
+arm with paired seeds. Every trial owns a distinct overlay and eval session. The
+platform release plan binds immutable platform-owned cases, personas, profiles,
+and deterministic blocking evaluators; tenants cannot replace or supplement
+that gate. Submission fails closed when any required binding is missing. Hidden
+cases are exposed only to the internal experiment binding. The supported release lane
+uses exactly one `agent_loop` target template; execution-template release plans
+fail closed because they have no release-overlay resolver. Release cases that
+reference data bundles also fail closed because this lane has no target-side
+fixture resolver; trial sandboxes remain session-isolated, but their mutable
+state is not release evidence.
 
 MOA does not duplicate skill package bytes in object storage. Skill export uses
 package documents containing base64-encoded files; generic artifact draft
 authoring carries the canonical source plus package files. On each turn,
-selected serving skill packages are registered with the tool router and
-materialized into the active hand under `.moa/skills/<skill>/...` before the
-first hand tool executes.
+selected serving/activation-fenced skill packages are registered with the tool
+router and materialized into the active hand under `.moa/skills/<skill>/...`
+before the first hand tool executes. The eval-owned locked-draft exception above
+uses the same exact-package materialization path.
 
 ## Progressive Disclosure
 

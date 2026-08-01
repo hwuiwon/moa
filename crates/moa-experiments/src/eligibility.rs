@@ -514,10 +514,10 @@ mod tests {
     }
 
     #[test]
-    fn scenario_scorecard_is_not_runnable_without_a_durable_evidence_producer_offline() {
-        // Pins: direct runs and plan-backed runs share this admission check.
-        // Neither may execute a scenario evaluator before trials persist the
-        // objective evidence it would consume.
+    fn scenario_scorecard_is_runnable_with_the_registered_objective_evaluator_offline() {
+        // Pins: direct runs and plan-backed runs share this admission check, so
+        // the objective evaluator must be admitted only after its durable trial
+        // evidence producer is available.
         let scorecard = ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "scenario_outcome".to_string(),
             evaluator_version: "v1".to_string(),
@@ -526,11 +526,7 @@ mod tests {
         }])
         .expect("structurally valid");
 
-        assert_eq!(
-            require_runnable_scorecard(&scorecard)
-                .expect_err("scenario scorecard must fail before execution"),
-            EvaluatorError::ScenarioEvaluationUnavailable
-        );
+        require_runnable_scorecard(&scorecard).expect("scenario scorecard is runnable");
     }
 
     #[test]

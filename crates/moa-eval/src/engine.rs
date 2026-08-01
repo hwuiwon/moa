@@ -26,7 +26,7 @@ use moa_brain::runtime_events::RuntimeEvent;
 use moa_brain::{BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult, run_streamed_turn};
 use moa_config::MoaConfig;
 use moa_core::types::resource::{
-    DeadlineGuard, ResourceError, ResourceReservation, SharedResourceLedger,
+    DeadlineGuard, ResourceBudget, ResourceError, ResourceReservation, SharedResourceLedger,
 };
 use moa_core::{events::Event, traits::LLMProvider, types::events_stream::EventRange};
 use moa_eval_core::admission::{AdmittedRun, EvalAdmissionPolicy};
@@ -339,7 +339,7 @@ impl EvalEngine {
     ) -> Dispatch {
         if case.kind == TestCaseKind::Long {
             return self
-                .dispatch_long_case(case, config, guard, llm_provider, started_at)
+                .dispatch_long_case(case, config, guard, admitted, llm_provider, started_at)
                 .await;
         }
 
@@ -370,7 +370,7 @@ impl EvalEngine {
             &environment,
             &engine_options,
             guard.token(),
-            admitted.per_case.turns,
+            ResourceBudget::new(guard.deadline(), Some(admitted.per_case)),
         )
         .instrument(span);
 
@@ -424,6 +424,7 @@ impl EvalEngine {
         case: &TestCase,
         config: &AgentConfig,
         guard: &DeadlineGuard,
+        admitted: &AdmittedRun,
         llm_provider: Option<Arc<dyn LLMProvider>>,
         started_at: DateTime<Utc>,
     ) -> Dispatch {
@@ -457,7 +458,14 @@ impl EvalEngine {
             }
         };
         let run_root = run_root_of(&environment);
-        let scenario = run_scenario_in_environment(config, &self.options, case, &environment);
+        let scenario = run_scenario_in_environment(
+            config,
+            &self.options,
+            case,
+            &environment,
+            ResourceBudget::new(guard.deadline(), Some(admitted.per_case)),
+            guard.token(),
+        );
 
         let mut dispatch = match guard.run(scenario).await {
             Ok(Ok(report)) => Dispatch::Completed(report.result),
@@ -678,13 +686,13 @@ fn run_root_of(environment: &AgentEnvironment) -> PathBuf {
 }
 
 /// Drives one agent session to completion under a caller-owned cancellation
-/// token and a reserved turn budget.
+/// token and reserved resource budget.
 async fn run_environment(
     input: String,
     environment: &crate::AgentEnvironment,
     options: &EngineOptions,
     cancel_token: &CancellationToken,
-    max_turns: u64,
+    mut resource_budget: ResourceBudget,
 ) -> Result<CollectedExecution> {
     environment
         .session_store
@@ -697,8 +705,10 @@ async fn run_environment(
         )
         .await?;
 
-    let hard_cancel_token = CancellationToken::new();
     let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
+    let max_turns = resource_budget
+        .remaining
+        .map_or(0, |remaining| remaining.turns);
 
     for turn_index in 0..max_turns {
         if cancel_token.is_cancelled() {
@@ -717,7 +727,10 @@ async fn run_environment(
             runtime_tx: &runtime_tx,
             event_tx: None,
             cancel_token: Some(cancel_token.clone()),
-            hard_cancel_token: Some(hard_cancel_token.clone()),
+            // The case deadline cancels this token. Reusing it as the hard
+            // token makes in-sandbox work observe the same terminal stop.
+            hard_cancel_token: Some(cancel_token.clone()),
+            resource_budget: &mut resource_budget,
             signal_state: None,
             lineage: environment.lineage.clone(),
         })
@@ -835,6 +848,7 @@ mod tests {
         types::completion::StopReason, types::completion::TokenUsage,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
         types::resource::DeadlineGuard, types::resource::ResourceAmounts,
+        types::resource::ResourceBudget,
     };
     use tempfile::tempdir;
 
@@ -857,6 +871,19 @@ mod tests {
         let mut config = MoaConfig::default();
         config.database.url = moa_session::testing::test_database_url();
         config
+    }
+
+    fn test_resource_budget(turns: u64) -> ResourceBudget {
+        ResourceBudget::new(
+            None,
+            Some(ResourceAmounts {
+                cost_micro_usd: 1_000_000,
+                tokens: 1_000_000,
+                turns,
+                model_calls: turns,
+                tool_calls: 100,
+            }),
+        )
     }
 
     #[derive(Clone, Default)]
@@ -1169,7 +1196,7 @@ mod tests {
                 ..EngineOptions::default()
             },
             &CancellationToken::new(),
-            32,
+            test_resource_budget(32),
         )
         .await
         .unwrap();
@@ -1209,7 +1236,7 @@ mod tests {
                 ..EngineOptions::default()
             },
             &cancel,
-            32,
+            test_resource_budget(32),
         )
         .await
         .expect_err("a cancelled token stops the turn loop");

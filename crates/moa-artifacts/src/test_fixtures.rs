@@ -20,9 +20,8 @@ use crate::registry::{
     ArtifactRegistry, CandidateSubjectInputs, RecordDecision, ReleaseRepository, SubmitCandidate,
 };
 use crate::release::{
-    ActivationRequest, ActivationTarget, AgentRuntimeSubject, AssertionRef, DeterminismClass,
-    DeterministicVerdict, Digest32, EvaluationPlanSubject, EvidenceAdapter,
-    PLATFORM_BLOCKING_ASSERTIONS, TenantScope,
+    ActivationRequest, ActivationTarget, AgentRuntimeSubject, DeterministicVerdict, Digest32,
+    EvaluationPlanSubject, EvidenceAdapter, TenantScope,
 };
 use crate::resolver::ArtifactResolver;
 use crate::validation::validate_for_status;
@@ -197,6 +196,9 @@ async fn attest_revision_with_lock(
         })
         .await?;
     let candidate = submission.candidate;
+    let policy = repository
+        .resolve_policy(&scope, candidate.activation_target.class())
+        .await?;
     let decision = repository
         .record_decision(RecordDecision {
             scope,
@@ -207,14 +209,7 @@ async fn attest_revision_with_lock(
             trial_uids: vec![Uuid::now_v7()],
             evidence_ids: vec![Uuid::now_v7()],
             gate_results: BTreeMap::from([("result_produced".to_string(), "pass".to_string())]),
-            blocking_assertions: PLATFORM_BLOCKING_ASSERTIONS
-                .iter()
-                .map(|id| AssertionRef {
-                    id: (*id).to_string(),
-                    version: "1".to_string(),
-                    determinism: DeterminismClass::Deterministic,
-                })
-                .collect(),
+            blocking_assertions: policy.blocking_assertions,
             evidence_adapter: EvidenceAdapter::BehaviorLabExperiment,
             decided_by: "fixture".to_string(),
         })

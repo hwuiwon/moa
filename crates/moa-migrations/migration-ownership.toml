@@ -350,12 +350,6 @@ owner = "moa-orchestrator"
 notes = "Versioned approved plan and scenario pack. Platform rows are global-scope and hidden rows are never returned to a tenant."
 
 [[table]]
-name = "artifact_release_fixture"
-schema = "moa"
-owner = "moa-orchestrator"
-notes = "Copy-on-write release-evaluation environment whose connector bindings cannot reference production credentials."
-
-[[table]]
 name = "artifact_release_eval_overlay"
 schema = "moa"
 owner = "moa-orchestrator"
@@ -419,6 +413,16 @@ name = "simulator_policy"
 schema = "moa"
 owner = "moa-experiments"
 readers = ["moa-orchestrator"]
+
+[[table]]
+name = "simulator_certification_mandate"
+schema = "moa"
+owner = "moa-experiments"
+
+[[table]]
+name = "simulator_certification_evidence_import"
+schema = "moa"
+owner = "moa-experiments"
 
 [[table]]
 name = "simulator_fidelity_study"

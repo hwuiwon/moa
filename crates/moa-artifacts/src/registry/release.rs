@@ -193,6 +193,18 @@ impl ReleaseRepository {
         Ok(policy)
     }
 
+    /// Resolves the server-side gate policy inside the caller's transaction.
+    ///
+    /// This is the transactional counterpart to [`Self::resolve_policy`] for
+    /// adapters that submit and decide a candidate atomically.
+    pub async fn resolve_policy_in_tx(
+        conn: &mut PgConnection,
+        scope: &TenantScope,
+        class: ActivationTargetClass,
+    ) -> Result<ReleasePolicy> {
+        resolve_policy_in_tx(conn, scope, class).await
+    }
+
     /// Loads one candidate.
     pub async fn load_candidate(
         &self,
@@ -532,7 +544,16 @@ async fn resolve_policy_in_tx(
         r#"
         SELECT policy_uid, storage_partition_id, name, revision, target_class,
                blocking_assertions, primary_gate_family, attestation_ttl_secs,
-               resource_policy_hash, policy_hash
+               resource_policy_hash, policy_hash,
+               policy_hash = moa.artifact_release_policy_content_hash(
+                   name,
+                   revision,
+                   target_class,
+                   blocking_assertions,
+                   primary_gate_family,
+                   attestation_ttl_secs,
+                   resource_policy_hash
+               ) AS policy_hash_matches
         FROM moa.artifact_release_policy
         WHERE valid_to IS NULL
           AND target_class = $2
@@ -558,6 +579,17 @@ async fn resolve_policy_in_tx(
     let stored_partition: Option<String> = row.try_get("storage_partition_id").map_err(storage)?;
     let resource_policy_hash: Vec<u8> = row.try_get("resource_policy_hash").map_err(storage)?;
     let policy_hash: Vec<u8> = row.try_get("policy_hash").map_err(storage)?;
+    let policy_hash_matches: bool = row.try_get("policy_hash_matches").map_err(storage)?;
+    if !policy_hash_matches {
+        let policy_name: String = row.try_get("name").map_err(storage)?;
+        let policy_revision: i32 = row.try_get("revision").map_err(storage)?;
+        return Err(reject(
+            ReleaseRejection::PolicyInvalid,
+            format!(
+                "release policy {policy_name} revision {policy_revision} content does not match its canonical hash"
+            ),
+        ));
+    }
     let policy = ReleasePolicy {
         policy_uid: row.try_get("policy_uid").map_err(storage)?,
         tenant_id: stored_partition.map(|_| scope.tenant_id()),
@@ -1129,6 +1161,23 @@ async fn mint_attestation(
                 ),
             ));
         }
+    }
+    let exact_policy_assertions = request.blocking_assertions.len()
+        == policy.blocking_assertions.len()
+        && policy.blocking_assertions.iter().all(|required| {
+            request
+                .blocking_assertions
+                .iter()
+                .any(|actual| actual.id == required.id && actual.version == required.version)
+        });
+    if !exact_policy_assertions {
+        return Err(reject(
+            ReleaseRejection::VerdictNotPass,
+            format!(
+                "passing decision blocker identities do not exactly match release policy {} revision {}",
+                policy.name, policy.revision
+            ),
+        ));
     }
     let attestation_uid = Uuid::now_v7();
     let expires_at = now

@@ -853,13 +853,18 @@ async fn assert_catalog_coverage(
             // the pointer table is represented by the executable purge step.
             "moa.artifact_release_eval_overlay",
             "moa.artifact_release_attempt",
-            "moa.artifact_release_fixture",
             "moa.artifact_release_dispatch_outbox",
             "moa.artifact_release_case_pack",
             "moa.artifact_activation_audit",
             "moa.artifact_activation_attestation",
             "moa.artifact_release_candidate",
             "moa.artifact_release_policy",
+            // Platform-only simulator certification authority. These tables
+            // carry nullable scope columns solely for global RLS and can never
+            // own tenant rows; purging them would destroy release authority for
+            // every tenant.
+            "moa.simulator_certification_mandate",
+            "moa.simulator_certification_evidence_import",
             "public.authz_outbox",
             "public.tenants",
             // Owned by the durable credential vault, which removes them in the

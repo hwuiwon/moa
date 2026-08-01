@@ -673,6 +673,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
     let template = pinned_execution_template(22);
     ExperimentRunRecord {
         plan_artifact_uid: None,
+        expected_trials: 0,
         resource_envelope: fixture_experiment_envelope(),
         simulator_policy: None,
         scope: ActionRuleScope::Tenant {

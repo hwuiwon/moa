@@ -8,8 +8,8 @@ use moa_artifacts::registry::{
 };
 use moa_artifacts::release::{
     ActivationRequest, ActivationTarget, ActivationTargetClass, DeterministicVerdict, Digest32,
-    EvidenceAdapter, ExpectedServing, ReleaseSlot, ReleaseState, SimulatorPolicyBinding,
-    TenantScope,
+    EvidenceAdapter, ExpectedServing, PLATFORM_SCENARIO_OUTCOME_ASSERTION_ID, ReleaseSlot,
+    ReleaseState, SimulatorPolicyBinding, TenantScope,
 };
 use moa_artifacts::test_fixtures::{activate_revision, fixture_subject_inputs};
 use moa_artifacts::{Error, ReleaseRejection};
@@ -225,8 +225,53 @@ async fn activation_predicates_fail_closed_db_memory() -> Result<()> {
         ReleaseRejection::CandidateNotActivatable,
     );
 
+    let mut passing_decision = pass_decision(&repository, release_scope, &candidate)
+        .await
+        .map_err(release_error)?;
+    let mut wrong_version = passing_decision.clone();
+    wrong_version
+        .blocking_assertions
+        .iter_mut()
+        .find(|assertion| assertion.id == PLATFORM_SCENARIO_OUTCOME_ASSERTION_ID)
+        .expect("platform policy contains scenario_outcome")
+        .version = "v2".to_string();
+    let version_mismatch = repository
+        .record_decision(wrong_version)
+        .await
+        .expect_err("a mismatched blocker version cannot mint an attestation");
+    assert_rejection(&version_mismatch, ReleaseRejection::VerdictNotPass);
+
+    let mut missing_assertion = passing_decision.clone();
+    missing_assertion.blocking_assertions.pop();
+    let missing_set_member = repository
+        .record_decision(missing_assertion)
+        .await
+        .expect_err("an incomplete blocker set cannot mint an attestation");
+    assert_rejection(&missing_set_member, ReleaseRejection::VerdictNotPass);
+
+    let mut extra_assertion = passing_decision.clone();
+    let duplicate = extra_assertion.blocking_assertions[0].clone();
+    extra_assertion.blocking_assertions.push(duplicate);
+    let extra_set_member = repository
+        .record_decision(extra_assertion)
+        .await
+        .expect_err("a blocker superset cannot mint an attestation");
+    assert_rejection(&extra_set_member, ReleaseRejection::VerdictNotPass);
+
+    assert_eq!(
+        repository
+            .load_candidate(&release_scope, draft.revision_uid)
+            .await
+            .map_err(release_error)?
+            .expect("candidate survives rejected decision")
+            .state,
+        ReleaseState::Evaluating,
+        "a rejected decision rolls back the candidate transition"
+    );
+
+    passing_decision.blocking_assertions.reverse();
     let decision = repository
-        .record_decision(pass_decision(release_scope, &candidate))
+        .record_decision(passing_decision)
         .await
         .map_err(release_error)?;
     assert_eq!(decision.state, ReleaseState::Ready);
@@ -309,7 +354,11 @@ async fn activation_predicates_fail_closed_db_memory() -> Result<()> {
         .map_err(release_error)?
         .candidate;
     let other_attestation = repository
-        .record_decision(pass_decision(release_scope, &other_candidate))
+        .record_decision(
+            pass_decision(&repository, release_scope, &other_candidate)
+                .await
+                .map_err(release_error)?,
+        )
         .await
         .map_err(release_error)?
         .attestation
@@ -408,7 +457,9 @@ async fn activation_predicates_fail_closed_db_memory() -> Result<()> {
     let rejection = repository
         .record_decision(RecordDecision {
             verdict: DeterministicVerdict::Regression,
-            ..pass_decision(release_scope, &rejected_candidate)
+            ..pass_decision(&repository, release_scope, &rejected_candidate)
+                .await
+                .map_err(release_error)?
         })
         .await
         .map_err(release_error)?;
@@ -463,7 +514,11 @@ async fn baseline_drift_invalidates_an_attestation_db_memory() -> Result<()> {
         .map_err(release_error)?
         .candidate;
     let v2_attestation = repository
-        .record_decision(pass_decision(release_scope, &v2_candidate))
+        .record_decision(
+            pass_decision(&repository, release_scope, &v2_candidate)
+                .await
+                .map_err(release_error)?,
+        )
         .await
         .map_err(release_error)?
         .attestation
@@ -579,7 +634,9 @@ async fn inconclusive_frees_the_slot_and_dispatches_the_pending_candidate_db_mem
     let outcome = repository
         .record_decision(RecordDecision {
             verdict: DeterministicVerdict::Inconclusive,
-            ..pass_decision(release_scope, &active.candidate)
+            ..pass_decision(&repository, release_scope, &active.candidate)
+                .await
+                .map_err(release_error)?
         })
         .await
         .map_err(release_error)?;
@@ -691,7 +748,11 @@ async fn concurrent_activation_moves_the_pointer_once_db_memory() -> Result<()> 
             .map_err(release_error)?
             .expect("candidate");
         let attestation = repository
-            .record_decision(pass_decision(release_scope, &candidate))
+            .record_decision(
+                pass_decision(&repository, release_scope, &candidate)
+                    .await
+                    .map_err(release_error)?,
+            )
             .await
             .map_err(release_error)?
             .attestation
@@ -931,7 +992,11 @@ async fn agent_readiness_alone_does_not_change_an_installation_db_memory() -> Re
         .map_err(release_error)?
         .candidate;
     let attestation = repository
-        .record_decision(pass_decision(release_scope, &candidate))
+        .record_decision(
+            pass_decision(&repository, release_scope, &candidate)
+                .await
+                .map_err(release_error)?,
+        )
         .await
         .map_err(release_error)?
         .attestation
@@ -988,11 +1053,15 @@ async fn agent_readiness_alone_does_not_change_an_installation_db_memory() -> Re
 }
 
 /// Builds a passing decision for a candidate with fixture evidence identifiers.
-fn pass_decision(
+async fn pass_decision(
+    repository: &ReleaseRepository,
     scope: TenantScope,
     candidate: &moa_artifacts::registry::ReleaseCandidate,
-) -> RecordDecision {
-    RecordDecision {
+) -> std::result::Result<RecordDecision, Error> {
+    let policy = repository
+        .resolve_policy(&scope, candidate.activation_target.class())
+        .await?;
+    Ok(RecordDecision {
         scope,
         candidate_revision_uid: candidate.revision_uid,
         subject_digest: candidate.subject_digest,
@@ -1001,10 +1070,10 @@ fn pass_decision(
         trial_uids: vec![Uuid::now_v7()],
         evidence_ids: vec![Uuid::now_v7()],
         gate_results: BTreeMap::from([("result_produced".to_string(), "pass".to_string())]),
-        blocking_assertions: Vec::new(),
+        blocking_assertions: policy.blocking_assertions,
         evidence_adapter: EvidenceAdapter::BehaviorLabExperiment,
         decided_by: "release-evaluator".to_string(),
-    }
+    })
 }
 
 /// Asserts the exact release predicate that refused.
@@ -1042,6 +1111,29 @@ async fn release_policy_is_resolved_server_side_db_memory() -> Result<()> {
         .map_err(release_error)?;
     assert_eq!(platform.tenant_id, None, "the default is platform-owned");
     assert!(platform.name.starts_with("platform-default"));
+    let platform_hash_matches: bool = sqlx::query_scalar(
+        r#"
+        SELECT policy_hash = moa.artifact_release_policy_content_hash(
+            name,
+            revision,
+            target_class,
+            blocking_assertions,
+            primary_gate_family,
+            attestation_ttl_secs,
+            resource_policy_hash
+        )
+        FROM moa.artifact_release_policy
+        WHERE policy_uid = $1
+        "#,
+    )
+    .bind(platform.policy_uid)
+    .fetch_one(&pool)
+    .await
+    .map_err(storage_error)?;
+    assert!(
+        platform_hash_matches,
+        "the stored platform policy hash must digest its exact decision authority"
+    );
 
     let override_uid = Uuid::now_v7();
     sqlx::query(
@@ -1051,21 +1143,43 @@ async fn release_policy_is_resolved_server_side_db_memory() -> Result<()> {
             blocking_assertions, primary_gate_family, attestation_ttl_secs,
             resource_policy_hash, policy_hash
         )
-        VALUES ($1, $2, NULL, 'tenant-strict', 3, 'skill_visibility', $3, $4, 3600, $5, $6)
+        VALUES (
+            $1, $2, NULL, 'tenant-strict', 3, 'skill_visibility', $3, $4, 3600, $5,
+            moa.artifact_release_policy_content_hash(
+                'tenant-strict', 3, 'skill_visibility', $3, $4, 3600, $5
+            )
+        )
         "#,
     )
     .bind(override_uid)
     .bind(release_scope.storage_partition_id().to_string())
     .bind(serde_json::json!([
+        {"id": "scenario_outcome", "version": "v1", "determinism": "deterministic"},
         {"id": "target_completed", "version": "v1", "determinism": "deterministic"},
         {"id": "result_produced", "version": "v1", "determinism": "deterministic"},
         {"id": "privacy_safe_output", "version": "v1", "determinism": "deterministic"}
     ]))
     .bind(serde_json::json!([
-        {"metric": "result_produced", "direction": "higher_is_better", "margin_bp": 100}
+        {
+            "metric": "result_produced",
+            "direction": "higher_is_better",
+            "estimand": "paired difference in result-production probability",
+            "target_population": "approved artifact-release scenarios",
+            "independent_unit": "scenario_persona_profile",
+            "cluster_key": "scenario_persona_profile",
+            "paired_key": "scenario_persona_profile_repetition",
+            "confidence_method": "cluster_matched_risk_difference_bootstrap",
+            "unit": "proportion",
+            "margin_bp": 100,
+            "alpha_bp": 250,
+            "acceptable_alternative_bp": 0,
+            "unacceptable_alternative_bp": -200,
+            "resamples": 2000,
+            "min_independent_units": 6,
+            "holm_regression_alpha_bp": 250
+        }
     ]))
     .bind(vec![7_u8; 32])
-    .bind(vec![8_u8; 32])
     .execute(&pool)
     .await
     .map_err(storage_error)?;
@@ -1078,22 +1192,58 @@ async fn release_policy_is_resolved_server_side_db_memory() -> Result<()> {
     assert_eq!(resolved.revision, 3);
     assert_eq!(resolved.tenant_id, Some(tenant_id));
 
-    // A policy row that could not block anything is refused when it is resolved,
-    // not when a decision is recorded.
-    sqlx::query(
-        "UPDATE moa.artifact_release_policy SET blocking_assertions = $2 WHERE policy_uid = $1",
+    // A policy revision is immutable. Operators rotate policy by inserting a new
+    // revision and closing the old one, never by changing authority in place.
+    let in_place_rewrite = sqlx::query(
+        r#"
+        UPDATE moa.artifact_release_policy
+        SET blocking_assertions = $2,
+            policy_hash = moa.artifact_release_policy_content_hash(
+                name,
+                revision,
+                target_class,
+                $2,
+                primary_gate_family,
+                attestation_ttl_secs,
+                resource_policy_hash
+            )
+        WHERE policy_uid = $1
+        "#,
     )
     .bind(override_uid)
     .bind(serde_json::json!([
         {"id": "tenant.vibes", "version": "1", "determinism": "diagnostic"}
     ]))
     .execute(&pool)
+    .await;
+    assert!(
+        in_place_rewrite.is_err(),
+        "a promoter cannot rewrite policy authority under the same identity and hash"
+    );
+
+    // The repository independently recomputes the digest, so storage corruption
+    // still fails closed even if the database trigger is bypassed by an owner.
+    sqlx::query(
+        "ALTER TABLE moa.artifact_release_policy DISABLE TRIGGER artifact_release_policy_immutable",
+    )
+    .execute(&pool)
+    .await
+    .map_err(storage_error)?;
+    sqlx::query("UPDATE moa.artifact_release_policy SET name = 'tampered' WHERE policy_uid = $1")
+        .bind(override_uid)
+        .execute(&pool)
+        .await
+        .map_err(storage_error)?;
+    sqlx::query(
+        "ALTER TABLE moa.artifact_release_policy ENABLE TRIGGER artifact_release_policy_immutable",
+    )
+    .execute(&pool)
     .await
     .map_err(storage_error)?;
     let invalid = repository
         .resolve_policy(&release_scope, ActivationTargetClass::SkillVisibility)
         .await
-        .expect_err("a policy without platform blocking assertions cannot gate anything");
+        .expect_err("a policy whose authority no longer matches its digest cannot gate anything");
     assert_rejection(&invalid, ReleaseRejection::PolicyInvalid);
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await

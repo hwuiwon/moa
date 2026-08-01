@@ -9,7 +9,7 @@
 //! The shape is: the submission transaction writes a dispatch record
 //! ([`repository::ReleaseEvaluationRepository::submit_with_dispatch`]); this
 //! workflow, keyed by that record, claims it, provisions the evaluation-only
-//! overlay and a copy-on-write fixture per arm, resolves the server-side approved
+//! overlay and eval-owned session per arm, resolves the server-side approved
 //! case pack plus the hidden release cohort, and dispatches one plan-backed paired
 //! run through `Experiments/run`. The workflow derives the deterministic decision
 //! from that run's persisted scores and settles the record under the same
@@ -26,8 +26,8 @@
 //!   `(revision, generation, subject digest)` and is passed to `Experiments/run`,
 //!   so re-admission returns the same run instead of a second one.
 
-use moa_artifacts::registry::{RecordDecision, ReleaseRepository};
-use moa_artifacts::release::{ActivationTargetClass, EvidenceAdapter, TenantScope};
+use moa_artifacts::registry::RecordDecision;
+use moa_artifacts::release::{EvidenceAdapter, TenantScope};
 use moa_core::traits::Identity;
 use moa_core::types::identifiers::TenantId;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -123,13 +123,6 @@ pub struct ReleaseEvaluationWorkflowRequest {
     pub tenant_id: TenantId,
     /// Dispatch record this invocation owns; also the workflow key.
     pub outbox_uid: Uuid,
-    /// Candidate revision under evaluation.
-    pub revision_uid: Uuid,
-    /// Activation target class, as its database label.
-    pub activation_target: String,
-    /// Serving revision to compare against, absent for a first activation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_revision_uid: Option<Uuid>,
     /// Identity snapshot used for the downstream `Experiments/run` authorization.
     pub identity: Identity,
 }
@@ -204,11 +197,6 @@ impl ArtifactReleaseEvaluation for ArtifactReleaseEvaluationImpl {
                 TerminalError::new_with_code(404, "release dispatch record id mismatch").into(),
             );
         }
-        let activation_target: ActivationTargetClass = request
-            .activation_target
-            .parse()
-            .map_err(|error| Error::Release(error).terminal())?;
-
         let repository = self.repository.clone();
         let tenant_id = request.tenant_id;
         let outbox_uid = request.outbox_uid;
@@ -220,7 +208,7 @@ impl ArtifactReleaseEvaluation for ArtifactReleaseEvaluationImpl {
                         .claim_dispatch(tenant_id, outbox_uid)
                         .await
                         .map(Json::from)
-                        .map_err(Error::terminal)
+                        .map_err(release_handler_error)
                 }
             })
             .name("release_evaluation_claim")
@@ -263,50 +251,75 @@ impl ArtifactReleaseEvaluation for ArtifactReleaseEvaluationImpl {
 
         let repository = self.repository.clone();
         let record = claimed.record.clone();
-        let baseline_revision_uid = request.baseline_revision_uid;
-        let attempt = ctx
+        let provisioned = ctx
             .run(|| {
                 let repository = repository.clone();
                 let record = record.clone();
                 let tokens = tokens.clone();
                 async move {
-                    repository
-                        .provision_attempt(
-                            &record,
-                            activation_target,
-                            baseline_revision_uid,
-                            &tokens,
-                        )
-                        .await
-                        .map(Json::from)
-                        .map_err(Error::terminal)
+                    let outcome = match repository.provision_attempt(&record, &tokens).await {
+                        Ok(attempt) => Ok(attempt),
+                        Err(error) => Err(provisioning_failure(error)?),
+                    };
+                    Ok::<_, HandlerError>(Json::from(outcome))
                 }
             })
             .name("release_evaluation_provision")
             .await?
             .into_inner();
+        let attempt = match provisioned {
+            Ok(attempt) => attempt,
+            Err(failure) => {
+                return settle_terminal_failure(
+                    &ctx,
+                    self.repository.clone(),
+                    claimed.record,
+                    request.identity,
+                    failure,
+                )
+                .await;
+            }
+        };
 
-        let run_request = build_paired_run_request(
-            request.tenant_id,
-            &claimed.record,
-            activation_target,
-            &attempt,
-        )
-        .map_err(Error::terminal)?;
-        let run_uid = with_identity_headers(
+        let run_request =
+            match build_paired_run_request(request.tenant_id, &claimed.record, &attempt) {
+                Ok(request) => request,
+                Err(error) => {
+                    return settle_terminal_failure(
+                        &ctx,
+                        self.repository.clone(),
+                        claimed.record,
+                        request.identity,
+                        TerminalEvaluationFailure::new("build_experiment_request", &error),
+                    )
+                    .await;
+                }
+            };
+        let admitted = with_identity_headers(
             ctx.service_client::<ExperimentsClient>()
                 .run(Json::from(run_request)),
             &request.identity,
         )
         .call()
-        .await?
-        .into_inner()
-        .run_uid;
+        .await;
+        let run_uid = match admitted {
+            Ok(response) => response.into_inner().run_uid,
+            Err(error) => {
+                return settle_terminal_failure(
+                    &ctx,
+                    self.repository.clone(),
+                    claimed.record,
+                    request.identity,
+                    experiment_admission_failure(&error),
+                )
+                .await;
+            }
+        };
 
         let repository = self.repository.clone();
-        // A first activation compares the candidate with the approved plan's
-        // unmodified control target, so every release attempt remains paired.
-        let baseline_run_uid = Some(run_uid);
+        // Both arms share one experiment run. A first activation has no honest
+        // comparative arm, so it records no baseline run identity.
+        let baseline_run_uid = attempt.has_role(ArmRole::Baseline).then_some(run_uid);
         ctx.run(|| {
             let repository = repository.clone();
             async move {
@@ -314,33 +327,68 @@ impl ArtifactReleaseEvaluation for ArtifactReleaseEvaluationImpl {
                     .record_dispatched_runs(tenant_id, outbox_uid, run_uid, baseline_run_uid)
                     .await
                     .map(Json::from)
-                    .map_err(Error::terminal)
+                    .map_err(release_handler_error)
             }
         })
         .name("release_evaluation_record_runs")
         .await?;
 
-        wait_for_terminal_experiment(&ctx, request.tenant_id, run_uid, &request.identity).await?;
+        match wait_for_terminal_experiment(&ctx, request.tenant_id, run_uid, &request.identity)
+            .await?
+        {
+            ExperimentWaitOutcome::ReachedTerminal => {}
+            ExperimentWaitOutcome::Failed(failure) => {
+                return settle_terminal_failure(
+                    &ctx,
+                    self.repository.clone(),
+                    claimed.record,
+                    request.identity,
+                    failure,
+                )
+                .await;
+            }
+        }
 
         let pool = self.pool.clone();
         let subject_digest = claimed.record.subject_digest;
         let candidate_revision_uid = claimed.record.revision_uid;
-        let release_decision = ctx
+        let provisioned_trials = attempt.trials.clone();
+        let decision = ctx
             .run(|| async move {
-                decide_completed_run(
+                let decision = match decide_completed_run(
                     pool,
                     tenant_id,
                     run_uid,
                     candidate_revision_uid,
                     subject_digest,
+                    &provisioned_trials,
                 )
                 .await
-                .map(Json::from)
-                .map_err(Error::terminal)
+                {
+                    Ok(decision) => Ok(decision),
+                    Err(error) => match release_decision_failure(error) {
+                        Ok(failure) => Err(failure),
+                        Err(retryable) => return Err(retryable),
+                    },
+                };
+                Ok::<_, HandlerError>(Json::from(decision))
             })
             .name("release_evaluation_decide")
             .await?
             .into_inner();
+        let release_decision = match decision {
+            Ok(decision) => decision,
+            Err(failure) => {
+                return settle_terminal_failure(
+                    &ctx,
+                    self.repository.clone(),
+                    claimed.record,
+                    request.identity,
+                    failure,
+                )
+                .await;
+            }
+        };
 
         let repository = self.repository.clone();
         let generation = claimed.record.generation;
@@ -369,7 +417,7 @@ impl ArtifactReleaseEvaluation for ArtifactReleaseEvaluationImpl {
                             release_decision.detail,
                         )
                         .await
-                        .map_err(Error::terminal)?;
+                        .map_err(release_handler_error)?;
                     Ok::<_, HandlerError>(Json::from(SettledEvaluation { next: fenced.next }))
                 }
             })
@@ -378,17 +426,7 @@ impl ArtifactReleaseEvaluation for ArtifactReleaseEvaluationImpl {
             .into_inner();
 
         if let Some(next) = settled.next {
-            let pool = self.pool.clone();
-            let next_request = ctx
-                .run(|| async move {
-                    next_workflow_request(pool, next, identity)
-                        .await
-                        .map(Json::from)
-                        .map_err(Error::terminal)
-                })
-                .name("release_evaluation_next_dispatch")
-                .await?
-                .into_inner();
+            let next_request = next_workflow_request(next, identity);
             crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<ArtifactReleaseEvaluationClient>(
                     next_request.outbox_uid.to_string(),
@@ -415,57 +453,263 @@ struct SettledEvaluation {
     next: Option<types::DispatchRecord>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TerminalEvaluationFailure {
+    phase: String,
+    status_code: u16,
+    error: String,
+}
+
+impl TerminalEvaluationFailure {
+    fn new(phase: &str, error: &Error) -> Self {
+        Self {
+            phase: phase.to_string(),
+            status_code: error.status_code(),
+            error: error.to_string(),
+        }
+    }
+}
+
+fn experiment_admission_failure(error: &TerminalError) -> TerminalEvaluationFailure {
+    TerminalEvaluationFailure {
+        phase: "experiments_run_admission".to_string(),
+        status_code: error.code(),
+        error: error.to_string(),
+    }
+}
+
+fn experiment_status_failure(error: &TerminalError) -> TerminalEvaluationFailure {
+    TerminalEvaluationFailure {
+        phase: "experiments_status".to_string(),
+        status_code: error.code(),
+        error: error.to_string(),
+    }
+}
+
+fn release_decision_failure(error: Error) -> Result<TerminalEvaluationFailure, HandlerError> {
+    if is_retryable_release_error(&error) {
+        Err(release_handler_error(error))
+    } else {
+        Ok(TerminalEvaluationFailure::new("release_decision", &error))
+    }
+}
+
+fn provisioning_failure(error: Error) -> Result<TerminalEvaluationFailure, HandlerError> {
+    if is_retryable_release_error(&error) {
+        Err(release_handler_error(error))
+    } else {
+        Ok(TerminalEvaluationFailure::new("provision", &error))
+    }
+}
+
+async fn settle_terminal_failure(
+    ctx: &WorkflowContext<'_>,
+    repository: ReleaseEvaluationRepository,
+    record: types::DispatchRecord,
+    identity: Identity,
+    failure: TerminalEvaluationFailure,
+) -> Result<Json<ReleaseEvaluationWorkflowResponse>, HandlerError> {
+    let tenant_id = record.tenant_id;
+    let outbox_uid = record.outbox_uid;
+    let phase = failure.phase.clone();
+    let error = failure.error.clone();
+    let settlement = ctx
+        .run(|| async move {
+            repository
+                .settle_terminal_failure(tenant_id, outbox_uid, &phase, &error)
+                .await
+                .map(Json::from)
+                .map_err(release_handler_error)
+        })
+        .name("release_evaluation_settle_terminal_failure")
+        .await?
+        .into_inner();
+    if let Some(next) = settlement.next {
+        let next_request = next_workflow_request(next, identity);
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<ArtifactReleaseEvaluationClient>(
+                next_request.outbox_uid.to_string(),
+            )
+            .run(Json::from(next_request)),
+        )
+        .send();
+    }
+    Err(TerminalError::new_with_code(failure.status_code, failure.error).into())
+}
+
+/// Preserves retryable storage faults while terminalizing deterministic refusals.
+pub(crate) fn release_handler_error(error: Error) -> HandlerError {
+    if is_retryable_release_error(&error) {
+        error.into()
+    } else {
+        error.terminal()
+    }
+}
+
+fn is_retryable_release_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Storage(_) | Error::Release(moa_artifacts::Error::Storage(_))
+    )
+}
+
 async fn wait_for_terminal_experiment(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
     run_uid: Uuid,
     identity: &Identity,
-) -> Result<(), HandlerError> {
+) -> Result<ExperimentWaitOutcome, HandlerError> {
     loop {
-        let response = with_identity_headers(
+        let response = match with_identity_headers(
             ctx.service_client::<ExperimentsClient>().status(Json::from(
                 ExperimentRunStatusRequest { tenant_id, run_uid },
             )),
             identity,
         )
         .call()
-        .await?
-        .into_inner();
+        .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                return Ok(ExperimentWaitOutcome::Failed(experiment_status_failure(
+                    &error,
+                )));
+            }
+        };
         if matches!(
             response.status.as_str(),
             "completed" | "failed" | "cancelled"
         ) {
-            return Ok(());
+            return Ok(ExperimentWaitOutcome::ReachedTerminal);
         }
         ctx.sleep(Duration::from_secs(1)).await?;
     }
 }
 
-async fn next_workflow_request(
-    pool: sqlx::PgPool,
+enum ExperimentWaitOutcome {
+    ReachedTerminal,
+    Failed(TerminalEvaluationFailure),
+}
+
+fn next_workflow_request(
     record: types::DispatchRecord,
     identity: Identity,
-) -> Result<ReleaseEvaluationWorkflowRequest, Error> {
-    let scope = TenantScope::new(record.tenant_id);
-    let candidate = ReleaseRepository::new(pool)
-        .load_candidate(&scope, record.revision_uid)
-        .await?
-        .ok_or_else(|| {
-            Error::StaleDispatch(format!(
-                "next release candidate {} disappeared before dispatch",
-                record.revision_uid
-            ))
-        })?;
-    Ok(ReleaseEvaluationWorkflowRequest {
+) -> ReleaseEvaluationWorkflowRequest {
+    ReleaseEvaluationWorkflowRequest {
         tenant_id: record.tenant_id,
         outbox_uid: record.outbox_uid,
-        revision_uid: record.revision_uid,
-        activation_target: candidate.activation_target.class().as_str().to_string(),
-        baseline_revision_uid: candidate
-            .subject
-            .serving_baseline
-            .as_ref()
-            .map(|baseline| baseline.revision_uid),
         identity,
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pins: a terminal refusal returned by Experiments/run is represented by a
+    // stable settlement phase instead of escaping and stranding the release slot.
+    #[test]
+    fn experiment_admission_failure_has_stable_settlement_detail_offline() {
+        let downstream = TerminalError::new_with_code(400, "release binding refused");
+        let failure = experiment_admission_failure(&downstream);
+        assert_eq!(failure.phase, "experiments_run_admission");
+        assert_eq!(failure.status_code, 400);
+        assert_eq!(
+            failure.error,
+            "Terminal error [400]: release binding refused"
+        );
+    }
+
+    // Pins: storage faults on repository boundaries remain retryable while
+    // deterministic release refusals terminate the invocation.
+    #[test]
+    fn release_error_mapper_preserves_storage_retryability_offline() {
+        for storage in [
+            Error::Storage("database unavailable".into()),
+            Error::Release(moa_artifacts::Error::Storage(
+                "release database unavailable".into(),
+            )),
+        ] {
+            let retryable = release_handler_error(storage);
+            assert!(
+                crate::workflows::errors::handler_error_message(&retryable)
+                    .starts_with("Retryable error:")
+            );
+        }
+
+        let terminal = release_handler_error(Error::CasePackInvalid("empty pack".into()));
+        assert_eq!(
+            crate::workflows::errors::handler_error_message(&terminal),
+            "Terminal error [409]: release case pack is unusable: empty pack"
+        );
+    }
+
+    // Pins: a terminal Experiments/status refusal settles under a stable phase
+    // instead of escaping after claim and leaving the release slot occupied.
+    #[test]
+    fn experiment_status_failure_has_stable_settlement_detail_offline() {
+        let downstream = TerminalError::new_with_code(404, "experiment run disappeared");
+        let failure = experiment_status_failure(&downstream);
+        assert_eq!(failure.phase, "experiments_status");
+        assert_eq!(failure.status_code, 404);
+        assert_eq!(
+            failure.error,
+            "Terminal error [404]: experiment run disappeared"
+        );
+    }
+
+    // Pins: deterministic decision refusals settle, while database faults keep
+    // the workflow retryable and therefore do not consume the release attempt.
+    #[test]
+    fn release_decision_failure_settles_only_deterministic_errors_offline() {
+        let failure =
+            release_decision_failure(Error::StaleDispatch("release policy rotated".to_string()))
+                .expect("policy drift is a terminal release decision failure");
+        assert_eq!(failure.phase, "release_decision");
+        assert_eq!(failure.status_code, 409);
+        assert_eq!(
+            failure.error,
+            "release dispatch is stale: release policy rotated"
+        );
+
+        for storage in [
+            Error::Storage("database temporarily unavailable".to_string()),
+            Error::Release(moa_artifacts::Error::Storage(
+                "release database temporarily unavailable".to_string(),
+            )),
+        ] {
+            let retryable = release_decision_failure(storage)
+                .expect_err("storage failure must remain retryable");
+            assert!(
+                crate::workflows::errors::handler_error_message(&retryable)
+                    .starts_with("Retryable error:")
+            );
+        }
+    }
+
+    // Pins: attempt provisioning must not consume either storage error shape as
+    // a terminal inconclusive release outcome after the dispatch has been claimed.
+    #[test]
+    fn provisioning_failure_preserves_storage_retryability_offline() {
+        for storage in [
+            Error::Storage("database temporarily unavailable".to_string()),
+            Error::Release(moa_artifacts::Error::Storage(
+                "release database temporarily unavailable".to_string(),
+            )),
+        ] {
+            let retryable =
+                provisioning_failure(storage).expect_err("storage failure must remain retryable");
+            assert!(
+                crate::workflows::errors::handler_error_message(&retryable)
+                    .starts_with("Retryable error:")
+            );
+        }
+
+        let terminal = provisioning_failure(Error::Provisioning(
+            "approved case pack is unusable".to_string(),
+        ))
+        .expect("deterministic provisioning refusal must settle");
+        assert_eq!(terminal.phase, "provision");
+        assert_eq!(terminal.status_code, 409);
+    }
 }

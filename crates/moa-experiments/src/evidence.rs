@@ -7,6 +7,7 @@
 //! durable to read.
 
 use moa_core::types::identifiers::SessionId;
+use moa_eval_core::{assertion::AssertionSpec, evidence::EvidenceEnvelope};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -63,6 +64,46 @@ pub enum TrialScoreTarget {
         /// Exact target execution run.
         execution_run_uid: Uuid,
     },
+}
+
+/// Scenario/persona/profile identity selected by one durable trial row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrialScenarioIdentity {
+    /// Stable scenario ID from the pinned experiment plan.
+    pub scenario_id: String,
+    /// Stable simulator persona ID from the pinned experiment plan.
+    pub persona_id: String,
+    /// Stable profile ID from the pinned experiment plan.
+    pub profile_id: String,
+}
+
+/// Release-only provenance required by the objective scenario evaluator.
+///
+/// The trial identity and approved case identity are deliberately both kept.
+/// Comparing them at evaluation time makes a misbound case fail closed instead
+/// of letting a valid assertion result certify the wrong scenario.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseScenarioEvidence {
+    /// Exact durable trial row this evidence belongs to.
+    pub trial_uid: Uuid,
+    /// Scenario identity read from the durable trial row.
+    pub trial: TrialScenarioIdentity,
+    /// Scenario identity carried by the approved release-case binding.
+    pub approved_case: TrialScenarioIdentity,
+    /// Stable candidate or baseline variant key.
+    pub variant_key: String,
+    /// Exact artifact revision substituted by the evaluation overlay.
+    pub revision_uid: Uuid,
+    /// Exact evaluation overlay row used by this trial.
+    pub overlay_uid: Uuid,
+    /// Exact eval-owned session the overlay was bound to.
+    pub eval_session_id: Uuid,
+    /// Highest durable session-event sequence included in `evidence`.
+    pub captured_through_sequence_num: u64,
+    /// Exact versioned assertions selected for this case.
+    pub assertions: Vec<AssertionSpec>,
+    /// Complete persisted session-event evidence captured before scoring.
+    pub evidence: Option<EvidenceEnvelope>,
 }
 
 impl TrialScoreTarget {
@@ -132,6 +173,8 @@ pub struct TrialTerminalEvidence {
     pub simulator_decision: Option<SimulatorDecision>,
     /// Last bounded simulator decision reason, when a simulator ran.
     pub simulator_reason: Option<String>,
+    /// Objective release-scenario provenance, when this was a release trial.
+    pub release_scenario: Option<ReleaseScenarioEvidence>,
 }
 
 impl TrialTerminalEvidence {
@@ -221,13 +264,66 @@ impl TrialTerminalEvidence {
                 hasher.update(b"\x00");
             }
         }
+        match self.release_scenario.as_ref() {
+            Some(scenario) => {
+                hasher.update(b"\x01");
+                hasher.update(scenario.trial_uid.as_bytes());
+                hash_scenario_identity(&mut hasher, &scenario.trial);
+                hash_scenario_identity(&mut hasher, &scenario.approved_case);
+                hash_string(&mut hasher, &scenario.variant_key);
+                hasher.update(scenario.revision_uid.as_bytes());
+                hasher.update(scenario.overlay_uid.as_bytes());
+                hasher.update(scenario.eval_session_id.as_bytes());
+                hasher.update(&scenario.captured_through_sequence_num.to_be_bytes());
+                hash_serialized(&mut hasher, &scenario.assertions);
+                match scenario.evidence.as_ref() {
+                    Some(evidence) => {
+                        hasher.update(b"\x01");
+                        hash_serialized(&mut hasher, evidence);
+                    }
+                    None => {
+                        hasher.update(b"\x00");
+                    }
+                }
+            }
+            None => {
+                hasher.update(b"\x00");
+            }
+        }
         *hasher.finalize().as_bytes()
+    }
+}
+
+fn hash_scenario_identity(hasher: &mut blake3::Hasher, identity: &TrialScenarioIdentity) {
+    hash_string(hasher, &identity.scenario_id);
+    hash_string(hasher, &identity.persona_id);
+    hash_string(hasher, &identity.profile_id);
+}
+
+fn hash_string(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_serialized(hasher: &mut blake3::Hasher, value: &impl Serialize) {
+    match serde_json::to_vec(value) {
+        Ok(bytes) => {
+            hasher.update(&(bytes.len() as u64).to_be_bytes());
+            hasher.update(&bytes);
+        }
+        Err(_) => {
+            hasher.update(&u64::MAX.to_be_bytes());
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moa_eval_core::assertion::{AssertionCategory, AssertionSpec, EvaluatorRef, GateEffect};
+    use moa_eval_core::evidence::{EvidenceEnvelope, EvidenceSubject};
+    use moa_eval_core::types::TEST_CASE_SCHEMA_VERSION;
+    use serde_json::json;
 
     fn evidence() -> TrialTerminalEvidence {
         TrialTerminalEvidence {
@@ -246,6 +342,7 @@ mod tests {
             simulator_policy: None,
             simulator_decision: None,
             simulator_reason: None,
+            release_scenario: None,
         }
     }
 
@@ -292,5 +389,73 @@ mod tests {
         assert!(!absent.produced_result());
         assert!(!empty.produced_result());
         assert!(evidence().produced_result());
+    }
+
+    #[test]
+    fn evidence_hash_binds_release_overlay_assertions_and_observations_offline() {
+        // Pins: release scores cannot be replayed against another overlay,
+        // assertion set, or captured event envelope while retaining the same
+        // terminal evidence identity.
+        let mut first = evidence();
+        let identity = TrialScenarioIdentity {
+            scenario_id: "case".to_string(),
+            persona_id: "persona".to_string(),
+            profile_id: "profile".to_string(),
+        };
+        first.release_scenario = Some(ReleaseScenarioEvidence {
+            trial_uid: Uuid::from_u128(8),
+            trial: identity.clone(),
+            approved_case: identity,
+            variant_key: "release_candidate".to_string(),
+            revision_uid: Uuid::from_u128(9),
+            overlay_uid: Uuid::from_u128(10),
+            eval_session_id: first.session_id.0,
+            captured_through_sequence_num: 42,
+            assertions: vec![AssertionSpec {
+                id: "visible-result".to_string(),
+                category: AssertionCategory::Communication,
+                gate_effect: GateEffect::Blocking,
+                evaluator: EvaluatorRef::deterministic("text_match", 1),
+                config: json!({ "contains": ["shipped"] }),
+            }],
+            evidence: Some(
+                EvidenceEnvelope::builder(EvidenceSubject {
+                    case: "case".to_string(),
+                    case_schema_version: TEST_CASE_SCHEMA_VERSION,
+                    agent_config: "release_candidate".to_string(),
+                    run_label: Uuid::from_u128(8).to_string(),
+                })
+                .source("session_event_log")
+                .response("shipped")
+                .build(),
+            ),
+        });
+
+        let mut another_overlay = first.clone();
+        another_overlay
+            .release_scenario
+            .as_mut()
+            .expect("release evidence")
+            .overlay_uid = Uuid::from_u128(12);
+        let mut another_observation = first.clone();
+        let scenario = another_observation
+            .release_scenario
+            .as_mut()
+            .expect("release evidence");
+        let subject = scenario
+            .evidence
+            .as_ref()
+            .expect("typed evidence")
+            .subject
+            .clone();
+        scenario.evidence = Some(
+            EvidenceEnvelope::builder(subject)
+                .source("session_event_log")
+                .response("cancelled")
+                .build(),
+        );
+
+        assert_ne!(first.hash(), another_overlay.hash());
+        assert_ne!(first.hash(), another_observation.hash());
     }
 }

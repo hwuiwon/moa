@@ -71,6 +71,12 @@ jobs:
       - name: Run offline tests (fast-pr lane)
         run: cargo nextest run --locked --profile fast-pr
 
+      # Compile the feature-gated eval command surface and execute its
+      # deterministic null/oracle, corpus-authoring, and leakage gates. Database
+      # controls remain owned by the db-tests job below; this step is unbilled.
+      - name: Validate deterministic eval suite controls
+        run: cargo run -p xtask --locked --features eval-tools -- eval-suite-controls
+
   # Manifest and observability contracts.
   #
   # Nothing in the Rust build reads a Kubernetes manifest, an Alloy config, or an

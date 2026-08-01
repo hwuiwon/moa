@@ -261,6 +261,34 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(cases), 100)
         self.assertEqual(provenance["case_count"], 100)
 
+    def test_turn_message_bodies_carry_stable_unique_client_message_ids(self):
+        cases, _ = self.runner.parse_cases()
+        case = cases[0]
+        start = self.runner.turn_message_body(case, case["request"], 0)
+        queued = self.runner.turn_message_body(
+            case, "Actually, keep it to five bullets.", 1
+        )
+
+        required = {
+            "client_message_id",
+            "user_message",
+            "attachments",
+            "model",
+            "max_turns",
+            "contact",
+        }
+        self.assertTrue(required.issubset(start))
+        self.assertTrue(required.issubset(queued))
+        self.assertEqual(
+            start["client_message_id"], "moa-100-session-sweep:S001:0"
+        )
+        self.assertEqual(
+            queued["client_message_id"], "moa-100-session-sweep:S001:1"
+        )
+        self.assertNotEqual(start["client_message_id"], queued["client_message_id"])
+        next_case = self.runner.turn_message_body(cases[1], cases[1]["request"], 0)
+        self.assertNotEqual(start["client_message_id"], next_case["client_message_id"])
+
     def test_validate_cases_flag_exits_zero_and_creates_no_run_dir(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -313,6 +341,43 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertIn("below the run forecast", str(ctx.exception))
         self.assertIn("zero sessions will be dispatched", str(ctx.exception))
 
+    def test_total_budget_must_be_positive_and_finite(self):
+        base = {
+            "MOA_RUN_LIVE_100_SESSION_SWEEP": "1",
+            "MOA_OPENAI_API_KEY": "test-key",
+            "MOA_DATABASE_URL": "postgres://localhost/test",
+        }
+        for invalid in ("nan", "inf", "-inf", "0", "-1"):
+            with self.subTest(invalid=invalid):
+                with unittest.mock.patch.dict(
+                    "os.environ",
+                    {**base, "MOA_SWEEP_BUDGET_USD": invalid},
+                    clear=True,
+                ):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        self.runner.preflight_gate(100, 3)
+                self.assertIn("MOA_SWEEP_BUDGET_USD=", str(ctx.exception))
+                self.assertIn("finite and greater than zero", str(ctx.exception))
+
+    def test_per_case_forecast_must_be_positive_and_finite(self):
+        base = {
+            "MOA_RUN_LIVE_100_SESSION_SWEEP": "1",
+            "MOA_SWEEP_BUDGET_USD": "10",
+            "MOA_OPENAI_API_KEY": "test-key",
+            "MOA_DATABASE_URL": "postgres://localhost/test",
+        }
+        for invalid in ("nan", "inf", "-inf", "0", "-1"):
+            with self.subTest(invalid=invalid):
+                with unittest.mock.patch.dict(
+                    "os.environ",
+                    {**base, "MOA_SWEEP_COST_PER_CASE_USD": invalid},
+                    clear=True,
+                ):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        self.runner.preflight_gate(100, 3)
+                self.assertIn("MOA_SWEEP_COST_PER_CASE_USD=", str(ctx.exception))
+                self.assertIn("finite and greater than zero", str(ctx.exception))
+
     def test_ledger_stops_dispatching_when_the_budget_is_exhausted(self):
         ledger = self.runner.BudgetLedger(budget_usd=0.05, per_case_usd=0.02)
         self.assertTrue(ledger.reserve("S001"))
@@ -363,6 +428,54 @@ class RunnerIntegrationTests(unittest.TestCase):
         # The expected-zero bundle counters are gone from the record entirely.
         self.assertNotIn("worker_result_bundles", result)
         self.assertNotIn("worker_result_bundle_results", result)
+
+    def test_full_run_and_baseline_require_the_canonical_canary_to_pass(self):
+        passed = [
+            {"id": case_id, "outcome": "pass"} for case_id in self.runner.CANARY_IDS
+        ]
+        self.assertEqual(self.runner.CANARY_IDS, ("S001", "S002", "S003"))
+        self.assertTrue(self.runner.canonical_canary_succeeded(passed))
+        self.assertTrue(self.runner.baseline_is_eligible(100, False, passed, {}))
+
+        partial = copy.deepcopy(passed)
+        partial[1]["outcome"] = "partial"
+        self.assertFalse(self.runner.canonical_canary_succeeded(partial))
+        self.assertFalse(self.runner.baseline_is_eligible(100, False, partial, {}))
+        self.assertFalse(self.runner.baseline_is_eligible(100, False, passed[:2], {}))
+        self.assertFalse(
+            self.runner.baseline_is_eligible(
+                100, False, list(reversed(passed)), {}
+            )
+        )
+        self.assertFalse(self.runner.baseline_is_eligible(99, False, passed, {}))
+        self.assertFalse(self.runner.baseline_is_eligible(100, True, passed, {}))
+
+    def test_baseline_rejects_runner_error_outcomes(self):
+        passed = [
+            {"id": case_id, "outcome": "pass"} for case_id in self.runner.CANARY_IDS
+        ]
+        self.assertFalse(
+            self.runner.baseline_is_eligible(
+                100, False, passed, {"F-ERROR": 1}
+            )
+        )
+
+    def test_partial_canary_aborts_before_the_full_run(self):
+        cases, _ = self.runner.parse_cases()
+        partial = [
+            {"id": case_id, "outcome": "pass", "failure_tags": []}
+            for case_id in self.runner.CANARY_IDS
+        ]
+        partial[1]["outcome"] = "partial"
+        with tempfile.TemporaryDirectory(prefix="moa_sweep_canary_") as directory:
+            canary_path = Path(directory) / "canary.json"
+            with unittest.mock.patch.object(self.runner, "CANARY_JSON", canary_path):
+                with unittest.mock.patch.object(
+                    self.runner, "dispatch", return_value=partial
+                ):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        self.runner.run_canary(cases)
+        self.assertIn("canary failed", str(ctx.exception))
 
     def test_aggregate_excludes_undispatched_cases_from_attempted(self):
         cases, _ = self.runner.parse_cases()

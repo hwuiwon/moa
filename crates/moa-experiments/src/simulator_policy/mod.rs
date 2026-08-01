@@ -17,7 +17,8 @@
 //!   shared by certification and the production trial workflow.
 //! * [`authorization`] — the gate a live, billed fidelity study must pass:
 //!   explicit flag, positive budget, credentials, and human-data authorization.
-//! * [`store`] — the tenant-scoped durable registry and study records.
+//! * [`store`] — tenant registry records plus the independently authorized
+//!   platform-certification ingestion boundary.
 //!
 //! Experiment admission resolves one exact certified revision and persists the
 //! full immutable snapshot on the run and every trial. The existing production
@@ -66,6 +67,42 @@ pub enum SimulatorPolicyError {
     #[error("invalid fidelity measurement: {detail}")]
     InvalidMeasurement {
         /// Validation detail.
+        detail: String,
+    },
+    /// No independently persisted platform certification mandate was found.
+    #[error("platform simulator certification mandate {mandate_uid} does not exist")]
+    CertificationMandateMissing {
+        /// Requested mandate identifier.
+        mandate_uid: Uuid,
+    },
+    /// The submitted study disagrees with its independently persisted mandate.
+    #[error("platform simulator certification mandate {mandate_uid} mismatch: {detail}")]
+    CertificationMandateMismatch {
+        /// Mandate identifier.
+        mandate_uid: Uuid,
+        /// Mismatched authority field.
+        detail: String,
+    },
+    /// The study has no independently imported source-evidence approval.
+    #[error(
+        "platform simulator study {study_uid} has no approved evidence import under mandate {mandate_uid}"
+    )]
+    CertificationEvidenceMissing {
+        /// Mandate identifier.
+        mandate_uid: Uuid,
+        /// Study identifier.
+        study_uid: Uuid,
+    },
+    /// The imported source evidence does not approve the submitted study bytes.
+    #[error(
+        "platform simulator study {study_uid} disagrees with the approved evidence import under mandate {mandate_uid}: {detail}"
+    )]
+    CertificationEvidenceMismatch {
+        /// Mandate identifier.
+        mandate_uid: Uuid,
+        /// Study identifier.
+        study_uid: Uuid,
+        /// Mismatched evidence field.
         detail: String,
     },
     /// The stored hash does not match the stored policy body.
@@ -192,17 +229,6 @@ pub(crate) mod test_support {
         ScenarioDomain::new("retail-support").expect("fixture domain is valid")
     }
 
-    /// Returns the calibration cohort pin.
-    pub(crate) fn calibration_cohort() -> CohortPin {
-        CohortPin {
-            cohort_id: "calib-2026-q2".to_string(),
-            independent_units: 40,
-            content_hash: Digest32([0xC0; 32]),
-            consent_basis: ConsentBasis::ExplicitParticipantConsent,
-            deidentification: DeidentificationMethod::PseudonymizedAndRedacted,
-        }
-    }
-
     /// Returns the policy-selection cohort pin.
     pub(crate) fn selection_cohort() -> CohortPin {
         CohortPin {
@@ -240,7 +266,7 @@ pub(crate) mod test_support {
             protocol: production_protocol().expect("fixture protocol hashes"),
             context_contract_hash: production_context_contract_hash()
                 .expect("fixture context contract hashes"),
-            calibration_cohort: calibration_cohort(),
+            calibration_cohort: selection_cohort(),
             validity: ValidityWindow {
                 valid_from: at(500_000),
                 valid_until: at(2_000_000),

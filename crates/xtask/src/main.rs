@@ -11,6 +11,8 @@ use serde::Deserialize;
 
 #[cfg(feature = "eval-tools")]
 mod calibrate_external_memory_judge;
+#[cfg(feature = "eval-tools")]
+mod certify_platform_simulator;
 mod check_architecture_boundaries;
 #[cfg(feature = "eval-tools")]
 mod check_eval_budgets;
@@ -43,6 +45,7 @@ mod wixqa_rag_eval;
 const EVAL_TOOL_COMMANDS: &[&str] = &[
     "check-eval-budgets",
     "calibrate-external-memory-judge",
+    "certify-platform-simulator",
     "compare-eval-reports",
     "compute-memory-quality-scores",
     "eval-control-mutants",
@@ -97,6 +100,8 @@ fn main() -> Result<()> {
         Some("check-eval-budgets") => check_eval_budgets::run(args),
         #[cfg(feature = "eval-tools")]
         Some("calibrate-external-memory-judge") => calibrate_external_memory_judge::run(args),
+        #[cfg(feature = "eval-tools")]
+        Some("certify-platform-simulator") => certify_platform_simulator::run(args),
         #[cfg(feature = "eval-tools")]
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         #[cfg(feature = "eval-tools")]

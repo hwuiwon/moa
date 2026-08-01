@@ -6,7 +6,7 @@
 //! evaluation overlay is unreachable from normal session resolution, and the hidden
 //! release cohort rotates and runs out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
@@ -15,7 +15,8 @@ use moa_artifacts::registry::{
 };
 use moa_artifacts::release::{
     ActivationTarget, ActivationTargetClass, AssertionRef, DeterminismClass, DeterministicVerdict,
-    EvidenceAdapter, PLATFORM_BLOCKING_ASSERTIONS, ReleaseSlot, ReleaseState, TenantScope,
+    EvidenceAdapter, PLATFORM_BLOCKING_ASSERTIONS, PLATFORM_RELEASE_PLAN_REVISION_UID, ReleaseSlot,
+    ReleaseState, TenantScope,
 };
 use moa_artifacts::test_fixtures::fixture_subject_inputs;
 use moa_core::types::action_policy::ActionRuleScope;
@@ -112,8 +113,7 @@ mod artifact_release_evaluation {
             .expect("create draft skill")
     }
 
-    /// Seeds a tenant, certified simulator, published release plan, candidate,
-    /// and tenant case-pack supplement.
+    /// Seeds a tenant whose release subjects resolve the platform-owned plan.
     async fn fixture(label: &str) -> (moa_test_support::postgres::TestDb, Fixture) {
         let test_db = bootstrap_test_db()
             .await
@@ -127,7 +127,6 @@ mod artifact_release_evaluation {
             &pool,
             tenant_id,
             ActivationTargetClass::SkillVisibility,
-            label,
         )
         .await
         .expect("seed release environment");
@@ -167,13 +166,302 @@ mod artifact_release_evaluation {
                 .iter()
                 .map(|id| AssertionRef {
                     id: (*id).to_string(),
-                    version: "1".to_string(),
+                    version: "v1".to_string(),
                     determinism: DeterminismClass::Deterministic,
                 })
                 .collect(),
             evidence_adapter: EvidenceAdapter::BehaviorLabExperiment,
             decided_by: "admin".to_string(),
         }
+    }
+
+    async fn insert_historical_case_pack(
+        pool: &PgPool,
+        name: &str,
+        cases: serde_json::Value,
+        scenario_source: serde_json::Value,
+    ) -> std::result::Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+        let mandatory = json!(["target_completed"]);
+        sqlx::query(
+            r#"
+            INSERT INTO moa.artifact_release_case_pack (
+                pack_uid, storage_partition_id, user_id, name, revision, target_class,
+                visibility, cohort_epoch, plan_revision_uid, cases,
+                mandatory_assertions, scenario_source, pack_hash, valid_to
+            )
+            VALUES (
+                $1, NULL, NULL, $2, 1, 'action_visibility', 'authoring', 1, $3,
+                $4, $5, $6,
+                moa.artifact_release_case_pack_content_hash(
+                    $2, 1, 'action_visibility', 'authoring', 1,
+                    NULL, NULL, NULL, $3, $4, $5, $6
+                ),
+                now()
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(name)
+        .bind(PLATFORM_RELEASE_PLAN_REVISION_UID)
+        .bind(cases)
+        .bind(mandatory)
+        .bind(scenario_source)
+        .execute(pool)
+        .await
+    }
+
+    #[tokio::test]
+    async fn platform_plan_stores_its_exact_canonical_document_hash_db() {
+        // Pins: the release subject hashes the immutable executable ArtifactDocument,
+        // not a migration label that could stay unchanged while plan bytes drift.
+        let (_db, fixture) = fixture("platform-plan-hash").await;
+        let revision = fixture
+            .registry
+            .load_revision(&fixture.scope, PLATFORM_RELEASE_PLAN_REVISION_UID)
+            .await
+            .expect("load platform release plan")
+            .expect("platform release plan exists");
+        let expected = moa_artifacts::canonical::canonical_hash(&revision.document)
+            .expect("platform plan document canonicalizes");
+        assert_eq!(revision.canonical_hash.as_slice(), expected.as_slice());
+
+        let mut tenant_conn = moa_db::ScopedConn::begin(
+            &fixture.pool,
+            &moa_core::types::memory::RlsContext::tenant(fixture.tenant_id),
+        )
+        .await
+        .expect("begin tenant-scoped artifact transaction");
+        sqlx::query("SET LOCAL ROLE moa_app")
+            .execute(tenant_conn.as_mut())
+            .await
+            .expect("apply tenant application role");
+        let error = sqlx::query(
+            "UPDATE moa.artifact SET description = 'tenant rewrite' WHERE artifact_uid = $1",
+        )
+        .bind(revision.artifact_uid)
+        .execute(tenant_conn.as_mut())
+        .await
+        .expect_err("tenant role must not modify a global artifact");
+        assert!(
+            matches!(&error, sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")),
+            "unexpected global artifact write rejection: {error}"
+        );
+        tenant_conn
+            .rollback()
+            .await
+            .expect("rollback rejected tenant write");
+    }
+
+    #[tokio::test]
+    async fn platform_case_pack_authority_is_hashed_immutable_and_verified_db() {
+        // Pins: the case-pack hash covers executable authority, the same revision
+        // cannot be rewritten in place, and repository resolution independently
+        // refuses owner-level corruption before an experiment is provisioned.
+        let (_db, fixture) = fixture("case-pack-integrity").await;
+        let hashes_match: bool = sqlx::query_scalar(
+            r#"
+            SELECT bool_and(
+                pack_hash = moa.artifact_release_case_pack_content_hash(
+                    name,
+                    revision,
+                    target_class,
+                    visibility,
+                    cohort_epoch,
+                    cohort_size,
+                    rotates_at,
+                    max_attempts_per_epoch,
+                    plan_revision_uid,
+                    cases,
+                    mandatory_assertions,
+                    scenario_source
+                )
+            )
+            FROM moa.artifact_release_case_pack
+            WHERE storage_partition_id IS NULL
+            "#,
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("verify seeded case-pack digests");
+        assert!(
+            hashes_match,
+            "every platform case-pack hash must digest its exact executable authority"
+        );
+
+        let pack_uid: Uuid = sqlx::query_scalar(
+            "SELECT pack_uid FROM moa.artifact_release_case_pack \
+             WHERE target_class = 'skill_visibility' AND visibility = 'authoring' \
+               AND valid_to IS NULL",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load active authoring case pack");
+        let rewrite = sqlx::query(
+            r#"
+            UPDATE moa.artifact_release_case_pack
+            SET name = 'rewritten',
+                pack_hash = moa.artifact_release_case_pack_content_hash(
+                    'rewritten',
+                    revision,
+                    target_class,
+                    visibility,
+                    cohort_epoch,
+                    cohort_size,
+                    rotates_at,
+                    max_attempts_per_epoch,
+                    plan_revision_uid,
+                    cases,
+                    mandatory_assertions,
+                    scenario_source
+                )
+            WHERE pack_uid = $1
+            "#,
+        )
+        .bind(pack_uid)
+        .execute(&fixture.pool)
+        .await;
+        assert!(
+            rewrite.is_err(),
+            "a promoter cannot rewrite executable pack authority in place"
+        );
+
+        sqlx::query(
+            "ALTER TABLE moa.artifact_release_case_pack DISABLE TRIGGER artifact_release_case_pack_immutable",
+        )
+        .execute(&fixture.pool)
+        .await
+        .expect("disable immutability only to simulate owner-level corruption");
+        sqlx::query(
+            "UPDATE moa.artifact_release_case_pack SET name = 'tampered' WHERE pack_uid = $1",
+        )
+        .bind(pack_uid)
+        .execute(&fixture.pool)
+        .await
+        .expect("simulate corrupted case-pack authority");
+        sqlx::query(
+            "ALTER TABLE moa.artifact_release_case_pack ENABLE TRIGGER artifact_release_case_pack_immutable",
+        )
+        .execute(&fixture.pool)
+        .await
+        .expect("restore case-pack immutability");
+
+        let draft = fixture.draft("candidate").await;
+        let submitted = fixture
+            .repository
+            .submit_with_dispatch(
+                fixture.submit(draft.revision_uid, draft.artifact_uid),
+                Vec::new(),
+            )
+            .await
+            .expect("submit candidate before case-plan resolution");
+        let record = submitted.dispatch.expect("candidate dispatch record");
+        let claimed = fixture
+            .repository
+            .claim_dispatch(fixture.tenant_id, record.outbox_uid)
+            .await
+            .expect("claim dispatch")
+            .expect("dispatch is claimable");
+        let error = fixture
+            .repository
+            .provision_attempt(
+                &claimed.record,
+                &[(ArmRole::Candidate, "candidate-secret".to_string())],
+            )
+            .await
+            .expect_err("a corrupted pack cannot construct a release subject");
+        assert!(
+            matches!(error, ReleaseEvaluationError::CasePackInvalid(_)),
+            "unexpected corrupted pack error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_cohort_rotation_inserts_a_canonical_immutable_revision_db() {
+        // Pins: rotation is insert-new-revision, closes the old cohort, and hashes
+        // the exact new epoch and deadline instead of a human-readable label.
+        let (_db, fixture) = fixture("case-pack-rotation").await;
+        let (old_uid, old_revision, old_epoch, rotates_at): (
+            Uuid,
+            i32,
+            i32,
+            chrono::DateTime<chrono::Utc>,
+        ) = sqlx::query_as(
+            "SELECT pack_uid, revision, cohort_epoch, rotates_at \
+             FROM moa.artifact_release_case_pack \
+             WHERE target_class = 'skill_visibility' AND visibility = 'hidden' \
+               AND valid_to IS NULL",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load current hidden cohort");
+        let rotation_time = rotates_at + chrono::Duration::seconds(1);
+        let next_uid: Uuid = sqlx::query_scalar(
+            "SELECT moa.rotate_release_hidden_cohort($1, $2, INTERVAL '7 days')",
+        )
+        .bind(ActivationTargetClass::SkillVisibility.as_str())
+        .bind(rotation_time)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("rotate hidden cohort");
+        assert_ne!(next_uid, old_uid, "rotation must insert a new pack row");
+
+        let old_valid_to: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_to FROM moa.artifact_release_case_pack WHERE pack_uid = $1",
+        )
+        .bind(old_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load closed prior cohort");
+        assert_eq!(old_valid_to, rotation_time);
+        let reopened = sqlx::query(
+            "UPDATE moa.artifact_release_case_pack SET valid_to = NULL WHERE pack_uid = $1",
+        )
+        .bind(old_uid)
+        .execute(&fixture.pool)
+        .await;
+        assert!(
+            reopened.is_err(),
+            "a closed cohort revision cannot be reopened in place"
+        );
+
+        let (revision, epoch, hash_matches): (i32, i32, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                revision,
+                cohort_epoch,
+                pack_hash = moa.artifact_release_case_pack_content_hash(
+                    name,
+                    revision,
+                    target_class,
+                    visibility,
+                    cohort_epoch,
+                    cohort_size,
+                    rotates_at,
+                    max_attempts_per_epoch,
+                    plan_revision_uid,
+                    cases,
+                    mandatory_assertions,
+                    scenario_source
+                )
+            FROM moa.artifact_release_case_pack
+            WHERE pack_uid = $1
+            "#,
+        )
+        .bind(next_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load rotated cohort");
+        assert_eq!(revision, old_revision + 1);
+        assert_eq!(epoch, old_epoch + 1);
+        assert!(hash_matches, "rotation must hash the exact new cohort row");
+
+        let rewrite = sqlx::query(
+            "UPDATE moa.artifact_release_case_pack SET cohort_epoch = cohort_epoch + 1 WHERE pack_uid = $1",
+        )
+        .bind(next_uid)
+        .execute(&fixture.pool)
+        .await;
+        assert!(rewrite.is_err(), "a rotated revision is immutable too");
     }
 
     #[tokio::test]
@@ -354,6 +642,287 @@ mod artifact_release_evaluation {
     }
 
     #[tokio::test]
+    async fn terminal_provisioning_failure_releases_the_active_slot_db() {
+        // Pins: a terminal refusal before Experiments/run is admitted must close
+        // the claimed attempt as inconclusive and advance the newest pending
+        // subject instead of stranding the artifact's single active slot.
+        let (_db, fixture) = fixture("terminal-provisioning-failure").await;
+        let active = fixture.draft("active").await;
+        let submitted = fixture
+            .repository
+            .submit_with_dispatch(
+                fixture.submit(active.revision_uid, active.artifact_uid),
+                Vec::new(),
+            )
+            .await
+            .expect("submit active candidate");
+        let record = submitted.dispatch.expect("active dispatch record");
+        let pending = fixture.draft("pending").await;
+        fixture
+            .repository
+            .submit_with_dispatch(
+                fixture.submit(pending.revision_uid, pending.artifact_uid),
+                Vec::new(),
+            )
+            .await
+            .expect("submit pending candidate");
+        let claimed = fixture
+            .repository
+            .claim_dispatch(fixture.tenant_id, record.outbox_uid)
+            .await
+            .expect("claim active dispatch")
+            .expect("active dispatch is claimable");
+
+        let failure = fixture
+            .repository
+            .provision_attempt(&claimed.record, &[])
+            .await
+            .expect_err("missing candidate overlay token is terminal");
+        let failure_detail = failure.to_string();
+        let settled = fixture
+            .repository
+            .settle_terminal_failure(
+                fixture.tenant_id,
+                record.outbox_uid,
+                "provision",
+                &failure_detail,
+            )
+            .await
+            .expect("terminal provisioning failure settles the release attempt");
+        assert_eq!(
+            settled.next.as_ref().map(|next| next.revision_uid),
+            Some(pending.revision_uid)
+        );
+
+        let failed_dispatch: (String, bool) = sqlx::query_as(
+            "SELECT status, settled_at IS NOT NULL FROM moa.artifact_release_dispatch_outbox WHERE outbox_uid = $1",
+        )
+        .bind(record.outbox_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load failed dispatch status");
+        assert_eq!(
+            failed_dispatch,
+            (DispatchStatus::Abandoned.as_str().to_string(), true),
+            "the failed dispatch must be terminal"
+        );
+
+        let attempt: (String, Option<Uuid>, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            r#"
+            SELECT verdict, attestation_uid, candidate_run_uid, verdict_detail
+            FROM moa.artifact_release_attempt
+            WHERE attempt_uid = $1
+            "#,
+        )
+        .bind(settled.attempt_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load terminally failed attempt");
+        assert_eq!(attempt.0, DeterministicVerdict::Inconclusive.as_str());
+        assert_eq!(attempt.1, None, "terminal failure must never attest");
+        assert_eq!(attempt.2, None, "no experiment run was admitted");
+        assert_eq!(
+            attempt.3,
+            json!({
+                "terminal_failure": {
+                    "phase": "provision",
+                    "error": failure_detail,
+                }
+            }),
+            "the review surface preserves stable phase and error detail"
+        );
+
+        let active_state: (String, String, Option<Uuid>, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT r.status, c.slot, c.last_run_uid, c.last_decision
+            FROM moa.artifact_release_candidate c
+            JOIN moa.artifact_revision r ON r.revision_uid = c.revision_uid
+            WHERE c.revision_uid = $1
+            "#,
+        )
+        .bind(active.revision_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load failed candidate state");
+        assert_eq!(
+            active_state,
+            (
+                ReleaseState::Inconclusive.as_str().to_string(),
+                ReleaseSlot::Released.as_str().to_string(),
+                None,
+                Some(DeterministicVerdict::Inconclusive.as_str().to_string()),
+            ),
+            "the failed candidate must be retryable and carry no fabricated run"
+        );
+
+        let pending_state: (String, String) = sqlx::query_as(
+            r#"
+            SELECT c.slot, r.status
+            FROM moa.artifact_release_candidate c
+            JOIN moa.artifact_revision r ON r.revision_uid = c.revision_uid
+            WHERE c.revision_uid = $1
+            "#,
+        )
+        .bind(pending.revision_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("load pending candidate state");
+        assert_eq!(
+            pending_state,
+            (
+                ReleaseSlot::Active.as_str().to_string(),
+                ReleaseState::Evaluating.as_str().to_string(),
+            )
+        );
+
+        let replayed = fixture
+            .repository
+            .settle_terminal_failure(
+                fixture.tenant_id,
+                record.outbox_uid,
+                "provision",
+                "a replay must preserve the first committed detail",
+            )
+            .await
+            .expect("terminal settlement is idempotent");
+        assert_eq!(replayed, settled);
+        let replayed_detail: serde_json::Value = sqlx::query_scalar(
+            "SELECT verdict_detail FROM moa.artifact_release_attempt WHERE attempt_uid = $1",
+        )
+        .bind(settled.attempt_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("reload terminal failure detail");
+        assert_eq!(replayed_detail, attempt.3, "first failure detail is stable");
+        let dispatch_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.artifact_release_dispatch_outbox WHERE artifact_uid = $1",
+        )
+        .bind(active.artifact_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("count dispatch records after settlement replay");
+        assert_eq!(
+            dispatch_count, 2,
+            "settlement replay must not enqueue twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_claim_terminal_failures_release_the_active_slot_without_attestation_db() {
+        // Pins: terminal status-poll and decision failures happen after an
+        // experiment identity is recorded. Both must preserve that diagnostic
+        // identity on the attempt while releasing the candidate and advancing
+        // pending work without minting an attestation.
+        for phase in ["experiments_status", "release_decision"] {
+            let (_db, fixture) = fixture(&format!("terminal-{phase}")).await;
+            let active = fixture.draft("active").await;
+            let submitted = fixture
+                .repository
+                .submit_with_dispatch(
+                    fixture.submit(active.revision_uid, active.artifact_uid),
+                    Vec::new(),
+                )
+                .await
+                .expect("submit active candidate");
+            let record = submitted.dispatch.expect("active dispatch record");
+            let pending = fixture.draft("pending").await;
+            fixture
+                .repository
+                .submit_with_dispatch(
+                    fixture.submit(pending.revision_uid, pending.artifact_uid),
+                    Vec::new(),
+                )
+                .await
+                .expect("submit pending candidate");
+            let claimed = fixture
+                .repository
+                .claim_dispatch(fixture.tenant_id, record.outbox_uid)
+                .await
+                .expect("claim active dispatch")
+                .expect("active dispatch is claimable");
+            fixture
+                .repository
+                .provision_attempt(
+                    &claimed.record,
+                    &[(ArmRole::Candidate, "candidate-secret".to_string())],
+                )
+                .await
+                .expect("provision release attempt");
+            let run_uid = Uuid::now_v7();
+            fixture
+                .repository
+                .record_dispatched_runs(fixture.tenant_id, record.outbox_uid, run_uid, None)
+                .await
+                .expect("record admitted experiment identity");
+
+            let settled = fixture
+                .repository
+                .settle_terminal_failure(
+                    fixture.tenant_id,
+                    record.outbox_uid,
+                    phase,
+                    "terminal downstream refusal",
+                )
+                .await
+                .expect("post-claim terminal failure settles the release attempt");
+            assert_eq!(
+                settled.next.as_ref().map(|next| next.revision_uid),
+                Some(pending.revision_uid),
+                "{phase} failure must advance the newest pending candidate"
+            );
+
+            let attempt: (String, Option<Uuid>, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+                r#"
+                    SELECT verdict, attestation_uid, candidate_run_uid, verdict_detail
+                    FROM moa.artifact_release_attempt
+                    WHERE attempt_uid = $1
+                    "#,
+            )
+            .bind(settled.attempt_uid)
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("load terminal release attempt");
+            assert_eq!(attempt.0, DeterministicVerdict::Inconclusive.as_str());
+            assert_eq!(attempt.1, None, "{phase} failure must never attest");
+            assert_eq!(
+                attempt.2,
+                Some(run_uid),
+                "the admitted run remains available for diagnosis"
+            );
+            assert_eq!(attempt.3["terminal_failure"]["phase"], json!(phase));
+            assert_eq!(
+                attempt.3["terminal_failure"]["error"],
+                json!("terminal downstream refusal")
+            );
+            assert!(
+                attempt.3.get("case_plan").is_some(),
+                "terminal settlement must preserve provisioned diagnostic metadata"
+            );
+
+            let candidate: (String, String, Option<Uuid>) = sqlx::query_as(
+                r#"
+                SELECT r.status, c.slot, c.last_run_uid
+                FROM moa.artifact_release_candidate c
+                JOIN moa.artifact_revision r ON r.revision_uid = c.revision_uid
+                WHERE c.revision_uid = $1
+                "#,
+            )
+            .bind(active.revision_uid)
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("load terminal candidate state");
+            assert_eq!(
+                candidate,
+                (
+                    ReleaseState::Inconclusive.as_str().to_string(),
+                    ReleaseSlot::Released.as_str().to_string(),
+                    None,
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_superseded_generation_cannot_make_a_revision_ready_db() {
         // Pins: the generation fence runs before the candidate state moves, so a
         // result for a stale generation leaves the candidate evaluating, mints no
@@ -474,6 +1043,15 @@ mod artifact_release_evaluation {
         // nothing; and the overlay stops answering without its secret, in another
         // arm's session, or after the attempt closes.
         let (_db, fixture) = fixture("overlay").await;
+        let baseline = fixture.draft("serving baseline").await;
+        moa_artifacts::test_fixtures::activate_revision(
+            &fixture.pool,
+            fixture.release_scope,
+            fixture.target(baseline.artifact_uid),
+            baseline.revision_uid,
+        )
+        .await
+        .expect("activate serving baseline");
         let dependency = draft_skill(
             &fixture.registry,
             &fixture.scope,
@@ -505,11 +1083,6 @@ mod artifact_release_evaluation {
             .repository
             .provision_attempt(
                 &claimed.record,
-                ActivationTargetClass::SkillVisibility,
-                // A synthetic baseline revision so both arms are provisioned: the
-                // per-arm isolation below is exactly what a single-arm attempt
-                // could not exercise.
-                Some(dependency.revision_uid),
                 &[
                     (ArmRole::Candidate, "candidate-secret".to_string()),
                     (ArmRole::Baseline, "baseline-secret".to_string()),
@@ -517,29 +1090,82 @@ mod artifact_release_evaluation {
             )
             .await
             .expect("provision attempt");
-        let arm = attempt.arm(ArmRole::Candidate).expect("candidate arm");
-        let baseline_arm = attempt.arm(ArmRole::Baseline).expect("baseline arm");
-
-        let run_request = build_paired_run_request(
-            fixture.tenant_id,
-            &claimed.record,
-            ActivationTargetClass::SkillVisibility,
-            &attempt,
+        let replayed = fixture
+            .repository
+            .provision_attempt(
+                &claimed.record,
+                &[
+                    (ArmRole::Candidate, "candidate-secret".to_string()),
+                    (ArmRole::Baseline, "baseline-secret".to_string()),
+                ],
+            )
+            .await
+            .expect("replay provision attempt");
+        assert_eq!(
+            replayed, attempt,
+            "a replay must reuse every trial overlay, session, fixture, and token"
+        );
+        let overlay_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.artifact_release_eval_overlay WHERE outbox_uid = $1",
         )
-        .expect("build release run request");
+        .bind(claimed.record.outbox_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("count provisioned overlays after replay");
+        assert_eq!(
+            overlay_count, 24,
+            "replay must not create duplicate per-trial overlays"
+        );
+        let candidate_trials = attempt
+            .trials
+            .iter()
+            .filter(|trial| trial.role == ArmRole::Candidate)
+            .collect::<Vec<_>>();
+        let baseline_trials = attempt
+            .trials
+            .iter()
+            .filter(|trial| trial.role == ArmRole::Baseline)
+            .collect::<Vec<_>>();
+        assert_eq!(candidate_trials.len(), 12);
+        assert_eq!(baseline_trials.len(), 12);
+        assert_eq!(attempt.trials.len(), 24);
+        for (label, distinct) in [
+            (
+                "trial keys",
+                attempt
+                    .trials
+                    .iter()
+                    .map(|trial| trial.trial_key.clone())
+                    .collect::<BTreeSet<_>>(),
+            ),
+            (
+                "eval sessions",
+                attempt
+                    .trials
+                    .iter()
+                    .map(|trial| trial.eval_session_id.to_string())
+                    .collect::<BTreeSet<_>>(),
+            ),
+        ] {
+            assert_eq!(
+                distinct.len(),
+                attempt.trials.len(),
+                "every exact arm/case/repetition needs a distinct {label}"
+            );
+        }
+        let arm = candidate_trials[0];
+        let baseline_arm = baseline_trials[0];
+        assert_eq!(
+            baseline_arm.revision_uid, baseline.revision_uid,
+            "the baseline overlay must come from the fenced release subject, not caller input"
+        );
+
+        let run_request = build_paired_run_request(fixture.tenant_id, &claimed.record, &attempt)
+            .expect("build release run request");
         let binding = run_request
             .release_evaluation
             .expect("release run carries its durable binding");
-        assert_eq!(binding.cases.len(), 5);
-        assert_eq!(
-            binding
-                .cases
-                .iter()
-                .map(|case| case.repetitions)
-                .sum::<u32>(),
-            14,
-            "the run must carry the two platform authoring cases, tenant supplement, and two-case hidden cohort"
-        );
+        assert_eq!(binding.trials.len(), 24);
         fixture
             .repository
             .validate_experiment_binding(
@@ -551,7 +1177,7 @@ mod artifact_release_evaluation {
             .await
             .expect("the exact provisioned binding is admitted");
         let mut forged = binding.clone();
-        forged.arms[0].eval_session_id = Uuid::now_v7();
+        forged.trials[0].arm.eval_session_id = Uuid::now_v7();
         let error = fixture
             .repository
             .validate_experiment_binding(
@@ -567,7 +1193,7 @@ mod artifact_release_evaluation {
             ReleaseEvaluationError::ExperimentBindingInvalid(_)
         ));
         let mut forged = binding.clone();
-        forged.cases.pop();
+        forged.trials.pop();
         let error = fixture
             .repository
             .validate_experiment_binding(
@@ -577,23 +1203,15 @@ mod artifact_release_evaluation {
                 &forged,
             )
             .await
-            .expect_err("a release run cannot omit one approved case");
+            .expect_err("a release run cannot omit one approved trial");
         assert!(matches!(
             error,
             ReleaseEvaluationError::ExperimentBindingInvalid(_)
         ));
 
-        assert_ne!(
-            arm.eval_session_id, baseline_arm.eval_session_id,
-            "each arm runs under its own eval-owned session"
-        );
-        assert_ne!(
-            arm.fixture_uid, baseline_arm.fixture_uid,
-            "each arm gets its own writable environment"
-        );
-
-        // The overlay resolves the draft; the normal resolver still resolves
-        // nothing, because serving is a pointer and no pointer was moved.
+        assert_ne!(arm.eval_session_id, baseline_arm.eval_session_id);
+        // The candidate overlay resolves the draft; the normal resolver remains
+        // pinned to the serving baseline captured in the release subject.
         assert_eq!(
             fixture
                 .repository
@@ -622,14 +1240,15 @@ mod artifact_release_evaluation {
                 .expect("pinned dependency resolution"),
             Some(dependency.revision_uid)
         );
-        assert!(
-            fixture
-                .registry
-                .load_serving(&fixture.scope, ArtifactKind::Skill, &fixture.artifact_name)
-                .await
-                .expect("serving resolution")
-                .is_none(),
-            "an overlay must not make a draft resolvable to a normal session"
+        let normal = fixture
+            .registry
+            .load_serving(&fixture.scope, ArtifactKind::Skill, &fixture.artifact_name)
+            .await
+            .expect("serving resolution")
+            .expect("serving baseline");
+        assert_eq!(
+            normal.revision_uid, baseline.revision_uid,
+            "an overlay must not replace the revision visible to a normal session"
         );
 
         // Without the secret, in a session bound to another arm, or for an
@@ -672,61 +1291,6 @@ mod artifact_release_evaluation {
                 .expect("overlay resolution"),
             None,
             "an artifact the overlay never pinned must not resolve through it"
-        );
-
-        // Each arm gets its own writable clone of the immutable base fixture, and
-        // none of them can hold a production credential.
-        let fixtures: Vec<(String, bool, Option<Uuid>)> = sqlx::query_as(
-            "SELECT name, writable, base_fixture_uid FROM moa.artifact_release_fixture \
-             WHERE storage_partition_id = $1 ORDER BY name",
-        )
-        .bind(fixture.tenant_id.to_string())
-        .fetch_all(&fixture.pool)
-        .await
-        .expect("load fixtures");
-        assert_eq!(
-            fixtures.len(),
-            3,
-            "one base snapshot plus one clone per arm"
-        );
-        assert!(
-            fixtures
-                .iter()
-                .filter(|(_, writable, base)| *writable && base.is_some())
-                .count()
-                == 2,
-            "both arms must get their own writable environment: {fixtures:?}"
-        );
-        let base_uid: Uuid = sqlx::query_scalar(
-            "SELECT fixture_uid FROM moa.artifact_release_fixture \
-             WHERE storage_partition_id = $1 AND base_fixture_uid IS NULL",
-        )
-        .bind(fixture.tenant_id.to_string())
-        .fetch_one(&fixture.pool)
-        .await
-        .expect("load base fixture");
-        let mutated_base = sqlx::query(
-            "UPDATE moa.artifact_release_fixture SET environment = '{\"records\":[1]}'::JSONB \
-             WHERE fixture_uid = $1",
-        )
-        .bind(base_uid)
-        .execute(&fixture.pool)
-        .await;
-        assert!(
-            mutated_base.is_err(),
-            "a shared base snapshot must be immutable, so the environment is copy-on-write"
-        );
-        let credential = sqlx::query(
-            "UPDATE moa.artifact_release_fixture \
-             SET connector_bindings = '[{\"connector\":\"gmail\",\"credential_source\":\"vault\"}]'::JSONB \
-             WHERE fixture_uid = $1",
-        )
-        .bind(arm.fixture_uid)
-        .execute(&fixture.pool)
-        .await;
-        assert!(
-            credential.is_err(),
-            "a fixture environment must not be able to name a production credential source"
         );
 
         // Closing the attempt closes the overlay, so a crashed or settled attempt
@@ -827,8 +1391,6 @@ mod artifact_release_evaluation {
                 .repository
                 .provision_attempt(
                     &claimed.record,
-                    ActivationTargetClass::SkillVisibility,
-                    None,
                     &[
                         (ArmRole::Candidate, format!("candidate-{index}")),
                         (ArmRole::Baseline, format!("baseline-{index}")),
@@ -898,8 +1460,6 @@ mod artifact_release_evaluation {
             .repository
             .provision_attempt(
                 &claimed.record,
-                ActivationTargetClass::SkillVisibility,
-                None,
                 &[(ArmRole::Candidate, "candidate-secret".to_string())],
             )
             .await
@@ -978,65 +1538,58 @@ mod artifact_release_evaluation {
         // learned scenario source missing erasure provenance, so a release gate
         // cannot be built out of raw transcripts.
         let (_db, fixture) = fixture("case-pack-shape").await;
-        let transcript = sqlx::query(
-            r#"
-            INSERT INTO moa.artifact_release_case_pack (
-                pack_uid, storage_partition_id, user_id, name, revision, target_class,
-                visibility, cohort_epoch, cases, mandatory_assertions, scenario_source, pack_hash
-            )
-            VALUES ($1, $2, NULL, 'transcript-pack', 1, 'action_visibility', 'authoring', 1,
-                    '[{"case_id":"c","transcript":[{"role":"user"}]}]'::JSONB,
-                    '["target_completed"]'::JSONB,
-                    '{"kind":"approved_pack"}'::JSONB, digest('transcript', 'sha256'))
-            "#,
+        let transcript = insert_historical_case_pack(
+            &fixture.pool,
+            "transcript-pack",
+            json!([{"case_id":"c","transcript":[{"role":"user"}]}]),
+            json!({"kind":"approved_pack"}),
         )
-        .bind(Uuid::now_v7())
-        .bind(fixture.tenant_id.to_string())
-        .execute(&fixture.pool)
         .await;
         assert!(
             transcript.is_err(),
             "a case body carrying a transcript must be unrepresentable"
         );
 
-        let unerasable = sqlx::query(
-            r#"
-            INSERT INTO moa.artifact_release_case_pack (
-                pack_uid, storage_partition_id, user_id, name, revision, target_class,
-                visibility, cohort_epoch, cases, mandatory_assertions, scenario_source, pack_hash
-            )
-            VALUES ($1, $2, NULL, 'learned-pack', 1, 'action_visibility', 'authoring', 1,
-                    '[{"case_id":"c","persona_ref":"p","profile":"default","repetitions":1,"assertions":[]}]'::JSONB,
-                    '["target_completed"]'::JSONB,
-                    '{"kind":"learned","evidence":{"contribution_uid":"00000000-0000-4000-8000-000000000001","retention_class":"short","consent_basis":"contract"}}'::JSONB,
-                    digest('learned', 'sha256'))
-            "#,
+        let cases = json!([{
+            "case_id":"c",
+            "persona_ref":"p",
+            "profile":"default",
+            "repetitions":1,
+            "assertions":[]
+        }]);
+        let unerasable = insert_historical_case_pack(
+            &fixture.pool,
+            "unerasable-learned-pack",
+            cases.clone(),
+            json!({
+                "kind":"learned",
+                "evidence":{
+                    "contribution_uid":"00000000-0000-4000-8000-000000000001",
+                    "retention_class":"short",
+                    "consent_basis":"contract"
+                }
+            }),
         )
-        .bind(Uuid::now_v7())
-        .bind(fixture.tenant_id.to_string())
-        .execute(&fixture.pool)
         .await;
         assert!(
             unerasable.is_err(),
             "learned scenario input without erasure provenance must be unrepresentable"
         );
 
-        let complete = sqlx::query(
-            r#"
-            INSERT INTO moa.artifact_release_case_pack (
-                pack_uid, storage_partition_id, user_id, name, revision, target_class,
-                visibility, cohort_epoch, cases, mandatory_assertions, scenario_source, pack_hash
-            )
-            VALUES ($1, $2, NULL, 'learned-pack', 1, 'action_visibility', 'authoring', 1,
-                    '[{"case_id":"c","persona_ref":"p","profile":"default","repetitions":1,"assertions":[]}]'::JSONB,
-                    '["target_completed"]'::JSONB,
-                    '{"kind":"learned","evidence":{"contribution_uid":"00000000-0000-4000-8000-000000000001","retention_class":"short","consent_basis":"contract","erasure_provenance":"moa.artifact_revision_contribution"}}'::JSONB,
-                    digest('learned', 'sha256'))
-            "#,
+        let complete = insert_historical_case_pack(
+            &fixture.pool,
+            "erasable-learned-pack",
+            cases,
+            json!({
+                "kind":"learned",
+                "evidence":{
+                    "contribution_uid":"00000000-0000-4000-8000-000000000001",
+                    "retention_class":"short",
+                    "consent_basis":"contract",
+                    "erasure_provenance":"moa.artifact_revision_contribution"
+                }
+            }),
         )
-        .bind(Uuid::now_v7())
-        .bind(fixture.tenant_id.to_string())
-        .execute(&fixture.pool)
         .await;
         assert!(
             complete.is_ok(),
@@ -1091,13 +1644,46 @@ mod artifact_release_evaluation {
             .repository
             .provision_attempt(
                 &claimed.record,
-                ActivationTargetClass::SkillVisibility,
-                None,
                 &[(ArmRole::Candidate, "candidate-secret".to_string())],
             )
             .await
             .expect("provision attempt");
-        let arm = attempt.arm(ArmRole::Candidate).expect("candidate arm");
+        assert_eq!(
+            attempt.trials.len(),
+            12,
+            "a first activation provisions one candidate trial for every approved repetition"
+        );
+        assert!(
+            attempt
+                .trials
+                .iter()
+                .all(|trial| trial.role == ArmRole::Candidate),
+            "a first activation must not fabricate baseline overlays"
+        );
+        let run_uid = Uuid::now_v7();
+        fixture
+            .repository
+            .record_dispatched_runs(fixture.tenant_id, record.outbox_uid, run_uid, None)
+            .await
+            .expect("record candidate-only experiment run");
+        let recorded = fixture
+            .repository
+            .list_attempts(fixture.tenant_id, 10)
+            .await
+            .expect("list release attempts")
+            .into_iter()
+            .find(|row| row.attempt_uid == attempt.attempt_uid)
+            .expect("recorded release attempt");
+        assert_eq!(recorded.candidate_run_uid, Some(run_uid));
+        assert_eq!(
+            recorded.baseline_run_uid, None,
+            "a first activation must not relabel the candidate run as a baseline"
+        );
+        let arm = attempt
+            .trials
+            .iter()
+            .find(|trial| trial.role == ArmRole::Candidate)
+            .expect("candidate trial");
         let binding = moa_artifacts::release::EvalOverlayBinding {
             overlay_uid: arm.overlay_uid,
             overlay_token: arm.overlay_token.clone(),

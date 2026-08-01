@@ -900,6 +900,11 @@ pub struct ExperimentRunRecord {
     pub created_by_identity: Value,
     /// Plan artifact this run expands, when the run came from a plan artifact.
     pub plan_artifact_uid: Option<Uuid>,
+    /// Exact number of durable trials a plan-backed run must contain.
+    ///
+    /// Status aggregation compares observed rows against this admission-time
+    /// cardinality so an incrementally inserted prefix cannot settle the run.
+    pub expected_trials: u64,
     /// Durable resource ceiling this run and its trials execute inside.
     pub resource_envelope: ExperimentResourceEnvelope,
     /// Certified simulator policy snapshot for a plan-backed run.

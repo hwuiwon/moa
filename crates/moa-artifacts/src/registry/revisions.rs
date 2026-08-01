@@ -405,7 +405,7 @@ impl ArtifactRegistry {
             WHERE a.valid_to IS NULL
               AND r.revision_uid = $3
               AND r.valid_to IS NULL
-              AND a.storage_partition_id = $1
+              AND (a.storage_partition_id IS NULL OR a.storage_partition_id = $1)
               AND (a.user_id IS NULL OR a.user_id = $2)
             LIMIT 1
             "#
@@ -756,12 +756,17 @@ fn scope_from_columns(
     storage_partition_id: Option<String>,
     user_id: Option<String>,
 ) -> Result<(Option<StoragePartitionId>, Option<UserId>, String)> {
-    let storage_partition_id = storage_partition_id.map(StoragePartitionId::new);
-    let user_id = match (scope.as_str(), user_id) {
-        ("tenant", None) => None,
-        ("contact", Some(user_id)) => {
+    let (storage_partition_id, user_id) = match (scope.as_str(), storage_partition_id, user_id) {
+        ("global", None, None) => (None, None),
+        ("tenant", Some(storage_partition_id), None) => {
+            (Some(StoragePartitionId::new(storage_partition_id)), None)
+        }
+        ("contact", Some(storage_partition_id), Some(user_id)) => {
             parse_contact_user_id(&user_id)?;
-            Some(UserId::new(user_id))
+            (
+                Some(StoragePartitionId::new(storage_partition_id)),
+                Some(UserId::new(user_id)),
+            )
         }
         _ => {
             return Err(MoaError::StorageError(format!(

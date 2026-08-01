@@ -14,11 +14,11 @@
 //! construction. Two separate runs would each expand their own matrix and could
 //! only be argued to match.
 
-use moa_artifacts::release::ActivationTargetClass;
 use moa_core::types::identifiers::TenantId;
 use moa_wire::experiments::{
     ARTIFACT_RELEASE_BASELINE_VARIANT_KEY, ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
-    ArtifactReleaseExperimentArm, ArtifactReleaseExperimentBinding, ExperimentRunRequest,
+    ArtifactReleaseExperimentArm, ArtifactReleaseExperimentBinding,
+    ArtifactReleaseExperimentTrialBinding, ExperimentRunRequest,
 };
 
 use super::Error;
@@ -39,10 +39,9 @@ use super::types::{ArmRole, DispatchRecord, ProvisionedAttempt};
 pub fn build_paired_run_request(
     tenant_id: TenantId,
     record: &DispatchRecord,
-    activation_target: ActivationTargetClass,
     attempt: &ProvisionedAttempt,
 ) -> Result<ExperimentRunRequest, Error> {
-    if attempt.arm(ArmRole::Candidate).is_none() {
+    if !attempt.has_role(ArmRole::Candidate) {
         return Err(Error::Provisioning(
             "a release attempt has no candidate arm to run".to_string(),
         ));
@@ -51,7 +50,7 @@ pub fn build_paired_run_request(
         tenant_id,
         name: format!(
             "release:{}:{}:{}",
-            activation_target, record.revision_uid, record.generation
+            attempt.activation_target, record.revision_uid, record.generation
         ),
         plan_revision_uid: Some(attempt.plan.plan_revision_uid),
         // Deliberately absent. A plan-backed run derives its own target, so this
@@ -66,23 +65,26 @@ pub fn build_paired_run_request(
         agent_revision_variants: Vec::new(),
         release_evaluation: Some(ArtifactReleaseExperimentBinding {
             outbox_uid: record.outbox_uid,
-            activation_target: activation_target.as_str().to_string(),
-            arms: attempt
-                .arms
+            activation_target: attempt.activation_target.as_str().to_string(),
+            trials: attempt
+                .trials
                 .iter()
-                .map(|arm| ArtifactReleaseExperimentArm {
-                    variant_key: match arm.role {
-                        ArmRole::Candidate => ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
-                        ArmRole::Baseline => ARTIFACT_RELEASE_BASELINE_VARIANT_KEY,
-                    }
-                    .to_string(),
-                    revision_uid: arm.revision_uid,
-                    overlay_uid: arm.overlay_uid,
-                    overlay_token: arm.overlay_token.clone(),
-                    eval_session_id: arm.eval_session_id,
+                .map(|trial| ArtifactReleaseExperimentTrialBinding {
+                    trial_key: trial.trial_key.clone(),
+                    arm: ArtifactReleaseExperimentArm {
+                        variant_key: match trial.role {
+                            ArmRole::Candidate => ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
+                            ArmRole::Baseline => ARTIFACT_RELEASE_BASELINE_VARIANT_KEY,
+                        }
+                        .to_string(),
+                        revision_uid: trial.revision_uid,
+                        overlay_uid: trial.overlay_uid,
+                        overlay_token: trial.overlay_token.clone(),
+                        eval_session_id: trial.eval_session_id,
+                    },
+                    case: trial.case.clone(),
                 })
                 .collect(),
-            cases: attempt.plan.experiment_cases()?,
         }),
     })
 }
@@ -91,25 +93,55 @@ pub fn build_paired_run_request(
 mod tests {
     use super::*;
     use crate::workflows::artifact_release_evaluation::types::{
-        DispatchStatus, MergedCasePlan, ProvisionedArm, ReleaseCase,
+        DispatchStatus, MergedCasePlan, ProvisionedTrial, ReleaseCase,
     };
-    use moa_artifacts::release::Digest32;
+    use moa_artifacts::release::{ActivationTargetClass, Digest32};
+    use moa_eval_core::assertion::{AssertionCategory, AssertionSpec, EvaluatorRef, GateEffect};
+    use serde_json::json;
     use uuid::Uuid;
 
-    fn arm(role: ArmRole, revision: u128) -> ProvisionedArm {
-        ProvisionedArm {
+    fn assertion() -> AssertionSpec {
+        AssertionSpec {
+            id: "no-dangerous-tool".to_string(),
+            category: AssertionCategory::Action,
+            gate_effect: GateEffect::Blocking,
+            evaluator: EvaluatorRef::deterministic("prohibited_actions", 1),
+            config: json!({ "names": ["dangerous_tool"] }),
+        }
+    }
+
+    fn positive_assertion() -> AssertionSpec {
+        AssertionSpec {
+            id: "visible-result".to_string(),
+            category: AssertionCategory::Communication,
+            gate_effect: GateEffect::Blocking,
+            evaluator: EvaluatorRef::deterministic("text_match", 1),
+            config: json!({ "contains": ["result"] }),
+        }
+    }
+
+    fn trial(role: ArmRole, revision: u128) -> ProvisionedTrial {
+        ProvisionedTrial {
+            trial_key: format!("trial-{role}"),
             role,
+            case: moa_wire::experiments::ArtifactReleaseExperimentCase {
+                scenario_id: "a".to_string(),
+                persona_id: "persona://p".to_string(),
+                profile_id: "default".to_string(),
+                repetitions: 1,
+                assertions: vec![positive_assertion(), assertion()],
+            },
             overlay_uid: Uuid::from_u128(revision + 100),
             overlay_token: "token".to_string(),
             revision_uid: Uuid::from_u128(revision),
             eval_session_id: Uuid::from_u128(revision + 200),
-            fixture_uid: Uuid::from_u128(revision + 300),
         }
     }
 
-    fn provisioned(arms: Vec<ProvisionedArm>) -> ProvisionedAttempt {
+    fn provisioned(trials: Vec<ProvisionedTrial>) -> ProvisionedAttempt {
         ProvisionedAttempt {
             attempt_uid: Uuid::from_u128(1),
+            activation_target: ActivationTargetClass::SkillVisibility,
             plan: MergedCasePlan {
                 authoring_pack_uid: Uuid::from_u128(2),
                 hidden_pack_uid: Uuid::from_u128(3),
@@ -119,13 +151,13 @@ mod tests {
                     case_id: "a".to_string(),
                     persona_ref: "persona://p".to_string(),
                     profile: "default".to_string(),
-                    repetitions: 2,
+                    repetitions: 1,
                     assertions: Vec::new(),
                 }],
                 hidden_cases: Vec::new(),
-                mandatory_assertions: vec!["privacy_safe_output".to_string()],
+                mandatory_assertions: vec![assertion()],
             },
-            arms,
+            trials,
         }
     }
 
@@ -157,16 +189,11 @@ mod tests {
     fn paired_dispatch_shares_one_plan_and_the_fenced_idempotency_key_offline() {
         let record = record();
         let attempt = provisioned(vec![
-            arm(ArmRole::Candidate, 21),
-            arm(ArmRole::Baseline, 22),
+            trial(ArmRole::Candidate, 21),
+            trial(ArmRole::Baseline, 22),
         ]);
-        let request = build_paired_run_request(
-            record.tenant_id,
-            &record,
-            ActivationTargetClass::AgentDeployment,
-            &attempt,
-        )
-        .expect("paired request");
+        let request =
+            build_paired_run_request(record.tenant_id, &record, &attempt).expect("paired request");
 
         assert_eq!(request.plan_revision_uid, Some(Uuid::from_u128(5)));
         assert!(
@@ -180,47 +207,37 @@ mod tests {
             request
                 .release_evaluation
                 .as_ref()
-                .map(|binding| binding.arms.len()),
+                .map(|binding| binding.trials.len()),
             Some(2),
             "both arms must be release variants of the same plan-backed run"
         );
+        let binding = request
+            .release_evaluation
+            .as_ref()
+            .expect("release binding");
         assert_eq!(
-            request
-                .release_evaluation
-                .as_ref()
-                .map(|binding| binding.cases.len()),
-            Some(1)
+            binding.trials[0].case.assertions,
+            vec![positive_assertion(), assertion()],
+            "case-local and mandatory assertions must reach trial expansion"
         );
 
-        // A first activation has no serving-pointer overlay. The binding carries
-        // only the candidate; plan expansion adds the approved plan's authored
-        // target as `release_baseline`, preserving a real control arm without
-        // pretending that an older artifact revision exists.
-        let unpaired = provisioned(vec![arm(ArmRole::Candidate, 21)]);
-        let request = build_paired_run_request(
-            record.tenant_id,
-            &record,
-            ActivationTargetClass::AgentDeployment,
-            &unpaired,
-        )
-        .expect("unpaired request");
+        // A first activation has no serving-pointer baseline. It runs the
+        // candidate-only absolute gate instead of fabricating a control arm.
+        let unpaired = provisioned(vec![trial(ArmRole::Candidate, 21)]);
+        let request = build_paired_run_request(record.tenant_id, &record, &unpaired)
+            .expect("unpaired request");
         assert_eq!(
             request
                 .release_evaluation
                 .as_ref()
-                .map(|binding| binding.arms.len()),
+                .map(|binding| binding.trials.len()),
             Some(1)
         );
 
         // Skill and action releases substitute through the evaluation overlay, not
         // through agent revision variants.
-        let request = build_paired_run_request(
-            record.tenant_id,
-            &record,
-            ActivationTargetClass::SkillVisibility,
-            &attempt,
-        )
-        .expect("skill request");
+        let request =
+            build_paired_run_request(record.tenant_id, &record, &attempt).expect("skill request");
         assert!(request.agent_revision_variants.is_empty());
 
         // An attempt with no candidate arm has nothing to evaluate.
@@ -228,8 +245,7 @@ mod tests {
             build_paired_run_request(
                 record.tenant_id,
                 &record,
-                ActivationTargetClass::SkillVisibility,
-                &provisioned(vec![arm(ArmRole::Baseline, 22)]),
+                &provisioned(vec![trial(ArmRole::Baseline, 22)]),
             ),
             Err(Error::Provisioning(_))
         ));

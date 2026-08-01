@@ -140,9 +140,6 @@ impl ArtifactRelease for ArtifactReleaseImpl {
                 .run(Json::from(ReleaseEvaluationWorkflowRequest {
                     tenant_id: request.tenant_id,
                     outbox_uid: dispatch.outbox_uid,
-                    revision_uid: dispatch.revision_uid,
-                    activation_target: dispatch.activation_target,
-                    baseline_revision_uid: dispatch.baseline_revision_uid,
                     identity,
                 })),
             )
@@ -230,9 +227,6 @@ struct SubmitOutcome {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct EvaluationDispatch {
     outbox_uid: uuid::Uuid,
-    revision_uid: uuid::Uuid,
-    activation_target: String,
-    baseline_revision_uid: Option<uuid::Uuid>,
 }
 
 async fn submit_inner(
@@ -299,23 +293,12 @@ async fn submit_inner(
         .await
         .map_err(ReleaseEvaluationError::terminal)?;
     let candidate = submitted.submission.candidate;
-    // The baseline arm is read from the attested subject rather than from live
-    // pointer state, so the comparison an attempt runs is the one its digest
-    // covers even if the pointer moves while the attempt is in flight.
-    let baseline_revision_uid = candidate
-        .subject
-        .serving_baseline
-        .as_ref()
-        .map(|baseline| baseline.revision_uid);
     let activation_target = candidate.activation_target.class().as_str().to_string();
     let dispatch = submitted
         .dispatch
         .as_ref()
         .map(|record| EvaluationDispatch {
             outbox_uid: record.outbox_uid,
-            revision_uid: record.revision_uid,
-            activation_target: activation_target.clone(),
-            baseline_revision_uid,
         });
     Ok(SubmitOutcome {
         response: ReleaseSubmitResponse {

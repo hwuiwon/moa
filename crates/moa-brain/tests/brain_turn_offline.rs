@@ -11,7 +11,7 @@ mod offline_session_store;
 #[path = "support/openai_wiremock.rs"]
 mod openai_wiremock;
 
-use moa_providers::{OpenAIProvider, ScriptedProvider};
+use moa_providers::{OpenAIProvider, ScriptedProvider, ScriptedResponse};
 use wiremock::MockServer;
 
 use offline_session_store::{MockSessionStore, session_meta};
@@ -1269,6 +1269,524 @@ async fn run_brain_turn_executes_tool_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn streamed_turn_refuses_exhausted_model_budget_before_provider_dispatch() {
+    // Pins: a bounded eval turn with no model calls left fails before polling
+    // the provider and does not partially decrement another resource dimension.
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let store = Arc::new(MockSessionStore::new(
+        session.clone(),
+        vec![make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "must not dispatch".to_string(),
+                attachments: Vec::new(),
+            },
+        )],
+    ));
+    let pipeline = build_no_memory_test_pipeline(&MoaConfig::default(), store.clone());
+    let provider = Arc::new(CapturingTextLlmProvider::new("must not run"));
+    let (runtime_tx, _) = broadcast::channel(16);
+    let initial = moa_core::types::resource::ResourceAmounts {
+        cost_micro_usd: 1_000_000,
+        tokens: 1_000_000,
+        turns: 1,
+        model_calls: 0,
+        tool_calls: 1,
+    };
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::new(None, Some(initial));
+
+    let error = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id: session.id,
+            session_store: store,
+            llm_provider: provider.clone(),
+            pipeline: &pipeline,
+            tool_router: None,
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
+    .await
+    .expect_err("an exhausted model-call budget must refuse the provider");
+
+    assert!(error.to_string().contains("model_calls"), "got {error:?}");
+    assert!(provider.requests.lock().await.is_empty());
+    assert_eq!(resource_budget.remaining, Some(initial));
+}
+
+#[tokio::test]
+async fn streamed_turn_refuses_exhausted_tool_budget_before_router_dispatch() {
+    // Pins: a model may request a tool on its last model call, but a zero
+    // tool-call allowance rejects that leaf before policy, sandbox, or tool
+    // events and charges the model response exactly once.
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let store = Arc::new(MockSessionStore::new(
+        session.clone(),
+        vec![make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "request a tool".to_string(),
+                attachments: Vec::new(),
+            },
+        )],
+    ));
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities()).push_response(
+        ScriptedResponse::tool_call(
+            "bash",
+            json!({ "cmd": "printf must-not-run" }),
+            "budgeted-tool",
+        ),
+    );
+    let observed_provider = provider.clone();
+    let (runtime_tx, _) = broadcast::channel(16);
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::new(
+        None,
+        Some(moa_core::types::resource::ResourceAmounts {
+            cost_micro_usd: 1_000_000,
+            tokens: 1_000_000,
+            turns: 1,
+            model_calls: 1,
+            tool_calls: 0,
+        }),
+    );
+
+    let error = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id: session.id,
+            session_store: store.clone(),
+            llm_provider: Arc::new(provider),
+            pipeline: &pipeline,
+            tool_router: Some(tool_router),
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
+    .await
+    .expect_err("an exhausted tool-call budget must refuse the router");
+
+    assert!(error.to_string().contains("tool_calls"), "got {error:?}");
+    assert_eq!(observed_provider.recorded_requests().len(), 1);
+    let remaining = resource_budget
+        .remaining
+        .expect("bounded budget remains bounded");
+    assert_eq!(remaining.model_calls, 0);
+    assert_eq!(remaining.turns, 0);
+    assert_eq!(remaining.tool_calls, 0);
+    let events = store.events.lock().await;
+    assert!(!events.iter().any(|record| matches!(
+        record.event,
+        Event::ToolCall { .. } | Event::ToolResult { .. } | Event::ToolError { .. }
+    )));
+}
+
+#[tokio::test]
+async fn streamed_turn_caps_output_and_charges_reported_usage() {
+    // Pins: the cost envelope reaches the actual provider request as an output
+    // cap, and a successful response decrements reported tokens and cost once.
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let store = Arc::new(MockSessionStore::new(
+        session.clone(),
+        vec![make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "return a bounded response".to_string(),
+                attachments: Vec::new(),
+            },
+        )],
+    ));
+    let pipeline = build_no_memory_test_pipeline(&MoaConfig::default(), store.clone());
+    let provider = CappedOutputLlmProvider::default();
+    let observed_provider = provider.clone();
+    let (runtime_tx, _) = broadcast::channel(16);
+    let initial_tokens = 1_000_000;
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::new(
+        None,
+        Some(moa_core::types::resource::ResourceAmounts {
+            cost_micro_usd: 7,
+            tokens: initial_tokens,
+            turns: 1,
+            model_calls: 1,
+            tool_calls: 0,
+        }),
+    );
+
+    let result = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id: session.id,
+            session_store: store,
+            llm_provider: Arc::new(provider),
+            pipeline: &pipeline,
+            tool_router: None,
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
+    .await
+    .expect("the bounded response must complete");
+
+    assert!(matches!(result, moa_brain::StreamedTurnResult::Complete));
+    let requests = observed_provider.requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_output_tokens, Some(7));
+    let remaining = resource_budget
+        .remaining
+        .expect("bounded budget remains bounded");
+    assert_eq!(remaining.cost_micro_usd, 5);
+    assert_eq!(remaining.tokens, initial_tokens - 5);
+    assert_eq!(remaining.turns, 0);
+    assert_eq!(remaining.model_calls, 0);
+}
+
+#[tokio::test]
+async fn streamed_turn_refuses_missing_provider_input_usage_before_tool_dispatch() {
+    // Pins: independently missing provider prompt usage cannot undercharge the
+    // nonempty request and enter a tool or follow-up model leaf.
+    assert_partial_provider_usage_fails_closed(token_usage(0, 1)).await;
+}
+
+#[tokio::test]
+async fn streamed_turn_refuses_missing_provider_output_usage_before_tool_dispatch() {
+    // Pins: independently missing provider output usage on nonempty completion
+    // content cannot undercharge the response and enter another leaf.
+    assert_partial_provider_usage_fails_closed(token_usage(1, 0)).await;
+}
+
+async fn assert_partial_provider_usage_fails_closed(
+    usage: moa_core::types::completion::TokenUsage,
+) {
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let store = Arc::new(MockSessionStore::new(
+        session.clone(),
+        vec![make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "request a tool without usage metadata".to_string(),
+                attachments: Vec::new(),
+            },
+        )],
+    ));
+    let sandbox_dir = tempdir().expect("temporary sandbox");
+    let tool_router = Arc::new(
+        ToolRouter::new_local(sandbox_dir.path())
+            .await
+            .expect("local tool router")
+            .with_rule_store(allow_bash_commands_for_tenant(
+                session.tenant_id,
+                ["printf must-not-run"],
+            )),
+    );
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
+    let provider = PartialUsageToolLlmProvider::new(usage);
+    let observed_provider = provider.clone();
+    let (runtime_tx, _) = broadcast::channel(16);
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::new(
+        None,
+        Some(moa_core::types::resource::ResourceAmounts {
+            cost_micro_usd: 1_000_000,
+            tokens: 1_000_000,
+            turns: 2,
+            model_calls: 2,
+            tool_calls: 1,
+        }),
+    );
+
+    let error = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id: session.id,
+            session_store: store.clone(),
+            llm_provider: Arc::new(provider),
+            pipeline: &pipeline,
+            tool_router: Some(tool_router),
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
+    .await
+    .expect_err("partial provider usage must fail the turn closed");
+
+    assert!(
+        error.to_string().contains("provider token usage"),
+        "got {error:?}"
+    );
+    assert_eq!(observed_provider.requests.lock().await.len(), 1);
+    let remaining = resource_budget
+        .remaining
+        .expect("bounded budget remains bounded");
+    assert_eq!(remaining.turns, 1);
+    assert_eq!(remaining.model_calls, 1);
+    assert_eq!(remaining.tool_calls, 1);
+    let events = store.events.lock().await;
+    assert!(!events.iter().any(|record| matches!(
+        record.event,
+        Event::BrainResponse { .. }
+            | Event::ToolCall { .. }
+            | Event::ToolResult { .. }
+            | Event::ToolError { .. }
+    )));
+}
+
+#[tokio::test]
+async fn streamed_turn_cumulative_sub_micro_cost_stops_second_model_call() {
+    // Pins: actual spend is rounded upward for hard micro-USD enforcement, so
+    // one nonzero sub-micro response consumes a one-micro allowance and its
+    // tool follow-up cannot dispatch a second model call.
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let store = Arc::new(MockSessionStore::new(
+        session.clone(),
+        vec![make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "spend a sub-micro amount".to_string(),
+                attachments: Vec::new(),
+            },
+        )],
+    ));
+    let sandbox_dir = tempdir().expect("temporary sandbox");
+    let tool_router = Arc::new(
+        ToolRouter::new_local(sandbox_dir.path())
+            .await
+            .expect("local tool router")
+            .with_rule_store(allow_bash_commands_for_tenant(
+                session.tenant_id,
+                ["printf submicro"],
+            )),
+    );
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
+    let provider = SubMicroToolLoopLlmProvider::default();
+    let observed_provider = provider.clone();
+    let (runtime_tx, _) = broadcast::channel(16);
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::new(
+        None,
+        Some(moa_core::types::resource::ResourceAmounts {
+            cost_micro_usd: 1,
+            tokens: 1_000_000,
+            turns: 2,
+            model_calls: 2,
+            tool_calls: 1,
+        }),
+    );
+
+    let error = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id: session.id,
+            session_store: store,
+            llm_provider: Arc::new(provider),
+            pipeline: &pipeline,
+            tool_router: Some(tool_router),
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
+    .await
+    .expect_err("the one-micro allowance must stop the follow-up model call");
+
+    assert!(
+        error.to_string().contains("cost_micro_usd"),
+        "got {error:?}"
+    );
+    assert_eq!(observed_provider.requests.lock().await.len(), 1);
+    let remaining = resource_budget
+        .remaining
+        .expect("bounded budget remains bounded");
+    assert_eq!(remaining.cost_micro_usd, 0);
+    assert_eq!(remaining.model_calls, 1);
+    assert_eq!(remaining.tool_calls, 0);
+}
+
+#[tokio::test]
+async fn streamed_turn_deadline_hard_cancels_a_running_local_tool() {
+    // Pins: the eval case deadline and hard sandbox cancellation share one
+    // token, so a running command is killed at expiry and cannot outlive the
+    // turn that paid for it.
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let store = Arc::new(MockSessionStore::new(
+        session.clone(),
+        vec![make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "run until cancelled".to_string(),
+                attachments: Vec::new(),
+            },
+        )],
+    ));
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_rule_store(allow_bash_commands_for_tenant(
+                session.tenant_id,
+                ["sleep 30"],
+            )),
+    );
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities()).push_response(
+        ScriptedResponse::tool_call("bash", json!({ "cmd": "sleep 30" }), "slow-tool"),
+    );
+    let (runtime_tx, _) = broadcast::channel(16);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::new(
+        Some(chrono::Utc::now() + chrono::Duration::milliseconds(250)),
+        Some(moa_core::types::resource::ResourceAmounts {
+            cost_micro_usd: 1_000_000,
+            tokens: 1_000_000,
+            turns: 1,
+            model_calls: 1,
+            tool_calls: 1,
+        }),
+    );
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        run_streamed_turn(StreamedTurnRequest {
+            turn: BrainTurnRequest {
+                identity: test_identity(session.tenant_id),
+                session_id: session.id,
+                session_store: store.clone(),
+                llm_provider: Arc::new(provider),
+                pipeline: &pipeline,
+                tool_router: Some(tool_router),
+            },
+            runtime_tx: &runtime_tx,
+            event_tx: None,
+            cancel_token: Some(cancel_token.clone()),
+            hard_cancel_token: Some(cancel_token.clone()),
+            resource_budget: &mut resource_budget,
+            signal_state: None,
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
+        }),
+    )
+    .await
+    .expect("the deadline must stop the running command")
+    .expect_err("deadline expiry must terminate the streamed turn");
+
+    assert!(
+        error.to_string().contains("resource deadline"),
+        "got {error:?}"
+    );
+    assert!(cancel_token.is_cancelled());
+    let events = store.events.lock().await;
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolCall { tool_name, .. } if tool_name == "bash"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolError { error, .. } if error.contains("deadline")
+    )));
+    assert_eq!(
+        resource_budget
+            .remaining
+            .expect("bounded budget remains bounded")
+            .tool_calls,
+        0
+    );
+}
+
+#[tokio::test]
 async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_execution() {
     let session = SessionMeta {
         id: SessionId::new(),
@@ -1686,6 +2204,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
         tool_router.tool_schemas(),
     );
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::UNBOUNDED;
 
     let streamed_result = run_streamed_turn(StreamedTurnRequest {
         turn: BrainTurnRequest {
@@ -1700,6 +2219,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
         event_tx: None,
         cancel_token: None,
         hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
         signal_state: None,
         lineage: Arc::new(moa_core::traits::NullLineageHandle),
     })
@@ -2068,6 +2588,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
         build_no_memory_test_pipeline(&MoaConfig::default(), streamed_store.clone());
     let streamed_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
+    let mut resource_budget = moa_core::types::resource::ResourceBudget::UNBOUNDED;
 
     let streamed_result = run_streamed_turn(StreamedTurnRequest {
         turn: BrainTurnRequest {
@@ -2082,6 +2603,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
         event_tx: None,
         cancel_token: None,
         hard_cancel_token: None,
+        resource_budget: &mut resource_budget,
         signal_state: None,
         lineage: Arc::new(moa_core::traits::NullLineageHandle),
     })

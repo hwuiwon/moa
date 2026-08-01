@@ -54,7 +54,6 @@ async fn install_is_non_serving_and_deploy_requires_an_attestation_db_memory() -
         &pool,
         tenant_id,
         ActivationTargetClass::AgentDeployment,
-        "agent-deploy",
     )
     .await?;
 
@@ -321,6 +320,7 @@ async fn attest_agent_revision(
         artifact_uid,
         installation_uid,
     };
+    let release_policy = repository.resolve_policy(&scope, target.class()).await?;
     let candidate = repository
         .submit_candidate(SubmitCandidate {
             scope,
@@ -344,7 +344,7 @@ async fn attest_agent_revision(
                 "result_produced".to_string(),
                 "pass".to_string(),
             )]),
-            blocking_assertions: Vec::new(),
+            blocking_assertions: release_policy.blocking_assertions,
             evidence_adapter: EvidenceAdapter::BehaviorLabExperiment,
             decided_by: "release-evaluator".to_string(),
         })

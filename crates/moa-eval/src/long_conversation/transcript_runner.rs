@@ -23,8 +23,9 @@ use moa_core::{
     types::events_stream::EventRange, types::events_stream::EventRecord,
     types::experience::AttributionSubjectType, types::experience::LearningCandidateSourceRef,
     types::identifiers::SessionId, types::model::ModelCapabilities,
-    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
-    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
+    types::resource::ResourceBudget, types::segment_assessment::AssessmentPhase,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
+    types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
     types::session::SessionMeta,
@@ -136,7 +137,16 @@ pub async fn run_scenario_with_provider(
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| environment.workspace_dir.clone());
-    let outcome = run_scenario_in_environment(agent_config, options, case, &environment).await;
+    let cancel_token = CancellationToken::new();
+    let outcome = run_scenario_in_environment(
+        agent_config,
+        options,
+        case,
+        &environment,
+        ResourceBudget::UNBOUNDED,
+        &cancel_token,
+    )
+    .await;
     cleanup_environment_after_run(run_root.as_path(), environment, outcome).await
 }
 
@@ -145,15 +155,35 @@ pub(crate) async fn run_scenario_in_environment(
     options: &EngineOptions,
     case: &TestCase,
     environment: &crate::AgentEnvironment,
+    mut resource_budget: ResourceBudget,
+    cancel_token: &CancellationToken,
 ) -> Result<LongRunReport> {
     let long_case = case.long_case()?;
 
     match long_case.mode {
         LongConversationMode::Recorded => {
-            run_recorded_scenario(agent_config, options, case, long_case, environment).await
+            run_recorded_scenario(
+                agent_config,
+                options,
+                case,
+                long_case,
+                environment,
+                &mut resource_budget,
+                cancel_token,
+            )
+            .await
         }
         LongConversationMode::ScriptedUser => {
-            run_scripted_user_scenario(agent_config, options, case, long_case, environment).await
+            run_scripted_user_scenario(
+                agent_config,
+                options,
+                case,
+                long_case,
+                environment,
+                &mut resource_budget,
+                cancel_token,
+            )
+            .await
         }
     }
 }
@@ -164,6 +194,8 @@ async fn run_recorded_scenario(
     case: &TestCase,
     long_case: &LongTestCase,
     environment: &crate::AgentEnvironment,
+    resource_budget: &mut ResourceBudget,
+    cancel_token: &CancellationToken,
 ) -> Result<LongRunReport> {
     let transcript_path = resolve_path(&long_case.transcript)?;
     let transcript = Transcript::read_jsonl(&transcript_path).map_err(|error| {
@@ -190,10 +222,21 @@ async fn run_recorded_scenario(
             secondary_transcript,
             secondary_session.interleaving,
             environment,
+            resource_budget,
+            cancel_token,
         )
         .await
     } else {
-        drive_transcript(case, agent_config, options, transcript, environment).await
+        drive_transcript(
+            case,
+            agent_config,
+            options,
+            transcript,
+            environment,
+            resource_budget,
+            cancel_token,
+        )
+        .await
     }
 }
 
@@ -203,6 +246,8 @@ async fn run_scripted_user_scenario(
     case: &TestCase,
     long_case: &LongTestCase,
     environment: &crate::AgentEnvironment,
+    resource_budget: &mut ResourceBudget,
+    cancel_token: &CancellationToken,
 ) -> Result<LongRunReport> {
     let Some(goal_card_path) = long_case.goal_card.as_deref() else {
         return Err(Error::InvalidConfig(format!(
@@ -239,7 +284,16 @@ async fn run_scripted_user_scenario(
                 script_path.display()
             ))
         })?;
-    drive_scripted_user(case, agent_config, options, script, environment).await
+    drive_scripted_user(
+        case,
+        agent_config,
+        options,
+        script,
+        environment,
+        resource_budget,
+        cancel_token,
+    )
+    .await
 }
 
 async fn cleanup_environment_after_run(
@@ -271,6 +325,8 @@ async fn drive_transcript(
     options: &EngineOptions,
     transcript: Transcript,
     environment: &crate::AgentEnvironment,
+    resource_budget: &mut ResourceBudget,
+    cancel_token: &CancellationToken,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
     let mut primary = TranscriptSession::new(
@@ -280,7 +336,9 @@ async fn drive_transcript(
     );
 
     while primary.has_next_user_turn() {
-        primary.drive_next_turn(case, environment).await?;
+        primary
+            .drive_next_turn(case, environment, resource_budget, cancel_token)
+            .await?;
     }
 
     let completed_at = Utc::now();
@@ -301,6 +359,7 @@ async fn drive_transcript(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_multi_session_transcripts(
     case: &TestCase,
     agent_config: &AgentConfig,
@@ -309,6 +368,8 @@ async fn drive_multi_session_transcripts(
     secondary_transcript: Transcript,
     interleaving: LongSessionInterleaving,
     environment: &crate::AgentEnvironment,
+    resource_budget: &mut ResourceBudget,
+    cancel_token: &CancellationToken,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
     let secondary_observer = ObservedRecordedProvider::new(secondary_transcript.clone());
@@ -329,20 +390,28 @@ async fn drive_multi_session_transcripts(
     match interleaving {
         LongSessionInterleaving::Sequential | LongSessionInterleaving::Phased => {
             while primary.has_next_user_turn() {
-                primary.drive_next_turn(case, environment).await?;
+                primary
+                    .drive_next_turn(case, environment, resource_budget, cancel_token)
+                    .await?;
             }
             materialize_primary_learning_if_requested(case, environment, &primary).await?;
             while secondary.has_next_user_turn() {
-                secondary.drive_next_turn(case, environment).await?;
+                secondary
+                    .drive_next_turn(case, environment, resource_budget, cancel_token)
+                    .await?;
             }
         }
         LongSessionInterleaving::RoundRobin => {
             while primary.has_next_user_turn() || secondary.has_next_user_turn() {
                 if primary.has_next_user_turn() {
-                    primary.drive_next_turn(case, environment).await?;
+                    primary
+                        .drive_next_turn(case, environment, resource_budget, cancel_token)
+                        .await?;
                 }
                 if secondary.has_next_user_turn() {
-                    secondary.drive_next_turn(case, environment).await?;
+                    secondary
+                        .drive_next_turn(case, environment, resource_budget, cancel_token)
+                        .await?;
                 }
             }
         }
@@ -385,13 +454,17 @@ async fn drive_scripted_user(
     options: &EngineOptions,
     script: ScriptedUserScript,
     environment: &crate::AgentEnvironment,
+    resource_budget: &mut ResourceBudget,
+    cancel_token: &CancellationToken,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
     let mut primary =
         ScriptedUserSession::new(environment.session_id, environment.llm_provider.clone());
 
     for turn in &script.turns {
-        primary.drive_turn(case, environment, turn).await?;
+        primary
+            .drive_turn(case, environment, turn, resource_budget, cancel_token)
+            .await?;
     }
 
     let completed_at = Utc::now();
@@ -555,7 +628,7 @@ async fn drive_one_turn(
     llm_provider: Arc<dyn LLMProvider>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     cancel_token: &CancellationToken,
-    hard_cancel_token: &CancellationToken,
+    resource_budget: &mut ResourceBudget,
 ) -> Result<()> {
     for turn_index in 0..MAX_LONG_CONVERSATION_AGENT_TURNS {
         let outcome = run_streamed_turn(StreamedTurnRequest {
@@ -570,7 +643,8 @@ async fn drive_one_turn(
             runtime_tx,
             event_tx: None,
             cancel_token: Some(cancel_token.clone()),
-            hard_cancel_token: Some(hard_cancel_token.clone()),
+            hard_cancel_token: Some(cancel_token.clone()),
+            resource_budget: &mut *resource_budget,
             signal_state: None,
             lineage: environment.lineage.clone(),
         })
@@ -601,8 +675,6 @@ struct TranscriptSession {
     provider_turn_index: usize,
     user_turn_count: usize,
     runtime_tx: broadcast::Sender<RuntimeEvent>,
-    cancel_token: CancellationToken,
-    hard_cancel_token: CancellationToken,
 }
 
 impl TranscriptSession {
@@ -619,8 +691,6 @@ impl TranscriptSession {
             provider_turn_index: 0,
             user_turn_count: 0,
             runtime_tx,
-            cancel_token: CancellationToken::new(),
-            hard_cancel_token: CancellationToken::new(),
         }
     }
 
@@ -635,6 +705,8 @@ impl TranscriptSession {
         &mut self,
         case: &TestCase,
         environment: &crate::AgentEnvironment,
+        resource_budget: &mut ResourceBudget,
+        cancel_token: &CancellationToken,
     ) -> Result<()> {
         let Some(turn) = self.transcript.turns.get(self.provider_turn_index) else {
             return Ok(());
@@ -653,8 +725,8 @@ impl TranscriptSession {
             self.session_id,
             self.llm_provider.clone(),
             &self.runtime_tx,
-            &self.cancel_token,
-            &self.hard_cancel_token,
+            cancel_token,
+            resource_budget,
         )
         .await?;
 
@@ -677,8 +749,6 @@ struct ScriptedUserSession {
     llm_provider: Arc<dyn LLMProvider>,
     user_turn_count: usize,
     runtime_tx: broadcast::Sender<RuntimeEvent>,
-    cancel_token: CancellationToken,
-    hard_cancel_token: CancellationToken,
 }
 
 impl ScriptedUserSession {
@@ -689,8 +759,6 @@ impl ScriptedUserSession {
             llm_provider,
             user_turn_count: 0,
             runtime_tx,
-            cancel_token: CancellationToken::new(),
-            hard_cancel_token: CancellationToken::new(),
         }
     }
 
@@ -699,6 +767,8 @@ impl ScriptedUserSession {
         case: &TestCase,
         environment: &crate::AgentEnvironment,
         turn: &ScriptedUserTurn,
+        resource_budget: &mut ResourceBudget,
+        cancel_token: &CancellationToken,
     ) -> Result<()> {
         let user_text = turn.user.text.clone();
         emit_user_turn(
@@ -714,8 +784,8 @@ impl ScriptedUserSession {
             self.session_id,
             self.llm_provider.clone(),
             &self.runtime_tx,
-            &self.cancel_token,
-            &self.hard_cancel_token,
+            cancel_token,
+            resource_budget,
         )
         .await?;
         self.user_turn_count += 1;

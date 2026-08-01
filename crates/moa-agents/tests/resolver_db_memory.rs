@@ -5,12 +5,69 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     error::MoaError, error::Result, traits::SessionStore, types::action_policy::ActionRuleScope,
-    types::contact::SessionActorRef, types::guardrails::AgentGuardrailPolicy,
-    types::identifiers::ModelId, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::session::SessionMeta,
+    types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID, types::contact::SessionActorRef,
+    types::guardrails::AgentGuardrailPolicy, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::session::SessionMeta,
 };
 use serde_json::json;
 use uuid::Uuid;
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn exact_resolution_accepts_superseded_global_default_and_rejects_tenant_draft_db_memory()
+-> Result<()> {
+    // Pins: the migrated platform-owned system default remains globally visible and executable
+    // through the normal superseded lifecycle while a tenant draft remains ineligible.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let registry = ArtifactRegistry::new(pool.clone());
+    let system_default_revision = registry
+        .load_revision(&scope, SYSTEM_DEFAULT_AGENT_REVISION_UID)
+        .await?
+        .expect("global system-default revision should remain visible to tenant resolution");
+    assert_eq!(system_default_revision.scope, "global");
+    assert_eq!(system_default_revision.status, ArtifactStatus::Superseded);
+
+    let resolver = AgentResolver::new(pool.clone());
+    let system_default = resolver
+        .resolve_exact_revision(&scope, SYSTEM_DEFAULT_AGENT_REVISION_UID)
+        .await?;
+    assert_eq!(
+        system_default.revision_lock.agent_revision_uid,
+        SYSTEM_DEFAULT_AGENT_REVISION_UID
+    );
+
+    let document = agent_doc(
+        &format!("draft-tenant-agent-{}", Uuid::now_v7()),
+        "unused-draft-agent-skill",
+    );
+    let source = document.to_yaml().expect("serialize tenant agent");
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    let error = resolver
+        .resolve_exact_revision(&scope, draft.revision_uid)
+        .await
+        .expect_err("tenant draft agent must remain release-ineligible");
+    assert!(
+        error.to_string().contains("state draft"),
+        "unexpected tenant draft-agent rejection: {error}"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]

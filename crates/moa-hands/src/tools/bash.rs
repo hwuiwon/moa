@@ -95,6 +95,7 @@ pub async fn execute_local(
     let params = BashToolInput::parse(input)?;
     let timeout = params.timeout(default_timeout, remaining_lifetime, run_deadline);
     reject_exhausted_budget(timeout, remaining_lifetime, run_deadline)?;
+    let run_deadline_is_binding = run_deadline.is_some_and(|remaining| remaining <= timeout);
     let started_at = Instant::now();
 
     let mut command = Command::new(&*LOGIN_SHELL);
@@ -109,12 +110,21 @@ pub async fn execute_local(
         tokio::pin!(output);
         tokio::select! {
             result = tokio::time::timeout(timeout, &mut output) => {
-                result.map_err(|_| {
-                    MoaError::ToolError(format!(
-                        "bash command timed out after {}s",
-                        timeout.as_secs()
-                    ))
-                })??
+                match result {
+                    Ok(output) => output?,
+                    Err(_) if run_deadline_is_binding => {
+                        hard_cancel_token.cancel();
+                        return Err(MoaError::BudgetExhausted(
+                            "run deadline passed while a bash command was running".to_string(),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(MoaError::ToolError(format!(
+                            "bash command timed out after {}s",
+                            timeout.as_secs()
+                        )));
+                    }
+                }
             }
             _ = hard_cancel_token.cancelled() => {
                 return Err(MoaError::Cancelled);
@@ -158,6 +168,7 @@ pub async fn execute_docker(
     let params = BashToolInput::parse(input)?;
     let timeout = params.timeout(default_timeout, remaining_lifetime, run_deadline);
     reject_exhausted_budget(timeout, remaining_lifetime, run_deadline)?;
+    let run_deadline_is_binding = run_deadline.is_some_and(|remaining| remaining <= timeout);
     let started_at = Instant::now();
 
     let mut command = Command::new("docker");
@@ -171,12 +182,22 @@ pub async fn execute_docker(
         tokio::pin!(output);
         tokio::select! {
             result = tokio::time::timeout(timeout, &mut output) => {
-                result.map_err(|_| {
-                    MoaError::ToolError(format!(
-                        "docker bash command timed out after {}s",
-                        timeout.as_secs()
-                    ))
-                })??
+                match result {
+                    Ok(output) => output?,
+                    Err(_) if run_deadline_is_binding => {
+                        hard_cancel_token.cancel();
+                        let _ = stop_container(container_id).await;
+                        return Err(MoaError::BudgetExhausted(
+                            "run deadline passed while a docker bash command was running".to_string(),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(MoaError::ToolError(format!(
+                            "docker bash command timed out after {}s",
+                            timeout.as_secs()
+                        )));
+                    }
+                }
             }
             _ = hard_cancel_token.cancelled() => {
                 let _ = stop_container(container_id).await;
@@ -352,10 +373,11 @@ mod tests {
     use chrono::{TimeDelta, Utc};
     use moa_core::error::MoaError;
     use moa_core::types::tools::ToolOutput;
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        BashToolInput, MAX_BASH_TIMEOUT_SECS, MAX_CAPTURED_STREAM_BYTES, process_output,
-        remaining_lifetime,
+        BashToolInput, MAX_BASH_TIMEOUT_SECS, MAX_CAPTURED_STREAM_BYTES, execute_local,
+        process_output, remaining_lifetime,
     };
 
     #[test]
@@ -445,6 +467,33 @@ mod tests {
             Some(Duration::from_secs(45)),
             "a future deadline yields exactly the time left"
         );
+    }
+
+    #[tokio::test]
+    async fn binding_run_deadline_cancels_the_hard_token_and_process() {
+        // Pins: the command's run-derived timeout cannot win a race and return
+        // while leaving the shared hard token live. Expiry cancels the token
+        // before the local child process is dropped.
+        let sandbox = tempfile::tempdir().expect("temporary sandbox");
+        let hard_cancel = CancellationToken::new();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            execute_local(
+                sandbox.path(),
+                r#"{"cmd":"sleep 30"}"#,
+                Duration::from_secs(30),
+                None,
+                Some(Duration::from_millis(25)),
+                Some(&hard_cancel),
+            ),
+        )
+        .await
+        .expect("the run deadline must stop the command")
+        .expect_err("the command must not complete");
+
+        assert!(matches!(error, MoaError::BudgetExhausted(_)));
+        assert!(hard_cancel.is_cancelled());
     }
 
     #[test]

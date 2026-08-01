@@ -11,7 +11,10 @@
 //! their own isolated database and are safe to run concurrently.
 
 use chrono::{DateTime, TimeZone, Utc};
-use moa_artifacts::release::Digest32;
+use moa_artifacts::release::{
+    Digest32, PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+    PLATFORM_RELEASE_SIMULATOR_POLICY_REVISION, PLATFORM_RELEASE_SIMULATOR_POLICY_UID,
+};
 use moa_core::error::Result;
 use moa_core::types::identifiers::{ModelId, TenantId};
 use moa_experiments::simulator_policy::SimulatorPolicyError;
@@ -29,7 +32,7 @@ use moa_experiments::simulator_policy::runtime::{
     DEFAULT_SIMULATOR_SYSTEM_PROMPT, production_context_contract_hash, production_protocol,
 };
 use moa_experiments::simulator_policy::store::SimulatorPolicyStore;
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 const CRITICAL_CLASS: &str = "handoff_required";
@@ -58,7 +61,7 @@ fn components(model: &str) -> SimulatorPolicyComponents {
         protocol: production_protocol().expect("production protocol hashes"),
         context_contract_hash: production_context_contract_hash()
             .expect("production context contract hashes"),
-        calibration_cohort: cohort("calib", 40, 0xC0),
+        calibration_cohort: selection_cohort(),
         validity: ValidityWindow {
             valid_from: at(500_000),
             valid_until: at(2_000_000),
@@ -76,6 +79,10 @@ fn cohort(id: &str, units: u32, fill: u8) -> CohortPin {
     }
 }
 
+fn selection_cohort() -> CohortPin {
+    cohort("sel-2026-q2", 80, 0x51)
+}
+
 fn policy(policy_uid: Uuid, revision: i32, model: &str) -> SimulatorPolicy {
     SimulatorPolicy {
         policy_uid,
@@ -84,9 +91,9 @@ fn policy(policy_uid: Uuid, revision: i32, model: &str) -> SimulatorPolicy {
     }
 }
 
-fn bounds() -> DomainFidelityBounds {
+fn bounds(domain: ScenarioDomain) -> DomainFidelityBounds {
     DomainFidelityBounds {
-        domain: domain(),
+        domain,
         independent_unit: IndependentUnit::HumanParticipant,
         minimum_support: MinimumSupport {
             selection_units: 60,
@@ -121,6 +128,7 @@ fn bounds() -> DomainFidelityBounds {
 }
 
 fn artifact(policy: &SimulatorPolicy, study_uid: Uuid) -> FidelityStudyArtifact {
+    let domain = policy.components.domain.clone();
     FidelityStudyArtifact {
         artifact_version: FIDELITY_ARTIFACT_VERSION,
         study_uid,
@@ -128,9 +136,9 @@ fn artifact(policy: &SimulatorPolicy, study_uid: Uuid) -> FidelityStudyArtifact 
         policy_revision: policy.revision,
         policy_hash: policy.policy_hash().expect("policy hashes"),
         simulator_components: policy.components.clone(),
-        domain: domain(),
-        bounds: bounds(),
-        selection_cohort: cohort("sel-2026-q2", 80, 0x51),
+        domain: domain.clone(),
+        bounds: bounds(domain),
+        selection_cohort: policy.components.calibration_cohort.clone(),
         certification_cohort: cohort("cert-2026-q2", 220, 0xCE),
         label_protocol: LabelProtocolPin {
             protocol_id: "label-retail-handoff".to_string(),
@@ -195,6 +203,80 @@ async fn stored_state(pool: &PgPool, policy_uid: Uuid, revision: i32) -> Result<
     .await
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(state)
+}
+
+async fn replace_platform_mandate(
+    pool: &PgPool,
+    artifact: &FidelityStudyArtifact,
+    source_manifest_hash: Digest32,
+) {
+    sqlx::query("DELETE FROM moa.simulator_certification_mandate WHERE mandate_uid = $1")
+        .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+        .execute(pool)
+        .await
+        .expect("test owner replaces the unprovisioned migration mandate");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.simulator_certification_mandate (
+            mandate_uid, storage_partition_id, user_id, policy_uid,
+            policy_revision, policy_hash, domain, bounds, selection_cohort,
+            certification_cohort, label_protocol, human_data_authorization,
+            study_budget_micro_usd, required_source_manifest_hash,
+            study_window_from, study_window_until, predeclared_at
+        )
+        VALUES (
+            $1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15
+        )
+        "#,
+    )
+    .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+    .bind(artifact.policy_uid)
+    .bind(artifact.policy_revision)
+    .bind(artifact.policy_hash.to_vec())
+    .bind(artifact.domain.as_str())
+    .bind(serde_json::to_value(&artifact.bounds).expect("bounds serialize"))
+    .bind(serde_json::to_value(&artifact.selection_cohort).expect("selection cohort serializes"))
+    .bind(
+        serde_json::to_value(&artifact.certification_cohort)
+            .expect("certification cohort serializes"),
+    )
+    .bind(serde_json::to_value(&artifact.label_protocol).expect("label protocol serializes"))
+    .bind(serde_json::to_value(&artifact.authorization).expect("authorization serializes"))
+    .bind(i64::try_from(artifact.cost.budget_micro_usd).expect("fixture budget fits i64"))
+    .bind(source_manifest_hash.to_vec())
+    .bind(artifact.observed_at - chrono::Duration::days(1))
+    .bind(artifact.observed_at + chrono::Duration::days(1))
+    .bind(artifact.observed_at - chrono::Duration::days(1))
+    .execute(pool)
+    .await
+    .expect("insert independently provisioned test mandate");
+}
+
+async fn import_platform_evidence(
+    pool: &PgPool,
+    artifact: &FidelityStudyArtifact,
+    source_manifest_hash: Digest32,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO moa.simulator_certification_evidence_import (
+            mandate_uid, storage_partition_id, user_id, study_uid,
+            study_artifact_hash, source_manifest_hash, source_reference,
+            imported_by
+        )
+        VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+    .bind(artifact.study_uid)
+    .bind(artifact.digest().expect("fixture artifact hashes").to_vec())
+    .bind(source_manifest_hash.to_vec())
+    .bind("fixture://reviewed-source-manifest")
+    .bind("fixture-independent-reviewer")
+    .execute(pool)
+    .await
+    .expect("import independently reviewed test evidence");
 }
 
 #[tokio::test]
@@ -283,6 +365,249 @@ async fn certified_exact_policy_resolves_with_tenant_isolation_db() -> Result<()
         ),
         "expected a lapse, got {lapsed}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn global_release_policy_requires_independent_mandate_and_evidence_import_db() -> Result<()> {
+    // Pins: a caller-authored study cannot choose its own bounds, authorization,
+    // or source evidence. Certification requires the fixed migration-owned
+    // mandate plus an independently imported approval of the exact artifact hash.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let owner_pool = test_db.store().pool().clone();
+    let tenant_id = TenantId(Uuid::new_v4());
+    let tenant_store = SimulatorPolicyStore::new(owner_pool.clone());
+    let record = tenant_store
+        .load_policy(
+            tenant_id,
+            PLATFORM_RELEASE_SIMULATOR_POLICY_UID,
+            PLATFORM_RELEASE_SIMULATOR_POLICY_REVISION,
+        )
+        .await
+        .expect("load migrated global platform policy")
+        .expect("global platform policy exists");
+    let now = Utc::now();
+    let mut evidence = artifact(&record.policy, Uuid::now_v7());
+    evidence.authorization.approved_at = now - chrono::Duration::days(1);
+    evidence.authorization.expires_at = now + chrono::Duration::days(1);
+    evidence.observed_at = now;
+
+    let tenant_refusal = tenant_store
+        .record_study(tenant_id, &evidence, evidence.observed_at)
+        .await
+        .expect_err("tenant certification must not address the global row");
+    assert!(
+        matches!(tenant_refusal, SimulatorPolicyError::NotCertified { .. }),
+        "expected tenant/global scope refusal, got {tenant_refusal}"
+    );
+
+    let promoter_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SET ROLE moa_promoter")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(test_db.database_url())
+        .await
+        .expect("connect with the promoter role");
+    let promoter_store = SimulatorPolicyStore::new(promoter_pool.clone());
+
+    let promoter_rewrite = sqlx::query(
+        "UPDATE moa.simulator_certification_mandate SET study_budget_micro_usd = 1 WHERE mandate_uid = $1",
+    )
+    .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+    .execute(&promoter_pool)
+    .await;
+    assert!(
+        promoter_rewrite.is_err(),
+        "the evidence importer must not rewrite migration-owned authority"
+    );
+    let promoter_delete =
+        sqlx::query("DELETE FROM moa.simulator_certification_mandate WHERE mandate_uid = $1")
+            .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+            .execute(&promoter_pool)
+            .await;
+    assert!(
+        promoter_delete.is_err(),
+        "the evidence importer must not delete migration-owned authority"
+    );
+
+    let unprovisioned = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &evidence,
+            Utc::now(),
+        )
+        .await
+        .expect_err("the migration mandate intentionally carries no external evidence authority");
+    assert!(
+        matches!(
+            unprovisioned,
+            SimulatorPolicyError::CertificationMandateMismatch { .. }
+        ),
+        "expected unprovisioned mandate refusal, got {unprovisioned}"
+    );
+
+    let source_manifest_hash = Digest32([0xA5; 32]);
+    replace_platform_mandate(&owner_pool, &evidence, source_manifest_hash).await;
+    let missing_import = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &evidence,
+            Utc::now(),
+        )
+        .await
+        .expect_err("a mandate without exact imported evidence must not certify");
+    assert!(
+        matches!(
+            missing_import,
+            SimulatorPolicyError::CertificationEvidenceMissing { .. }
+        ),
+        "expected missing-evidence refusal, got {missing_import}"
+    );
+
+    let mut component_drift = evidence.clone();
+    component_drift.simulator_components.provider = "different-provider".to_string();
+    component_drift.policy_hash = SimulatorPolicy {
+        policy_uid: component_drift.policy_uid,
+        revision: component_drift.policy_revision,
+        components: component_drift.simulator_components.clone(),
+    }
+    .policy_hash()
+    .expect("drifted policy hashes");
+    let drift_refusal = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &component_drift,
+            Utc::now(),
+        )
+        .await
+        .expect_err("evidence for different components must not certify the stored policy");
+    assert!(
+        matches!(
+            drift_refusal,
+            SimulatorPolicyError::CertificationMandateMismatch { .. }
+        ),
+        "expected mandate component-drift refusal, got {drift_refusal}"
+    );
+
+    let mut cohort_drift = evidence.clone();
+    cohort_drift.selection_cohort.cohort_id = "different-selection".to_string();
+    let cohort_refusal = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &cohort_drift,
+            Utc::now(),
+        )
+        .await
+        .expect_err("evidence from another selection cohort must be refused");
+    assert!(
+        matches!(
+            cohort_refusal,
+            SimulatorPolicyError::CertificationMandateMismatch { .. }
+        ),
+        "expected mandate cohort refusal, got {cohort_refusal}"
+    );
+
+    let mut easier_bounds = evidence.clone();
+    easier_bounds
+        .bounds
+        .critical_classes
+        .first_mut()
+        .expect("one critical class")
+        .min_sensitivity_lower_bound_permille = 1;
+    let bounds_refusal = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &easier_bounds,
+            Utc::now(),
+        )
+        .await
+        .expect_err("a study cannot choose easier bounds than the mandate");
+    assert!(
+        matches!(
+            bounds_refusal,
+            SimulatorPolicyError::CertificationMandateMismatch { .. }
+        ),
+        "expected predeclared-bounds refusal, got {bounds_refusal}"
+    );
+
+    let mut authorization_drift = evidence.clone();
+    authorization_drift.authorization.authorization_id = "caller-selected".to_string();
+    let authorization_refusal = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &authorization_drift,
+            Utc::now(),
+        )
+        .await
+        .expect_err("a study cannot self-select human-data authorization");
+    assert!(
+        matches!(
+            authorization_refusal,
+            SimulatorPolicyError::CertificationMandateMismatch { .. }
+        ),
+        "expected independent-authorization refusal, got {authorization_refusal}"
+    );
+
+    import_platform_evidence(&owner_pool, &evidence, source_manifest_hash).await;
+
+    let mut changed_after_import = evidence.clone();
+    changed_after_import.cost.spent_micro_usd += 1;
+    let changed_refusal = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &changed_after_import,
+            Utc::now(),
+        )
+        .await
+        .expect_err("the imported approval applies only to exact canonical artifact bytes");
+    assert!(
+        matches!(
+            changed_refusal,
+            SimulatorPolicyError::CertificationEvidenceMismatch { .. }
+        ),
+        "expected exact-evidence refusal, got {changed_refusal}"
+    );
+
+    let outcome = promoter_store
+        .record_platform_study(
+            PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
+            &evidence,
+            Utc::now(),
+        )
+        .await
+        .expect("record independently authorized platform evidence as promoter");
+    assert_eq!(outcome.verdict(), "certified");
+    let resolved = promoter_store
+        .resolve_platform_policy(record.policy.reference(), Utc::now())
+        .await
+        .expect("certified global policy resolves for the operator");
+    assert_eq!(
+        resolved.binding.policy_uid,
+        PLATFORM_RELEASE_SIMULATOR_POLICY_UID
+    );
+    assert_eq!(
+        resolved.binding.policy_hash,
+        record.policy.policy_hash().expect("platform policy hashes")
+    );
+
+    let global_studies: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.simulator_fidelity_study WHERE storage_partition_id IS NULL",
+    )
+    .fetch_one(&owner_pool)
+    .await
+    .expect("count global studies");
+    assert_eq!(
+        global_studies, 1,
+        "refused tenant, mandate, and evidence drift must not persist"
+    );
+    promoter_pool.close().await;
     Ok(())
 }
 

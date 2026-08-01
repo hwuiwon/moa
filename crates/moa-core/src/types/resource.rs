@@ -359,6 +359,45 @@ impl ResourceBudget {
             .and_then(|remaining| request.first_exceeding(&remaining))
     }
 
+    /// Returns the budget left after charging `usage` at `now`.
+    ///
+    /// The charge is all-or-nothing: an expired deadline or an amount above any
+    /// remaining dimension returns an error and leaves the original copy
+    /// available to the caller. Unmetered budgets retain an unmetered allowance.
+    pub fn try_consume_at(
+        self,
+        usage: ResourceAmounts,
+        now: DateTime<Utc>,
+    ) -> Result<Self, ResourceError> {
+        if let Some(deadline) = self.deadline
+            && self.deadline_passed(now)
+        {
+            return Err(ResourceError::DeadlineExceeded { deadline });
+        }
+
+        let Some(remaining) = self.remaining else {
+            return Ok(self);
+        };
+        if let Some(kind) = usage.first_exceeding(&remaining) {
+            return Err(ResourceError::Exhausted {
+                kind,
+                requested: usage.get(kind),
+                remaining: remaining.get(kind),
+                limit: remaining.get(kind),
+            });
+        }
+
+        Ok(Self {
+            deadline: self.deadline,
+            remaining: Some(remaining.saturating_sub(&usage)),
+        })
+    }
+
+    /// Returns the budget left after charging `usage` against the current time.
+    pub fn try_consume(self, usage: ResourceAmounts) -> Result<Self, ResourceError> {
+        self.try_consume_at(usage, Utc::now())
+    }
+
     /// Narrows this budget by another: the earlier deadline and the smaller
     /// allowance in every dimension.
     ///
@@ -836,8 +875,12 @@ impl DeadlineGuard {
 
         tokio::pin!(future);
         tokio::select! {
-            output = &mut future => Ok(output),
+            // If work and its deadline become ready together, expiry wins: a
+            // deadline is an exclusive bound and must cancel sibling work
+            // before any terminal output is accepted.
+            biased;
             error = self.cancelled_or_expired() => Err(error),
+            output = &mut future => Ok(output),
         }
     }
 }
@@ -1238,6 +1281,30 @@ mod tests {
         );
         assert!(unmetered.is_unbounded());
         assert!(!exhausted.is_unbounded());
+    }
+
+    #[test]
+    fn budget_consumption_accepts_exact_boundary_and_rejects_one_more() {
+        // Pins: a downward budget copy decrements every dimension atomically,
+        // admits equality, and rejects the next unit without widening or
+        // partially charging any other dimension.
+        let now = Utc::now();
+        let initial = ResourceBudget::new(None, Some(amounts(10, 20, 2, 3, 4)));
+        let exhausted = initial
+            .try_consume_at(amounts(10, 20, 2, 3, 4), now)
+            .expect("the exact remaining boundary is admissible");
+
+        assert_eq!(exhausted.remaining, Some(ResourceAmounts::ZERO));
+        assert!(matches!(
+            exhausted.try_consume_at(amounts(0, 0, 0, 1, 0), now),
+            Err(ResourceError::Exhausted {
+                kind: ResourceKind::ModelCalls,
+                requested: 1,
+                remaining: 0,
+                ..
+            })
+        ));
+        assert_eq!(initial.remaining, Some(amounts(10, 20, 2, 3, 4)));
     }
 
     #[test]

@@ -12,11 +12,13 @@ eval-tools = [
     "dep:blake3",
     "dep:chrono",
     "dep:moa-core",
+    "dep:moa-artifacts",
     "dep:moa-config",
     "dep:moa-crypto",
     "dep:moa-retrieval",
     "dep:moa-db",
     "dep:moa-eval",
+    "dep:moa-experiments",
     "dep:moa-knowledge",
     "dep:moa-memory-graph",
     "dep:moa-memory-ingest",
@@ -41,11 +43,13 @@ async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 moa-core = { workspace = true, optional = true }
+moa-artifacts = { workspace = true, optional = true }
 moa-config = { workspace = true, optional = true }
 moa-crypto = { workspace = true, optional = true }
 moa-retrieval = { workspace = true, optional = true }
 moa-db = { workspace = true, optional = true }
 moa-eval = { workspace = true, optional = true }
+moa-experiments = { workspace = true, optional = true }
 moa-knowledge = { workspace = true, optional = true }
 moa-memory-graph = { workspace = true, optional = true }
 moa-memory-ingest = { workspace = true, features = ["test-util"], optional = true }

@@ -4,6 +4,12 @@ use axum::body::Bytes;
 use axum::http::{Method, Uri};
 use moa_core::types::identifiers::TenantId;
 use moa_execution::wire::ExecutionTemplateAdmissionRequest;
+use moa_wire::artifact_release::{
+    ReleaseActivateRequest, ReleaseAttemptListRequest, ReleaseAttemptReviewRequest,
+    ReleaseSubmitRequest,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use super::{
     RouteTranslation, tenant_id_field, translate_json_object_with_fields,
@@ -61,6 +67,30 @@ pub(super) fn translate(
         }
         "/v1/artifacts/publish" => {
             translate_json_object_with_tenant_scope(body, "/Artifacts/publish", tenant_id)
+        }
+        "/v1/artifact-releases/submit" => translate_artifact_release::<ReleaseSubmitRequest>(
+            body,
+            "/ArtifactRelease/submit",
+            tenant_id,
+        ),
+        "/v1/artifact-releases/activate" => translate_artifact_release::<ReleaseActivateRequest>(
+            body,
+            "/ArtifactRelease/activate",
+            tenant_id,
+        ),
+        "/v1/artifact-releases/attempts/list" => {
+            translate_artifact_release::<ReleaseAttemptListRequest>(
+                body,
+                "/ArtifactRelease/list_attempts",
+                tenant_id,
+            )
+        }
+        "/v1/artifact-releases/attempts/review" => {
+            translate_artifact_release::<ReleaseAttemptReviewRequest>(
+                body,
+                "/ArtifactRelease/review_attempt",
+                tenant_id,
+            )
         }
         "/v1/learning-candidates/get" => {
             translate_json_object_with_tenant_id(body, "/LearningReview/get", tenant_id)
@@ -122,6 +152,36 @@ pub(super) fn translate(
     Some(translation)
 }
 
+fn translate_artifact_release<T>(
+    body: &Bytes,
+    path: &'static str,
+    tenant_id: TenantId,
+) -> RouteTranslation
+where
+    T: DeserializeOwned + Serialize,
+{
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad artifact release route body"),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return RouteTranslation::BadRequest("artifact release route body must be object");
+    };
+    object.insert("tenant_id".to_string(), serde_json::json!(tenant_id));
+    let request = match serde_json::from_value::<T>(value) {
+        Ok(request) => request,
+        Err(_) => return RouteTranslation::BadRequest("invalid artifact release request"),
+    };
+    match serde_json::to_vec(&request) {
+        Ok(body) => RouteTranslation::Forward {
+            method: Method::POST,
+            path: path.to_string(),
+            body,
+        },
+        Err(_) => RouteTranslation::BadRequest("serialize artifact release request failed"),
+    }
+}
+
 fn translate_execution_template_admission(body: &Bytes, tenant_id: TenantId) -> RouteTranslation {
     let mut value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(value) => value,
@@ -179,9 +239,16 @@ fn translate_execution_run_nested(
 mod tests {
     use axum::body::Bytes;
     use axum::http::{Method, Uri};
+    use moa_wire::artifact_release::{
+        ReleaseActivateRequest, ReleaseAttemptListRequest, ReleaseAttemptReviewRequest,
+        ReleasePinnedDependency, ReleaseSubmitRequest,
+    };
+    use uuid::Uuid;
 
     use crate::routes::RouteTranslation;
-    use crate::routes::test_support::{test_tenant_json, test_tenant_scope_json, translate};
+    use crate::routes::test_support::{
+        test_tenant_id, test_tenant_json, test_tenant_scope_json, translate,
+    };
 
     #[test]
     fn skills_and_capabilities_public_routes_translate_to_restate_handlers() {
@@ -396,6 +463,145 @@ mod tests {
                 RouteTranslation::BadRequest(message) => {
                     panic!("{public_path} should not fail translation: {message}")
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_release_public_routes_translate_typed_requests_to_restate_handlers() {
+        // Pins: each authenticated artifact-release command replaces any caller tenant
+        // with the edge tenant and forwards the existing typed wire request unchanged.
+        let revision_uid = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("revision id should parse");
+        let attestation_uid = Uuid::parse_str("33333333-3333-3333-3333-333333333333")
+            .expect("attestation id should parse");
+        let attempt_uid = Uuid::parse_str("44444444-4444-4444-4444-444444444444")
+            .expect("attempt id should parse");
+        let dependency = ReleasePinnedDependency {
+            artifact_uid: Uuid::parse_str("55555555-5555-5555-5555-555555555555")
+                .expect("dependency artifact id should parse"),
+            revision_uid: Uuid::parse_str("66666666-6666-6666-6666-666666666666")
+                .expect("dependency revision id should parse"),
+        };
+        let cases = [
+            (
+                "/v1/artifact-releases/submit",
+                "/ArtifactRelease/submit",
+                serde_json::to_value(ReleaseSubmitRequest {
+                    tenant_id: test_tenant_id(),
+                    revision_uid,
+                    installation_uid: None,
+                    pinned_draft_dependencies: vec![dependency],
+                })
+                .expect("submit request should serialize"),
+            ),
+            (
+                "/v1/artifact-releases/activate",
+                "/ArtifactRelease/activate",
+                serde_json::to_value(ReleaseActivateRequest {
+                    tenant_id: test_tenant_id(),
+                    revision_uid,
+                    attestation_uid,
+                    installation_uid: None,
+                    reason: Some("approved rollout".to_string()),
+                })
+                .expect("activate request should serialize"),
+            ),
+            (
+                "/v1/artifact-releases/attempts/list",
+                "/ArtifactRelease/list_attempts",
+                serde_json::to_value(ReleaseAttemptListRequest {
+                    tenant_id: test_tenant_id(),
+                    limit: Some(25),
+                })
+                .expect("attempt-list request should serialize"),
+            ),
+            (
+                "/v1/artifact-releases/attempts/review",
+                "/ArtifactRelease/review_attempt",
+                serde_json::to_value(ReleaseAttemptReviewRequest {
+                    tenant_id: test_tenant_id(),
+                    attempt_uid,
+                    review_state: "acknowledged".to_string(),
+                    note: Some("evidence reviewed".to_string()),
+                })
+                .expect("attempt-review request should serialize"),
+            ),
+        ];
+
+        for (public_path, internal_path, expected_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let mut caller_body = expected_body.clone();
+            caller_body["tenant_id"] = serde_json::json!("77777777-7777-7777-7777-777777777777");
+
+            let translation = translate(&Method::POST, &uri, &Bytes::from(caller_body.to_string()));
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    let forwarded: serde_json::Value = serde_json::from_slice(&forwarded_body)
+                        .expect("forwarded release body should be JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_release_public_routes_reject_invalid_bodies() {
+        // Pins: malformed, non-object, and incomplete release commands fail at the
+        // authenticated edge before reaching the release-control service.
+        let uri = "/v1/artifact-releases/submit"
+            .parse::<Uri>()
+            .expect("release submit route should parse");
+        let cases = [
+            (
+                Bytes::from_static(b"not-json"),
+                RouteTranslation::BadRequest("bad artifact release route body"),
+            ),
+            (
+                Bytes::from_static(br#"[]"#),
+                RouteTranslation::BadRequest("artifact release route body must be object"),
+            ),
+            (
+                Bytes::from_static(br#"{}"#),
+                RouteTranslation::BadRequest("invalid artifact release request"),
+            ),
+        ];
+
+        for (body, expected) in cases {
+            assert_eq!(translate(&Method::POST, &uri, &body), expected);
+        }
+    }
+
+    #[test]
+    fn artifact_release_public_routes_reject_non_post_methods() {
+        // Pins: artifact release is an explicit command surface; reads and alternate
+        // mutation verbs do not become aliases for any Restate release handler.
+        for public_path in [
+            "/v1/artifact-releases/submit",
+            "/v1/artifact-releases/activate",
+            "/v1/artifact-releases/attempts/list",
+            "/v1/artifact-releases/attempts/review",
+        ] {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            for method in [Method::GET, Method::PUT, Method::PATCH, Method::DELETE] {
+                assert_eq!(
+                    translate(&method, &uri, &Bytes::from_static(br#"{}"#)),
+                    RouteTranslation::NotFound,
+                    "{method} {public_path} must not translate"
+                );
             }
         }
     }

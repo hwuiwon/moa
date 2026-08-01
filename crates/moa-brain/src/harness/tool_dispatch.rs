@@ -7,9 +7,10 @@ use moa_core::{
     error::MoaError, error::Result, events::Event, traits::Identity, traits::SessionStore,
     types::action_policy::ActionPolicyEffect, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::resource::ResourceBudget,
+    types::session::SessionMeta,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{ToolCallScope, ToolRouter};
 use moa_security::ToolInputCanaryScreening;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +46,7 @@ pub(super) async fn handle_tool_call(
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    resource_budget: ResourceBudget,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
     tool_dispatch_span: Option<&tracing::Span>,
@@ -153,6 +155,7 @@ pub(super) async fn handle_tool_call(
                 active_canary,
                 event_tx,
                 runtime_tx,
+                resource_budget,
                 cancel_token,
                 hard_cancel_token,
                 tool_dispatch_span,
@@ -267,6 +270,7 @@ pub(super) async fn execute_tool(
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    resource_budget: ResourceBudget,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
     tool_dispatch_span: Option<&tracing::Span>,
@@ -301,14 +305,14 @@ pub(super) async fn execute_tool(
     let mut execution_call = call.clone();
     execution_call.id = Some(tool_id.to_string());
     let execution_result = tool_router
-        .execute_authorized_with_cancel(
+        .execute_authorized_within(
             session,
             caller_identity,
             &execution_call,
             tool_id,
             active_canary,
-            cancel_token,
-            hard_cancel_token,
+            ToolCallScope::from_tokens(cancel_token, hard_cancel_token)
+                .with_budget(resource_budget),
         )
         .instrument(tool_span.clone())
         .await;

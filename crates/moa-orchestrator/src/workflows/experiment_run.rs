@@ -558,6 +558,7 @@ mod tests {
         assert_eq!(
             plan_expansion::aggregate_status_for_trials(
                 &[failed.clone(), pending],
+                2,
                 ExperimentRunStatus::Running
             ),
             ExperimentRunStatus::Running
@@ -565,6 +566,7 @@ mod tests {
         assert_eq!(
             plan_expansion::aggregate_status_for_trials(
                 &[failed.clone(), dispatched],
+                2,
                 ExperimentRunStatus::Running
             ),
             ExperimentRunStatus::Running
@@ -572,6 +574,7 @@ mod tests {
         assert_eq!(
             plan_expansion::aggregate_status_for_trials(
                 &[failed.clone(), completed],
+                2,
                 ExperimentRunStatus::Running
             ),
             ExperimentRunStatus::Failed
@@ -607,6 +610,7 @@ mod tests {
         assert_eq!(
             plan_expansion::aggregate_status_for_trials(
                 &[completed, cancelled],
+                2,
                 ExperimentRunStatus::Running
             ),
             ExperimentRunStatus::Cancelled
@@ -629,15 +633,56 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_status_completes_empty_plan_expansion() {
-        // Pins: an empty runtime expansion cannot leave the parent polling forever.
+    fn aggregate_status_requires_exact_expected_trial_cardinality() {
+        // Pins: plan expansion inserts trials incrementally. Status reads of an
+        // empty or terminal prefix cannot settle the run, and excess rows fail
+        // closed instead of being silently excluded from the verdict.
+        let completed = trial_record("completed", ExperimentTrialStatus::Completed);
         assert_eq!(
-            plan_expansion::aggregate_status_for_trials(&[], ExperimentRunStatus::Running),
+            plan_expansion::aggregate_status_for_trials(&[], 2, ExperimentRunStatus::Accepted),
+            ExperimentRunStatus::Accepted
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                std::slice::from_ref(&completed),
+                2,
+                ExperimentRunStatus::Running,
+            ),
+            ExperimentRunStatus::Running
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                std::slice::from_ref(&completed),
+                2,
+                ExperimentRunStatus::Failed,
+            ),
+            ExperimentRunStatus::Failed,
+            "a terminal failure must not be reopened"
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                std::slice::from_ref(&completed),
+                2,
+                ExperimentRunStatus::Completed,
+            ),
+            ExperimentRunStatus::Failed,
+            "completed before exact cardinality is an inconsistent failure"
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                &[completed.clone(), completed.clone()],
+                2,
+                ExperimentRunStatus::Running,
+            ),
             ExperimentRunStatus::Completed
         );
         assert_eq!(
-            plan_expansion::aggregate_status_for_trials(&[], ExperimentRunStatus::Cancelled),
-            ExperimentRunStatus::Cancelled
+            plan_expansion::aggregate_status_for_trials(
+                &[completed.clone(), completed.clone(), completed],
+                2,
+                ExperimentRunStatus::Running,
+            ),
+            ExperimentRunStatus::Failed
         );
     }
 

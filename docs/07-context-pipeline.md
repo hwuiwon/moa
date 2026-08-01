@@ -127,6 +127,15 @@ pointer is authoritative. Neither the latest artifact row nor revision status
 can make a skill visible. There is no contact-scoped skill inheritance, and
 tenant-learned skills stay tenant-local.
 
+Normal sessions remain serving/activation-fenced: they may load a skill only
+through the current serving pointer or an exact activation-pinned dependency in
+their `AgentContext`. The sole draft-state exception is an eval-owned
+`Experiment` session. In that origin, `SkillInjector` may load and materialize an
+exact `draft` or `evaluating` skill revision only when that revision is already
+named by the session's pinned `AgentContext` dependency lock. It never falls
+back to the latest draft, and the exception does not make that revision visible
+to any normal session.
+
 When a configured-agent policy is pinned to the session, selection first applies
 that policy. Pinned skills are included before ranked fill, allowlists bound the
 eligible set, denylists exclude matching refs, and `max_visible` caps the final

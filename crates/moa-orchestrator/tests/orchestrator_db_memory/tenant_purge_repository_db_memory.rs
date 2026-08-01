@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use moa_artifacts::release::PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::types::identifiers::{StoragePartitionId, TenantId};
 use moa_memory_pii::legal_hold::{
@@ -308,6 +309,69 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
     .await
     .expect("count global control-plane rows");
     assert_eq!(global_rows, (1, 1, 1));
+}
+
+#[tokio::test]
+async fn tenant_purge_catalog_preserves_global_simulator_authority_db_memory() {
+    // Pins: nullable global-RLS scope columns do not make the platform mandate
+    // and evidence import tenant-owned. Catalog coverage must ignore both, and a
+    // tenant purge must leave their global rows unchanged.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap global-authority catalog db");
+    let pool = test_db.store().pool();
+    let tenant_id = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    seed_tenant(pool, tenant_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.simulator_certification_evidence_import (
+            mandate_uid, storage_partition_id, user_id, study_uid,
+            study_artifact_hash, source_manifest_hash, source_reference,
+            imported_by
+        )
+        VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+    .bind(Uuid::new_v4())
+    .bind(vec![0xAA_u8; 32])
+    .bind(vec![0_u8; 32])
+    .bind("fixture://global-authority")
+    .bind("tenant-purge-catalog-test")
+    .execute(pool)
+    .await
+    .expect("seed one global evidence import");
+    start_destruction(
+        pool,
+        TenantId::from(tenant_id),
+        &[],
+        &operation_id,
+        "tenant.purge",
+    )
+    .await
+    .expect("start global-authority catalog fence");
+
+    assert_eq!(
+        purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
+            .await
+            .expect("global authority tables are outside tenant purge ownership"),
+        RelationalPurgeOutcome::Committed
+    );
+    let authority_rows: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM moa.simulator_certification_mandate
+             WHERE mandate_uid = $1),
+            (SELECT count(*) FROM moa.simulator_certification_evidence_import
+             WHERE mandate_uid = $1)
+        "#,
+    )
+    .bind(PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID)
+    .fetch_one(pool)
+    .await
+    .expect("count preserved global simulator authority");
+    assert_eq!(authority_rows, (1, 1));
 }
 
 #[tokio::test]

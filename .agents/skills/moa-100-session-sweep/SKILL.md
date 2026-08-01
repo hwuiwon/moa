@@ -90,7 +90,7 @@ missing requirement instead of silently doing nothing:
 - `MOA_RUN_LIVE_100_SESSION_SWEEP=1`
 - a live provider credential (`MOA_ANTHROPIC_API_KEY`, `MOA_OPENAI_API_KEY`, or
   `MOA_GOOGLE_API_KEY`), `MOA_DATABASE_URL`, and a `.env.fga` file
-- `MOA_SWEEP_BUDGET_USD` set to a positive number that covers the pre-computed
+- `MOA_SWEEP_BUDGET_USD` set to a positive finite number that covers the pre-computed
   forecast for the whole run, canary included
 
 Forecast is `MOA_SWEEP_COST_PER_CASE_USD` (default `0.02`, deliberately above the
@@ -99,18 +99,20 @@ cases. **A budget below the forecast dispatches zero sessions.**
 
 During the run a reservation ledger holds one case's forecast before each
 session is dispatched and reconciles it against that session's actual provider
-cost when it finishes. When no reservation is available the runner stops
-dispatching and marks the remaining cases `skipped` rather than spending past the
-authorized budget. The canary and the full run share one ledger.
+cost when it finishes. If actual spend consumes the remaining forecast
+headroom, later cases cannot reserve and are marked `skipped`. The canary and
+the full run share one ledger. This is forecast-based admission plus actual-cost
+reconciliation; it is not a hard cap on provider work already in flight, which
+can settle above its reservation.
 
 ## Canary
 
 Before the 100-case job the runner executes a three-case canary
-(`MOA_SWEEP_CANARY_IDS`, default `S001,S002,S003` — S002 exercises delegation,
-S003 carries the ` reconcile ` planner anchor). Any canary `fail` or `skipped`
-aborts before the billed 100 are dispatched, and canary results are written to
-`canary.json` in the run directory. Focused lanes (`MOA_SWEEP_IDS` /
-`MOA_SWEEP_LIMIT`) and `MOA_SWEEP_SKIP_CANARY=1` skip it.
+(`S001,S002,S003` — S002 exercises delegation, S003 carries the ` reconcile `
+planner anchor). All three must pass before the billed 100 are dispatched, and
+canary results are written to `canary.json` in the run directory. Focused
+subsets (`MOA_SWEEP_IDS` / `MOA_SWEEP_LIMIT`) skip it and can never write the
+committed baseline.
 
 ## Failure Tags
 
@@ -175,17 +177,17 @@ Every run writes a temp report, summary, logs, and per-session JSON under the pr
 
 The committed repo baseline report
 (`docs/engineering-discipline/live-runs/<date>-moa-100-persona-baseline.md`) is written **only** when
-`MOA_SWEEP_WRITE_REPO=1` is set explicitly **and** the run reached `attempted == 100`. Both
-conditions are enforced by the runner, so a focused lane, a budget-truncated run, or a crash can
-never clobber the committed baseline. The summary JSON records `baseline_written`.
+`MOA_SWEEP_WRITE_REPO=1` is set explicitly, the run is not focused, the exact
+canonical canary passed, the run reached `attempted == 100`, and no case produced
+an `F-ERROR` runner-error outcome. These conditions are enforced by the runner,
+so a focused lane, a budget-truncated run, or a crash can never clobber the
+committed baseline. The summary JSON records `baseline_written`.
 
 Useful env overrides:
 
 - `MOA_RUN_LIVE_100_SESSION_SWEEP=1`: required to dispatch any billed session
-- `MOA_SWEEP_BUDGET_USD`: required positive USD budget for the run
-- `MOA_SWEEP_COST_PER_CASE_USD`: per-case forecast used for the pre-run budget check, default `0.02`
-- `MOA_SWEEP_CANARY_IDS`: canary case ids, default `S001,S002,S003`
-- `MOA_SWEEP_SKIP_CANARY=1`: skip the pre-flight canary
+- `MOA_SWEEP_BUDGET_USD`: required positive finite USD budget for the run
+- `MOA_SWEEP_COST_PER_CASE_USD`: positive finite per-case forecast used for the pre-run budget check, default `0.02`
 - `MOA_SWEEP_CASE_SOURCE`: alternate case fixture path (must satisfy the same schema and hashes)
 - `MOA_SWEEP_REPORT_REPO`: exact repo report path to write
 - `MOA_SWEEP_WRITE_REPO=1`: also overwrite the committed repo baseline report (default off: temp run directory only)
@@ -225,7 +227,9 @@ Interpretation guidance for sweeps at or after the 2026-07-10 defaults changes:
 Treat the repo report as the current baseline only when all of these hold:
 
 - the summary JSON reports `attempted=100` and `baseline_written=true`;
-- the canary passed;
+- the run was not focused;
+- the exact canonical canary passed;
+- no case produced an `F-ERROR` runner-error outcome;
 - the baseline's case `content_sha256` matches the fixture you are comparing against.
 
 Runs seeded from a different case content hash are **not comparable**. The

@@ -243,7 +243,7 @@ binaries are scheduled by two named profiles, both invoked from
 | Profile | Binaries | Restate stack |
 | --- | --- | --- |
 | `behavior-lab-service-e2e` | `behavior_lab_simulation_e2e`, `experiment_agent_loop_e2e`, `experiment_trial_run_e2e`, `skill_learning_gate_e2e` | external: reads `MOA_RESTATE_INGRESS_URL`/`MOA_RESTATE_ADMIN_URL`, spawns its own orchestrator on reserved ports |
-| `behavior-lab-fixture-service-e2e` | `experiment_execution_service_e2e` | self-contained: `OrchestratorTestFixture::with_execution_fixture` starts its own containers and **fails** if `MOA_RESTATE_INGRESS_URL` is set |
+| `behavior-lab-fixture-service-e2e` | `artifact_release_service_e2e`, `experiment_execution_service_e2e` | self-contained: `OrchestratorTestFixture` starts its own containers and **fails** if `MOA_RESTATE_INGRESS_URL` is set |
 
 That split is why there are two profiles rather than one: the two halves need
 opposite environments, so the runner invokes the first with the ephemeral

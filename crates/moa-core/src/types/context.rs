@@ -9,10 +9,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    agent::AgentContext, agent::AgentPolicySnapshot, completion::CompletionRequest,
-    completion::ToolInvocation, contact::ContactRef, contact::SessionActorRef,
-    events_stream::EventRecord, hands::SandboxFile, identifiers::SessionId, identifiers::TenantId,
-    identifiers::ToolCallId, model::ModelCapabilities, session::SessionMeta, tools::ToolContent,
+    action_policy::CallOrigin, agent::AgentContext, agent::AgentPolicySnapshot,
+    completion::CompletionRequest, completion::ToolInvocation, contact::ContactRef,
+    contact::SessionActorRef, events_stream::EventRecord, hands::SandboxFile,
+    identifiers::SessionId, identifiers::TenantId, identifiers::ToolCallId,
+    model::ModelCapabilities, session::SessionMeta, tools::ToolContent,
 };
 
 /// Metadata key carrying the replay-stable turn identifier across context stages.
@@ -354,6 +355,9 @@ pub struct WorkingContext {
     pub session_id: SessionId,
     /// Tenant runtime boundary that owns the session.
     pub tenant_id: TenantId,
+    /// Durable provenance class of the runtime that owns the session.
+    #[serde(default)]
+    pub call_origin: CallOrigin,
     /// Agent-facing contact snapshot attached to this session, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<ContactRef>,
@@ -390,6 +394,7 @@ impl WorkingContext {
             model_capabilities,
             session_id: session.id,
             tenant_id: session.tenant_id,
+            call_origin: session.call_origin,
             contact: session.contact.clone(),
             created_by: session.created_by.clone(),
             caller_identity: None,

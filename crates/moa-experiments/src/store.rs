@@ -1531,9 +1531,14 @@ async fn ensure_artifact_revisions_visible(
         SELECT revision_uid
         FROM moa.artifact_revision
         WHERE revision_uid = ANY($1)
-          AND scope IN ('tenant', 'contact')
-          AND storage_partition_id IS NOT DISTINCT FROM $2
-          AND (user_id IS NULL OR user_id IS NOT DISTINCT FROM $3)
+          AND (
+              scope = 'global'
+              OR (
+                  scope IN ('tenant', 'contact')
+                  AND storage_partition_id IS NOT DISTINCT FROM $2
+                  AND (user_id IS NULL OR user_id IS NOT DISTINCT FROM $3)
+              )
+          )
         "#,
     )
     .bind(revision_uids)
@@ -1885,7 +1890,7 @@ impl RowExt for sqlx::postgres::PgRow {
 const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, target_kind, status, \
      target, variant, scorecard, score_run_id, session_id, execution_run_uid, \
      artifact_revision_uids, idempotency_key, created_by_identity, \
-     plan_artifact_uid, resource_envelope, simulator_policy, error, \
+     plan_artifact_uid, expected_trials, resource_envelope, simulator_policy, error, \
      started_at, completed_at, created_at, updated_at";
 
 /// Column projection shared by every full experiment-trial load.
@@ -1937,6 +1942,9 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
         idempotency_key: row.col("idempotency_key")?,
         created_by_identity: row.col("created_by_identity")?,
         plan_artifact_uid: row.col("plan_artifact_uid")?,
+        expected_trials: u64::try_from(row.col::<i64>("expected_trials")?).map_err(|_| {
+            MoaError::StorageError("experiment expected_trials is negative".to_string())
+        })?,
         resource_envelope: from_json("resource_envelope", row.col("resource_envelope")?)?,
         simulator_policy: row
             .col::<Option<Value>>("simulator_policy")?

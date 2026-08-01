@@ -105,7 +105,7 @@ pub struct TrajectoryCollector {
     evidence: Vec<EvidenceEntry>,
     evidence_indices: HashMap<ToolCallId, usize>,
     review_tools: HashMap<Uuid, String>,
-    response_chunks: Vec<String>,
+    final_response: Option<String>,
     metrics: EvalMetrics,
     pricing: Option<TokenPricing>,
     capture_content: bool,
@@ -126,7 +126,7 @@ impl TrajectoryCollector {
             evidence: Vec::new(),
             evidence_indices: HashMap::new(),
             review_tools: HashMap::new(),
-            response_chunks: Vec::new(),
+            final_response: None,
             metrics: EvalMetrics::default(),
             pricing,
             capture_content,
@@ -278,7 +278,7 @@ impl TrajectoryCollector {
                 let input_tokens = event.input_tokens();
                 if self.capture_content && !text.trim().is_empty() {
                     let text = self.capture_text(text);
-                    self.response_chunks.push(text.clone());
+                    self.final_response = Some(text.clone());
                     self.evidence.push(EvidenceEntry::History {
                         role: HistoryRole::Assistant,
                         text,
@@ -318,6 +318,16 @@ impl TrajectoryCollector {
         }
     }
 
+    /// Consumes the complete event-log capture into assertion evidence.
+    ///
+    /// Production Behavior Lab release trials use this narrow surface after the
+    /// target stops and before scoring, so they reuse the same ledger semantics
+    /// as the internal regression harness without exposing its report payload.
+    #[must_use]
+    pub fn into_evidence(self, subject: EvidenceSubject) -> EvidenceEnvelope {
+        self.finish().to_evidence(subject)
+    }
+
     /// Consumes the collector and returns the final collected execution payload.
     pub(crate) fn finish(self) -> CollectedExecution {
         // Content capture off means the response and history observations were
@@ -336,11 +346,7 @@ impl TrajectoryCollector {
             None
         };
         CollectedExecution {
-            response: if self.response_chunks.is_empty() {
-                None
-            } else {
-                Some(self.response_chunks.join("\n\n"))
-            },
+            response: self.final_response,
             trajectory: self.steps,
             evidence: self.evidence,
             capture_truncated,
@@ -491,6 +497,46 @@ mod tests {
         assert_eq!(collected.metrics.total_tokens, 150);
         assert!(collected.metrics.cost_dollars > 0.0);
         assert_eq!(collected.response.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn collector_uses_the_latest_brain_response_as_the_final_response() {
+        // Pins: multi-turn histories retain every assistant message, while
+        // final-response assertions evaluate the same last response surfaced by
+        // production trial terminal evidence.
+        let mut collector = TrajectoryCollector::new(None, true, 1_024);
+        for text in ["intermediate", "final"] {
+            collector.process_event(&Event::BrainResponse {
+                text: text.to_string(),
+                thought_signature: None,
+                model: moa_core::types::identifiers::ModelId::new("mock"),
+                model_tier: moa_core::types::provider::ModelTier::Main,
+                input_tokens_uncached: 0,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 0,
+                cost_cents: 0,
+                duration_ms: 0,
+                llm_ttft_ms: None,
+            });
+        }
+
+        let collected = collector.finish();
+        assert_eq!(collected.response.as_deref(), Some("final"));
+        assert_eq!(
+            collected
+                .evidence
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    super::EvidenceEntry::History {
+                        role: moa_eval_core::evidence::HistoryRole::Assistant,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
     }
 
     #[test]

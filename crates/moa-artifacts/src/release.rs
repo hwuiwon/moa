@@ -40,8 +40,33 @@ use crate::{Error, ReleaseRejection, Result};
 ///
 /// A policy without these is not a weaker gate, it is an absent one, so
 /// [`ReleasePolicy::validate`] refuses it before evaluation is ever dispatched.
-pub const PLATFORM_BLOCKING_ASSERTIONS: [&str; 3] =
-    ["target_completed", "result_produced", "privacy_safe_output"];
+pub const PLATFORM_BLOCKING_ASSERTIONS: [&str; 4] = [
+    PLATFORM_SCENARIO_OUTCOME_ASSERTION_ID,
+    "target_completed",
+    "result_produced",
+    "privacy_safe_output",
+];
+
+/// Stable evaluator and score identity for objective scenario success.
+pub const PLATFORM_SCENARIO_OUTCOME_ASSERTION_ID: &str = "scenario_outcome";
+
+/// Exact deterministic implementation required for objective scenario success.
+pub const PLATFORM_SCENARIO_OUTCOME_ASSERTION_VERSION: &str = "v1";
+
+/// Global platform experiment-plan revision executed by artifact release gates.
+pub const PLATFORM_RELEASE_PLAN_REVISION_UID: Uuid =
+    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_000d_74f1);
+
+/// Global certified simulator policy pinned by the platform release plan.
+pub const PLATFORM_RELEASE_SIMULATOR_POLICY_UID: Uuid =
+    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_000d_75f1);
+
+/// Immutable revision of the global platform release simulator policy.
+pub const PLATFORM_RELEASE_SIMULATOR_POLICY_REVISION: i32 = 1;
+
+/// Fixed independent authority record for the platform release simulator.
+pub const PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID: Uuid =
+    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_000d_75f2);
 
 /// Tenant scope accepted by the release system.
 ///
@@ -576,6 +601,33 @@ pub enum MetricDirection {
     LowerIsBetter,
 }
 
+/// Confidence construction supported by an artifact-release metric.
+///
+/// The method is part of the server-owned policy rather than selected from the
+/// observed score type after a run. Each variant fixes the compatible metric
+/// class, estimator, and bootstrap construction used by the release workflow.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateConfidenceMethod {
+    /// Cluster bootstrap over paired binary risk differences.
+    ClusterMatchedRiskDifferenceBootstrap,
+    /// Two-stage bootstrap over cases with repetitions nested inside each case.
+    HierarchicalCaseBootstrap,
+}
+
+/// Unit accepted by the current artifact-release statistical gate.
+///
+/// Release margins and alternatives are fixed-point basis-point declarations,
+/// so the current contract accepts normalized proportions only. Extending this
+/// enum requires defining a non-ambiguous fixed-point representation for the
+/// new unit rather than silently reinterpreting basis points.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateMetricUnit {
+    /// Value normalized to `[0, 1]`.
+    Proportion,
+}
+
 /// One metric in a policy's primary gate family.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GateMetric {
@@ -583,8 +635,43 @@ pub struct GateMetric {
     pub metric: String,
     /// Orientation used to compute the oriented utility delta.
     pub direction: MetricDirection,
+    /// Quantity estimated by the paired comparison.
+    pub estimand: String,
+    /// Population to which the comparison claims to generalize.
+    pub target_population: String,
+    /// Independent unit counted toward the declared support floor.
+    pub independent_unit: String,
+    /// Persisted coordinate used to group correlated observations.
+    pub cluster_key: String,
+    /// Persisted coordinate used to pair candidate and baseline observations.
+    pub paired_key: String,
+    /// Predeclared confidence construction.
+    pub confidence_method: GateConfidenceMethod,
+    /// Unit of the persisted candidate and baseline values.
+    pub unit: GateMetricUnit,
     /// Predeclared one-sided non-inferiority margin, in basis points.
     pub margin_bp: i32,
+    /// Predeclared one-sided alpha, in basis points.
+    pub alpha_bp: u32,
+    /// Utility delta at which PASS power is assessed, in basis points.
+    pub acceptable_alternative_bp: i32,
+    /// Utility delta at which regression-detection power is assessed, in basis points.
+    pub unacceptable_alternative_bp: i32,
+    /// Number of deterministic bootstrap resamples.
+    pub resamples: u32,
+    /// Minimum independent units required before this metric may be analyzed.
+    ///
+    /// Repetitions nested inside one case do not increase this count. This is a
+    /// policy-declared evidence floor, not measured power or an operating-
+    /// characteristic certification.
+    pub min_independent_units: u32,
+    /// Holm family alpha for an any-metric overall regression declaration.
+    ///
+    /// `None` means the policy does not declare an overall regression family;
+    /// a raw per-metric regression then keeps the release inconclusive. Every
+    /// metric in one primary family must declare the same value or all use
+    /// `None`.
+    pub holm_regression_alpha_bp: Option<u32>,
 }
 
 /// Exact identity of the policy a subject was evaluated under.
@@ -654,6 +741,11 @@ impl ReleasePolicy {
                 ),
             });
         }
+        let mut metric_ids = std::collections::BTreeSet::new();
+        let regression_alpha = self
+            .primary_gate_family
+            .first()
+            .and_then(|metric| metric.holm_regression_alpha_bp);
         for metric in &self.primary_gate_family {
             if metric.metric.trim().is_empty() {
                 return Err(Error::Release {
@@ -664,6 +756,32 @@ impl ReleasePolicy {
                     ),
                 });
             }
+            if !metric_ids.insert(metric.metric.as_str()) {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} declares duplicate primary metric {}",
+                        self.name, metric.metric
+                    ),
+                });
+            }
+            for (field, value) in [
+                ("estimand", metric.estimand.as_str()),
+                ("target_population", metric.target_population.as_str()),
+                ("independent_unit", metric.independent_unit.as_str()),
+                ("cluster_key", metric.cluster_key.as_str()),
+                ("paired_key", metric.paired_key.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(Error::Release {
+                        rejection: ReleaseRejection::PolicyInvalid,
+                        detail: format!(
+                            "release policy {} metric {} has an empty {field}",
+                            self.name, metric.metric
+                        ),
+                    });
+                }
+            }
             if metric.margin_bp <= 0 {
                 return Err(Error::Release {
                     rejection: ReleaseRejection::PolicyInvalid,
@@ -673,18 +791,111 @@ impl ReleasePolicy {
                     ),
                 });
             }
+            if metric.margin_bp > 10_000 {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} declares a margin above one for {}",
+                        self.name, metric.metric
+                    ),
+                });
+            }
+            if metric.alpha_bp == 0 || metric.alpha_bp > 5_000 {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} metric {} alpha must be in (0, 0.5]",
+                        self.name, metric.metric
+                    ),
+                });
+            }
+            if metric.acceptable_alternative_bp <= -metric.margin_bp
+                || metric.unacceptable_alternative_bp >= -metric.margin_bp
+            {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} metric {} alternatives must lie on opposite sides of -margin",
+                        self.name, metric.metric
+                    ),
+                });
+            }
+            if metric.resamples == 0 {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} metric {} declares zero bootstrap resamples",
+                        self.name, metric.metric
+                    ),
+                });
+            }
+            if metric.min_independent_units < 6 {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} metric {} declares fewer than six independent units",
+                        self.name, metric.metric
+                    ),
+                });
+            }
+            if metric.holm_regression_alpha_bp != regression_alpha {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} must configure one Holm alpha across its primary family",
+                        self.name
+                    ),
+                });
+            }
+            if metric
+                .holm_regression_alpha_bp
+                .is_some_and(|alpha_bp| alpha_bp == 0 || alpha_bp > 5_000)
+            {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} Holm alpha must be in (0, 0.5]",
+                        self.name
+                    ),
+                });
+            }
+        }
+        let mut assertion_ids = std::collections::BTreeSet::new();
+        for assertion in &self.blocking_assertions {
+            if !assertion_ids.insert(assertion.id.as_str()) {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} declares duplicate blocking assertion {}",
+                        self.name, assertion.id
+                    ),
+                });
+            }
         }
         for required in PLATFORM_BLOCKING_ASSERTIONS {
-            let present = self
+            let assertion = self
                 .blocking_assertions
                 .iter()
-                .any(|assertion| assertion.id == required);
-            if !present {
+                .find(|assertion| assertion.id == required);
+            let Some(assertion) = assertion else {
                 return Err(Error::Release {
                     rejection: ReleaseRejection::PolicyInvalid,
                     detail: format!(
                         "release policy {} is missing platform blocking assertion {required}",
                         self.name
+                    ),
+                });
+            };
+            if required == PLATFORM_SCENARIO_OUTCOME_ASSERTION_ID
+                && assertion.version != PLATFORM_SCENARIO_OUTCOME_ASSERTION_VERSION
+            {
+                return Err(Error::Release {
+                    rejection: ReleaseRejection::PolicyInvalid,
+                    detail: format!(
+                        "release policy {} must use {}@{}",
+                        self.name,
+                        PLATFORM_SCENARIO_OUTCOME_ASSERTION_ID,
+                        PLATFORM_SCENARIO_OUTCOME_ASSERTION_VERSION
                     ),
                 });
             }
@@ -1111,14 +1322,27 @@ mod tests {
                 .iter()
                 .map(|id| AssertionRef {
                     id: (*id).to_string(),
-                    version: "1".to_string(),
+                    version: "v1".to_string(),
                     determinism: DeterminismClass::Deterministic,
                 })
                 .collect(),
             primary_gate_family: vec![GateMetric {
                 metric: "result_produced".to_string(),
                 direction: MetricDirection::HigherIsBetter,
+                estimand: "paired difference in result-production probability".to_string(),
+                target_population: "approved artifact-release scenarios".to_string(),
+                independent_unit: "scenario_persona_profile".to_string(),
+                cluster_key: "scenario_persona_profile".to_string(),
+                paired_key: "scenario_persona_profile_repetition".to_string(),
+                confidence_method: GateConfidenceMethod::ClusterMatchedRiskDifferenceBootstrap,
+                unit: GateMetricUnit::Proportion,
                 margin_bp: 500,
+                alpha_bp: 250,
+                acceptable_alternative_bp: 0,
+                unacceptable_alternative_bp: -1_000,
+                resamples: 2_000,
+                min_independent_units: 6,
+                holm_regression_alpha_bp: Some(250),
             }],
             attestation_ttl_secs: 86_400,
             resource_policy_hash: digest(7),
@@ -1432,6 +1656,57 @@ mod tests {
         diagnostic_assertion.blocking_assertions[0].determinism = DeterminismClass::Diagnostic;
         assert!(matches!(
             diagnostic_assertion.validate(),
+            Err(Error::Release {
+                rejection: ReleaseRejection::PolicyInvalid,
+                ..
+            })
+        ));
+
+        let mut wrong_scenario_version = policy(ActivationTargetClass::SkillVisibility);
+        wrong_scenario_version.blocking_assertions[0].version = "v2".to_string();
+        assert!(matches!(
+            wrong_scenario_version.validate(),
+            Err(Error::Release {
+                rejection: ReleaseRejection::PolicyInvalid,
+                ..
+            })
+        ));
+
+        let mut duplicate_assertion = policy(ActivationTargetClass::SkillVisibility);
+        let duplicate = duplicate_assertion.blocking_assertions[0].clone();
+        duplicate_assertion.blocking_assertions.push(duplicate);
+        assert!(matches!(
+            duplicate_assertion.validate(),
+            Err(Error::Release {
+                rejection: ReleaseRejection::PolicyInvalid,
+                ..
+            })
+        ));
+
+        let mut incomplete_metric = policy(ActivationTargetClass::SkillVisibility);
+        incomplete_metric.primary_gate_family[0].estimand.clear();
+        assert!(matches!(
+            incomplete_metric.validate(),
+            Err(Error::Release {
+                rejection: ReleaseRejection::PolicyInvalid,
+                ..
+            })
+        ));
+
+        let mut unsupported_metric = policy(ActivationTargetClass::SkillVisibility);
+        unsupported_metric.primary_gate_family[0].min_independent_units = 5;
+        assert!(matches!(
+            unsupported_metric.validate(),
+            Err(Error::Release {
+                rejection: ReleaseRejection::PolicyInvalid,
+                ..
+            })
+        ));
+
+        let mut invalid_alternatives = policy(ActivationTargetClass::SkillVisibility);
+        invalid_alternatives.primary_gate_family[0].unacceptable_alternative_bp = -500;
+        assert!(matches!(
+            invalid_alternatives.validate(),
             Err(Error::Release {
                 rejection: ReleaseRejection::PolicyInvalid,
                 ..

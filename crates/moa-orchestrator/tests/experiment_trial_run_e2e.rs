@@ -112,7 +112,7 @@ async fn register_certified_simulator_policy(
         system_prompt: DEFAULT_SIMULATOR_SYSTEM_PROMPT.to_string(),
         protocol: production_protocol()?,
         context_contract_hash: production_context_contract_hash()?,
-        calibration_cohort: policy_cohort("calibration", 40, 0xC0),
+        calibration_cohort: policy_cohort("selection", 80, 0x51),
         validity: ValidityWindow {
             valid_from: now - chrono::Duration::days(1),
             valid_until: now + chrono::Duration::days(180),
@@ -129,7 +129,7 @@ async fn register_certified_simulator_policy(
         policy_uid: policy.policy_uid,
         policy_revision: policy.revision,
         policy_hash: policy.policy_hash()?,
-        simulator_components: components,
+        simulator_components: components.clone(),
         domain,
         bounds: DomainFidelityBounds {
             domain: ScenarioDomain::new("behavior-lab-e2e")?,
@@ -164,7 +164,7 @@ async fn register_certified_simulator_policy(
             max_slice_disagreement_permille: Some(100),
             recertification_interval_days: 90,
         },
-        selection_cohort: policy_cohort("selection", 80, 0x51),
+        selection_cohort: components.calibration_cohort.clone(),
         certification_cohort: policy_cohort("certification", 220, 0xCE),
         label_protocol: LabelProtocolPin {
             protocol_id: "behavior-lab-e2e-labels".to_string(),

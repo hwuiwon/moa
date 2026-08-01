@@ -7,9 +7,9 @@ use moa_artifacts::registry::{
     StoredArtifactRevision, SubmitCandidate,
 };
 use moa_artifacts::release::{
-    ActivationOutcome, ActivationRequest, ActivationTarget, AgentRuntimeSubject, AssertionRef,
-    DeterminismClass, DeterministicVerdict, Digest32, EvaluationPlanSubject, EvidenceAdapter,
-    ExpectedServing, PLATFORM_BLOCKING_ASSERTIONS, TenantScope,
+    ActivationOutcome, ActivationRequest, ActivationTarget, AgentRuntimeSubject,
+    DeterministicVerdict, Digest32, EvaluationPlanSubject, EvidenceAdapter, ExpectedServing,
+    TenantScope,
 };
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
@@ -372,6 +372,10 @@ async fn activate_promoted_skill_revision(
         &prepared.validation_report,
     )
     .await?;
+    let release_policy =
+        ReleaseRepository::resolve_policy_in_tx(conn, &scope, activation_target.class())
+            .await
+            .map_err(release_error)?;
     let submission = ReleaseRepository::submit_candidate_in_tx(
         conn,
         &SubmitCandidate {
@@ -400,14 +404,7 @@ async fn activate_promoted_skill_revision(
                 ("held_in_suite".to_string(), "pass".to_string()),
                 ("held_out_suite".to_string(), "pass".to_string()),
             ]),
-            blocking_assertions: PLATFORM_BLOCKING_ASSERTIONS
-                .iter()
-                .map(|id| AssertionRef {
-                    id: (*id).to_string(),
-                    version: "1".to_string(),
-                    determinism: DeterminismClass::Deterministic,
-                })
-                .collect(),
+            blocking_assertions: release_policy.blocking_assertions,
             evidence_adapter: EvidenceAdapter::SkillLearningRegression,
             decided_by: decided_by.clone(),
         },

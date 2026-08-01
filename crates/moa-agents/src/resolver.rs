@@ -186,8 +186,49 @@ impl AgentResolver {
         let model_policy = model_policy_from_definition(&definition.model_policy);
         let knowledge_policy = knowledge_policy_from_definition(definition);
         knowledge_policy.validate()?;
-        let skill_policy = skill_policy_from_definition(&definition.skill_policy);
-        let action_policy = action_policy_from_definition(&definition.action_policy);
+        let mut skill_policy = skill_policy_from_definition(&definition.skill_policy);
+        let mut action_policy = action_policy_from_definition(&definition.action_policy);
+        let release_target = match overlay {
+            Some(overlay) => ArtifactRegistry::new(self.pool.clone())
+                .load_release_overlay_target(scope, overlay)
+                .await?
+                .ok_or_else(|| {
+                    MoaError::ValidationError(format!(
+                        "release overlay {} did not resolve its exact target",
+                        overlay.overlay_uid
+                    ))
+                })?,
+            None => revision.clone(),
+        };
+        let release_target_ref = match (overlay, &release_target.kind) {
+            (Some(_), ArtifactKind::Skill) => {
+                let artifact_ref = ArtifactRef::artifact(ArtifactKind::Skill, &release_target.name);
+                skill_policy.mode = AgentSkillPolicyMode::Pinned;
+                skill_policy.refs.push(artifact_ref.to_string());
+                skill_policy.refs.sort();
+                skill_policy.refs.dedup();
+                Some(artifact_ref)
+            }
+            (Some(_), ArtifactKind::Action) => {
+                let artifact_ref = ArtifactRef::action_artifact(&release_target.name);
+                action_policy.allowed.push(artifact_ref.to_string());
+                action_policy.allowed.sort();
+                action_policy.allowed.dedup();
+                Some(artifact_ref)
+            }
+            (Some(_), ArtifactKind::Agent)
+                if release_target.revision_uid == revision.revision_uid =>
+            {
+                None
+            }
+            (Some(_), kind) => {
+                return Err(MoaError::ValidationError(format!(
+                    "release overlay target {} is {kind}, which cannot run through agent revision {}",
+                    release_target.revision_uid, revision.revision_uid
+                )));
+            }
+            (None, _) => None,
+        };
         let guardrail_policy = guardrail_policy_from_definition(
             &definition.guardrail_policy,
             model_policy.fallback_model.as_deref(),
@@ -207,7 +248,11 @@ impl AgentResolver {
         let revision_lock = match pointer.as_ref() {
             Some(pointer) if overlay.is_none() => pointer.revision_lock.clone(),
             _ => {
-                let reference_paths = revision.document.reference_paths();
+                let mut reference_paths = revision.document.reference_paths();
+                if let Some(release_target_ref) = release_target_ref {
+                    reference_paths
+                        .push(("release_evaluation.target".to_string(), release_target_ref));
+                }
                 let resolved = self
                     .resolve_artifact_dependencies(scope, &reference_paths, overlay)
                     .await?;
@@ -482,9 +527,7 @@ async fn load_executable_agent_revision(
     revision_uid: Uuid,
 ) -> Result<StoredArtifactRevision> {
     let revision = load_agent_revision(pool, scope, revision_uid).await?;
-    let state = ReleaseState::from_artifact_status(&revision.status)
-        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
-    if !matches!(state, ReleaseState::Ready | ReleaseState::Superseded) {
+    if !is_exact_agent_revision_executable(&revision, false)? {
         return Err(MoaError::ValidationError(format!(
             "agent revision {} is not executable in state {}",
             revision.revision_uid, revision.status
@@ -499,18 +542,25 @@ async fn load_agent_revision_for_evaluation(
     revision_uid: Uuid,
 ) -> Result<StoredArtifactRevision> {
     let revision = load_agent_revision(pool, scope, revision_uid).await?;
-    let state = ReleaseState::from_artifact_status(&revision.status)
-        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
-    if !matches!(
-        state,
-        ReleaseState::Evaluating | ReleaseState::Ready | ReleaseState::Superseded
-    ) {
+    if !is_exact_agent_revision_executable(&revision, true)? {
         return Err(MoaError::ValidationError(format!(
             "agent revision {} is not executable in evaluation state {}",
             revision.revision_uid, revision.status
         )));
     }
     Ok(revision)
+}
+
+fn is_exact_agent_revision_executable(
+    revision: &StoredArtifactRevision,
+    allow_evaluating: bool,
+) -> Result<bool> {
+    let state = ReleaseState::from_artifact_status(&revision.status)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    Ok(
+        matches!(state, ReleaseState::Ready | ReleaseState::Superseded)
+            || allow_evaluating && state == ReleaseState::Evaluating,
+    )
 }
 
 async fn load_agent_release_candidate(

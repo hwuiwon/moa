@@ -1221,7 +1221,12 @@ fn data_bundle_ids_for_scenario(
         .collect()
 }
 
-fn stable_trial_key(
+/// Builds the canonical durable key for one expanded plan trial.
+///
+/// Release-environment provisioning uses the same coordinate before the run is
+/// dispatched, so its per-trial overlay cannot drift from the pager's trial.
+#[must_use]
+pub fn stable_trial_key(
     scenario: (usize, &str),
     persona: (usize, &str),
     profile: (usize, &str),
@@ -1356,22 +1361,18 @@ mod tests {
     }
 
     #[test]
-    fn plan_admission_refuses_scenario_gates_until_exact_evidence_is_durable_offline() {
-        // Pins: plan-backed run admission and trial expansion both stop before
-        // minting work when the scorecard asks for objective scenario evidence
-        // that the runtime cannot persist yet. Runtime completion must never be
-        // substituted for that missing evidence.
+    fn plan_admission_accepts_the_registered_objective_scenario_gate_offline() {
+        // Pins: the production trial runtime now persists typed release-case
+        // evidence and the registered evaluator fails closed when that evidence
+        // is absent. Plan admission therefore treats scenario_outcome like any
+        // other runnable deterministic evaluator.
         let definition = scenario_gated_plan();
 
         let projection = project_plan_run(&definition, fixture_uuid(1), "plan", "run")
-            .expect_err("run admission must reject an unsupported scenario gate");
-        assert!(
-            matches!(
-                &projection,
-                PlanExpansionError::UnrunnableScorecard { message }
-                    if message.contains("trials do not persist objective scenario evidence")
-            ),
-            "unexpected admission error: {projection:?}"
+            .expect("registered scenario gate projects a run");
+        assert_eq!(
+            projection.scorecard.requirements()[0].evaluator_id,
+            "scenario_outcome"
         );
 
         let expansion = expand_plan_trials(
@@ -1380,14 +1381,10 @@ mod tests {
             &definition,
             &fixture_policy(),
         )
-        .expect_err("trial expansion must independently reject the gate");
+        .expect("trial expansion accepts the registered gate");
         assert!(
-            matches!(
-                &expansion,
-                PlanExpansionError::UnrunnableScorecard { message }
-                    if message.contains("trials do not persist objective scenario evidence")
-            ),
-            "unexpected expansion error: {expansion:?}"
+            !expansion.is_empty(),
+            "a runnable scenario-gated plan must mint its bounded trial matrix"
         );
     }
 

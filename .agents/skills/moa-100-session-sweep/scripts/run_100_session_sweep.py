@@ -14,6 +14,7 @@ import concurrent.futures
 import contextlib
 import datetime as dt
 import json
+import math
 import os
 import re
 import signal
@@ -72,18 +73,14 @@ WRITE_REPO_REPORT = os.environ.get("MOA_SWEEP_WRITE_REPO", "0") == "1"
 # nothing but validate the fixture.
 RUN_FLAG_ENV = "MOA_RUN_LIVE_100_SESSION_SWEEP"
 BUDGET_ENV = "MOA_SWEEP_BUDGET_USD"
+PER_CASE_FORECAST_ENV = "MOA_SWEEP_COST_PER_CASE_USD"
 # Conservative per-session forecast. The 2026-07 baselines observed ~0.5 cents
 # per session on `gpt-5.4-mini`; forecasting at 2 cents leaves headroom for a
 # more expensive pinned model without letting an unbounded run through.
-PER_CASE_FORECAST_USD = float(os.environ.get("MOA_SWEEP_COST_PER_CASE_USD", "0.02"))
+DEFAULT_PER_CASE_FORECAST_USD = 0.02
 # Three cheap, representative cases proving the stack before the billed 100.
 # S002 is the delegation case, S003 carries the ' reconcile ' planner anchor.
-CANARY_IDS = [
-    case_id.strip().upper()
-    for case_id in os.environ.get("MOA_SWEEP_CANARY_IDS", "S001,S002,S003").split(",")
-    if case_id.strip()
-]
-SKIP_CANARY = os.environ.get("MOA_SWEEP_SKIP_CANARY", "0") == "1"
+CANARY_IDS = ("S001", "S002", "S003")
 SWEEP_MODEL = (
     os.environ.get("MOA_SWEEP_MODEL")
     or ("claude-sonnet-4-6" if os.environ.get("MOA_ANTHROPIC_API_KEY") else None)
@@ -403,13 +400,13 @@ def parse_cases():
 
 
 class BudgetLedger:
-    """Reservation ledger bounding what a sweep is allowed to spend.
+    """Reservation ledger controlling admission against the sweep budget.
 
     Budget is reserved at the pessimistic per-case forecast *before* a session
     is dispatched and reconciled against the session's actual provider cost once
     it finishes. When no reservation is available the runner stops dispatching
-    instead of spending past the authorized budget, and the run is then short of
-    100 attempted cases, which blocks the baseline write.
+    later cases, and the run is then short of 100 attempted cases, which blocks
+    the baseline write. Already in-flight work can settle above its reservation.
     """
 
     def __init__(self, budget_usd, per_case_usd):
@@ -464,9 +461,9 @@ def preflight_gate(case_count, canary_count):
 
     A paid sweep needs three independent things: explicit intent
     (`MOA_RUN_LIVE_100_SESSION_SWEEP=1`), live credentials and local
-    infrastructure, and a positive `MOA_SWEEP_BUDGET_USD` that covers the
-    full-run forecast (canary included). Anything missing is reported as an
-    error naming what to set -- never a silent no-op or a partial run.
+    infrastructure, and positive finite total/per-case USD amounts that cover
+    the full-run forecast (canary included). Anything missing is reported as
+    an error naming what to set -- never a silent no-op or a partial run.
     """
     if os.environ.get(RUN_FLAG_ENV) != "1":
         raise RuntimeError(
@@ -494,33 +491,45 @@ def preflight_gate(case_count, canary_count):
     if not fga_env.exists():
         problems.append(f"missing OpenFGA env file at {fga_env}")
 
-    raw_budget = os.environ.get(BUDGET_ENV, "").strip()
-    budget = None
-    if not raw_budget:
-        problems.append(f"{BUDGET_ENV} is not set; a positive USD budget is required")
-    else:
-        try:
-            budget = float(raw_budget)
-        except ValueError:
-            problems.append(f"{BUDGET_ENV}={raw_budget!r} is not a number")
-        else:
-            if budget <= 0:
-                problems.append(f"{BUDGET_ENV}={budget} must be greater than zero")
-
-    ledger = BudgetLedger(budget or 0.0, PER_CASE_FORECAST_USD)
-    forecast = ledger.forecast_usd(case_count + canary_count)
-    if budget is not None and budget > 0 and budget < forecast:
+    budget = positive_finite_usd(BUDGET_ENV, os.environ.get(BUDGET_ENV), problems)
+    per_case_forecast = positive_finite_usd(
+        PER_CASE_FORECAST_ENV,
+        os.environ.get(PER_CASE_FORECAST_ENV, str(DEFAULT_PER_CASE_FORECAST_USD)),
+        problems,
+    )
+    forecast = None
+    if budget is not None and per_case_forecast is not None:
+        forecast = per_case_forecast * (case_count + canary_count)
+    if budget is not None and forecast is not None and budget < forecast:
         problems.append(
             f"{BUDGET_ENV}={budget:.4f} is below the run forecast "
             f"{forecast:.4f} USD ({case_count} cases + {canary_count} canary at "
-            f"{PER_CASE_FORECAST_USD:.4f} USD each); zero sessions will be dispatched"
+            f"{per_case_forecast:.4f} USD each); zero sessions will be dispatched"
         )
     if problems:
         raise RuntimeError(
             "the 100-session sweep is authorized but not runnable:\n  - "
             + "\n  - ".join(problems)
         )
+    ledger = BudgetLedger(budget, per_case_forecast)
     return ledger, forecast
+
+
+def positive_finite_usd(name, raw, problems):
+    """Parse one required USD amount, recording a clear preflight defect."""
+    value = None
+    if raw is None or not str(raw).strip():
+        problems.append(f"{name} is not set; a positive finite USD amount is required")
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        problems.append(f"{name}={raw!r} is not a number")
+    else:
+        if not math.isfinite(value) or value <= 0:
+            problems.append(f"{name}={value} must be finite and greater than zero")
+            return None
+    return value
 
 
 def skipped_case(case, reason):
@@ -551,6 +560,18 @@ def skipped_case(case, reason):
         "worker_spawns_sample": [],
         "worker_states_sample": [],
         "worker_signals_sample": [],
+    }
+
+
+def turn_message_body(case, user_message, ordinal):
+    """Build one Session message request with a stable caller-owned identity."""
+    return {
+        "client_message_id": f"moa-100-session-sweep:{case['id']}:{ordinal}",
+        "user_message": user_message,
+        "attachments": [],
+        "model": SWEEP_MODEL,
+        "max_turns": TURN_LIMIT,
+        "contact": None,
     }
 
 
@@ -1144,13 +1165,7 @@ def run_case(case):
             headers=headers,
             timeout=60,
         )
-        body = {
-            "user_message": case["request"],
-            "attachments": [],
-            "model": SWEEP_MODEL,
-            "max_turns": TURN_LIMIT,
-            "contact": None,
-        }
+        body = turn_message_body(case, case["request"], 0)
         start_resp = http_json(
             "POST",
             f"{INGRESS}/Session/{session_id}/start_turn",
@@ -1163,13 +1178,7 @@ def run_case(case):
             queued_resp = http_json(
                 "POST",
                 f"{INGRESS}/Session/{session_id}/queue_message",
-                {
-                    "user_message": "Actually, keep it to five bullets.",
-                    "attachments": [],
-                    "model": SWEEP_MODEL,
-                    "max_turns": TURN_LIMIT,
-                    "contact": None,
-                },
+                turn_message_body(case, "Actually, keep it to five bullets.", 1),
                 headers=headers,
                 timeout=60,
             )
@@ -1300,7 +1309,7 @@ def fmt_map(m):
     return ", ".join(f"{k}={m[k]}" for k in sorted(m))
 
 
-def write_reports(results, env_info, imported, skill_list, provenance, canary):
+def write_reports(results, env_info, imported, skill_list, provenance, canary, focused):
     agg = aggregate(results)
     partials = [r for r in results if r["outcome"] != "pass"]
     lines = []
@@ -1468,14 +1477,19 @@ def write_reports(results, env_info, imported, skill_list, provenance, canary):
     # short by the budget ledger, a focused lane, or a crash must never
     # overwrite the baseline, whatever MOA_SWEEP_WRITE_REPO says.
     complete = agg["attempted"] == sweep_cases.EXPECTED_CASE_COUNT
+    baseline_eligible = baseline_is_eligible(
+        agg["attempted"], focused, canary, agg["failure_tags"]
+    )
     baseline_written = False
-    if WRITE_REPO_REPORT and complete:
+    if WRITE_REPO_REPORT and baseline_eligible:
         REPORT_REPO.write_text(report)
         baseline_written = True
     elif WRITE_REPO_REPORT:
         log(
             f"refusing to write the repo baseline: attempted={agg['attempted']}, "
-            f"need exactly {sweep_cases.EXPECTED_CASE_COUNT}"
+            f"focused={focused}, complete={complete}, "
+            f"canonical_canary_passed={canonical_canary_succeeded(canary)}, "
+            f"runner_errors={agg['failure_tags'].get('F-ERROR', 0)}"
         )
     SUMMARY_JSON.write_text(
         json.dumps(
@@ -1553,7 +1567,7 @@ def run_canary(all_cases):
     log(f"running {len(canary_cases)} canary cases: {','.join(CANARY_IDS)}")
     results = dispatch(canary_cases, "canary")
     CANARY_JSON.write_text(json.dumps(results, indent=2, sort_keys=True))
-    bad = [r for r in results if r["outcome"] in ("fail", "skipped")]
+    bad = [r for r in results if r["outcome"] != "pass"]
     if bad:
         detail = ", ".join(
             f"{r['id']}={r['outcome']}({','.join(r['failure_tags']) or r.get('skip_reason') or 'n/a'})"
@@ -1567,6 +1581,23 @@ def run_canary(all_cases):
     return results
 
 
+def canonical_canary_succeeded(results):
+    """Return whether exactly the canonical three canary cases passed."""
+    return [result.get("id") for result in results] == list(CANARY_IDS) and all(
+        result.get("outcome") == "pass" for result in results
+    )
+
+
+def baseline_is_eligible(attempted, focused, canary, failure_tags):
+    """Return whether this run may overwrite the committed baseline."""
+    return (
+        not focused
+        and attempted == sweep_cases.EXPECTED_CASE_COUNT
+        and canonical_canary_succeeded(canary)
+        and failure_tags.get("F-ERROR", 0) == 0
+    )
+
+
 def main():
     global TENANT_ID, IDENTITY_ID, LEDGER
     cases, provenance = parse_cases()
@@ -1576,7 +1607,7 @@ def main():
     if CASE_LIMIT:
         selected = selected[:CASE_LIMIT]
     focused = bool(CASE_IDS or CASE_LIMIT)
-    canary_count = 0 if (focused or SKIP_CANARY) else len(CANARY_IDS)
+    canary_count = 0 if focused else len(CANARY_IDS)
     LEDGER, forecast = preflight_gate(len(selected), canary_count)
     init_run_dir()
     log(f"run dir {RUN_DIR}")
@@ -1651,12 +1682,10 @@ def main():
             else 0
         )
         log(f"imported skills; list count approx={skill_count}")
-        canary = []
-        if canary_count:
-            canary = run_canary(cases)
+        canary = [] if focused else run_canary(cases)
         results = dispatch(selected, "full run")
         agg = write_reports(
-            results, env_info, imported, skill_list, provenance, canary
+            results, env_info, imported, skill_list, provenance, canary, focused
         )
         log(
             f"aggregate outcomes={agg['outcomes']} failure_tags={agg['failure_tags']} workers={agg['total_worker_spawns']} cost_cents={agg['cost']['cost_cents']}"

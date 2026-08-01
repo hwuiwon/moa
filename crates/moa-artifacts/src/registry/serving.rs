@@ -195,6 +195,47 @@ impl ArtifactRegistry {
         row.as_ref().map(revision_from_row).transpose()
     }
 
+    /// Loads the exact primary artifact bound to an evaluation overlay.
+    ///
+    /// This is used only to bind a release candidate into the platform-owned
+    /// evaluation host. The same secret, eval-session, expiry, and closed-state
+    /// checks as symbolic overlay substitution apply; the overlay row alone is
+    /// not sufficient authority.
+    pub async fn load_release_overlay_target(
+        &self,
+        scope: &ActionRuleScope,
+        overlay: &EvalOverlayBinding,
+    ) -> Result<Option<StoredArtifactRevision>> {
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let row = sqlx::query(&format!(
+            r#"
+            SELECT {REVISION_COLUMNS}
+            FROM moa.artifact_release_eval_overlay overlay
+            JOIN moa.artifact a ON a.artifact_uid = overlay.artifact_uid
+            JOIN moa.artifact_revision r
+              ON r.artifact_uid = a.artifact_uid
+             AND r.revision_uid = moa.resolve_release_overlay_revision(
+                    overlay.overlay_uid, $2, $3, overlay.artifact_uid, $4
+                )
+            WHERE overlay.overlay_uid = $1
+              AND overlay.storage_partition_id = $5
+              AND a.valid_to IS NULL
+              AND r.valid_to IS NULL
+            "#
+        ))
+        .bind(overlay.overlay_uid)
+        .bind(overlay.token_hash().to_vec())
+        .bind(overlay.eval_session_id)
+        .bind(Utc::now())
+        .bind(parts.storage_partition_id.as_deref())
+        .fetch_optional(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        row.as_ref().map(revision_from_row).transpose()
+    }
+
     /// Lists every artifact a tenant currently serves for one kind.
     pub async fn list_serving(
         &self,

@@ -205,6 +205,7 @@ async fn run_preserves_agent_revision_variants_for_workflow_db_memory() -> Resul
         tenant_id,
         Uuid::parse_str("10000000-0000-0000-0000-000000000001")?,
         "gpt-5.1-mini",
+        "fixture-provider",
     )
     .await?;
     let plan = publish_artifact(

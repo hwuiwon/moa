@@ -322,6 +322,7 @@ fn record_for_target(
             tenant_id: TenantId::from(Uuid::now_v7()),
         },
         plan_artifact_uid: None,
+        expected_trials: 0,
         resource_envelope: fixture_run_envelope(),
         simulator_policy: None,
         run_uid: Uuid::now_v7(),

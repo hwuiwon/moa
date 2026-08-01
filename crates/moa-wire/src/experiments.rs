@@ -7,6 +7,7 @@ use moa_core::types::experiments::{
     ScorecardValueType,
 };
 use moa_core::types::identifiers::{SessionId, TenantId};
+use moa_eval_core::assertion::AssertionSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -56,16 +57,14 @@ pub struct ExperimentRunRequest {
 }
 
 /// One artifact-release attempt bound to a production experiment run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactReleaseExperimentBinding {
     /// Durable release dispatch record that owns these arms.
     pub outbox_uid: Uuid,
     /// Release target class (`skill_visibility`, `action_visibility`, or `agent_deployment`).
     pub activation_target: String,
-    /// Candidate first, followed by the serving baseline when one exists.
-    pub arms: Vec<ArtifactReleaseExperimentArm>,
-    /// Exact approved case tuples and repetition counts this run must expand.
-    pub cases: Vec<ArtifactReleaseExperimentCase>,
+    /// Exact per-trial overlays, sessions, and approved cases.
+    pub trials: Vec<ArtifactReleaseExperimentTrialBinding>,
 }
 
 /// One approved sparse case in an artifact-release experiment.
@@ -73,7 +72,7 @@ pub struct ArtifactReleaseExperimentBinding {
 /// Unlike a normal Behavior Lab plan, a release pack is not a Cartesian
 /// product. Each row selects one scenario/persona/profile tuple and declares
 /// its own paired repetition count.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactReleaseExperimentCase {
     /// Scenario ID in the pinned experiment plan.
     pub scenario_id: String,
@@ -83,6 +82,11 @@ pub struct ArtifactReleaseExperimentCase {
     pub profile_id: String,
     /// Paired repetitions emitted for every release arm.
     pub repetitions: u32,
+    /// Versioned, data-only assertions this case requires.
+    ///
+    /// Every spec selects a server-registered evaluator. It can carry typed
+    /// parameters, but never executable assertion code.
+    pub assertions: Vec<AssertionSpec>,
 }
 
 /// One candidate or baseline arm of an artifact-release experiment.
@@ -98,6 +102,21 @@ pub struct ArtifactReleaseExperimentArm {
     pub overlay_token: String,
     /// Eval-owned session identifier the overlay is allowed to answer for.
     pub eval_session_id: Uuid,
+}
+
+/// Exact release arm and approved case bound to one experiment trial.
+///
+/// Run admission carries arms and cases separately because the plan expands
+/// them into a matrix. Trial dispatch joins one row from each side so terminal
+/// evidence can prove which approved case actually ran.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactReleaseExperimentTrialBinding {
+    /// Canonical trial key emitted by the plan pager.
+    pub trial_key: String,
+    /// Candidate or baseline arm selected by the durable trial variant.
+    pub arm: ArtifactReleaseExperimentArm,
+    /// Approved sparse case selected by the durable trial identity.
+    pub case: ArtifactReleaseExperimentCase,
 }
 
 /// Request payload for generating a draft experiment plan artifact.

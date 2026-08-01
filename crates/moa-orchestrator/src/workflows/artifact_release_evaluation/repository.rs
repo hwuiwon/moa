@@ -1,4 +1,4 @@
-//! Persistence for release-evaluation dispatch, overlays, fixtures, and attempts.
+//! Persistence for release-evaluation dispatch, overlays, and attempts.
 //!
 //! Every write here is fenced by the same two facts: the submission `generation`
 //! and the exact `EvaluationSubjectV1` digest. A dispatch record is created with
@@ -20,26 +20,28 @@ use moa_artifacts::registry::{
     CandidateSubmission, DecisionOutcome, RecordDecision, ReleaseRepository, SubmitCandidate,
 };
 use moa_artifacts::release::{
-    ActivationTargetClass, Digest32, EvaluationPlanSubject, EvaluationSubjectV1, ReleasePolicy,
-    SimulatorPolicyBinding, TenantScope, overlay_token_hash,
+    ActivationTargetClass, DeterministicVerdict, Digest32, EvaluationPlanSubject,
+    EvaluationSubjectV1, EvidenceAdapter, ReleasePolicy, SimulatorPolicyBinding, TenantScope,
+    overlay_token_hash,
 };
 use moa_core::types::identifiers::TenantId;
 use moa_db::ScopedConn;
+use moa_experiments::simulator_policy::SimulatorPolicyError;
 use moa_wire::experiments::{
     ARTIFACT_RELEASE_BASELINE_VARIANT_KEY, ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
-    ArtifactReleaseExperimentBinding,
+    ArtifactReleaseExperimentBinding, ArtifactReleaseExperimentCase,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row, types::Json as SqlJson};
 use uuid::Uuid;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Error;
 use super::types::{
     ArmRole, AttemptReviewState, CohortVisibility, DispatchRecord, DispatchStatus, MergedCasePlan,
-    PinnedDependency, ProvisionedArm, ProvisionedAttempt, ReleaseAttemptRow, ReleaseCase,
+    PinnedDependency, ProvisionedAttempt, ProvisionedTrial, ReleaseAttemptRow, ReleaseCase,
     ReleaseCasePack, ScenarioSource, dispatch_idempotency_key, merge_case_packs,
     release_seed_material,
 };
@@ -53,8 +55,8 @@ const OVERLAY_TTL_HOURS: i64 = 24;
 /// How long a hidden cohort epoch lasts before rotation.
 const HIDDEN_COHORT_PERIOD_DAYS: i64 = 7;
 
-/// Name of the per-tenant base fixture snapshot every attempt clones from.
-const BASE_FIXTURE_NAME: &str = "release-evaluation-base";
+/// Domain separator for deriving an unpersisted capability per exact trial.
+const TRIAL_OVERLAY_TOKEN_DOMAIN: &str = "moa.artifact-release.trial-overlay-token.v1";
 
 /// A submission plus the dispatch record written in the same transaction.
 #[derive(Clone, Debug)]
@@ -92,6 +94,15 @@ pub struct FencedDecision {
     pub next: Option<DispatchRecord>,
 }
 
+/// Settlement recorded when release evaluation fails without authoritative evidence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalFailureSettlement {
+    /// Attempt row closed with an inconclusive verdict.
+    pub attempt_uid: Uuid,
+    /// Dispatch enqueued for the newest pending subject, if one existed.
+    pub next: Option<DispatchRecord>,
+}
+
 /// Immutable plan and simulator inputs included in a release subject.
 pub struct ReleaseSubjectEnvironment {
     /// Exact approved plan, case-pack, seed-contract, and evaluator hashes.
@@ -126,7 +137,7 @@ impl ReleaseEvaluationRepository {
         let scope = TenantScope::new(tenant_id);
         let now = Utc::now();
         let mut conn = self.begin(&scope).await?;
-        let case_plan = resolve_case_plan(conn.as_mut(), &scope, activation_target, now).await?;
+        let case_plan = resolve_case_plan(conn.as_mut(), activation_target, now).await?;
         let plan_revision = moa_artifacts::registry::ArtifactRegistry::load_revision_in_tx(
             conn.as_mut(),
             case_plan.plan_revision_uid,
@@ -158,7 +169,7 @@ impl ReleaseEvaluationRepository {
             moa_experiments::simulator_policy::store::SimulatorPolicyStore::new(self.pool.clone())
                 .resolve_policy(tenant_id, definition.simulator_policy, now)
                 .await
-                .map_err(|error| Error::CasePackInvalid(error.to_string()))?;
+                .map_err(simulator_policy_error)?;
         let plan_hash =
             Digest32::from_slice(&plan_revision.canonical_hash).map_err(Error::Release)?;
         let scenario_dataset_hash = Digest32(
@@ -312,24 +323,27 @@ impl ReleaseEvaluationRepository {
         Ok(claimed)
     }
 
-    /// Provisions the case plan, overlays, fixtures, and attempt row for a record.
+    /// Provisions the case plan, per-trial overlays, and attempt row.
     ///
     /// Idempotent in every write, so a Restate replay re-reads what the first
     /// invocation created instead of provisioning a second environment. The one
-    /// thing it cannot re-derive is the overlay token, which the caller journals.
+    /// thing it cannot re-derive is each arm's root overlay token, which the caller
+    /// journals. Trial capabilities are deterministically derived from that root
+    /// and the canonical plan trial key, so replay returns the exact same binding.
     pub async fn provision_attempt(
         &self,
         record: &DispatchRecord,
-        activation_target: ActivationTargetClass,
-        baseline_revision_uid: Option<Uuid>,
         overlay_tokens: &[(ArmRole, String)],
     ) -> Result<ProvisionedAttempt, Error> {
         let scope = TenantScope::new(record.tenant_id);
         let now = Utc::now();
         let mut conn = self.begin(&scope).await?;
 
-        let plan = resolve_case_plan(conn.as_mut(), &scope, activation_target, now).await?;
-        ensure_plan_matches_subject(conn.as_mut(), &self.pool, &scope, record, &plan, now).await?;
+        let subject = load_current_subject(conn.as_mut(), &scope, record).await?;
+        let activation_target = subject.activation_target.class();
+        let plan = resolve_case_plan(conn.as_mut(), activation_target, now).await?;
+        ensure_plan_matches_subject(conn.as_mut(), &self.pool, &scope, &subject, &plan, now)
+            .await?;
         ensure_cohort_budget(
             conn.as_mut(),
             &scope,
@@ -341,36 +355,62 @@ impl ReleaseEvaluationRepository {
         .await?;
         bind_plan_to_dispatch(conn.as_mut(), record.outbox_uid, &plan, now).await?;
 
-        let base_fixture_uid = ensure_base_fixture(conn.as_mut(), &scope).await?;
-        let mut arms = Vec::new();
+        let plan_revision = moa_artifacts::registry::ArtifactRegistry::load_revision_in_tx(
+            conn.as_mut(),
+            plan.plan_revision_uid,
+        )
+        .await
+        .map_err(|error| Error::Storage(error.to_string()))?;
+        let ArtifactDefinition::ExperimentPlan(definition) = &plan_revision.document.definition
+        else {
+            return Err(Error::CasePackInvalid(
+                "approved release plan has the wrong artifact definition".to_string(),
+            ));
+        };
+        let cases = plan.experiment_cases()?;
+        let mut trials = Vec::new();
         let mut wanted = vec![(ArmRole::Candidate, record.revision_uid)];
-        if let Some(baseline) = baseline_revision_uid {
+        if let Some(baseline) = subject.serving_baseline.as_ref() {
+            let baseline = baseline.revision_uid;
             wanted.push((ArmRole::Baseline, baseline));
         }
-        for (role, revision_uid) in wanted {
-            let token = overlay_tokens
-                .iter()
-                .find(|(candidate_role, _)| *candidate_role == role)
-                .map(|(_, token)| token.clone())
-                .ok_or_else(|| {
-                    Error::Provisioning(format!(
-                        "no overlay token was journaled for the {role} arm"
-                    ))
-                })?;
-            let fixture_uid =
-                clone_fixture(conn.as_mut(), base_fixture_uid, record.outbox_uid, role).await?;
-            let arm = upsert_overlay(
-                conn.as_mut(),
-                &scope,
-                record,
-                role,
-                revision_uid,
-                fixture_uid,
-                &token,
-                now,
-            )
-            .await?;
-            arms.push(arm);
+        for case in cases {
+            let coordinates = release_case_coordinates(definition, &case)?;
+            for (role, revision_uid) in &wanted {
+                let root_token = overlay_tokens
+                    .iter()
+                    .find(|(candidate_role, _)| candidate_role == role)
+                    .map(|(_, token)| token.as_str())
+                    .ok_or_else(|| {
+                        Error::Provisioning(format!(
+                            "no overlay token was journaled for the {role} arm"
+                        ))
+                    })?;
+                let variant_key = release_variant_key(*role);
+                for repetition in 0..case.repetitions {
+                    let trial_key = moa_experiments::plan::stable_trial_key(
+                        (coordinates.0, &case.scenario_id),
+                        (coordinates.1, &case.persona_id),
+                        (coordinates.2, &case.profile_id),
+                        variant_key,
+                        repetition,
+                    );
+                    let overlay_token = trial_overlay_token(root_token, &trial_key);
+                    let trial = upsert_overlay(
+                        conn.as_mut(),
+                        &scope,
+                        record,
+                        *role,
+                        &trial_key,
+                        *revision_uid,
+                        &overlay_token,
+                        &case,
+                        now,
+                    )
+                    .await?;
+                    trials.push(trial);
+                }
+            }
         }
 
         let attempt_uid =
@@ -378,8 +418,9 @@ impl ReleaseEvaluationRepository {
         conn.commit().await.map_err(storage)?;
         Ok(ProvisionedAttempt {
             attempt_uid,
+            activation_target,
             plan,
-            arms,
+            trials,
         })
     }
 
@@ -515,6 +556,157 @@ impl ReleaseEvaluationRepository {
             attempt_uid,
             next,
         })
+    }
+
+    /// Closes a claimed release dispatch that cannot produce authoritative evidence.
+    ///
+    /// The failure is an inconclusive evaluation, never a regression and never a
+    /// permission to serve. The transaction reuses the release repository's
+    /// inconclusive state transition so the active slot is released and the newest
+    /// pending subject advances under the existing coalescing rules. `abandoned`
+    /// is the schema's terminal non-decision dispatch state; the exact failure phase
+    /// and error are preserved on the attempt review row.
+    pub async fn settle_terminal_failure(
+        &self,
+        tenant_id: TenantId,
+        outbox_uid: Uuid,
+        phase: &str,
+        error: &str,
+    ) -> Result<TerminalFailureSettlement, Error> {
+        let scope = TenantScope::new(tenant_id);
+        let now = Utc::now();
+        let mut conn = self.begin(&scope).await?;
+        let record = load_dispatch(conn.as_mut(), &scope, outbox_uid, true)
+            .await?
+            .ok_or_else(|| {
+                Error::StaleDispatch(format!(
+                    "release dispatch {outbox_uid} does not exist in this tenant"
+                ))
+            })?;
+
+        if record.status == DispatchStatus::Abandoned {
+            let attempt_uid = load_terminal_failure_attempt(conn.as_mut(), outbox_uid).await?;
+            let next = load_open_dispatch_for_artifact(
+                conn.as_mut(),
+                &scope,
+                record.artifact_uid,
+                outbox_uid,
+            )
+            .await?;
+            conn.commit().await.map_err(storage)?;
+            return Ok(TerminalFailureSettlement { attempt_uid, next });
+        }
+        if record.status != DispatchStatus::Dispatched {
+            return Err(Error::StaleDispatch(format!(
+                "release dispatch {outbox_uid} is {} rather than dispatched",
+                record.status
+            )));
+        }
+
+        let subject = load_current_subject(conn.as_mut(), &scope, &record).await?;
+        let terminalized = sqlx::query(
+            r#"
+            UPDATE moa.artifact_release_dispatch_outbox
+            SET status = 'abandoned',
+                settled_at = $6,
+                updated_at = $6
+            WHERE outbox_uid = $1
+              AND storage_partition_id = $2
+              AND revision_uid = $3
+              AND generation = $4
+              AND subject_digest = $5
+              AND status = 'dispatched'
+            "#,
+        )
+        .bind(outbox_uid)
+        .bind(scope.storage_partition_id().to_string())
+        .bind(record.revision_uid)
+        .bind(record.generation)
+        .bind(record.subject_digest.to_vec())
+        .bind(now)
+        .execute(&mut *conn.as_mut())
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if terminalized != 1 {
+            return Err(Error::StaleDispatch(format!(
+                "release dispatch {outbox_uid} changed before terminal failure settlement"
+            )));
+        }
+        close_overlays(conn.as_mut(), outbox_uid, now).await?;
+
+        let outcome = ReleaseRepository::record_decision_in_tx(
+            conn.as_mut(),
+            &RecordDecision {
+                scope,
+                candidate_revision_uid: record.revision_uid,
+                subject_digest: record.subject_digest,
+                verdict: DeterministicVerdict::Inconclusive,
+                // A terminal failure has no authoritative experiment evidence.
+                // This correlation satisfies the shared transition input and is
+                // cleared before commit below; the attempt row separately retains
+                // any admitted experiment run identity for diagnosis.
+                run_uid: outbox_uid,
+                trial_uids: Vec::new(),
+                evidence_ids: Vec::new(),
+                gate_results: BTreeMap::new(),
+                blocking_assertions: Vec::new(),
+                evidence_adapter: EvidenceAdapter::BehaviorLabExperiment,
+                decided_by: format!("artifact-release-terminal-failure:{outbox_uid}"),
+            },
+            now,
+        )
+        .await
+        .map_err(Error::Release)?;
+        debug_assert!(outcome.attestation.is_none());
+        let cleared_run = sqlx::query(
+            r#"
+            UPDATE moa.artifact_release_candidate
+            SET last_run_uid = NULL,
+                updated_at = $3
+            WHERE revision_uid = $1
+              AND storage_partition_id = $2
+              AND last_run_uid = $4
+            "#,
+        )
+        .bind(record.revision_uid)
+        .bind(scope.storage_partition_id().to_string())
+        .bind(now)
+        .bind(outbox_uid)
+        .execute(&mut *conn.as_mut())
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if cleared_run != 1 {
+            return Err(Error::StaleDispatch(format!(
+                "release candidate {} did not retain the terminal settlement correlation",
+                record.revision_uid
+            )));
+        }
+
+        let detail = json!({
+            "terminal_failure": {
+                "phase": phase,
+                "error": error,
+            }
+        });
+        let attempt_uid = upsert_terminal_failure_attempt(
+            conn.as_mut(),
+            &scope,
+            &record,
+            subject.activation_target.class(),
+            &detail,
+            now,
+        )
+        .await?;
+        let next = match outcome.dispatched_revision_uid {
+            Some(revision_uid) => {
+                Some(Self::enqueue_dispatch_in_tx(conn.as_mut(), &scope, revision_uid).await?)
+            }
+            None => None,
+        };
+        conn.commit().await.map_err(storage)?;
+        Ok(TerminalFailureSettlement { attempt_uid, next })
     }
 
     /// Settles the open dispatch record for a decision, fenced by generation.
@@ -872,15 +1064,12 @@ impl ReleaseEvaluationRepository {
                 "experiment plan revision does not match the approved release plan".to_string(),
             ));
         }
-        if stored_case_plan.experiment_cases()? != binding.cases {
-            return Err(Error::ExperimentBindingInvalid(
-                "experiment cases do not match the durable release attempt".to_string(),
-            ));
-        }
+        let stored_cases = stored_case_plan.experiment_cases()?;
 
         let overlays = sqlx::query(
             r#"
-            SELECT overlay_uid, role, revision_uid, eval_session_id, overlay_token_hash
+            SELECT overlay_uid, role, trial_key, revision_uid, eval_session_id,
+                   overlay_token_hash
             FROM moa.artifact_release_eval_overlay
             WHERE outbox_uid = $1
               AND storage_partition_id = $2
@@ -888,7 +1077,7 @@ impl ReleaseEvaluationRepository {
               AND subject_digest = $4
               AND closed_at IS NULL
               AND expires_at > now()
-            ORDER BY role
+            ORDER BY trial_key
             "#,
         )
         .bind(binding.outbox_uid)
@@ -898,15 +1087,83 @@ impl ReleaseEvaluationRepository {
         .fetch_all(&mut *conn.as_mut())
         .await
         .map_err(storage)?;
-        if overlays.len() != binding.arms.len() || !(1..=2).contains(&overlays.len()) {
+        if overlays.is_empty() || overlays.len() != binding.trials.len() {
             return Err(Error::ExperimentBindingInvalid(
-                "experiment arms do not match the live release overlays".to_string(),
+                "experiment trials do not match the live release overlays".to_string(),
             ));
         }
 
-        let mut candidate_seen = false;
-        let mut baseline_seen = false;
-        for arm in &binding.arms {
+        let plan_revision = moa_artifacts::registry::ArtifactRegistry::load_revision_in_tx(
+            conn.as_mut(),
+            plan_revision_uid,
+        )
+        .await
+        .map_err(|error| Error::Storage(error.to_string()))?;
+        let ArtifactDefinition::ExperimentPlan(definition) = &plan_revision.document.definition
+        else {
+            return Err(Error::ExperimentBindingInvalid(
+                "approved release plan has the wrong artifact definition".to_string(),
+            ));
+        };
+        let roles = overlays
+            .iter()
+            .map(|row| row.try_get::<String, _>("role").map_err(storage))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !roles.contains(ArmRole::Candidate.as_str())
+            || roles.iter().any(|role| {
+                role != ArmRole::Candidate.as_str() && role != ArmRole::Baseline.as_str()
+            })
+        {
+            return Err(Error::ExperimentBindingInvalid(
+                "release experiment has an invalid or missing candidate role".to_string(),
+            ));
+        }
+        let mut expected_trial_keys = BTreeSet::new();
+        for case in &stored_cases {
+            let coordinates = release_case_coordinates(definition, case)?;
+            for role in &roles {
+                let role = match role.as_str() {
+                    "candidate" => ArmRole::Candidate,
+                    "baseline" => ArmRole::Baseline,
+                    other => {
+                        return Err(Error::ExperimentBindingInvalid(format!(
+                            "release experiment has unknown role `{other}`"
+                        )));
+                    }
+                };
+                for repetition in 0..case.repetitions {
+                    expected_trial_keys.insert(moa_experiments::plan::stable_trial_key(
+                        (coordinates.0, &case.scenario_id),
+                        (coordinates.1, &case.persona_id),
+                        (coordinates.2, &case.profile_id),
+                        release_variant_key(role),
+                        repetition,
+                    ));
+                }
+            }
+        }
+        let stored_trial_keys = overlays
+            .iter()
+            .map(|row| row.try_get::<String, _>("trial_key").map_err(storage))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let binding_trial_keys = binding
+            .trials
+            .iter()
+            .map(|trial| trial.trial_key.clone())
+            .collect::<BTreeSet<_>>();
+        if stored_trial_keys != expected_trial_keys
+            || binding_trial_keys != expected_trial_keys
+            || binding_trial_keys.len() != binding.trials.len()
+        {
+            return Err(Error::ExperimentBindingInvalid(
+                "release experiment does not bind every approved trial exactly once".to_string(),
+            ));
+        }
+
+        let mut overlay_uids = BTreeSet::new();
+        let mut session_ids = BTreeSet::new();
+        for trial in &binding.trials {
+            let arm = &trial.arm;
             let row = overlays
                 .iter()
                 .find(|row| row.get::<Uuid, _>("overlay_uid") == arm.overlay_uid)
@@ -917,43 +1174,48 @@ impl ReleaseEvaluationRepository {
                     ))
                 })?;
             let role: String = row.try_get("role").map_err(storage)?;
-            match (role.as_str(), arm.variant_key.as_str()) {
-                ("candidate", ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY) if !candidate_seen => {
-                    candidate_seen = true;
-                }
-                ("baseline", ARTIFACT_RELEASE_BASELINE_VARIANT_KEY) if !baseline_seen => {
-                    baseline_seen = true;
-                }
-                _ => {
+            let expected_variant = match role.as_str() {
+                "candidate" => ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
+                "baseline" => ARTIFACT_RELEASE_BASELINE_VARIANT_KEY,
+                other => {
                     return Err(Error::ExperimentBindingInvalid(format!(
-                        "overlay {} has an invalid or duplicate release role",
-                        arm.overlay_uid
+                        "release experiment has unknown role `{other}`"
                     )));
                 }
-            }
-            let stored_revision_uid: Uuid = row.try_get("revision_uid").map_err(storage)?;
-            let stored_session_id: Uuid = row.try_get("eval_session_id").map_err(storage)?;
-            let stored_token_hash: Vec<u8> = row.try_get("overlay_token_hash").map_err(storage)?;
-            if stored_revision_uid != arm.revision_uid
-                || stored_session_id != arm.eval_session_id
-                || stored_token_hash != overlay_token_hash(&arm.overlay_token).to_vec()
-            {
+            };
+            if arm.variant_key != expected_variant {
                 return Err(Error::ExperimentBindingInvalid(format!(
-                    "overlay {} does not match its provisioned revision, session, or token",
+                    "overlay {} has an invalid release role binding",
                     arm.overlay_uid
                 )));
             }
-        }
-        if !candidate_seen
-            || binding
-                .arms
-                .iter()
-                .find(|arm| arm.variant_key == ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY)
-                .is_none_or(|arm| arm.revision_uid != revision_uid)
-        {
-            return Err(Error::ExperimentBindingInvalid(
-                "release experiment does not carry the dispatch candidate revision".to_string(),
-            ));
+            let stored_trial_key: String = row.try_get("trial_key").map_err(storage)?;
+            let stored_revision_uid: Uuid = row.try_get("revision_uid").map_err(storage)?;
+            let stored_session_id: Uuid = row.try_get("eval_session_id").map_err(storage)?;
+            let stored_token_hash: Vec<u8> = row.try_get("overlay_token_hash").map_err(storage)?;
+            let approved_case = stored_cases.iter().find(|case| {
+                case.scenario_id == trial.case.scenario_id
+                    && case.persona_id == trial.case.persona_id
+                    && case.profile_id == trial.case.profile_id
+            });
+            if stored_trial_key != trial.trial_key
+                || approved_case != Some(&trial.case)
+                || stored_revision_uid != arm.revision_uid
+                || stored_session_id != arm.eval_session_id
+                || stored_token_hash != overlay_token_hash(&arm.overlay_token).to_vec()
+                || !overlay_uids.insert(arm.overlay_uid)
+                || !session_ids.insert(arm.eval_session_id)
+            {
+                return Err(Error::ExperimentBindingInvalid(format!(
+                    "overlay {} does not match its provisioned trial, case, revision, session, or token",
+                    arm.overlay_uid
+                )));
+            }
+            if role == ArmRole::Candidate.as_str() && arm.revision_uid != revision_uid {
+                return Err(Error::ExperimentBindingInvalid(
+                    "release experiment does not carry the dispatch candidate revision".to_string(),
+                ));
+            }
         }
         conn.commit().await.map_err(storage)?;
         Ok(())
@@ -966,14 +1228,11 @@ impl ReleaseEvaluationRepository {
     }
 }
 
-async fn ensure_plan_matches_subject(
+async fn load_current_subject(
     conn: &mut PgConnection,
-    pool: &PgPool,
     scope: &TenantScope,
     record: &DispatchRecord,
-    plan: &MergedCasePlan,
-    now: DateTime<Utc>,
-) -> Result<(), Error> {
+) -> Result<EvaluationSubjectV1, Error> {
     let subject: Value = sqlx::query_scalar(
         r#"
         SELECT subject
@@ -1000,6 +1259,25 @@ async fn ensure_plan_matches_subject(
     let subject: EvaluationSubjectV1 = serde_json::from_value(subject).map_err(|error| {
         Error::Storage(format!("stored release subject is unreadable: {error}"))
     })?;
+    if subject.candidate_revision_uid != record.revision_uid
+        || subject.activation_target.artifact_uid() != record.artifact_uid
+    {
+        return Err(Error::StaleDispatch(format!(
+            "release subject for dispatch {} does not match its candidate or artifact",
+            record.outbox_uid
+        )));
+    }
+    Ok(subject)
+}
+
+async fn ensure_plan_matches_subject(
+    conn: &mut PgConnection,
+    pool: &PgPool,
+    scope: &TenantScope,
+    subject: &EvaluationSubjectV1,
+    plan: &MergedCasePlan,
+    now: DateTime<Utc>,
+) -> Result<(), Error> {
     let case_hash = Digest32(
         moa_artifacts::canonical::canonical_hash(plan)
             .map_err(|error| Error::CasePackInvalid(error.to_string()))?,
@@ -1030,7 +1308,7 @@ async fn ensure_plan_matches_subject(
         moa_experiments::simulator_policy::store::SimulatorPolicyStore::new(pool.clone())
             .resolve_policy(scope.tenant_id(), definition.simulator_policy, now)
             .await
-            .map_err(|error| Error::CasePackInvalid(error.to_string()))?;
+            .map_err(simulator_policy_error)?;
     let simulator = SimulatorPolicyBinding {
         policy_uid: resolved.binding.policy_uid,
         revision: resolved.binding.revision,
@@ -1043,6 +1321,13 @@ async fn ensure_plan_matches_subject(
         ));
     }
     Ok(())
+}
+
+fn simulator_policy_error(error: SimulatorPolicyError) -> Error {
+    match error {
+        SimulatorPolicyError::Storage { detail } => Error::Storage(detail),
+        other => Error::CasePackInvalid(other.to_string()),
+    }
 }
 
 fn validate_release_scorecard(
@@ -1416,7 +1701,6 @@ fn dispatch_from_row(
 /// Resolves the approved plan/scenario pack, rotating the hidden cohort when due.
 async fn resolve_case_plan(
     conn: &mut PgConnection,
-    scope: &TenantScope,
     activation_target: ActivationTargetClass,
     now: DateTime<Utc>,
 ) -> Result<MergedCasePlan, Error> {
@@ -1434,41 +1718,20 @@ async fn resolve_case_plan(
         tracing::debug!(%pack_uid, %activation_target, "resolved current hidden release cohort");
     }
 
-    let platform_authoring = load_case_pack(
-        conn,
-        None,
-        activation_target,
-        CohortVisibility::Authoring,
-        scope,
-    )
-    .await?
-    .ok_or_else(|| {
-        Error::CasePackInvalid(format!(
-            "no approved authoring pack resolves for {activation_target}"
-        ))
-    })?;
-    let hidden = load_case_pack(
-        conn,
-        None,
-        activation_target,
-        CohortVisibility::Hidden,
-        scope,
-    )
-    .await?
-    .ok_or_else(|| {
-        Error::CasePackInvalid(format!(
-            "no hidden release cohort resolves for {activation_target}"
-        ))
-    })?;
-    let tenant_supplement = load_case_pack(
-        conn,
-        Some(scope),
-        activation_target,
-        CohortVisibility::Authoring,
-        scope,
-    )
-    .await?;
-
+    let platform_authoring = load_case_pack(conn, activation_target, CohortVisibility::Authoring)
+        .await?
+        .ok_or_else(|| {
+            Error::CasePackInvalid(format!(
+                "no approved authoring pack resolves for {activation_target}"
+            ))
+        })?;
+    let hidden = load_case_pack(conn, activation_target, CohortVisibility::Hidden)
+        .await?
+        .ok_or_else(|| {
+            Error::CasePackInvalid(format!(
+                "no hidden release cohort resolves for {activation_target}"
+            ))
+        })?;
     let cohort: Value = sqlx::query_scalar("SELECT moa.select_release_hidden_cohort($1, $2)")
         .bind(hidden.pack_uid)
         .bind(hidden.cohort_epoch)
@@ -1479,36 +1742,42 @@ async fn resolve_case_plan(
         Error::CasePackInvalid(format!("hidden cohort window is unreadable: {error}"))
     })?;
 
-    merge_case_packs(
-        &platform_authoring,
-        &hidden,
-        hidden_cases,
-        tenant_supplement.as_ref(),
-    )
+    merge_case_packs(&platform_authoring, &hidden, hidden_cases)
 }
 
 async fn load_case_pack(
     conn: &mut PgConnection,
-    tenant_scope: Option<&TenantScope>,
     activation_target: ActivationTargetClass,
     visibility: CohortVisibility,
-    scope: &TenantScope,
 ) -> Result<Option<ReleaseCasePack>, Error> {
     let row = sqlx::query(
         r#"
-        SELECT pack_uid, storage_partition_id, name, revision, visibility, cohort_epoch,
+        SELECT pack_uid, name, revision, visibility, cohort_epoch,
                cohort_size, rotates_at, max_attempts_per_epoch, plan_revision_uid, cases,
-               mandatory_assertions, scenario_source, pack_hash
+               mandatory_assertions, scenario_source, pack_hash,
+               pack_hash = moa.artifact_release_case_pack_content_hash(
+                   name,
+                   revision,
+                   target_class,
+                   visibility,
+                   cohort_epoch,
+                   cohort_size,
+                   rotates_at,
+                   max_attempts_per_epoch,
+                   plan_revision_uid,
+                   cases,
+                   mandatory_assertions,
+                   scenario_source
+               ) AS pack_hash_matches
         FROM moa.artifact_release_case_pack
         WHERE valid_to IS NULL
           AND target_class = $1
           AND visibility = $2
-          AND storage_partition_id IS NOT DISTINCT FROM $3
+          AND storage_partition_id IS NULL
         "#,
     )
     .bind(activation_target.as_str())
     .bind(visibility.as_str())
-    .bind(tenant_scope.map(|scope| scope.storage_partition_id().to_string()))
     .fetch_optional(&mut *conn)
     .await
     .map_err(storage)?;
@@ -1520,7 +1789,14 @@ async fn load_case_pack(
     let mandatory: Value = row.try_get("mandatory_assertions").map_err(storage)?;
     let scenario_source: Value = row.try_get("scenario_source").map_err(storage)?;
     let pack_hash: Vec<u8> = row.try_get("pack_hash").map_err(storage)?;
-    let stored_partition: Option<String> = row.try_get("storage_partition_id").map_err(storage)?;
+    let pack_hash_matches: bool = row.try_get("pack_hash_matches").map_err(storage)?;
+    if !pack_hash_matches {
+        let pack_name: String = row.try_get("name").map_err(storage)?;
+        let pack_revision: i32 = row.try_get("revision").map_err(storage)?;
+        return Err(Error::CasePackInvalid(format!(
+            "release case pack {pack_name} revision {pack_revision} content does not match its canonical hash"
+        )));
+    }
     let scenario_source: ScenarioSource =
         serde_json::from_value(scenario_source).map_err(|error| {
             Error::CasePackInvalid(format!("pack scenario source is unreadable: {error}"))
@@ -1531,7 +1807,6 @@ async fn load_case_pack(
         pack_uid: row.try_get("pack_uid").map_err(storage)?,
         name: row.try_get("name").map_err(storage)?,
         revision: row.try_get("revision").map_err(storage)?,
-        tenant_id: stored_partition.map(|_| scope.tenant_id()),
         visibility: visibility_text.parse()?,
         cohort_epoch: row.try_get("cohort_epoch").map_err(storage)?,
         cohort_size: row.try_get("cohort_size").map_err(storage)?,
@@ -1628,84 +1903,67 @@ async fn bind_plan_to_dispatch(
     Ok(())
 }
 
-/// Returns the tenant's base fixture snapshot, creating it on first use.
-///
-/// The base carries no connector bindings at all, which is the strongest form of
-/// "never production credentials": there is nothing to leak, and the schema
-/// refuses to let an operator add a non-fixture binding later.
-async fn ensure_base_fixture(conn: &mut PgConnection, scope: &TenantScope) -> Result<Uuid, Error> {
-    let partition = scope.storage_partition_id().to_string();
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT fixture_uid
-        FROM moa.artifact_release_fixture
-        WHERE storage_partition_id = $1
-          AND name = $2
-          AND base_fixture_uid IS NULL
-        "#,
-    )
-    .bind(&partition)
-    .bind(BASE_FIXTURE_NAME)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(storage)?;
-    if let Some(fixture_uid) = existing {
-        return Ok(fixture_uid);
+fn release_case_coordinates(
+    definition: &moa_artifacts::simulation::ExperimentPlanDefinition,
+    case: &ArtifactReleaseExperimentCase,
+) -> Result<(usize, usize, usize), Error> {
+    let scenario = definition
+        .simulation
+        .scenarios
+        .iter()
+        .position(|value| value.id == case.scenario_id)
+        .ok_or_else(|| {
+            Error::CasePackInvalid(format!(
+                "approved case scenario `{}` is absent from the pinned plan",
+                case.scenario_id
+            ))
+        })?;
+    let scenario_definition = &definition.simulation.scenarios[scenario];
+    if !scenario_definition.data_bundle_ids.is_empty() {
+        return Err(Error::CasePackInvalid(format!(
+            "approved release case scenario `{}` requires data bundles, but release evaluation has no fixture-backed target capability",
+            case.scenario_id
+        )));
     }
-    let environment = serde_json::json!({
-        "kind": "release_evaluation_fixture",
-        "version": 1,
-        "records": [],
-    });
-    let content_hash = blake3::hash(environment.to_string().as_bytes());
-    let fixture_uid = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO moa.artifact_release_fixture (
-            fixture_uid, storage_partition_id, user_id, base_fixture_uid, outbox_uid, name,
-            revision, environment, connector_bindings, content_hash, writable
-        )
-        VALUES ($1, $2, NULL, NULL, NULL, $3, 1, $4, '[]'::JSONB, $5, false)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(fixture_uid)
-    .bind(&partition)
-    .bind(BASE_FIXTURE_NAME)
-    .bind(SqlJson(&environment))
-    .bind(content_hash.as_bytes().to_vec())
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    sqlx::query_scalar(
-        r#"
-        SELECT fixture_uid
-        FROM moa.artifact_release_fixture
-        WHERE storage_partition_id = $1
-          AND name = $2
-          AND base_fixture_uid IS NULL
-        "#,
-    )
-    .bind(&partition)
-    .bind(BASE_FIXTURE_NAME)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(storage)
+    let persona = definition
+        .simulation
+        .personas
+        .iter()
+        .position(|value| value.id == case.persona_id)
+        .ok_or_else(|| {
+            Error::CasePackInvalid(format!(
+                "approved case persona `{}` is absent from the pinned plan",
+                case.persona_id
+            ))
+        })?;
+    let profile = definition
+        .simulation
+        .profiles
+        .iter()
+        .position(|value| value.id == case.profile_id)
+        .ok_or_else(|| {
+            Error::CasePackInvalid(format!(
+                "approved case profile `{}` is absent from the pinned plan",
+                case.profile_id
+            ))
+        })?;
+    Ok((scenario, persona, profile))
 }
 
-async fn clone_fixture(
-    conn: &mut PgConnection,
-    base_fixture_uid: Uuid,
-    outbox_uid: Uuid,
-    role: ArmRole,
-) -> Result<Uuid, Error> {
-    sqlx::query_scalar("SELECT moa.clone_release_fixture($1, $2, $3)")
-        .bind(base_fixture_uid)
-        .bind(outbox_uid)
-        .bind(role.as_str())
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(storage)
+fn release_variant_key(role: ArmRole) -> &'static str {
+    match role {
+        ArmRole::Candidate => ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
+        ArmRole::Baseline => ARTIFACT_RELEASE_BASELINE_VARIANT_KEY,
+    }
+}
+
+fn trial_overlay_token(root_token: &str, trial_key: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key(TRIAL_OVERLAY_TOKEN_DOMAIN);
+    hasher.update(&(root_token.len() as u64).to_be_bytes());
+    hasher.update(root_token.as_bytes());
+    hasher.update(&(trial_key.len() as u64).to_be_bytes());
+    hasher.update(trial_key.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 #[allow(
@@ -1717,11 +1975,12 @@ async fn upsert_overlay(
     scope: &TenantScope,
     record: &DispatchRecord,
     role: ArmRole,
+    trial_key: &str,
     revision_uid: Uuid,
-    fixture_uid: Uuid,
     overlay_token: &str,
+    case: &ArtifactReleaseExperimentCase,
     now: DateTime<Utc>,
-) -> Result<ProvisionedArm, Error> {
+) -> Result<ProvisionedTrial, Error> {
     let artifact_uid: Uuid = sqlx::query_scalar(
         "SELECT artifact_uid FROM moa.artifact_revision WHERE revision_uid = $1 AND valid_to IS NULL",
     )
@@ -1743,11 +2002,11 @@ async fn upsert_overlay(
         r#"
         INSERT INTO moa.artifact_release_eval_overlay (
             overlay_uid, storage_partition_id, user_id, outbox_uid, role, artifact_uid,
-            revision_uid, generation, subject_digest, pinned_dependencies, overlay_token_hash,
-            eval_session_id, fixture_uid, expires_at
+            trial_key, revision_uid, generation, subject_digest, pinned_dependencies,
+            overlay_token_hash, eval_session_id, expires_at
         )
         VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-        ON CONFLICT (outbox_uid, role) DO NOTHING
+        ON CONFLICT (outbox_uid, trial_key) DO NOTHING
         "#,
     )
     .bind(overlay_uid)
@@ -1755,13 +2014,13 @@ async fn upsert_overlay(
     .bind(record.outbox_uid)
     .bind(role.as_str())
     .bind(artifact_uid)
+    .bind(trial_key)
     .bind(revision_uid)
     .bind(record.generation)
     .bind(record.subject_digest.to_vec())
     .bind(SqlJson(&record.pinned_dependencies))
     .bind(overlay_token_hash(overlay_token).to_vec())
     .bind(eval_session_id)
-    .bind(fixture_uid)
     .bind(expires_at)
     .execute(&mut *conn)
     .await
@@ -1769,24 +2028,36 @@ async fn upsert_overlay(
 
     let row = sqlx::query(
         r#"
-        SELECT overlay_uid, revision_uid, eval_session_id, fixture_uid
+        SELECT overlay_uid, role, revision_uid, eval_session_id, overlay_token_hash
         FROM moa.artifact_release_eval_overlay
         WHERE outbox_uid = $1
-          AND role = $2
+          AND trial_key = $2
         "#,
     )
     .bind(record.outbox_uid)
-    .bind(role.as_str())
+    .bind(trial_key)
     .fetch_one(&mut *conn)
     .await
     .map_err(storage)?;
-    Ok(ProvisionedArm {
+    let stored_role: String = row.try_get("role").map_err(storage)?;
+    let stored_revision_uid: Uuid = row.try_get("revision_uid").map_err(storage)?;
+    let stored_token_hash: Vec<u8> = row.try_get("overlay_token_hash").map_err(storage)?;
+    if stored_role != role.as_str()
+        || stored_revision_uid != revision_uid
+        || stored_token_hash != overlay_token_hash(overlay_token).to_vec()
+    {
+        return Err(Error::Provisioning(format!(
+            "trial overlay `{trial_key}` conflicts with its replayed role, revision, or token"
+        )));
+    }
+    Ok(ProvisionedTrial {
+        trial_key: trial_key.to_string(),
         role,
+        case: case.clone(),
         overlay_uid: row.try_get("overlay_uid").map_err(storage)?,
         overlay_token: overlay_token.to_string(),
-        revision_uid: row.try_get("revision_uid").map_err(storage)?,
+        revision_uid: stored_revision_uid,
         eval_session_id: row.try_get("eval_session_id").map_err(storage)?,
-        fixture_uid: row.try_get("fixture_uid").map_err(storage)?,
     })
 }
 
@@ -1839,4 +2110,175 @@ async fn upsert_attempt(
         .fetch_one(&mut *conn)
         .await
         .map_err(storage)
+}
+
+async fn upsert_terminal_failure_attempt(
+    conn: &mut PgConnection,
+    scope: &TenantScope,
+    record: &DispatchRecord,
+    activation_target: ActivationTargetClass,
+    detail: &Value,
+    now: DateTime<Utc>,
+) -> Result<Uuid, Error> {
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO moa.artifact_release_attempt (
+            attempt_uid, storage_partition_id, user_id, outbox_uid, artifact_uid, revision_uid,
+            generation, subject_digest, activation_target, seed_material, case_pack_uid,
+            hidden_pack_uid, cohort_epoch, verdict, verdict_detail, attestation_uid, updated_at
+        )
+        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                'inconclusive', $13, NULL, $14)
+        ON CONFLICT (outbox_uid) DO UPDATE
+        SET verdict = 'inconclusive',
+            verdict_detail = moa.artifact_release_attempt.verdict_detail || EXCLUDED.verdict_detail,
+            attestation_uid = NULL,
+            updated_at = EXCLUDED.updated_at
+        WHERE moa.artifact_release_attempt.attestation_uid IS NULL
+        RETURNING attempt_uid
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(scope.storage_partition_id().to_string())
+    .bind(record.outbox_uid)
+    .bind(record.artifact_uid)
+    .bind(record.revision_uid)
+    .bind(record.generation)
+    .bind(record.subject_digest.to_vec())
+    .bind(activation_target.as_str())
+    .bind(&record.seed_material)
+    .bind(record.case_pack_uid)
+    .bind(record.hidden_pack_uid)
+    .bind(record.cohort_epoch)
+    .bind(SqlJson(detail))
+    .bind(now)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?
+    .ok_or_else(|| {
+        Error::StaleDispatch(format!(
+            "release attempt for dispatch {} already carries an attestation",
+            record.outbox_uid
+        ))
+    })
+}
+
+async fn load_terminal_failure_attempt(
+    conn: &mut PgConnection,
+    outbox_uid: Uuid,
+) -> Result<Uuid, Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT attempt_uid
+        FROM moa.artifact_release_attempt
+        WHERE outbox_uid = $1
+          AND verdict = 'inconclusive'
+          AND attestation_uid IS NULL
+          AND verdict_detail ? 'terminal_failure'
+        "#,
+    )
+    .bind(outbox_uid)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?
+    .ok_or_else(|| {
+        Error::StaleDispatch(format!(
+            "abandoned release dispatch {outbox_uid} was not a terminal evaluation failure"
+        ))
+    })
+}
+
+async fn load_open_dispatch_for_artifact(
+    conn: &mut PgConnection,
+    scope: &TenantScope,
+    artifact_uid: Uuid,
+    excluded_outbox_uid: Uuid,
+) -> Result<Option<DispatchRecord>, Error> {
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT {DISPATCH_COLUMNS}
+        FROM moa.artifact_release_dispatch_outbox
+        WHERE artifact_uid = $1
+          AND storage_partition_id = $2
+          AND outbox_uid <> $3
+          AND status IN ('pending', 'dispatched')
+        "#
+    ))
+    .bind(artifact_uid)
+    .bind(scope.storage_partition_id().to_string())
+    .bind(excluded_outbox_uid)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?;
+    row.as_ref()
+        .map(|row| dispatch_from_row(row, scope.tenant_id()))
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_artifacts::simulation::{
+        ExperimentPlanDefinition, SimulationPersonaDefinition, SimulationProfileDefinition,
+        SimulationScenarioDefinition,
+    };
+    use moa_experiments::simulator_policy::SimulatorPolicyError;
+    use moa_wire::experiments::ArtifactReleaseExperimentCase;
+
+    use super::{Error, release_case_coordinates, simulator_policy_error};
+
+    #[test]
+    fn simulator_policy_storage_failure_remains_retryable_offline() {
+        let storage = simulator_policy_error(SimulatorPolicyError::Storage {
+            detail: "database temporarily unavailable".to_string(),
+        });
+        assert!(
+            matches!(storage, Error::Storage(ref detail) if detail == "database temporarily unavailable")
+        );
+        assert!(super::super::is_retryable_release_error(&storage));
+
+        let deterministic = simulator_policy_error(SimulatorPolicyError::InvalidDomain {
+            domain: "INVALID".to_string(),
+        });
+        assert!(matches!(deterministic, Error::CasePackInvalid(_)));
+        assert!(!super::super::is_retryable_release_error(&deterministic));
+    }
+
+    #[test]
+    fn release_case_requiring_a_data_bundle_fails_admission_offline() {
+        // Pins: release evaluation must not claim fixture isolation from a
+        // persisted identifier that no target-side capability consumes.
+        let definition = ExperimentPlanDefinition {
+            simulation: moa_artifacts::simulation::ExperimentSimulationDefinition {
+                scenarios: vec![SimulationScenarioDefinition {
+                    id: "stateful-case".to_string(),
+                    data_bundle_ids: vec!["orders".to_string()],
+                    ..Default::default()
+                }],
+                personas: vec![SimulationPersonaDefinition {
+                    id: "customer".to_string(),
+                    ..Default::default()
+                }],
+                profiles: vec![SimulationProfileDefinition {
+                    id: "default".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let case = ArtifactReleaseExperimentCase {
+            scenario_id: "stateful-case".to_string(),
+            persona_id: "customer".to_string(),
+            profile_id: "default".to_string(),
+            repetitions: 1,
+            assertions: Vec::new(),
+        };
+
+        let error = release_case_coordinates(&definition, &case)
+            .expect_err("a data-bundle case has no supported fixture-backed target runtime");
+        assert!(
+            matches!(error, Error::CasePackInvalid(message) if message.contains("no fixture-backed target capability")),
+            "the refusal must identify the unsupported runtime boundary"
+        );
+    }
 }

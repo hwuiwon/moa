@@ -605,7 +605,7 @@ async fn run_inner(
         )
         .await
         .map_err(
-            crate::workflows::artifact_release_evaluation::Error::terminal,
+            crate::workflows::artifact_release_evaluation::release_handler_error,
         )?;
     }
     admit_run(pool, request, identity)

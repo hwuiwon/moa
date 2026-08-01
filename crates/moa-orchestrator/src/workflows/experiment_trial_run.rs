@@ -70,7 +70,7 @@ use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
 use moa_core::types::experiments::ExperimentCancelSignal;
-use moa_wire::experiments::ArtifactReleaseExperimentArm;
+use moa_wire::experiments::ArtifactReleaseExperimentTrialBinding;
 
 mod finalize;
 pub(crate) mod resources;
@@ -84,7 +84,10 @@ use status::{
     persist_trial_status_by_key, status_response_from_record, trial_status_allows_child_start,
     trial_status_response,
 };
-use target_execution::{TrialTargetOutcome, run_agent_loop_trial, run_execution_template_trial};
+use target_execution::{
+    TrialTargetOutcome, capture_release_assertion_evidence, run_agent_loop_trial,
+    run_execution_template_trial,
+};
 use trial_simulator::load_simulator_context;
 
 const K_RUN_UID: &str = "run_uid";
@@ -109,7 +112,7 @@ pub struct ExperimentTrialRunWorkflowRequest {
     pub identity: Identity,
     /// Internal artifact-release overlay selected by this trial's variant key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_overlay: Option<ArtifactReleaseExperimentArm>,
+    pub release_overlay: Option<ArtifactReleaseExperimentTrialBinding>,
     /// Parent workflow awakeable resolved when this trial workflow completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_awakeable_id: Option<String>,
@@ -368,7 +371,7 @@ async fn run_trial(
     .await?;
     ctx.set(K_STATUS, Json(trial.status));
 
-    let outcome = match trial.target_kind {
+    let mut outcome = match trial.target_kind {
         ExperimentTargetKind::AgentLoop => {
             let simulator_context = load_simulator_context(ctx, trial.clone(), pool).await?;
             run_agent_loop_trial(
@@ -387,6 +390,7 @@ async fn run_trial(
                 .await?
         }
     };
+    capture_release_assertion_evidence(ctx, &mut outcome, session_store).await?;
 
     // Evaluation happens here, before any terminal status is persisted. The
     // target paths deliberately return evidence rather than writing a status

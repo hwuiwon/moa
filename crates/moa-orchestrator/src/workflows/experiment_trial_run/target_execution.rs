@@ -17,6 +17,7 @@ use moa_artifacts::{
     canonical::canonical_json_bytes as artifact_canonical_json_bytes,
     execution_plan::{ExecutionGoalContract, GeneratedExecutionCandidate},
     reference::ArtifactRef,
+    simulation::MAX_PLAN_DEFINITION_BYTES,
 };
 use moa_config::MoaConfig;
 use moa_core::types::{
@@ -30,6 +31,9 @@ use moa_core::types::{
     },
     resource::ResourceAmounts,
 };
+use moa_eval::collector::TrajectoryCollector;
+use moa_eval_core::evidence::EvidenceSubject;
+use moa_eval_core::types::TEST_CASE_SCHEMA_VERSION;
 use moa_execution::{
     CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationReport,
     ExecutionValidationSeverity, compile,
@@ -41,7 +45,11 @@ use moa_execution::{
         ExecutionStartRequest, ExecutionStatusResponse,
     },
 };
-use moa_experiments::evidence::{TrialScoreTarget, TrialTerminalEvidence, TrialTerminalOutcome};
+use moa_experiments::evidence::{
+    ReleaseScenarioEvidence, TrialScenarioIdentity, TrialScoreTarget, TrialTerminalEvidence,
+    TrialTerminalOutcome,
+};
+use moa_wire::experiments::ArtifactReleaseExperimentTrialBinding;
 use moa_wire::session_store::AppendEventRequest;
 use std::{str::FromStr, time::Instant};
 
@@ -129,6 +137,7 @@ struct TargetObservations {
     simulator_policy: Option<moa_experiments::simulator_policy::registry::SimulatorPolicyBinding>,
     simulator_decision: Option<SimulatorDecision>,
     simulator_reason: Option<String>,
+    release_scenario: Option<ReleaseScenarioEvidence>,
 }
 
 impl TargetObservations {
@@ -169,6 +178,7 @@ impl TargetObservations {
                 simulator_policy: self.simulator_policy,
                 simulator_decision: self.simulator_decision,
                 simulator_reason: self.simulator_reason,
+                release_scenario: self.release_scenario,
             },
             terminal_status: status,
             stop_reason,
@@ -257,6 +267,7 @@ pub(super) async fn run_agent_loop_trial(
         simulator_policy: Some(trial.simulator.policy.binding),
         simulator_decision: None,
         simulator_reason: None,
+        release_scenario: release_scenario_evidence(&trial, request.release_overlay.as_ref())?,
     };
     if forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
         return Ok(observations.into_outcome(
@@ -1155,6 +1166,7 @@ pub(super) async fn run_execution_template_trial(
         };
     let mut observations = TargetObservations {
         turns: trial.turn_count.max(0) as u32,
+        release_scenario: release_scenario_evidence(&trial, request.release_overlay.as_ref())?,
         ..TargetObservations::default()
     };
     observations.absorb(&usage);
@@ -1227,12 +1239,15 @@ async fn ensure_execution_session(
         });
     }
 
-    let session_id = experiment_execution_session_id(
-        request.tenant_id,
-        trial.run_uid,
-        trial.score_run_id,
-        Some(trial.trial_uid),
-    )?;
+    let session_id = match request.release_overlay.as_ref() {
+        Some(binding) => SessionId(binding.arm.eval_session_id),
+        None => experiment_execution_session_id(
+            request.tenant_id,
+            trial.run_uid,
+            trial.score_run_id,
+            Some(trial.trial_uid),
+        )?,
+    };
     let model = trial
         .target_model
         .clone()
@@ -1833,7 +1848,7 @@ async fn create_new_session(
     identity: &Identity,
     call_origin: CallOrigin,
     agent: AgentSessionSelection,
-    release_overlay: Option<moa_wire::experiments::ArtifactReleaseExperimentArm>,
+    release_overlay: Option<ArtifactReleaseExperimentTrialBinding>,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
@@ -1842,7 +1857,8 @@ async fn create_new_session(
     let meta = ctx
         .run(|| async move {
             let mut meta = new_session_meta(tenant_id, model, &prepare_identity, call_origin)?;
-            let overlay_binding = release_overlay.as_ref().map(|arm| {
+            let overlay_binding = release_overlay.as_ref().map(|binding| {
+                let arm = &binding.arm;
                 meta.id = SessionId(arm.eval_session_id);
                 moa_artifacts::release::EvalOverlayBinding {
                     overlay_uid: arm.overlay_uid,
@@ -1857,8 +1873,8 @@ async fn create_new_session(
                 overlay_binding.as_ref(),
             )
             .await?;
-            if let Some(arm) = release_overlay.as_ref() {
-                ensure_release_revision_selected(&agent_context, arm)?;
+            if let Some(binding) = release_overlay.as_ref() {
+                ensure_release_revision_selected(&agent_context, &binding.arm)?;
             }
             apply_agent_model_policy(&mut meta, &agent_context)?;
             meta.agent_context = Some(agent_context);
@@ -1886,6 +1902,79 @@ async fn create_new_session(
         .name("experiment_trial_create_session")
         .await?
         .into_inner())
+}
+
+fn release_scenario_evidence(
+    trial: &ExperimentTrialRecord,
+    binding: Option<&ArtifactReleaseExperimentTrialBinding>,
+) -> Result<Option<ReleaseScenarioEvidence>, HandlerError> {
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    let trial_identity = TrialScenarioIdentity {
+        scenario_id: trial
+            .scenario_id
+            .clone()
+            .ok_or_else(|| bad_request("release trial is missing scenario identity"))?,
+        persona_id: trial
+            .persona_id
+            .clone()
+            .ok_or_else(|| bad_request("release trial is missing persona identity"))?,
+        profile_id: trial
+            .profile_id
+            .clone()
+            .ok_or_else(|| bad_request("release trial is missing profile identity"))?,
+    };
+    let approved_case = TrialScenarioIdentity {
+        scenario_id: binding.case.scenario_id.clone(),
+        persona_id: binding.case.persona_id.clone(),
+        profile_id: binding.case.profile_id.clone(),
+    };
+    Ok(Some(ReleaseScenarioEvidence {
+        trial_uid: trial.trial_uid,
+        trial: trial_identity,
+        approved_case,
+        variant_key: binding.arm.variant_key.clone(),
+        revision_uid: binding.arm.revision_uid,
+        overlay_uid: binding.arm.overlay_uid,
+        eval_session_id: binding.arm.eval_session_id,
+        captured_through_sequence_num: 0,
+        assertions: binding.case.assertions.clone(),
+        evidence: None,
+    }))
+}
+
+/// Captures the complete persisted session log for release-case assertions.
+///
+/// This runs after either production target path stops and before score
+/// derivation. Missing or truncated coverage remains represented in the typed
+/// envelope and therefore fails the scenario assertion closed.
+pub(super) async fn capture_release_assertion_evidence(
+    ctx: &WorkflowContext<'_>,
+    outcome: &mut TrialTargetOutcome,
+    session_store: &Arc<PostgresSessionStore>,
+) -> Result<(), HandlerError> {
+    let Some(scenario) = outcome.evidence.release_scenario.as_mut() else {
+        return Ok(());
+    };
+    let events = load_session_events(
+        ctx,
+        outcome.evidence.session_id,
+        EventRange::all(),
+        session_store,
+    )
+    .await?;
+    let captured_through_sequence_num = latest_sequence(&events);
+    let mut collector = TrajectoryCollector::new(None, true, MAX_PLAN_DEFINITION_BYTES);
+    collector.process_events(&events);
+    scenario.captured_through_sequence_num = captured_through_sequence_num;
+    scenario.evidence = Some(collector.into_evidence(EvidenceSubject {
+        case: scenario.approved_case.scenario_id.clone(),
+        case_schema_version: TEST_CASE_SCHEMA_VERSION,
+        agent_config: scenario.variant_key.clone(),
+        run_label: scenario.trial_uid.to_string(),
+    }));
+    Ok(())
 }
 
 fn ensure_release_revision_selected(

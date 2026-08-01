@@ -263,17 +263,52 @@ passes; `ready` means activatable, not serving.
 `ArtifactRelease/submit` is the hand-authored release entry point. It resolves
 the platform gate server-side, snapshots the candidate, dependency/runtime/tool
 policy and activated tool catalog, writes the candidate plus durable dispatch in
-one transaction, and starts `ArtifactReleaseEvaluation`. That workflow runs one
-production Behavior Lab experiment with paired candidate/baseline variants. A
-server-approved case cohort selects exact scenario, persona, profile, and
-repetition tuples from a published tenant experiment plan; the ordinary plan
-Cartesian product is not run for a release. The approved plan must produce the
-policy's deterministic blocking score rows (`target_completed`,
-`result_produced`, and `privacy_safe_output` in the platform policy), and the
-workflow derives its verdict from those persisted scores and their provenance.
+one transaction, and starts `ArtifactReleaseEvaluation`. The approved plan must
+declare exactly one `agent_loop` target template. Skill and action release plans
+pin an exact host-agent revision; agent-deployment evaluation removes any
+authored host selector and substitutes the exact candidate or baseline agent
+revision for its arm. An `execution_template` release plan fails closed because
+that target has no release-overlay resolver.
+
+The workflow runs one production Behavior Lab experiment. First activation runs
+the candidate alone. A later release runs candidate and serving-baseline arms,
+but their paired comparison remains diagnostic until that exact design has a
+passing operating-characteristic assessment; activation authority remains the
+candidate's absolute deterministic score evidence. A server-approved case cohort
+selects exact scenario, persona, profile, and repetition tuples from the
+published platform release plan; tenants cannot replace or supplement this
+gate. Release-policy and case-pack hashes cover their complete decision and
+executable authority. The database permits only lifecycle closure of an existing
+row; policy changes and hidden-cohort rotations insert a new immutable revision,
+and repository resolution recomputes the digest before constructing a release
+subject. The ordinary plan Cartesian product is not run for a release. Every
+case/repetition/arm trial receives a distinct overlay and
+eval-owned session, and dispatch verifies each exact binding once. Release cases
+that reference simulation data bundles fail admission: the supported AgentLoop
+lane has no fixture-backed target capability, so persisted fixture identifiers
+would be provenance without enforcement. Run-scoped hand state is isolated by
+the trial's unique session and sandbox, but is not release gate authority.
+The approved plan must produce the policy's deterministic blocking score rows
+(`scenario_outcome`, `target_completed`, `result_produced`, and
+`privacy_safe_output` in the platform policy), and the workflow derives its
+verdict from those persisted scores and their provenance. Release case authority
+currently accepts only `text_match@1` positive assertions and
+`prohibited_actions@1` safety assertions. `required_actions@1` remains available
+to the general assertion registry but cannot block a release until reviewed
+approval and execution observations share a stable effect identity.
 Only that workflow may mint the expiring single-use activation attestation;
 there is no caller-supplied verdict endpoint. Evaluation-only overlays are bound
 to one secret and one eval-owned session; normal resolution never reads them.
+
+The authenticated public ArtifactRelease surface contains exactly four `POST`
+routes:
+
+| Public route | Restate handler |
+|---|---|
+| `/v1/artifact-releases/submit` | `ArtifactRelease/submit` |
+| `/v1/artifact-releases/activate` | `ArtifactRelease/activate` |
+| `/v1/artifact-releases/attempts/list` | `ArtifactRelease/list_attempts` |
+| `/v1/artifact-releases/attempts/review` | `ArtifactRelease/review_attempt` |
 
 `ArtifactRelease/activate` spends the attestation to compare-and-set a skill or
 action pointer. Agent activation uses `AgentDefinitions/deploy` so the existing
@@ -288,10 +323,24 @@ Submission and activation also re-resolve the published release plan, case
 cohort, evaluator versions, certified simulator policy, and tool catalog. Any
 drift from the digested evaluation subject invalidates the attempt or
 attestation instead of silently changing what was measured.
+The platform simulator certification itself requires a fixed migration-owned
+mandate plus a separate exact-artifact evidence import. The mandate, not the
+submitted study, owns bounds, cohort and authorization pins, budget, study
+window, and the external source-manifest digest. The initial mandate is
+unprovisioned and fails closed until a reviewed code-and-migration revision
+supplies real evidence authority; `moa_promoter` cannot rewrite or delete it.
 
 Migration `V000373` makes `published` unrepresentable for skill, action, and
 agent revisions. `published` survives only for kinds whose activation seam is
 owned elsewhere, including experiment plans and connector catalog snapshots.
+This migration deliberately does not backfill skill or action serving pointers.
+Formerly published skill and action revisions become historical `superseded`
+revisions and must pass the new release gate before serving again. Formerly
+published agent revisions also become historical, while existing agent
+installations retain their exact installation pointer; every later deployment
+transition is gated.
+Contact-scoped release artifacts are archived because the release subject is
+tenant-scoped. This is a hard break, not a compatibility migration.
 
 Tenant knowledge-base rows are `moa.knowledge_connections`,
 `moa.knowledge_sync_runs`, `moa.knowledge_ingestion_steps`,
@@ -637,8 +686,8 @@ configuration of such a path was ever correct.
 Regression evals, live behavior experiments, and analytics insights are
 separate surfaces:
 
-- Regression eval: `moa-eval` is a platform-only library, CLI, and `xtask`
-  surface used by CI, nightly jobs, explicit live lanes, and the internal
+- Regression eval: `moa-eval` is a platform-only library and feature-gated
+  `xtask` surface used by CI, nightly jobs, explicit live lanes, and the internal
   skill-regression gate. It owns deterministic datasets, replay plans,
   regression runs, and score comparisons. It is not a tenant product: there is
   no `Eval` Restate service, no tenant eval MCP tool, and the public edge does

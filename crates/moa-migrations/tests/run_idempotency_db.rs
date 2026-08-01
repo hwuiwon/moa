@@ -571,14 +571,19 @@ async fn artifact_release_purge_is_scope_bound_and_execute_only_db() {
                 $1, $2, NULL, 'tenant-release-purge', 1, 'skill_visibility',
                 '[{"id":"safety"}]'::JSONB,
                 '[{"metric":"scenario_pass_rate"}]'::JSONB,
-                3600, $3, $4
+                3600, $3,
+                moa.artifact_release_policy_content_hash(
+                    'tenant-release-purge', 1, 'skill_visibility',
+                    '[{"id":"safety"}]'::JSONB,
+                    '[{"metric":"scenario_pass_rate"}]'::JSONB,
+                    3600, $3
+                )
             )
             "#,
         )
         .bind(policy_uid)
         .bind(&partition)
         .bind(vec![1_u8; 32])
-        .bind(vec![2_u8; 32])
         .execute(&target)
         .await?;
 

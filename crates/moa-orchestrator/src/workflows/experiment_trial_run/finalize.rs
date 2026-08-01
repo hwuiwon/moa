@@ -403,6 +403,7 @@ mod tests {
             simulator_policy: None,
             simulator_decision: None,
             simulator_reason: None,
+            release_scenario: None,
         }
     }
 

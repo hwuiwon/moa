@@ -4,12 +4,15 @@ mod signals;
 
 use std::time::Instant;
 
+use chrono::Utc;
 use moa_core::{
     error::MoaError, error::Result, events::Event, types::completion::CompletionContent,
-    types::completion::StopReason, types::context::WorkingContext,
-    types::events_stream::EventRange, types::observability::TraceContext,
+    types::completion::StopReason, types::completion::TokenUsage, types::context::WorkingContext,
+    types::context::estimate_text_tokens, types::events_stream::EventRange,
+    types::model::TokenPricing, types::observability::TraceContext,
     types::observability::genai_operation_name, types::observability::genai_provider_name,
-    types::provider::ModelTask, types::session::SessionMeta,
+    types::provider::ModelTask, types::resource::ResourceAmounts, types::resource::ResourceBudget,
+    types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -51,6 +54,7 @@ pub(super) async fn run_streamed_turn(
         event_tx,
         cancel_token,
         hard_cancel_token,
+        resource_budget,
         signal_state,
         lineage,
     } = request;
@@ -142,7 +146,55 @@ pub(super) async fn run_streamed_turn(
             )
             .await?;
 
-            let request = ctx.into_request();
+            let model_dispatch_budget = *resource_budget;
+            let estimated_input_token_count = ctx
+                .tools()
+                .iter()
+                .fold(ctx.token_count, |total, tool| {
+                    total.saturating_add(estimate_text_tokens(&tool.to_string()))
+                });
+            let estimated_input_tokens =
+                u64::try_from(estimated_input_token_count).unwrap_or(u64::MAX);
+            let pricing = llm_provider.capabilities().pricing;
+            let minimum_model_cost =
+                conservative_model_cost(&pricing, estimated_input_token_count, 1);
+            let minimum_model_usage = ResourceAmounts {
+                cost_micro_usd: minimum_model_cost,
+                tokens: estimated_input_tokens.saturating_add(1),
+                turns: 1,
+                model_calls: 1,
+                ..ResourceAmounts::ZERO
+            };
+            // Validate the prompt plus one output token without charging the
+            // estimate. Provider-reported token usage is charged below, while
+            // turns and calls are reserved before the request leaves MOA.
+            model_dispatch_budget.try_consume_at(minimum_model_usage, Utc::now())?;
+            *resource_budget = model_dispatch_budget.try_consume_at(
+                ResourceAmounts {
+                    turns: 1,
+                    model_calls: 1,
+                    ..ResourceAmounts::ZERO
+                },
+                Utc::now(),
+            )?;
+            let mut request = ctx.into_request();
+            if let Some(remaining) = model_dispatch_budget.remaining {
+                let token_budget_cap = usize::try_from(
+                    remaining.tokens.saturating_sub(estimated_input_tokens),
+                )
+                .unwrap_or(usize::MAX);
+                let cost_budget_cap = affordable_output_tokens(
+                    &pricing,
+                    usize::try_from(estimated_input_tokens).unwrap_or(usize::MAX),
+                    remaining.cost_micro_usd,
+                );
+                let output_cap = token_budget_cap.min(cost_budget_cap);
+                request.max_output_tokens = Some(
+                    request
+                        .max_output_tokens
+                        .map_or(output_cap, |configured| configured.min(output_cap)),
+                );
+            }
             let request_model = request
                 .model
                 .as_ref()
@@ -215,9 +267,15 @@ pub(super) async fn run_streamed_turn(
                 )
             })?;
             let response_usage = response.token_usage();
-            let pricing = &llm_provider.capabilities().pricing;
+            let response_has_output = !streamed.streamed_text.is_empty()
+                || !response.text.is_empty()
+                || !response.content.is_empty();
+            let response_resource_usage =
+                reported_model_usage(&pricing, &response_usage, response_has_output)?;
             let response_cost_cents = pricing.cost_cents(&response_usage);
-            let response_cost_micros = pricing.cost_micros(&response_usage);
+            let response_cost_micros = response_resource_usage.cost_micro_usd;
+            *resource_budget =
+                resource_budget.try_consume_at(response_resource_usage, Utc::now())?;
             emit_generation_lineage(
                 lineage.as_ref(),
                 turn_id,
@@ -301,6 +359,15 @@ pub(super) async fn run_streamed_turn(
                     match block {
                         CompletionContent::ToolCall(call) => {
                             saw_tool_request = true;
+                            let tool_dispatch_budget = *resource_budget;
+                            *resource_budget = tool_dispatch_budget.try_consume_at(
+                                ResourceAmounts {
+                                    tool_calls: 1,
+                                    ..ResourceAmounts::ZERO
+                                },
+                                Utc::now(),
+                            )?;
+                            let tool_leaf_budget = one_tool_call_budget(tool_dispatch_budget);
                             let outcome = handle_tool_call(
                                 &identity,
                                 session_id,
@@ -311,6 +378,7 @@ pub(super) async fn run_streamed_turn(
                                 active_canary.as_deref(),
                                 event_tx,
                                 runtime_tx,
+                                tool_leaf_budget,
                                 cancel_token.as_ref(),
                                 hard_cancel_token.as_ref(),
                                 Some(&tool_dispatch_span),
@@ -436,6 +504,125 @@ pub(super) async fn run_streamed_turn(
     .await
 }
 
+fn conservative_model_cost(
+    pricing: &TokenPricing,
+    estimated_input_tokens: usize,
+    output_tokens: usize,
+) -> u64 {
+    let input_rates = [
+        pricing.input_per_mtok,
+        pricing.cache_write_per_mtok(),
+        pricing
+            .cached_input_per_mtok
+            .unwrap_or(pricing.input_per_mtok),
+    ];
+    let output_rate = pricing.output_per_mtok;
+    if input_rates
+        .into_iter()
+        .chain(std::iter::once(output_rate))
+        .any(|rate| !rate.is_finite() || rate < 0.0)
+    {
+        return u64::MAX;
+    }
+    let input_rate = input_rates.into_iter().fold(0.0_f64, f64::max);
+    let projected = estimated_input_tokens as f64 * input_rate + output_tokens as f64 * output_rate;
+    if !projected.is_finite() || projected >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        projected.ceil() as u64
+    }
+}
+
+fn reported_model_usage(
+    pricing: &TokenPricing,
+    usage: &TokenUsage,
+    response_has_output: bool,
+) -> Result<ResourceAmounts> {
+    let total_input_tokens = usage
+        .input_tokens_uncached
+        .checked_add(usage.input_tokens_cache_write)
+        .and_then(|total| total.checked_add(usage.input_tokens_cache_read))
+        .ok_or_else(|| {
+            MoaError::BudgetExhausted(
+                "provider token usage overflowed after model dispatch; refusing further work"
+                    .to_string(),
+            )
+        })?;
+    if total_input_tokens == 0 {
+        return Err(MoaError::BudgetExhausted(
+            "provider token usage omitted input tokens after model dispatch; refusing further work"
+                .to_string(),
+        ));
+    }
+    if response_has_output && usage.output_tokens == 0 {
+        return Err(MoaError::BudgetExhausted(
+            "provider token usage omitted output tokens for nonempty model output; refusing further work"
+                .to_string(),
+        ));
+    }
+    let total_tokens = total_input_tokens
+        .checked_add(usage.output_tokens)
+        .ok_or_else(|| {
+            MoaError::BudgetExhausted(
+                "provider token usage overflowed after model dispatch; refusing further work"
+                    .to_string(),
+            )
+        })?;
+
+    Ok(ResourceAmounts {
+        cost_micro_usd: ResourceAmounts::cost_micro_usd_from_dollars(
+            pricing.cost_dollars(usage),
+        )?,
+        tokens: u64::try_from(total_tokens).map_err(|_| {
+            MoaError::BudgetExhausted(
+                "provider token usage exceeded the resource counter after model dispatch; refusing further work"
+                    .to_string(),
+            )
+        })?,
+        ..ResourceAmounts::ZERO
+    })
+}
+
+fn affordable_output_tokens(
+    pricing: &TokenPricing,
+    estimated_input_tokens: usize,
+    remaining_cost_micro_usd: u64,
+) -> usize {
+    let input_cost = conservative_model_cost(pricing, estimated_input_tokens, 0);
+    let Some(remaining_for_output) = remaining_cost_micro_usd.checked_sub(input_cost) else {
+        return 0;
+    };
+    if pricing.output_per_mtok == 0.0 {
+        return usize::MAX;
+    }
+    if !pricing.output_per_mtok.is_finite() || pricing.output_per_mtok < 0.0 {
+        return 0;
+    }
+
+    let candidate = (remaining_for_output as f64 / pricing.output_per_mtok).floor();
+    if !candidate.is_finite() || candidate >= usize::MAX as f64 {
+        return usize::MAX;
+    }
+    let mut candidate = candidate as usize;
+    while candidate > 0
+        && conservative_model_cost(pricing, estimated_input_tokens, candidate)
+            > remaining_cost_micro_usd
+    {
+        candidate -= 1;
+    }
+    candidate
+}
+
+fn one_tool_call_budget(budget: ResourceBudget) -> ResourceBudget {
+    ResourceBudget::new(
+        budget.deadline,
+        budget.remaining.map(|mut remaining| {
+            remaining.tool_calls = remaining.tool_calls.min(1);
+            remaining
+        }),
+    )
+}
+
 /// Fire-and-forgets a negative-results incident write when a turn concludes on a
 /// terminal tool failure.
 ///
@@ -555,5 +742,55 @@ fn augment_agentic_memory_tools(ctx: &mut WorkingContext, tool_router: Option<&T
             tools = ?appended,
             "surfaced agentic memory tools onto turn"
         );
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use moa_core::types::{
+        model::TokenPricing,
+        resource::{ResourceAmounts, ResourceBudget},
+    };
+
+    use super::{affordable_output_tokens, conservative_model_cost, one_tool_call_budget};
+
+    fn pricing() -> TokenPricing {
+        TokenPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cached_input_per_mtok: Some(0.3),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_1h_per_mtok: None,
+        }
+    }
+
+    #[test]
+    fn cost_cap_accepts_exact_one_token_boundary_and_rejects_one_less() {
+        // Pins: cost is projected in micro-USD before dispatch using the most
+        // expensive configured input path. At the exact boundary one output
+        // token is allowed; one micro-dollar less permits none.
+        let pricing = pricing();
+        let exact = conservative_model_cost(&pricing, 10, 1);
+
+        assert_eq!(affordable_output_tokens(&pricing, 10, exact), 1);
+        assert_eq!(affordable_output_tokens(&pricing, 10, exact - 1), 0);
+    }
+
+    #[test]
+    fn tool_leaf_receives_one_call_while_parent_tracks_the_remainder() {
+        // Pins: the router receives only the currently admitted tool call. The
+        // caller owns decrementing the parent, so the router cannot spend the
+        // rest of the case allowance or double-charge it.
+        let parent = ResourceBudget::new(
+            None,
+            Some(ResourceAmounts {
+                tool_calls: 7,
+                ..ResourceAmounts::ZERO
+            }),
+        );
+        let leaf = one_tool_call_budget(parent);
+
+        assert_eq!(leaf.remaining.expect("bounded leaf").tool_calls, 1);
+        assert_eq!(parent.remaining.expect("bounded parent").tool_calls, 7);
     }
 }
