@@ -12,7 +12,8 @@
 //!    and the permanent-failure direction;
 //! 4. a recoverable failure preserves the accepted rows;
 //! 5. lineage for a purged tenant cannot be written back after the fence; and
-//! 6. a shutdown that runs out of drain budget leaves accepted rows for someone
+//! 6. multi-scope destruction locks are acquired in one tenant-first order; and
+//! 7. a shutdown that runs out of drain budget leaves accepted rows for someone
 //!    else rather than consuming them.
 //!
 //! They require `MOA_DATABASE_URL` to point at a reachable Postgres superuser
@@ -786,13 +787,7 @@ fn experiment_score_event(
     })
 }
 
-/// Applies the full central migration set and seeds the rows V000361's composite
-/// foreign keys require.
-///
-/// `ensure_lineage_schema` alone creates only the `analytics` bootstrap tables,
-/// so a provenance write needs the real migration set — which is what production
-/// runs, and what makes this test exercise the real constraints rather than a
-/// permissive stand-in.
+/// Seeds the rows the central schema's experiment-provenance foreign keys require.
 async fn seed_experiment_fixture(
     pool: &sqlx::PgPool,
     database_name: &str,
@@ -824,7 +819,7 @@ async fn seed_experiment_fixture(
     .execute(pool)
     .await?;
     sqlx::query(
-        // A run states its resource envelope explicitly: V000371 dropped the
+        // A run states its resource envelope explicitly: V000044 defines the
         // backfill default so no new row can be admitted without a stated ceiling.
         // This fixture only needs the sink's score provenance, so the ceiling is a
         // valid zero envelope rather than a realistic budget.
@@ -940,7 +935,13 @@ async fn a_committed_batch_is_finished_by_another_replica_after_a_lease_expires_
     .await
     .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
 
-    // Lease the row on behalf of the doomed replica, then abandon it.
+    // Stop the doomed replica before installing its abandoned lease. Updating
+    // the lease first lets the still-running worker race this fixture and
+    // reclaim the row with its one-hour test lease after we made it expired.
+    drop(sink);
+    drop(doomed);
+
+    // Lease the row on behalf of the now-dead replica, already expired.
     sqlx::query(
         "UPDATE analytics.lineage_journal \
          SET lease_owner = gen_random_uuid(), lease_expires_at = now() - interval '1 second' \
@@ -949,8 +950,6 @@ async fn a_committed_batch_is_finished_by_another_replica_after_a_lease_expires_
     .bind(&partition)
     .execute(&pool)
     .await?;
-    drop(sink);
-    drop(doomed);
 
     let still_unstored: i64 =
         sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
@@ -1205,6 +1204,23 @@ async fn a_purged_tenant_cannot_have_lineage_written_back_after_the_fence_db() -
     .execute(&pool)
     .await?;
 
+    let payload_rewrite = sqlx::query(
+        "UPDATE analytics.lineage_journal \
+         SET payload = payload || '{\"spoofed\": true}'::jsonb \
+         WHERE storage_partition_id = $1",
+    )
+    .bind(&purged)
+    .execute(&pool)
+    .await
+    .expect_err("a fenced tenant's queued payload must remain immutable");
+    assert_eq!(
+        payload_rewrite
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("55000")
+    );
+
     // A second replica, which knows nothing about the purge, drains the queue.
     let (tx, rx) = mpsc::channel::<LineageEvent>(8);
     let handle = spawn_writer(
@@ -1363,8 +1379,9 @@ async fn a_subject_fence_blocks_only_that_contacts_lineage_while_tenant_fence_bl
 async fn destruction_lock_serializes_a_fence_with_an_in_flight_lineage_write_db() -> TestResult<()>
 {
     // Pins: destruction and lineage take the same tenant advisory lock. The
-    // writer may claim while destruction is in progress, but cannot pass the
-    // fence check until the fence transaction commits.
+    // writer cannot claim while destruction owns the exclusive boundary. Once
+    // the fence commits, its lease-only update may proceed so the durable row
+    // can be suppressed and dequeued.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
     let tenant_id = Uuid::now_v7();
     let partition = StoragePartitionId::for_tenant(TenantId::from(tenant_id)).to_string();
@@ -1388,7 +1405,41 @@ async fn destruction_lock_serializes_a_fence_with_an_in_flight_lineage_write_db(
     )
     .await?;
     drop(tx);
-    wait_for_journal_attempts(&pool, &partition, 1).await?;
+    let mut observed_waiter = false;
+    for _ in 0..100 {
+        observed_waiter = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND wait_event = 'advisory'
+                  AND query LIKE '%UPDATE analytics.lineage_journal%'
+            )
+            "#,
+        )
+        .fetch_one(&pool)
+        .await?;
+        if observed_waiter {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        observed_waiter,
+        "the lineage claim must wait on the tenant destruction boundary"
+    );
+    let attempts_while_fenced: i32 = sqlx::query_scalar(
+        "SELECT attempts FROM analytics.lineage_journal \
+         WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        attempts_while_fenced, 0,
+        "the claim transaction must not mutate durable lease state before it owns the shared lock"
+    );
 
     sqlx::query(
         "INSERT INTO moa.destruction_operation_fence \
@@ -1416,6 +1467,143 @@ async fn destruction_lock_serializes_a_fence_with_an_in_flight_lineage_write_db(
         (0, 0),
         "the post-lock fence must suppress and dequeue the in-flight row"
     );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn destruction_locks_batch_multiple_scopes_in_tenant_then_subject_order_db() -> TestResult<()>
+{
+    // Pins: one writer batch deduplicates and locks every tenant before it starts
+    // the sorted subject lock statement. Holding the smallest subject therefore
+    // blocks that one statement while both tenant locks are already held and the
+    // larger subject remains available.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let mut tenant_ids = [Uuid::now_v7(), Uuid::now_v7()];
+    tenant_ids.sort_unstable();
+    let mut subject_ids = [Uuid::now_v7(), Uuid::now_v7()];
+    subject_ids.sort_unstable();
+    let turn_ids = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+
+    // Deliberately enqueue in descending scope order, including one duplicate
+    // scope, so input order cannot accidentally satisfy the lock contract.
+    for (tenant_id, subject_id, turn_id) in [
+        (tenant_ids[1], subject_ids[1], turn_ids[0]),
+        (tenant_ids[0], subject_ids[0], turn_ids[1]),
+        (tenant_ids[1], subject_ids[1], turn_ids[2]),
+    ] {
+        let partition = StoragePartitionId::for_tenant(TenantId::from(tenant_id)).to_string();
+        insert_retrieval_journal_row(
+            &pool,
+            &retrieval_event_for_user(
+                turn_id,
+                &partition,
+                &format!("contact:{subject_id}"),
+                Utc::now(),
+            ),
+        )
+        .await?;
+    }
+
+    let mut subject_blocker = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(\
+         hashtextextended('moa:destruction:subject:' || $1::text, 0))",
+    )
+    .bind(subject_ids[0])
+    .execute(&mut *subject_blocker)
+    .await?;
+
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let writer = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(20)),
+        LineageStore::new(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+
+    let mut blocked_writer_pid: Option<i32> = None;
+    for _ in 0..300 {
+        blocked_writer_pid = sqlx::query_scalar(
+            r#"
+            SELECT pid
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event = 'advisory'
+              AND query LIKE '%moa:destruction:subject:%'
+              AND query LIKE '%unnest($1::uuid[])%'
+            ORDER BY pid
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&pool)
+        .await?;
+        if blocked_writer_pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let blocked_writer_pid = blocked_writer_pid.ok_or_else(|| {
+        test_error(
+            "writer never reached the set-based subject destruction-lock statement".to_string(),
+        )
+    })?;
+
+    let held_advisory_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks \
+         WHERE pid = $1 AND locktype = 'advisory' AND granted",
+    )
+    .bind(blocked_writer_pid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        held_advisory_locks, 2,
+        "the blocked writer must already hold exactly the two unique tenant locks"
+    );
+
+    let mut probe = pool.begin().await?;
+    for tenant_id in tenant_ids {
+        let available: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(\
+             hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut *probe)
+        .await?;
+        assert!(
+            !available,
+            "every tenant lock must be held before subject acquisition starts"
+        );
+    }
+    let larger_subject_available: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(\
+         hashtextextended('moa:destruction:subject:' || $1::text, 0))",
+    )
+    .bind(subject_ids[1])
+    .fetch_one(&mut *probe)
+    .await?;
+    assert!(
+        larger_subject_available,
+        "the sorted subject statement must block on the smaller UUID before taking the larger one"
+    );
+    probe.rollback().await?;
+
+    subject_blocker.rollback().await?;
+    let stats = writer.shutdown().await?;
+    assert_eq!(
+        stats.written, 3,
+        "all three rows should store after release"
+    );
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = ANY($1::uuid[])",
+    )
+    .bind(turn_ids.to_vec())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, 3, "lock serialization must not discard batch rows");
 
     pool.close().await;
     drop_database(&cleanup_pool, &database_name).await;
@@ -1565,7 +1753,7 @@ async fn an_over_age_backlog_fails_readiness_while_the_writer_stays_alive_db() -
     .execute(&pool)
     .await?;
 
-    let reason = wait_for(Duration::from_secs(10), || handle.unready_reason()).await;
+    let reason = wait_for(Duration::from_secs(3), || handle.unready_reason()).await;
     let reason = reason.ok_or_else(|| {
         test_error(format!(
             "an over-age backlog must fail readiness; health was {:?}",

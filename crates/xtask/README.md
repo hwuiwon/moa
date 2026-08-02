@@ -11,8 +11,9 @@ Default commands:
   and envelope-encryption code) across the workspace.
 - `check-architecture-boundaries` — enforce crate dependency and architecture
   rules, including the execution trace manifest audit.
-- `check-migrations` — enforce central migration files, ban non-central
-  `migrations/` directories, and check table ownership.
+- `check-migrations` — enforce the flat canonical `V000001..V00000N` central
+  sequence, ban non-central `migrations/` directories, and require exact table
+  ownership.
 
 ## Features
 

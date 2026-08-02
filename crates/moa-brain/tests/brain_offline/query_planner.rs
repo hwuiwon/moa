@@ -116,6 +116,10 @@ impl GraphStore for SeedGraph {
         unreachable!("query planner tests do not write graph edges")
     }
 
+    async fn bulk_create_edges(&self, _intents: Vec<EdgeWriteIntent>) -> Result<Vec<Uuid>, Error> {
+        unreachable!("query planner tests do not write graph edges")
+    }
+
     async fn get_node(&self, _uid: Uuid) -> Result<Option<NodeIndexRow>, Error> {
         Ok(None)
     }
@@ -186,6 +190,10 @@ impl GraphStore for TemporalSeedGraph {
     }
 
     async fn create_edge(&self, _intent: EdgeWriteIntent) -> Result<Uuid, Error> {
+        unreachable!("query planner tests do not write graph edges")
+    }
+
+    async fn bulk_create_edges(&self, _intents: Vec<EdgeWriteIntent>) -> Result<Vec<Uuid>, Error> {
         unreachable!("query planner tests do not write graph edges")
     }
 

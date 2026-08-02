@@ -527,13 +527,13 @@ pub struct SkillMetadata {
 /// This is the authoritative embedding input for a `Chunk` vector, and it is
 /// not the chunk text. The same sentence under a different document title or
 /// heading path is a different point in the embedding space, so ingestion
-/// prefixes the chunk with its context and a rebuild must reproduce the prefix
-/// byte for byte. Re-embedding from bare `knowledge_chunks.text` would produce
+/// prefixes the chunk with its context. Re-embedding from bare
+/// `knowledge_chunks.text` would produce
 /// vectors that look valid, index cleanly, and quietly answer from a different
 /// space than the queries they are compared against.
 ///
-/// Both the ingestion pipeline and the rebuild call this one function so the
-/// format cannot drift between the writer and the rebuilder.
+/// Every chunk-embedding caller uses this function so the format cannot drift
+/// between vector backends or ingestion paths.
 #[must_use]
 pub fn contextual_chunk_embedding_input(
     document_title: Option<&str>,

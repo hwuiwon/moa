@@ -1,19 +1,18 @@
 //! SQL-backed privacy subject resolution and export read models.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{TimeZone, Utc};
+use futures_util::TryStreamExt;
 use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::UserId,
-    types::memory::RlsContext,
 };
-use moa_db::ScopedConn;
 use moa_wire::privacy::{ParsedPrivacySubjectId, contact_privacy_subject_string};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
-use tokio::io::AsyncWriteExt;
+use sqlx::{PgConnection, PgPool, Row};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use uuid::Uuid;
 
 use super::approval::{ApprovalClaims, ensure_jti_inserted};
@@ -499,651 +498,772 @@ async fn load_linked_contact_ids(
     .map_err(|error| db_handler_error("load linked privacy contacts", error))
 }
 
-/// Collects privacy export data sections before README, audit, changelog, and manifest generation.
-pub async fn collect_privacy_export_data_sections(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<BTreeMap<&'static str, usize>, HandlerError> {
-    let mut counts = BTreeMap::new();
-    counts.insert("facts", collect_facts(ctx, export_dir).await?);
-    counts.insert("entities", collect_entities(ctx, export_dir).await?);
-    counts.insert(
-        "relationships",
-        collect_relationships(ctx, export_dir).await?,
-    );
-    counts.insert("embeddings", collect_embeddings(ctx, export_dir).await?);
-    counts.insert("skills", collect_skills(ctx, export_dir).await?);
-    let (learning_candidates, learning_entries, learning_decisions, erasure_decisions) = tokio::try_join!(
-        collect_learning_candidates(ctx, export_dir),
-        collect_learning_entries(ctx, export_dir),
-        collect_learning_decisions(ctx, export_dir),
-        collect_erasure_decisions(ctx, export_dir),
-    )?;
-    counts.extend([
-        ("learning_candidates", learning_candidates),
-        ("learning_entries", learning_entries),
-        ("learning_decisions", learning_decisions),
-        ("erasure_decisions", erasure_decisions),
-    ]);
-    Ok(counts)
-}
+const MAX_PRIVACY_EXPORT_SUBJECTS: usize = 1_000;
 
-/// Every learning candidate derived from the subject's data, with its sources.
+const EXPORT_SUBJECTS_CTE: &str = r#"
+WITH subjects AS MATERIALIZED (
+    SELECT subject.user_id,
+           subject.target_uid,
+           subject.provenance,
+           subject.ordinality
+    FROM unnest($3::text[], $4::uuid[], $5::text[])
+         WITH ORDINALITY AS subject(user_id, target_uid, provenance, ordinality)
+)
+"#;
+
+const EXPORT_LEARNING_CLOSURE_CTES: &str = r#"
+WITH RECURSIVE subjects AS MATERIALIZED (
+    SELECT subject.user_id,
+           subject.target_uid,
+           subject.provenance,
+           subject.ordinality
+    FROM unnest($3::text[], $4::uuid[], $5::text[])
+         WITH ORDINALITY AS subject(user_id, target_uid, provenance, ordinality)
+),
+subject_sessions AS MATERIALIZED (
+    SELECT DISTINCT subject.ordinality AS subject_ordinal, session.id
+    FROM subjects AS subject
+    JOIN sessions AS session
+      ON session.tenant_id = $1
+     AND (session.user_id = subject.user_id OR session.contact_id = subject.target_uid)
+),
+subject_experiences AS MATERIALIZED (
+    SELECT DISTINCT subject.ordinality AS subject_ordinal,
+           experience.id,
+           experience.session_id
+    FROM subjects AS subject
+    JOIN experience_records AS experience
+      ON experience.tenant_id = $1::text
+     AND experience.user_id = subject.user_id
+),
+subject_attributions AS MATERIALIZED (
+    SELECT DISTINCT experience.subject_ordinal, attribution.id
+    FROM subject_experiences AS experience
+    JOIN experience_attributions AS attribution
+      ON attribution.tenant_id = $1::text
+     AND attribution.experience_id = experience.id
+),
+subject_segments AS MATERIALIZED (
+    SELECT DISTINCT session.subject_ordinal, segment.id
+    FROM subject_sessions AS session
+    JOIN task_segments AS segment
+      ON segment.tenant_id = $1::text
+     AND segment.session_id = session.id
+),
+subject_candidate_anchors(subject_ordinal, source_kind, privacy_anchor_id) AS MATERIALIZED (
+    SELECT subject.ordinality, 'contact'::text, subject.target_uid
+    FROM subjects AS subject
+    UNION ALL
+    SELECT session.subject_ordinal, 'session'::text, session.id
+    FROM subject_sessions AS session
+    UNION ALL
+    SELECT session.subject_ordinal, 'event'::text, session.id
+    FROM subject_sessions AS session
+    UNION ALL
+    SELECT segment.subject_ordinal, 'task_segment'::text, segment.id
+    FROM subject_segments AS segment
+    UNION ALL
+    SELECT experience.subject_ordinal, 'experience'::text, experience.id
+    FROM subject_experiences AS experience
+    UNION ALL
+    SELECT attribution.subject_ordinal, 'attribution'::text, attribution.id
+    FROM subject_attributions AS attribution
+),
+derived(subject_ordinal, kind, id) AS (
+    SELECT DISTINCT anchor.subject_ordinal, 'candidate'::text, source.candidate_id
+    FROM subject_candidate_anchors AS anchor
+    JOIN learning_candidate_source AS source
+      ON source.tenant_id = $1::text
+     AND source.source_kind = anchor.source_kind
+     AND source.privacy_anchor_id = anchor.privacy_anchor_id
+    UNION
+    SELECT parent.subject_ordinal, next.kind, next.id
+    FROM derived AS parent
+    CROSS JOIN LATERAL (
+        SELECT 'candidate'::text AS kind, source.candidate_id AS id
+        FROM learning_candidate_source AS source
+        WHERE source.tenant_id = $1::text
+          AND source.source_kind = CASE parent.kind
+              WHEN 'candidate' THEN 'promotion_candidate'
+              WHEN 'revision' THEN 'artifact_revision'
+          END
+          AND source.privacy_anchor_id = parent.id
+        UNION
+        SELECT 'revision'::text, contribution.revision_uid
+        FROM moa.artifact_revision_contribution AS contribution
+        WHERE parent.kind = 'candidate'
+          AND contribution.tenant_id = $1::text
+          AND contribution.candidate_id = parent.id
+    ) AS next
+),
+subject_learning_anchors(subject_ordinal, source_kind, privacy_anchor_id) AS MATERIALIZED (
+    SELECT derived.subject_ordinal, 'candidate'::text, derived.id
+    FROM derived
+    WHERE derived.kind = 'candidate'
+    UNION ALL
+    SELECT derived.subject_ordinal, 'artifact_revision'::text, derived.id
+    FROM derived
+    WHERE derived.kind = 'revision'
+    UNION ALL
+    SELECT session.subject_ordinal, 'session'::text, session.id
+    FROM subject_sessions AS session
+    UNION ALL
+    SELECT experience.subject_ordinal, 'experience'::text, experience.id
+    FROM subject_experiences AS experience
+    UNION ALL
+    SELECT segment.subject_ordinal, 'task_segment'::text, segment.id
+    FROM subject_segments AS segment
+),
+subject_learning AS MATERIALIZED (
+    SELECT DISTINCT anchor.subject_ordinal, source.learning_id
+    FROM subject_learning_anchors AS anchor
+    JOIN learning_log_source AS source
+      ON source.tenant_id = $1::text
+     AND source.source_kind = anchor.source_kind
+     AND source.privacy_anchor_id = anchor.privacy_anchor_id
+)
+"#;
+
+/// Starts the one read-only, repeatable-read snapshot used by a privacy export.
 ///
-/// Reached through the normalized provenance rows by typed join. The older
-/// sections in this file still search with `LIKE '%subject%'` over JSON and text,
-/// which both over-matches (any row that happens to contain the id as a
-/// substring) and under-matches (any row that references the subject indirectly).
-/// A derivation chain cannot be built on that, which is why these levels join
-/// instead.
-async fn collect_learning_candidates(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'id', candidate.id,
-                    'tenant_id', candidate.tenant_id,
-                    'candidate_type', candidate.candidate_type,
-                    'proposal_kind', candidate.proposal_kind,
-                    'status', candidate.status,
-                    'target_id', candidate.target_id,
-                    'target_label', candidate.target_label,
-                    'payload', candidate.payload,
-                    'evaluation_payload', candidate.evaluation_payload,
-                    'confidence', candidate.confidence,
-                    'risk_class', candidate.risk_class,
-                    'status_reason', candidate.status_reason,
-                    'created_at', candidate.created_at,
-                    'updated_at', candidate.updated_at,
-                    'privacy_subject_user_id', $3,
-                    'privacy_subject_provenance', $4,
-                    'sources', COALESCE((
-                        SELECT jsonb_agg(jsonb_build_object(
-                            'source_kind', source.source_kind,
-                            'experience_id', source.experience_id,
-                            'attribution_id', source.attribution_id,
-                            'session_id', source.session_id,
-                            'event_id', source.event_id,
-                            'segment_id', source.segment_id,
-                            'contact_id', source.contact_id,
-                            'promotion_candidate_id', source.promotion_candidate_id,
-                            'artifact_revision_uid', source.artifact_revision_uid,
-                            'experiment_run_uid', source.experiment_run_uid,
-                            'experiment_trial_uid', source.experiment_trial_uid,
-                            'score_run_id', source.score_run_id
-                        ) ORDER BY source.source_kind, source.id)
-                        FROM learning_candidate_source AS source
-                        WHERE source.candidate_id = candidate.id
-                    ), '[]'::jsonb)
-                )
-                FROM learning_candidates AS candidate
-                WHERE candidate.storage_partition_id = $1
-                  AND EXISTS (
-                      SELECT 1
-                      FROM learning_candidate_source AS reached
-                      WHERE reached.candidate_id = candidate.id
-                        AND (
-                            reached.contact_id = $2
-                            OR reached.session_id IN (
-                                SELECT id FROM sessions
-                                WHERE storage_partition_id = $1 AND user_id = $3
-                            )
-                            OR reached.experience_id IN (
-                                SELECT id FROM experience_records
-                                WHERE storage_partition_id = $1 AND user_id = $3
-                            )
-                        )
-                  )
-                ORDER BY candidate.created_at, candidate.id
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(subject.target_uid)
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("learning_candidates.jsonl"), &rows).await
-}
-
-/// Learning-log entries derived from the subject, with their typed sources.
-async fn collect_learning_entries(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'id', entry.id,
-                    'tenant_id', entry.tenant_id,
-                    'learning_type', entry.learning_type,
-                    'target_id', entry.target_id,
-                    'target_label', entry.target_label,
-                    'payload', entry.payload,
-                    'confidence', entry.confidence,
-                    'actor', entry.actor,
-                    'valid_from', entry.valid_from,
-                    'valid_to', entry.valid_to,
-                    'version', entry.version,
-                    'privacy_subject_user_id', $3,
-                    'privacy_subject_provenance', $4,
-                    'sources', COALESCE((
-                        SELECT jsonb_agg(jsonb_build_object(
-                            'source_kind', source.source_kind,
-                            'candidate_id', source.candidate_id,
-                            'experience_id', source.experience_id,
-                            'session_id', source.session_id,
-                            'segment_id', source.segment_id,
-                            'artifact_revision_uid', source.artifact_revision_uid
-                        ) ORDER BY source.source_kind, source.id)
-                        FROM learning_log_source AS source
-                        WHERE source.learning_id = entry.id
-                    ), '[]'::jsonb)
-                )
-                FROM learning_log AS entry
-                WHERE entry.storage_partition_id = $1
-                  AND EXISTS (
-                      SELECT 1
-                      FROM learning_log_source AS reached
-                      WHERE reached.learning_id = entry.id
-                        AND (
-                            reached.session_id IN (
-                                SELECT id FROM sessions
-                                WHERE storage_partition_id = $1 AND user_id = $3
-                            )
-                            OR reached.experience_id IN (
-                                SELECT id FROM experience_records
-                                WHERE storage_partition_id = $1 AND user_id = $3
-                            )
-                            OR reached.candidate_id IN (
-                                SELECT candidate_source.candidate_id
-                                FROM learning_candidate_source AS candidate_source
-                                WHERE candidate_source.contact_id = $2
-                            )
-                        )
-                  )
-                ORDER BY entry.valid_from, entry.id
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(subject.target_uid)
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("learning_entries.jsonl"), &rows).await
-}
-
-/// Historical review dispositions for candidates derived from the subject.
-///
-/// The candidate's current `status` says where it is now; this says what was
-/// decided about it and by whom, which a mutable column cannot answer after the
-/// fact and which a subject-access request is entitled to.
-async fn collect_learning_decisions(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'id', decision.id,
-                    'candidate_id', decision.candidate_id,
-                    'decision', decision.decision,
-                    'from_status', decision.from_status,
-                    'to_status', decision.to_status,
-                    'reviewer_subject', decision.reviewer_subject,
-                    'reason', decision.reason,
-                    'request_digest', encode(decision.request_digest, 'hex'),
-                    'outcome', decision.outcome,
-                    'decided_at', decision.decided_at,
-                    'privacy_subject_user_id', $3,
-                    'privacy_subject_provenance', $4
-                )
-                FROM learning_candidate_decision AS decision
-                WHERE decision.storage_partition_id = $1
-                  AND EXISTS (
-                      SELECT 1
-                      FROM learning_candidate_source AS reached
-                      WHERE reached.candidate_id = decision.candidate_id
-                        AND (
-                            reached.contact_id = $2
-                            OR reached.session_id IN (
-                                SELECT id FROM sessions
-                                WHERE storage_partition_id = $1 AND user_id = $3
-                            )
-                            OR reached.experience_id IN (
-                                SELECT id FROM experience_records
-                                WHERE storage_partition_id = $1 AND user_id = $3
-                            )
-                        )
-                  )
-                ORDER BY decision.decided_at, decision.id
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(subject.target_uid)
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("learning_decisions.jsonl"), &rows).await
-}
-
-/// Prior erasure dispositions recorded for this subject.
-///
-/// Included so a subject who was told "a legal hold blocked your erasure" or
-/// "this was a dry run" can see exactly which records that covered, rather than
-/// having to trust a summary count.
-async fn collect_erasure_decisions(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = ScopedConn::begin_as_app(&ctx.pool, &RlsContext::tenant(ctx.tenant_id), true)
-        .await
-        .map_err(handler_error)?;
-    let subject_user_ids = ctx
-        .subjects
-        .iter()
-        .map(|subject| subject.user_id.clone())
-        .collect::<Vec<_>>();
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'subject_user_id', subject_user_id,
-            'attempt_id', attempt_id,
-            'record_kind', record_kind,
-            'record_id', record_id,
-            'disposition', disposition,
-            'applied', applied,
-            'reason', reason,
-            'decided_at', decided_at
-        )
-        FROM moa.privacy_erasure_record_decision
-        WHERE tenant_id = $1
-          AND subject_user_id = ANY($2)
-        ORDER BY decided_at, decision_uid
-        "#,
-    )
-    .bind(ctx.tenant_id.0)
-    .bind(&subject_user_ids)
-    .fetch_all(tx.as_mut())
-    .await
-    .map_err(handler_error)?;
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("erasure_decisions.jsonl"), &rows).await
-}
-
-async fn collect_facts(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    collect_nodes(
-        ctx,
-        export_dir.join("facts.jsonl"),
-        &["Fact", "Lesson", "Decision", "Incident"],
-    )
-    .await
-}
-
-async fn collect_entities(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    collect_nodes(
-        ctx,
-        export_dir.join("entities.jsonl"),
-        &["Entity", "Concept", "Source"],
-    )
-    .await
-}
-
-async fn collect_nodes(
-    ctx: &PrivacyExportContext,
-    path: PathBuf,
-    labels: &[&str],
-) -> Result<usize, HandlerError> {
-    let label_filter = labels
-        .iter()
-        .map(|label| (*label).to_string())
-        .collect::<Vec<_>>();
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'uid', uid,
-                    'label', label,
-                    'storage_partition_id', storage_partition_id,
-                    'user_id', user_id,
-                    'scope', scope,
-                    'name', name,
-                    'properties_summary', properties_summary,
-                    'pii_class', pii_class,
-                    'confidence', confidence,
-                    'valid_from', valid_from,
-                    'valid_to', valid_to,
-                    'created_at', created_at,
-                    'last_accessed_at', last_accessed_at,
-                    'privacy_subject_user_id', $2,
-                    'privacy_subject_provenance', $4
-                )
-                FROM moa.node_index
-                WHERE valid_to IS NULL
-                  AND label = ANY($3)
-                  AND ($1::text IS NULL OR storage_partition_id = $1)
-                  AND (
-                      user_id = $2
-                      OR properties_summary->>'user_id' = $2
-                      OR properties_summary::text LIKE ('%' || $2 || '%')
-                  )
-                ORDER BY storage_partition_id NULLS FIRST, label, name, uid
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(&subject.user_id)
-            .bind(label_filter.clone())
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(path, &rows).await
-}
-
-async fn collect_relationships(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'change_id', change_id,
-                    'storage_partition_id', storage_partition_id,
-                    'user_id', user_id,
-                    'scope', scope,
-                    'actor_id', actor_id,
-                    'actor_kind', actor_kind,
-                    'op', op,
-                    'target_kind', target_kind,
-                    'target_label', target_label,
-                    'target_uid', target_uid,
-                    'payload', payload,
-                    'pii_class', pii_class,
-                    'audit_metadata', audit_metadata,
-                    'cause_change_id', cause_change_id,
-                    'created_at', created_at,
-                    'privacy_subject_user_id', $2,
-                    'privacy_subject_provenance', $3
-                )
-                FROM moa.graph_changelog
-                WHERE target_kind = 'edge'
-                  AND ($1::text IS NULL OR storage_partition_id = $1)
-                  AND (
-                      user_id = $2
-                      OR actor_id = $2
-                      OR payload::text LIKE ('%' || $2 || '%')
-                      OR audit_metadata->>'subject_user_id' = $2
-                  )
-                ORDER BY created_at, change_id
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("relationships.jsonl"), &rows).await
-}
-
-async fn collect_embeddings(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'uid', e.uid,
-                    'storage_partition_id', e.storage_partition_id,
-                    'user_id', e.user_id,
-                    'scope', e.scope,
-                    'label', e.label,
-                    'pii_class', e.pii_class,
-                    'embedding_model', e.embedding_model,
-                    'embedding_model_version', e.embedding_model_version,
-                    'embedding', (e.embedding::text)::jsonb,
-                    'valid_to', e.valid_to,
-                    'created_at', e.created_at,
-                    'privacy_subject_user_id', $2,
-                    'privacy_subject_provenance', $3
-                )
-                FROM moa.embeddings e
-                JOIN moa.node_index n ON n.uid = e.uid
-                WHERE e.valid_to IS NULL
-                  AND n.valid_to IS NULL
-                  AND ($1::text IS NULL OR e.storage_partition_id = $1)
-                  AND (
-                      e.user_id = $2
-                      OR n.user_id = $2
-                      OR n.properties_summary->>'user_id' = $2
-                      OR n.properties_summary::text LIKE ('%' || $2 || '%')
-                  )
-                ORDER BY e.storage_partition_id NULLS FIRST, e.label, e.uid
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("embeddings.jsonl"), &rows).await
-}
-
-async fn collect_skills(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'artifact_uid', a.artifact_uid,
-                    'revision_uid', r.revision_uid,
-                    'storage_partition_id', a.storage_partition_id,
-                    'user_id', a.user_id,
-                    'scope', a.scope,
-                    'name', a.name,
-                    'description', a.description,
-                    'tags', a.tags,
-                    'definition', r.definition,
-                    'canonical_hash_hex', encode(r.canonical_hash, 'hex'),
-                    'source_format', r.source_format,
-                    'source_text_base64', encode(r.source_text, 'base64'),
-                    'status', r.status,
-                    'version', r.version,
-                    'published_at', r.published_at,
-                    'valid_to', r.valid_to,
-                    'created_at', r.created_at,
-                    'updated_at', r.updated_at,
-                    'privacy_subject_user_id', $2,
-                    'privacy_subject_provenance', $3,
-                    'files', COALESCE((
-                        SELECT jsonb_agg(jsonb_build_object(
-                            'path', f.path,
-                            'content_base64', encode(f.content, 'base64'),
-                            'content_sha256_hex', encode(f.content_sha256, 'hex'),
-                            'content_type', f.content_type,
-                            'executable', f.executable,
-                            'file_size_bytes', f.file_size_bytes
-                        ) ORDER BY f.path)
-                        FROM moa.artifact_file f
-                        WHERE f.revision_uid = r.revision_uid
-                    ), '[]'::jsonb)
-                )
-                FROM moa.artifact a
-                JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
-                WHERE a.kind = 'skill'
-                  -- A privacy export covers every retained revision that could
-                  -- contain the subject's data, including archived or invalidated
-                  -- history. Lifecycle status controls serving, not whether bytes
-                  -- still held by MOA are attributable to the subject.
-                  AND ($1::text IS NULL OR a.storage_partition_id = $1)
-                  AND (
-                      a.user_id = $2
-                      OR a.description LIKE ('%' || $2 || '%')
-                      OR r.definition::text LIKE ('%' || $2 || '%')
-                      OR encode(r.source_text, 'escape') LIKE ('%' || $2 || '%')
-                      OR EXISTS (
-                          SELECT 1
-                          FROM moa.artifact_file f
-                          WHERE f.revision_uid = r.revision_uid
-                            AND encode(f.content, 'escape') LIKE ('%' || $2 || '%')
-                      )
-                  )
-                ORDER BY a.storage_partition_id NULLS FIRST, a.scope, a.name, r.version
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("skills.jsonl"), &rows).await
-}
-
-pub(super) async fn collect_changelog(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'change_id', change_id,
-                    'storage_partition_id', storage_partition_id,
-                    'user_id', user_id,
-                    'scope', scope,
-                    'actor_id', actor_id,
-                    'actor_kind', actor_kind,
-                    'op', op,
-                    'target_kind', target_kind,
-                    'target_label', target_label,
-                    'target_uid', target_uid,
-                    'payload', payload,
-                    'redaction_marker', redaction_marker,
-                    'pii_class', pii_class,
-                    'audit_metadata', audit_metadata,
-                    'cause_change_id', cause_change_id,
-                    'created_at', created_at,
-                    'privacy_subject_user_id', $2,
-                    'privacy_subject_provenance', $3
-                )
-                FROM moa.graph_changelog
-                WHERE ($1::text IS NULL OR storage_partition_id = $1)
-                  AND (
-                      user_id = $2
-                      OR actor_id = $2
-                      OR target_uid::text = $2
-                      OR payload::text LIKE ('%' || $2 || '%')
-                      OR audit_metadata->>'subject_user_id' = $2
-                  )
-                ORDER BY created_at, change_id
-                "#,
-            )
-            .bind(ctx.storage_partition.as_deref())
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("changelog.jsonl"), &rows).await
-}
-
-async fn begin_audited_read(
+/// The isolation statement is deliberately the first statement after `BEGIN`.
+pub async fn begin_privacy_export_snapshot(
     pool: &PgPool,
 ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, HandlerError> {
     let mut tx = pool.begin().await.map_err(handler_error)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(tx.as_mut())
+        .await
+        .map_err(handler_error)?;
+    sqlx::query("SET LOCAL statement_timeout = '30s'")
+        .execute(tx.as_mut())
+        .await
+        .map_err(handler_error)?;
+    sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '30s'")
+        .execute(tx.as_mut())
+        .await
+        .map_err(handler_error)?;
     sqlx::query("SET LOCAL ROLE moa_auditor")
-        .execute(&mut *tx)
+        .execute(tx.as_mut())
         .await
         .map_err(handler_error)?;
     Ok(tx)
 }
 
-async fn write_jsonl(path: PathBuf, rows: &[Value]) -> Result<usize, HandlerError> {
-    let mut file = tokio::fs::File::create(&path)
-        .await
-        .map_err(handler_error)?;
-    for row in rows {
-        file.write_all(
-            serde_json::to_string(row)
-                .map_err(handler_error)?
-                .as_bytes(),
+/// Resolves the primary subject and verified linked contacts inside the export snapshot.
+pub(super) async fn resolve_privacy_export_subjects(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    storage_partition_id: Option<&StoragePartitionId>,
+    requested_subject_user_id: &UserId,
+) -> Result<ResolvedPrivacySubjects, HandlerError> {
+    let parsed = parse_privacy_subject_id(requested_subject_user_id)?;
+    let mut rows = sqlx::query_as::<_, (Uuid, String, bool)>(
+        r#"
+        WITH requested AS MATERIALIZED (
+            SELECT id, storage_partition_id, state
+            FROM contacts
+            WHERE id = $1
+              AND tenant_id = $2
+              AND ($3::text IS NULL OR storage_partition_id = $3)
+        ),
+        resolved AS (
+            SELECT requested.id,
+                   requested.storage_partition_id,
+                   TRUE AS is_primary,
+                   0::bigint AS ordinal
+            FROM requested
+            UNION ALL
+            SELECT linked.id,
+                   linked.storage_partition_id,
+                   FALSE,
+                   row_number() OVER (
+                       ORDER BY linked.merged_at NULLS LAST, linked.updated_at DESC, linked.id
+                   )
+            FROM requested
+            JOIN contacts AS linked
+              ON requested.state = 'verified'
+             AND linked.canonical_contact_id = requested.id
+             AND linked.tenant_id = $2
+             AND linked.storage_partition_id = requested.storage_partition_id
         )
+        SELECT id, storage_partition_id, is_primary
+        FROM resolved
+        ORDER BY ordinal, id
+        LIMIT 1001
+        "#,
+    )
+    .bind(parsed.uuid)
+    .bind(tenant_id)
+    .bind(storage_partition_id.map(StoragePartitionId::as_str))
+    .fetch(&mut *conn);
+    let mut resolved_rows = Vec::with_capacity(MAX_PRIVACY_EXPORT_SUBJECTS.saturating_add(1));
+    while let Some(row) = rows
+        .try_next()
         .await
-        .map_err(handler_error)?;
-        file.write_all(b"\n").await.map_err(handler_error)?;
+        .map_err(|error| db_handler_error("resolve privacy export subjects", error))?
+    {
+        resolved_rows.push(row);
     }
-    file.flush().await.map_err(handler_error)?;
-    Ok(rows.len())
+    drop(rows);
+
+    if resolved_rows.len() > MAX_PRIVACY_EXPORT_SUBJECTS {
+        return Err(TerminalError::new_with_code(
+            400,
+            "privacy export subject expansion exceeds the 1000-subject limit",
+        )
+        .into());
+    }
+    let Some((_, effective_storage_partition, _)) = resolved_rows.first() else {
+        if parsed.is_contact() {
+            return Err(TerminalError::new_with_code(404, "contact not found").into());
+        }
+        return Ok(ResolvedPrivacySubjects {
+            kind: PrivacySubjectKind::User,
+            effective_storage_partition: storage_partition_id.map(ToString::to_string),
+            subjects: vec![PrivacySubject::primary(
+                requested_subject_user_id.to_string(),
+                parsed.uuid,
+            )],
+        });
+    };
+
+    let subjects = resolved_rows
+        .iter()
+        .map(|(id, _, is_primary)| {
+            if *is_primary {
+                PrivacySubject::primary(contact_privacy_subject_string(ContactId(*id)), *id)
+            } else {
+                PrivacySubject::linked_contact(*id)
+            }
+        })
+        .collect();
+    Ok(ResolvedPrivacySubjects {
+        kind: PrivacySubjectKind::Contact,
+        effective_storage_partition: Some(effective_storage_partition.clone()),
+        subjects,
+    })
+}
+
+#[derive(Debug)]
+struct ExportSubjectRelation {
+    user_ids: Vec<String>,
+    target_uids: Vec<Uuid>,
+    provenances: Vec<String>,
+}
+
+impl ExportSubjectRelation {
+    fn from_subjects(subjects: &[PrivacySubject]) -> Self {
+        Self {
+            user_ids: subjects
+                .iter()
+                .map(|subject| subject.user_id.clone())
+                .collect(),
+            target_uids: subjects.iter().map(|subject| subject.target_uid).collect(),
+            provenances: subjects
+                .iter()
+                .map(|subject| subject.provenance.as_str().to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Streams every typed privacy export section inside the caller's snapshot.
+pub async fn collect_privacy_export_data_sections(
+    ctx: &PrivacyExportContext,
+    conn: &mut PgConnection,
+    export_dir: &Path,
+) -> Result<BTreeMap<&'static str, usize>, HandlerError> {
+    let subjects = ExportSubjectRelation::from_subjects(&ctx.subjects);
+    let mut counts = BTreeMap::new();
+
+    for (name, labels) in [
+        ("facts", "'Fact', 'Lesson', 'Decision', 'Incident'"),
+        ("entities", "'Entity', 'Concept', 'Source'"),
+    ] {
+        let query = format!(
+            "{EXPORT_SUBJECTS_CTE}
+             SELECT to_jsonb(node) || jsonb_build_object(
+                 'privacy_subject_user_id', subject.user_id,
+                 'privacy_subject_provenance', subject.provenance
+             )
+             FROM moa.node_index AS node
+             JOIN subjects AS subject ON subject.target_uid = node.data_subject_id
+             WHERE node.tenant_id = $1
+               AND node.valid_to IS NULL
+               AND node.label IN ({labels})
+             ORDER BY subject.ordinality, node.label, node.name, node.uid"
+        );
+        counts.insert(
+            name,
+            stream_subject_query(
+                ctx,
+                conn,
+                &subjects,
+                &export_dir.join(format!("{name}.jsonl")),
+                &query,
+            )
+            .await?,
+        );
+    }
+
+    let relationships = format!(
+        "{EXPORT_SUBJECTS_CTE},
+         matched AS (
+             SELECT DISTINCT ON (edge.uid)
+                    edge.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    subject.ordinality AS privacy_subject_ordinal
+             FROM moa.edge_index AS edge
+             JOIN subjects AS subject
+               ON edge.user_id = subject.user_id
+               OR edge.contact_id = subject.target_uid
+               OR EXISTS (
+                   SELECT 1
+                   FROM moa.node_index AS endpoint
+                   WHERE endpoint.uid IN (edge.start_uid, edge.end_uid)
+                     AND endpoint.tenant_id = $1
+                     AND endpoint.data_subject_id = subject.target_uid
+               )
+             WHERE edge.tenant_id = $1
+             ORDER BY edge.uid, subject.ordinality
+         )
+         SELECT to_jsonb(matched) - 'privacy_subject_ordinal'
+         FROM matched
+         ORDER BY privacy_subject_ordinal, created_at, uid"
+    );
+    counts.insert(
+        "relationships",
+        stream_subject_query(
+            ctx,
+            conn,
+            &subjects,
+            &export_dir.join("relationships.jsonl"),
+            &relationships,
+        )
+        .await?,
+    );
+
+    let embeddings = format!(
+        "{EXPORT_SUBJECTS_CTE},
+         matched AS (
+             SELECT DISTINCT ON (embedding.storage_partition_id, embedding.uid)
+                    embedding.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    subject.ordinality AS privacy_subject_ordinal
+             FROM moa.embeddings AS embedding
+             JOIN moa.node_index AS node
+               ON node.uid = embedding.uid AND node.tenant_id = embedding.tenant_id
+             JOIN subjects AS subject
+               ON embedding.user_id = subject.user_id
+               OR embedding.contact_id = subject.target_uid
+               OR node.data_subject_id = subject.target_uid
+             WHERE embedding.tenant_id = $1
+               AND embedding.valid_to IS NULL
+               AND node.valid_to IS NULL
+             ORDER BY embedding.storage_partition_id, embedding.uid, subject.ordinality
+         )
+         SELECT (to_jsonb(matched) - 'embedding' - 'privacy_subject_ordinal')
+                || jsonb_build_object('embedding', (matched.embedding::text)::jsonb)
+         FROM matched
+         ORDER BY privacy_subject_ordinal, label, uid"
+    );
+    counts.insert(
+        "embeddings",
+        stream_subject_query(
+            ctx,
+            conn,
+            &subjects,
+            &export_dir.join("embeddings.jsonl"),
+            &embeddings,
+        )
+        .await?,
+    );
+
+    stream_learning_sections(ctx, conn, &subjects, export_dir, &mut counts).await?;
+    stream_erasure_decisions(ctx, conn, &subjects, export_dir, &mut counts).await?;
+    stream_changelog(ctx, conn, &subjects, export_dir, &mut counts).await?;
+    Ok(counts)
+}
+
+async fn stream_learning_sections(
+    ctx: &PrivacyExportContext,
+    conn: &mut PgConnection,
+    subjects: &ExportSubjectRelation,
+    export_dir: &Path,
+    counts: &mut BTreeMap<&'static str, usize>,
+) -> Result<(), HandlerError> {
+    let candidates = format!(
+        "{EXPORT_LEARNING_CLOSURE_CTES},
+         matched AS (
+             SELECT DISTINCT ON (candidate.id)
+                    candidate.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    derived.subject_ordinal
+             FROM derived
+             JOIN learning_candidates AS candidate
+               ON derived.kind = 'candidate'
+              AND candidate.id = derived.id
+              AND candidate.tenant_id = $1::text
+             JOIN subjects AS subject ON subject.ordinality = derived.subject_ordinal
+             ORDER BY candidate.id, derived.subject_ordinal
+         )
+         SELECT (to_jsonb(matched) - 'subject_ordinal')
+                || jsonb_build_object(
+                    'sources', COALESCE((
+                        SELECT jsonb_agg(to_jsonb(source) ORDER BY source.source_kind, source.id)
+                        FROM learning_candidate_source AS source
+                        WHERE source.candidate_id = matched.id
+                    ), '[]'::jsonb)
+                )
+         FROM matched
+         ORDER BY subject_ordinal, created_at, id"
+    );
+    counts.insert(
+        "learning_candidates",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("learning_candidates.jsonl"),
+            &candidates,
+        )
+        .await?,
+    );
+
+    let entries = format!(
+        "{EXPORT_LEARNING_CLOSURE_CTES},
+         matched AS (
+             SELECT DISTINCT ON (entry.id)
+                    entry.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    reached.subject_ordinal
+             FROM subject_learning AS reached
+             JOIN learning_log AS entry
+               ON entry.id = reached.learning_id AND entry.tenant_id = $1::text
+             JOIN subjects AS subject ON subject.ordinality = reached.subject_ordinal
+             ORDER BY entry.id, reached.subject_ordinal
+         )
+         SELECT (to_jsonb(matched) - 'subject_ordinal')
+                || jsonb_build_object(
+                    'sources', COALESCE((
+                        SELECT jsonb_agg(to_jsonb(source) ORDER BY source.source_kind, source.id)
+                        FROM learning_log_source AS source
+                        WHERE source.learning_id = matched.id
+                    ), '[]'::jsonb)
+                )
+         FROM matched
+         ORDER BY subject_ordinal, valid_from, id"
+    );
+    counts.insert(
+        "learning_entries",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("learning_entries.jsonl"),
+            &entries,
+        )
+        .await?,
+    );
+
+    let decisions = format!(
+        "{EXPORT_LEARNING_CLOSURE_CTES},
+         matched AS (
+             SELECT DISTINCT ON (decision.id)
+                    decision.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    derived.subject_ordinal
+             FROM derived
+             JOIN learning_candidate_decision AS decision
+               ON derived.kind = 'candidate'
+              AND decision.candidate_id = derived.id
+              AND decision.tenant_id = $1::text
+             JOIN subjects AS subject ON subject.ordinality = derived.subject_ordinal
+             ORDER BY decision.id, derived.subject_ordinal
+         )
+         SELECT to_jsonb(matched) - 'subject_ordinal'
+         FROM matched
+         ORDER BY subject_ordinal, decided_at, id"
+    );
+    counts.insert(
+        "learning_decisions",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("learning_decisions.jsonl"),
+            &decisions,
+        )
+        .await?,
+    );
+
+    let revision_contributions = format!(
+        "{EXPORT_LEARNING_CLOSURE_CTES},
+         matched AS (
+             SELECT DISTINCT ON (contribution.contribution_uid)
+                    contribution.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    derived.subject_ordinal
+             FROM derived
+             JOIN moa.artifact_revision_contribution AS contribution
+               ON contribution.tenant_id = $1::text
+              AND (
+                  (derived.kind = 'candidate' AND contribution.candidate_id = derived.id)
+                  OR (derived.kind = 'revision' AND contribution.revision_uid = derived.id)
+              )
+             JOIN subjects AS subject ON subject.ordinality = derived.subject_ordinal
+             ORDER BY contribution.contribution_uid, derived.subject_ordinal
+         )
+         SELECT to_jsonb(matched) - 'subject_ordinal'
+         FROM matched
+         ORDER BY subject_ordinal, created_at, contribution_uid"
+    );
+    counts.insert(
+        "artifact_revision_contributions",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("artifact_revision_contributions.jsonl"),
+            &revision_contributions,
+        )
+        .await?,
+    );
+
+    let suite_contributions = format!(
+        "{EXPORT_LEARNING_CLOSURE_CTES},
+         matched AS (
+             SELECT DISTINCT ON (suite.contribution_uid)
+                    suite.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    subject.ordinality AS subject_ordinal
+             FROM moa.artifact_suite_contribution AS suite
+             JOIN subjects AS subject
+               ON EXISTS (
+                   SELECT 1 FROM derived
+                   WHERE derived.subject_ordinal = subject.ordinality
+                     AND derived.kind = 'candidate'
+                     AND derived.id = suite.candidate_id
+               )
+               OR EXISTS (
+                   SELECT 1 FROM subject_sessions
+                   WHERE subject_ordinal = subject.ordinality
+                     AND id = suite.source_session_id
+               )
+               OR EXISTS (
+                   SELECT 1 FROM subject_experiences
+                   WHERE subject_ordinal = subject.ordinality
+                     AND id = suite.source_experience_id
+               )
+             WHERE suite.tenant_id = $1::text
+             ORDER BY suite.contribution_uid, subject.ordinality
+         )
+         SELECT to_jsonb(matched) - 'subject_ordinal'
+         FROM matched
+         ORDER BY subject_ordinal, created_at, contribution_uid"
+    );
+    counts.insert(
+        "artifact_suite_contributions",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("artifact_suite_contributions.jsonl"),
+            &suite_contributions,
+        )
+        .await?,
+    );
+
+    let skills = format!(
+        "{EXPORT_LEARNING_CLOSURE_CTES},
+         matched AS (
+             SELECT DISTINCT ON (revision.revision_uid)
+                    artifact.artifact_uid,
+                    revision.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    subject.ordinality AS subject_ordinal
+             FROM moa.artifact AS artifact
+             JOIN moa.artifact_revision AS revision
+               ON revision.artifact_uid = artifact.artifact_uid
+             JOIN subjects AS subject
+               ON artifact.user_id = subject.user_id
+               OR EXISTS (
+                   SELECT 1 FROM derived
+                   WHERE derived.subject_ordinal = subject.ordinality
+                     AND derived.kind = 'revision'
+                     AND derived.id = revision.revision_uid
+               )
+             WHERE artifact.kind = 'skill'
+               AND artifact.storage_partition_id = $2
+             ORDER BY revision.revision_uid, subject.ordinality
+         )
+         SELECT (to_jsonb(matched) - 'subject_ordinal')
+                || jsonb_build_object(
+                    'files', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'path', file.path,
+                                'content_base64', encode(file.content, 'base64'),
+                                'content_sha256_hex', encode(file.content_sha256, 'hex'),
+                                'content_type', file.content_type,
+                                'executable', file.executable,
+                                'file_size_bytes', file.file_size_bytes
+                            ) ORDER BY file.path
+                        )
+                        FROM moa.artifact_file AS file
+                        WHERE file.revision_uid = matched.revision_uid
+                    ), '[]'::jsonb)
+                )
+         FROM matched
+         ORDER BY subject_ordinal, created_at, revision_uid"
+    );
+    counts.insert(
+        "skills",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("skills.jsonl"),
+            &skills,
+        )
+        .await?,
+    );
+    Ok(())
+}
+
+async fn stream_erasure_decisions(
+    ctx: &PrivacyExportContext,
+    conn: &mut PgConnection,
+    subjects: &ExportSubjectRelation,
+    export_dir: &Path,
+    counts: &mut BTreeMap<&'static str, usize>,
+) -> Result<(), HandlerError> {
+    let query = format!(
+        "{EXPORT_SUBJECTS_CTE}
+         SELECT to_jsonb(decision)
+                || jsonb_build_object('privacy_subject_provenance', subject.provenance)
+         FROM moa.privacy_erasure_record_decision AS decision
+         JOIN subjects AS subject ON subject.user_id = decision.subject_user_id
+         WHERE decision.tenant_id = $1
+         ORDER BY subject.ordinality, decision.decided_at, decision.decision_uid"
+    );
+    counts.insert(
+        "erasure_decisions",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("erasure_decisions.jsonl"),
+            &query,
+        )
+        .await?,
+    );
+    Ok(())
+}
+
+async fn stream_changelog(
+    ctx: &PrivacyExportContext,
+    conn: &mut PgConnection,
+    subjects: &ExportSubjectRelation,
+    export_dir: &Path,
+    counts: &mut BTreeMap<&'static str, usize>,
+) -> Result<(), HandlerError> {
+    let query = format!(
+        "{EXPORT_SUBJECTS_CTE},
+         matched AS (
+             SELECT DISTINCT ON (changelog.change_id, changelog.created_at)
+                    changelog.*,
+                    subject.user_id AS privacy_subject_user_id,
+                    subject.provenance AS privacy_subject_provenance,
+                    subject.ordinality AS subject_ordinal
+             FROM moa.graph_changelog AS changelog
+             JOIN subjects AS subject
+               ON changelog.user_id = subject.user_id
+               OR changelog.actor_id = subject.user_id
+               OR changelog.target_uid = subject.target_uid
+               OR changelog.contact_id = subject.target_uid
+               OR changelog.payload ->> 'subject_user_id' = subject.user_id
+               OR changelog.audit_metadata ->> 'subject_user_id' = subject.user_id
+               OR EXISTS (
+                   SELECT 1
+                   FROM jsonb_array_elements(
+                       CASE
+                           WHEN jsonb_typeof(changelog.payload -> 'subjects') = 'array'
+                           THEN changelog.payload -> 'subjects'
+                           ELSE '[]'::jsonb
+                       END
+                   ) AS audit_subject
+                   WHERE audit_subject ->> 'user_id' = subject.user_id
+                      OR audit_subject ->> 'target_uid' = subject.target_uid::text
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM jsonb_array_elements(
+                       CASE
+                           WHEN jsonb_typeof(changelog.audit_metadata -> 'subjects') = 'array'
+                           THEN changelog.audit_metadata -> 'subjects'
+                           ELSE '[]'::jsonb
+                       END
+                   ) AS audit_subject
+                   WHERE audit_subject ->> 'user_id' = subject.user_id
+                      OR audit_subject ->> 'target_uid' = subject.target_uid::text
+               )
+             WHERE changelog.tenant_id = $1
+             ORDER BY changelog.change_id, changelog.created_at, subject.ordinality
+         )
+         SELECT to_jsonb(matched) - 'subject_ordinal'
+         FROM matched
+         ORDER BY subject_ordinal, created_at, change_id"
+    );
+    counts.insert(
+        "changelog",
+        stream_subject_query(
+            ctx,
+            conn,
+            subjects,
+            &export_dir.join("changelog.jsonl"),
+            &query,
+        )
+        .await?,
+    );
+    Ok(())
+}
+
+async fn stream_subject_query(
+    ctx: &PrivacyExportContext,
+    conn: &mut PgConnection,
+    subjects: &ExportSubjectRelation,
+    path: &Path,
+    query: &str,
+) -> Result<usize, HandlerError> {
+    let file = tokio::fs::File::create(path).await.map_err(handler_error)?;
+    let mut writer = BufWriter::new(file);
+    let mut rows = sqlx::query_scalar::<_, Value>(query)
+        .bind(ctx.tenant_id.0)
+        .bind(ctx.storage_partition.as_deref())
+        .bind(&subjects.user_ids)
+        .bind(&subjects.target_uids)
+        .bind(&subjects.provenances)
+        .fetch(&mut *conn);
+    let mut count = 0usize;
+    while let Some(row) = rows.try_next().await.map_err(handler_error)? {
+        let bytes = serde_json::to_vec(&row).map_err(handler_error)?;
+        writer.write_all(&bytes).await.map_err(handler_error)?;
+        writer.write_all(b"\n").await.map_err(handler_error)?;
+        count = count.saturating_add(1);
+    }
+    drop(rows);
+    writer.flush().await.map_err(handler_error)?;
+    Ok(count)
 }
 
 fn handler_error(error: impl std::fmt::Display) -> HandlerError {

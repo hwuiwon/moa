@@ -1,8 +1,8 @@
-//! Database pool and migration wiring for orchestrator startup.
+//! Database pool wiring for orchestrator startup.
 
 use std::time::Duration;
 
-use anyhow::{Context as AnyhowContext, Result};
+use anyhow::Result;
 use moa_config::MoaConfig;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
@@ -43,14 +43,6 @@ pub async fn build_database_pool(
         .connect(database_url)
         .await
         .map_err(Into::into)
-}
-
-/// Applies the shared MOA database migrations.
-pub async fn apply_database_migrations(config: &MoaConfig, _pool: &PgPool) -> Result<()> {
-    moa_migrations::run(config.database.admin_url())
-        .await
-        .context("apply database migrations")?;
-    Ok(())
 }
 
 fn quote_identifier(identifier: &str) -> String {

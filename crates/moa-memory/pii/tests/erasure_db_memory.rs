@@ -15,23 +15,242 @@ use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_pii::erasure::{
-    EraseCandidate, GraphErasureAudit, begin_app_scoped_tx, crypto_shred_erased_subject,
-    delete_subject_digests, delete_subject_retrieval_lineage, enumerate_erase_candidates,
-    hard_purge_erase_candidates,
+    EraseCandidate, GraphErasureAudit, begin_app_scoped_tx, delete_subject_digests,
+    delete_subject_retrieval_lineage, enumerate_erase_candidates, hard_purge_erase_candidates,
 };
 use moa_memory_pii::learning_erasure::{
-    ErasureRecordKind, ErasureSubjects, enumerate_learning_closure, erase_learning_closure,
+    ErasureDisposition, ErasureRecordKind, ErasureSubjects, RecordDecision,
+    enumerate_learning_closure, erase_learning_closure, record_decisions,
 };
 use moa_memory_pii::legal_hold::{
-    LegalHoldError, lock_tenant_and_subjects, place_hold, release_hold, start_destruction,
+    LegalHoldError, begin_destruction_stage_guard, lock_tenant_and_subjects, place_hold,
+    release_hold, start_destruction,
 };
 use moa_session::testing;
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 fn test_kms() -> Arc<dyn moa_crypto::KeyManagementProvider> {
     Arc::new(moa_crypto::LocalKmsProvider::new())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RoleScopeSnapshot {
+    backend_pid: i32,
+    current_user: String,
+    session_user: String,
+    tenant_id: Option<String>,
+    storage_partition_id: Option<String>,
+    contact_id: Option<String>,
+    control_plane: Option<String>,
+    cleared_barriers: Option<String>,
+}
+
+async fn role_scope_snapshot(conn: &mut PgConnection) -> RoleScopeSnapshot {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            pg_backend_pid() AS backend_pid,
+            current_user::text AS current_user,
+            session_user::text AS session_user,
+            current_setting('moa.tenant_id', true) AS tenant_id,
+            current_setting('moa.storage_partition_id', true) AS storage_partition_id,
+            current_setting('moa.contact_id', true) AS contact_id,
+            current_setting('moa.control_plane', true) AS control_plane,
+            current_setting('moa.cleared_barriers', true) AS cleared_barriers
+        "#,
+    )
+    .fetch_one(conn)
+    .await
+    .expect("inspect guarded role and RLS scope");
+
+    RoleScopeSnapshot {
+        backend_pid: row.get("backend_pid"),
+        current_user: row.get("current_user"),
+        session_user: row.get("session_user"),
+        tenant_id: row.get("tenant_id"),
+        storage_partition_id: row.get("storage_partition_id"),
+        contact_id: row.get("contact_id"),
+        control_plane: row.get("control_plane"),
+        cleared_barriers: row.get("cleared_barriers"),
+    }
+}
+
+#[tokio::test]
+async fn destruction_guard_role_scope_transitions_preserve_backend_and_reset_contact_scope_db_memory()
+ {
+    // Pins: one active destruction guard owns one transaction while typed
+    // role transitions move moa_app -> owner -> moa_app contact scope and reset
+    // every RLS GUC without checking the connection back into the pool.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let operation_id = format!("privacy-role-scope-{}", Uuid::now_v7());
+    let expected_storage_partition = StoragePartitionId::for_tenant(tenant_id).to_string();
+
+    start_destruction(
+        session_store.pool(),
+        tenant_id,
+        &[contact_id.0],
+        &operation_id,
+        "privacy.erase",
+    )
+    .await
+    .expect("start durable subject destruction");
+    let active_fence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.destruction_operation_fence \
+         WHERE tenant_id = $1 AND subject_id = $2 \
+           AND operation_id = $3 AND status = 'in_progress'",
+    )
+    .bind(tenant_id.0)
+    .bind(contact_id.0)
+    .bind(&operation_id)
+    .fetch_one(session_store.pool())
+    .await
+    .expect("count active destruction fence");
+    assert_eq!(
+        active_fence_count, 1,
+        "the tenant-purge destruction fence is active"
+    );
+
+    let mut guard = begin_destruction_stage_guard(
+        session_store.pool(),
+        tenant_id,
+        &[contact_id.0],
+        &operation_id,
+    )
+    .await
+    .expect("acquire active destruction stage guard");
+    let initial = role_scope_snapshot(guard.connection()).await;
+    assert_eq!(initial.current_user, "moa_app");
+    assert_eq!(
+        initial.tenant_id.as_deref(),
+        Some(tenant_id.to_string().as_str())
+    );
+    assert_eq!(
+        initial.storage_partition_id.as_deref(),
+        Some(expected_storage_partition.as_str())
+    );
+    assert_eq!(initial.contact_id.as_deref(), Some(""));
+    assert_eq!(initial.control_plane.as_deref(), Some("false"));
+    assert_eq!(initial.cleared_barriers.as_deref(), Some(""));
+
+    guard
+        .assume_owner_role()
+        .await
+        .expect("restore canonical owner role");
+    let owner = role_scope_snapshot(guard.connection()).await;
+    assert_eq!(owner.backend_pid, initial.backend_pid);
+    assert_eq!(owner.current_user, owner.session_user);
+    assert_eq!(owner.tenant_id, initial.tenant_id);
+    assert_eq!(owner.storage_partition_id, initial.storage_partition_id);
+    assert_eq!(owner.contact_id, initial.contact_id);
+    assert_eq!(owner.control_plane, initial.control_plane);
+    assert_eq!(owner.cleared_barriers, initial.cleared_barriers);
+
+    sqlx::query(
+        r#"
+        SELECT
+            set_config('moa.tenant_id', '00000000-0000-0000-0000-000000000000', true),
+            set_config('moa.storage_partition_id', 'stale-partition', true),
+            set_config('moa.contact_id', '00000000-0000-0000-0000-000000000000', true),
+            set_config('moa.control_plane', 'true', true),
+            set_config('moa.cleared_barriers', 'stale-barrier', true)
+        "#,
+    )
+    .execute(guard.connection())
+    .await
+    .expect("poison every prior RLS GUC before the typed transition");
+    guard
+        .assume_app_contact_scope(tenant_id, contact_id)
+        .await
+        .expect("install typed app contact scope");
+    let contact = role_scope_snapshot(guard.connection()).await;
+    assert_eq!(contact.backend_pid, initial.backend_pid);
+    assert_eq!(contact.session_user, initial.session_user);
+    assert_eq!(contact.current_user, "moa_app");
+    assert_eq!(
+        contact.tenant_id.as_deref(),
+        Some(tenant_id.to_string().as_str())
+    );
+    assert_eq!(
+        contact.storage_partition_id.as_deref(),
+        Some(expected_storage_partition.as_str())
+    );
+    assert_eq!(
+        contact.contact_id.as_deref(),
+        Some(contact_id.to_string().as_str())
+    );
+    assert_eq!(contact.control_plane.as_deref(), Some("false"));
+    assert_eq!(contact.cleared_barriers.as_deref(), Some(""));
+
+    guard.finish().await.expect("commit guarded transaction");
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated Postgres store");
+}
+
+#[tokio::test]
+async fn learning_erasure_records_1001_decisions_in_one_idempotent_batch_db_memory() {
+    // Pins: the decision ledger accepts a batch larger than PostgreSQL's common
+    // 1,000-row work chunk through the set-based UNNEST path, and replay inserts
+    // no duplicate audit rows.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = TenantId::new();
+    let subject_user_id = Uuid::now_v7().to_string();
+    let decisions = (0..1_001)
+        .map(|_| RecordDecision {
+            kind: ErasureRecordKind::LearningCandidate,
+            record_id: Uuid::now_v7().to_string(),
+            disposition: ErasureDisposition::Erased,
+            applied: true,
+            reason: Some("set-based erasure fixture".to_string()),
+        })
+        .collect::<Vec<_>>();
+
+    let inserted = record_decisions(
+        session_store.pool(),
+        tenant_id,
+        &subject_user_id,
+        "set-based-1001",
+        &decisions,
+    )
+    .await
+    .expect("record 1001 erasure decisions");
+    let replayed = record_decisions(
+        session_store.pool(),
+        tenant_id,
+        &subject_user_id,
+        "set-based-1001",
+        &decisions,
+    )
+    .await
+    .expect("replay 1001 erasure decisions");
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.privacy_erasure_record_decision
+         WHERE tenant_id = $1 AND subject_user_id = $2 AND attempt_id = $3",
+    )
+    .bind(tenant_id.0)
+    .bind(&subject_user_id)
+    .bind("set-based-1001")
+    .fetch_one(session_store.pool())
+    .await
+    .expect("count bulk decision rows");
+
+    assert_eq!(inserted, 1_001);
+    assert_eq!(replayed, 0);
+    assert_eq!(persisted, 1_001);
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated Postgres store");
 }
 
 #[tokio::test]
@@ -82,6 +301,62 @@ async fn legal_hold_and_subject_destruction_are_linearizable_across_pools_db_mem
             .await
             .expect("release hold")
     );
+
+    let tenant_hold = place_hold(
+        session_store.pool(),
+        tenant_id,
+        None,
+        "tenant preservation order",
+        "legal-admin",
+    )
+    .await
+    .expect("place one tenant-wide hold");
+    let duplicate_tenant_hold = place_hold(
+        &second_pool,
+        tenant_id,
+        None,
+        "duplicate tenant preservation order",
+        "other-admin",
+    )
+    .await
+    .expect_err("NULLS NOT DISTINCT permits only one active tenant-wide hold");
+    assert!(matches!(duplicate_tenant_hold, LegalHoldError::Sqlx(_)));
+    assert!(
+        release_hold(
+            session_store.pool(),
+            tenant_id,
+            tenant_hold.id,
+            "legal-admin"
+        )
+        .await
+        .expect("release tenant-wide hold")
+    );
+
+    let mut plan_tx = session_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin fence index plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(plan_tx.as_mut())
+        .await
+        .expect("force indexable fence plan");
+    let fence_plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (FORMAT TEXT)
+         SELECT 1 FROM moa.destruction_operation_fence
+         WHERE tenant_id = $1 AND status = 'in_progress'",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(plan_tx.as_mut())
+    .await
+    .expect("explain typed in-progress fence lookup");
+    assert!(
+        fence_plan
+            .iter()
+            .any(|line| line.contains("destruction_fence_in_progress_tenant")),
+        "typed fence lookup must use its partial tenant index: {fence_plan:?}"
+    );
+    plan_tx.rollback().await.expect("finish fence plan check");
 
     let mut fence_tx =
         ScopedConn::begin_as_app(session_store.pool(), &RlsContext::tenant(tenant_id), true)
@@ -137,14 +412,16 @@ async fn legal_hold_and_subject_destruction_are_linearizable_across_pools_db_mem
 async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents_db_memory() {
     // Pins: erasure removes experience/attribution rows and walks both
     // promotion-candidate and artifact-revision dependencies before restrictive
-    // foreign keys can roll back the transaction.
+    // foreign keys can roll back the transaction. One durable destruction guard
+    // also owns the mutations, typed ledger-role transition, rollback, and retry.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
     let pool = session_store.pool();
     let tenant_id = TenantId::new();
     let tenant_key = tenant_id.to_string();
-    let subject_user_id = Uuid::now_v7().to_string();
+    let subject_id = Uuid::now_v7();
+    let subject_user_id = subject_id.to_string();
     let session_id = Uuid::now_v7();
     let segment_id = Uuid::now_v7();
     let experience_id = Uuid::now_v7();
@@ -158,7 +435,7 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
         revision_candidate_id,
     ];
     let artifact_uid = Uuid::now_v7();
-    let revision_uid = Uuid::now_v7();
+    let revision_uids = (0..1_001).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
 
     let mut session_tx = pool.begin().await.expect("begin session fixture");
     sqlx::query(
@@ -252,20 +529,38 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
             (revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id,
              definition, canonical_hash, source_format, source_text, status,
              validation_report, version, published_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'ready',
-                 '{}'::JSONB, 1, now())",
+         SELECT revision_uid, $2, $3, $4, $5,
+                jsonb_build_object('kind', 'skill', 'ordinal', ordinal),
+                digest(revision_uid::TEXT, 'sha256'), 'json',
+                convert_to(jsonb_build_object('ordinal', ordinal)::TEXT, 'UTF8'),
+                'ready', '{}'::JSONB, ordinal::INTEGER, now()
+         FROM unnest($1::UUID[]) WITH ORDINALITY AS revision(revision_uid, ordinal)",
     )
-    .bind(revision_uid)
+    .bind(&revision_uids)
     .bind(artifact_uid)
     .bind(tenant_id.0)
     .bind(&tenant_key)
     .bind(&subject_user_id)
-    .bind(json!({"kind": "skill", "name": "attributable"}))
-    .bind(vec![7_u8; 32])
-    .bind(br#"{"kind":"skill","name":"attributable"}"#.to_vec())
     .execute(pool)
     .await
-    .expect("seed artifact revision");
+    .expect("seed 1001 artifact revisions");
+    sqlx::query(
+        "INSERT INTO moa.artifact_file
+            (file_uid, artifact_uid, revision_uid, tenant_id, storage_partition_id,
+             user_id, path, content, content_sha256, file_size_bytes)
+         SELECT gen_random_uuid(), $2, revision_uid, $3, $4, $5,
+                format('fixture-%s.txt', ordinal), decode('01', 'hex'),
+                digest(revision_uid::TEXT, 'sha256'), 1
+         FROM unnest($1::UUID[]) WITH ORDINALITY AS revision(revision_uid, ordinal)",
+    )
+    .bind(&revision_uids)
+    .bind(artifact_uid)
+    .bind(tenant_id.0)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(pool)
+    .await
+    .expect("seed 1001 attributable artifact files");
 
     let mut tx = pool.begin().await.expect("begin learning fixture");
     sqlx::query(
@@ -300,7 +595,7 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
     .bind(revision_candidate_id)
     .bind(&tenant_key)
     .bind(&subject_user_id)
-    .bind(revision_uid)
+    .bind(revision_uids[0])
     .execute(tx.as_mut())
     .await
     .expect("seed recursive candidate sources");
@@ -308,17 +603,234 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
         "INSERT INTO moa.artifact_revision_contribution
             (contribution_uid, storage_partition_id, user_id, revision_uid,
              candidate_id, tenant_id, contribution_kind)
-         VALUES ($1, $2, $3, $4, $5, $2, 'generated_definition')",
+         SELECT gen_random_uuid(), $2, $3, revision_uid,
+                $4, $2, 'generated_definition'
+         FROM unnest($1::UUID[]) AS revision(revision_uid)",
     )
-    .bind(Uuid::now_v7())
+    .bind(&revision_uids)
     .bind(&tenant_key)
     .bind(&subject_user_id)
-    .bind(revision_uid)
     .bind(source_candidate_id)
     .execute(tx.as_mut())
     .await
     .expect("seed revision contribution");
     tx.commit().await.expect("commit learning fixture");
+
+    // The completeness contract is deferred so an owner and its sources can be
+    // written in separate statements, but it covers both directions. Removing
+    // or moving the final source must fail at the constraint boundary.
+    let mut delete_last_source = pool.begin().await.expect("begin last-source delete");
+    sqlx::query("DELETE FROM learning_candidate_source WHERE candidate_id = $1")
+        .bind(source_candidate_id)
+        .execute(delete_last_source.as_mut())
+        .await
+        .expect("stage last-source delete");
+    let delete_error = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(delete_last_source.as_mut())
+        .await
+        .expect_err("deleting the final candidate source must fail at constraint time");
+    assert_eq!(
+        delete_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    delete_last_source
+        .rollback()
+        .await
+        .expect("roll back refused last-source delete");
+
+    let mut move_last_source = pool.begin().await.expect("begin last-source move");
+    sqlx::query("UPDATE learning_candidate_source SET candidate_id = $1 WHERE candidate_id = $2")
+        .bind(rollback_candidate_id)
+        .bind(source_candidate_id)
+        .execute(move_last_source.as_mut())
+        .await
+        .expect("stage last-source move");
+    let move_error = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(move_last_source.as_mut())
+        .await
+        .expect_err("moving the final candidate source must fail at constraint time");
+    assert_eq!(
+        move_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    move_last_source
+        .rollback()
+        .await
+        .expect("roll back refused last-source move");
+
+    let mut delete_owner = pool.begin().await.expect("begin owner/source delete");
+    sqlx::query("DELETE FROM learning_candidate_source WHERE candidate_id = $1")
+        .bind(rollback_candidate_id)
+        .execute(delete_owner.as_mut())
+        .await
+        .expect("delete source with owner");
+    sqlx::query("DELETE FROM learning_candidates WHERE id = $1")
+        .bind(rollback_candidate_id)
+        .execute(delete_owner.as_mut())
+        .await
+        .expect("delete source owner");
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(delete_owner.as_mut())
+        .await
+        .expect("source and owner may disappear together");
+    delete_owner
+        .rollback()
+        .await
+        .expect("restore source-completeness fixture");
+
+    let learning_ids = [Uuid::now_v7(), Uuid::now_v7()];
+    let mut log_fixture = pool.begin().await.expect("begin learning-log fixture");
+    sqlx::query(
+        "INSERT INTO learning_log
+            (id, tenant_id, storage_partition_id, user_id, learning_type, target_id, payload)
+         SELECT id, $2, $2, $3, 'skill', id::TEXT, '{}'::JSONB
+         FROM unnest($1::UUID[]) AS entry(id)",
+    )
+    .bind(&learning_ids[..])
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(log_fixture.as_mut())
+    .await
+    .expect("seed learning-log owners");
+    sqlx::query(
+        "INSERT INTO learning_log_source
+            (id, learning_id, tenant_id, storage_partition_id, user_id,
+             source_kind, candidate_id)
+         VALUES
+            ($1, $2, $7, $7, $8, 'candidate', $3),
+            ($4, $5, $7, $7, $8, 'candidate', $6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(learning_ids[0])
+    .bind(source_candidate_id)
+    .bind(Uuid::now_v7())
+    .bind(learning_ids[1])
+    .bind(rollback_candidate_id)
+    .bind(&tenant_key)
+    .bind(&subject_user_id)
+    .execute(log_fixture.as_mut())
+    .await
+    .expect("seed learning-log sources");
+    log_fixture
+        .commit()
+        .await
+        .expect("commit learning-log fixture");
+
+    let mut anchor_plan_tx = pool
+        .begin()
+        .await
+        .expect("begin privacy anchor plan checks");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(anchor_plan_tx.as_mut())
+        .await
+        .expect("force privacy anchor index plans");
+    let candidate_anchor_plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (FORMAT TEXT)
+         SELECT candidate_id FROM learning_candidate_source
+         WHERE tenant_id = $1 AND source_kind = 'attribution' AND privacy_anchor_id = $2",
+    )
+    .bind(&tenant_key)
+    .bind(attribution_id)
+    .fetch_all(anchor_plan_tx.as_mut())
+    .await
+    .expect("explain candidate privacy-anchor lookup");
+    assert!(
+        candidate_anchor_plan
+            .iter()
+            .any(|line| line.contains("learning_candidate_source_privacy_anchor_idx")),
+        "candidate closure must use the exact privacy-anchor index: {candidate_anchor_plan:?}"
+    );
+    let log_anchor_plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (FORMAT TEXT)
+         SELECT learning_id FROM learning_log_source
+         WHERE tenant_id = $1 AND source_kind = 'candidate' AND privacy_anchor_id = $2",
+    )
+    .bind(&tenant_key)
+    .bind(source_candidate_id)
+    .fetch_all(anchor_plan_tx.as_mut())
+    .await
+    .expect("explain learning-log privacy-anchor lookup");
+    assert!(
+        log_anchor_plan
+            .iter()
+            .any(|line| line.contains("learning_log_source_privacy_anchor_idx")),
+        "learning-log closure must use the exact privacy-anchor index: {log_anchor_plan:?}"
+    );
+    anchor_plan_tx
+        .rollback()
+        .await
+        .expect("finish privacy anchor plan checks");
+
+    let mut delete_last_log_source = pool.begin().await.expect("begin last-log-source delete");
+    sqlx::query("DELETE FROM learning_log_source WHERE learning_id = $1")
+        .bind(learning_ids[0])
+        .execute(delete_last_log_source.as_mut())
+        .await
+        .expect("stage last learning-log source delete");
+    let delete_log_error = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(delete_last_log_source.as_mut())
+        .await
+        .expect_err("deleting the final learning-log source must fail at constraint time");
+    assert_eq!(
+        delete_log_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    delete_last_log_source
+        .rollback()
+        .await
+        .expect("roll back refused last learning-log source delete");
+
+    let mut move_last_log_source = pool.begin().await.expect("begin last-log-source move");
+    sqlx::query("UPDATE learning_log_source SET learning_id = $1 WHERE learning_id = $2")
+        .bind(learning_ids[1])
+        .bind(learning_ids[0])
+        .execute(move_last_log_source.as_mut())
+        .await
+        .expect("stage last learning-log source move");
+    let move_log_error = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(move_last_log_source.as_mut())
+        .await
+        .expect_err("moving the final learning-log source must fail at constraint time");
+    assert_eq!(
+        move_log_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    move_last_log_source
+        .rollback()
+        .await
+        .expect("roll back refused last learning-log source move");
+
+    let mut remove_log_fixture = pool.begin().await.expect("begin log fixture cleanup");
+    sqlx::query("DELETE FROM learning_log_source WHERE learning_id = ANY($1)")
+        .bind(&learning_ids[..])
+        .execute(remove_log_fixture.as_mut())
+        .await
+        .expect("delete sources with their learning-log owners");
+    sqlx::query("DELETE FROM learning_log WHERE id = ANY($1)")
+        .bind(&learning_ids[..])
+        .execute(remove_log_fixture.as_mut())
+        .await
+        .expect("delete learning-log owners with their sources");
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(remove_log_fixture.as_mut())
+        .await
+        .expect("learning-log sources and owners may disappear together");
+    remove_log_fixture
+        .commit()
+        .await
+        .expect("commit learning-log fixture cleanup");
 
     let closure = enumerate_learning_closure(
         pool,
@@ -343,10 +855,51 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     );
-    assert_eq!(closure.revision_uids, vec![revision_uid]);
+    assert_eq!(
+        closure
+            .revision_uids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        revision_uids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
 
-    let decisions = erase_learning_closure(
+    let operation_id = format!("privacy-learning-erasure-{subject_id}");
+    start_destruction(
         pool,
+        tenant_id,
+        &[subject_id],
+        &operation_id,
+        "privacy.erase",
+    )
+    .await
+    .expect("start durable learning-erasure fence");
+    let mut erase_guard =
+        begin_destruction_stage_guard(pool, tenant_id, &[subject_id], &operation_id)
+            .await
+            .expect("begin guarded learning erase transaction");
+    erase_guard
+        .assume_owner_role()
+        .await
+        .expect("assume owner role for learning mutations");
+    let owner_scope = role_scope_snapshot(erase_guard.connection()).await;
+    assert_eq!(owner_scope.current_user, owner_scope.session_user);
+    assert_eq!(
+        owner_scope.tenant_id.as_deref(),
+        Some(tenant_id.to_string().as_str())
+    );
+    assert_eq!(
+        owner_scope.storage_partition_id.as_deref(),
+        Some(tenant_key.as_str())
+    );
+    assert_eq!(owner_scope.contact_id.as_deref(), Some(""));
+    assert_eq!(owner_scope.control_plane.as_deref(), Some("false"));
+    assert_eq!(owner_scope.cleared_barriers.as_deref(), Some(""));
+    let decisions = erase_learning_closure(
+        &mut erase_guard,
         tenant_id,
         &subject_user_id,
         "attempt-applied",
@@ -354,7 +907,71 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
     )
     .await
     .expect("erase recursive learning closure");
-    assert_eq!(decisions.len(), 6);
+    let ledger_scope = role_scope_snapshot(erase_guard.connection()).await;
+    assert_eq!(ledger_scope.backend_pid, owner_scope.backend_pid);
+    assert_eq!(ledger_scope.current_user, "moa_app");
+    assert_eq!(ledger_scope.session_user, owner_scope.session_user);
+    assert_eq!(ledger_scope.tenant_id, owner_scope.tenant_id);
+    assert_eq!(
+        ledger_scope.storage_partition_id,
+        owner_scope.storage_partition_id
+    );
+    assert_eq!(ledger_scope.contact_id, owner_scope.contact_id);
+    assert_eq!(ledger_scope.control_plane, owner_scope.control_plane);
+    assert_eq!(ledger_scope.cleared_barriers, owner_scope.cleared_barriers);
+    drop(erase_guard);
+
+    let rolled_back = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        "SELECT
+            (SELECT COUNT(*) FROM experience_records WHERE id = $1),
+            (SELECT COUNT(*) FROM experience_attributions WHERE id = $2),
+            (SELECT COUNT(*) FROM learning_candidates WHERE id = ANY($3)),
+            (SELECT COUNT(*) FROM moa.privacy_erasure_record_decision
+             WHERE tenant_id = $4 AND subject_user_id = $5 AND attempt_id = 'attempt-applied'),
+            (SELECT COUNT(*) FROM moa.artifact_revision
+             WHERE revision_uid = ANY($6) AND status = 'ready')",
+    )
+    .bind(experience_id)
+    .bind(attribution_id)
+    .bind(&candidate_ids)
+    .bind(tenant_id.0)
+    .bind(&subject_user_id)
+    .bind(&revision_uids)
+    .fetch_one(pool)
+    .await
+    .expect("read rolled-back learning erasure state");
+    assert_eq!(rolled_back, (1, 1, 3, 0, 1_001));
+
+    let mut retry_guard =
+        begin_destruction_stage_guard(pool, tenant_id, &[subject_id], &operation_id)
+            .await
+            .expect("retry under the same durable destruction fence");
+    retry_guard
+        .assume_owner_role()
+        .await
+        .expect("assume owner role for retried learning mutations");
+    let retried_decisions = erase_learning_closure(
+        &mut retry_guard,
+        tenant_id,
+        &subject_user_id,
+        "attempt-applied",
+        &closure,
+    )
+    .await
+    .expect("retry recursive learning closure");
+    retry_guard
+        .finish()
+        .await
+        .expect("commit guarded learning erase transaction");
+    assert_eq!(decisions.len(), 1_006);
+    assert_eq!(retried_decisions.len(), decisions.len());
+    for (retried, rolled_back) in retried_decisions.iter().zip(&decisions) {
+        assert_eq!(retried.kind, rolled_back.kind);
+        assert_eq!(retried.record_id, rolled_back.record_id);
+        assert_eq!(retried.disposition, rolled_back.disposition);
+        assert_eq!(retried.applied, rolled_back.applied);
+        assert_eq!(retried.reason, rolled_back.reason);
+    }
     assert_eq!(
         decisions
             .iter()
@@ -383,15 +1000,24 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
     .await
     .expect("count erased learning rows");
     assert_eq!(remaining, (0, 0, 0));
-    let revision = sqlx::query_as::<_, (String, serde_json::Value, Vec<u8>)>(
-        "SELECT status, definition, source_text
-         FROM moa.artifact_revision WHERE revision_uid = $1",
+    let revisions: (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),
+                COUNT(*) FILTER (WHERE status = 'archived'),
+                COUNT(*) FILTER (WHERE definition = '{}'::JSONB AND octet_length(source_text) = 0)
+         FROM moa.artifact_revision WHERE revision_uid = ANY($1)",
     )
-    .bind(revision_uid)
+    .bind(&revision_uids)
     .fetch_one(pool)
     .await
-    .expect("read invalidated revision identity");
-    assert_eq!(revision, ("archived".to_string(), json!({}), Vec::new()));
+    .expect("read invalidated revision identities");
+    assert_eq!(revisions, (1_001, 1_001, 1_001));
+    let remaining_files: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM moa.artifact_file WHERE revision_uid = ANY($1)")
+            .bind(&revision_uids)
+            .fetch_one(pool)
+            .await
+            .expect("count attributable artifact files");
+    assert_eq!(remaining_files, 0);
     let recorded_kinds = sqlx::query_as::<_, (String, i64)>(
         "SELECT record_kind, COUNT(*)
          FROM moa.privacy_erasure_record_decision
@@ -406,7 +1032,7 @@ async fn learning_erasure_removes_experiences_and_recursive_candidate_dependents
     assert_eq!(
         recorded_kinds,
         vec![
-            ("artifact_revision".to_string(), 1),
+            ("artifact_revision".to_string(), 1_001),
             ("experience_attribution".to_string(), 1),
             ("experience_record".to_string(), 1),
             ("learning_candidate".to_string(), 3),
@@ -532,9 +1158,10 @@ async fn legal_hold_destruction_fence_blocks_subject_graph_recreation_db_memory(
 }
 
 #[tokio::test]
-async fn legal_hold_crypto_shred_rechecks_durable_fence_db_memory() {
-    // Pins: a resumed graph stage cannot shred a KEK when its durable operation
-    // fence no longer matches, even if earlier graph deletion already ran.
+async fn legal_hold_outer_guard_rechecks_durable_fence_before_crypto_shred_db_memory() {
+    // Pins: a resumed graph stage cannot acquire the outer guard that must stay
+    // held through crypto-shred when its durable operation fence no longer
+    // matches, even if earlier graph deletion already ran.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -563,16 +1190,17 @@ async fn legal_hold_crypto_shred_rechecks_durable_fence_db_memory() {
     .expect("simulate mismatched resumed operation");
     conn.commit().await.expect("commit mismatched fence");
 
-    let kms = moa_crypto::LocalKmsProvider::new();
-    let error = crypto_shred_erased_subject(
+    let error = match begin_destruction_stage_guard(
         session_store.pool(),
-        &kms,
         tenant_id,
-        subject_id,
+        &[subject_id],
         "erase-original",
     )
     .await
-    .expect_err("mismatched durable fence must block crypto-shred");
+    {
+        Ok(_) => panic!("mismatched durable fence must block crypto-shred"),
+        Err(error) => error,
+    };
     assert!(
         error
             .to_string()
@@ -626,7 +1254,9 @@ fn contact_node(
 async fn privileged_erasure_is_barrier_independent_and_subject_bounded_db_memory() {
     // Pins: empty retrieval clearances hide the candidate from enumeration, but
     // the narrowly granted subject eraser still removes it. Missing or
-    // mismatched scope GUCs fail before any row is touched.
+    // mismatched scope GUCs fail before any row is touched, and a tenant fence
+    // makes the restricted eraser fail atomically with SQLSTATE 55000 even when
+    // the caller spoofs the purge-operation GUC.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -718,12 +1348,98 @@ async fn privileged_erasure_is_barrier_independent_and_subject_bounded_db_memory
         .await
         .expect("rollback mismatch transaction");
 
+    let before_fenced_erase: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM moa.node_index WHERE uid = $1), \
+            (SELECT count(*) FROM moa.vector_sync_outbox WHERE uid = $1), \
+            (SELECT count(*) FROM moa.graph_changelog WHERE target_uid = $1)",
+    )
+    .bind(uid)
+    .fetch_one(session_store.pool())
+    .await
+    .expect("read erasure state before tenant fence");
+    sqlx::query(
+        "INSERT INTO moa.destruction_operation_fence \
+            (tenant_id, subject_id, operation_id, operation_kind) \
+         VALUES ($1, NULL, 'privacy-tenant-fence', 'tenant.purge')",
+    )
+    .bind(tenant_id.0)
+    .execute(session_store.pool())
+    .await
+    .expect("install tenant-wide privacy fence");
+    sqlx::query(
+        "INSERT INTO moa.tenant_purge_operations \
+            (tenant_id, operation_id, status, current_stage) \
+         VALUES ($1, 'privacy-tenant-fence', 'in_progress', 'authz')",
+    )
+    .bind(tenant_id.0)
+    .execute(session_store.pool())
+    .await
+    .expect("install matching progress row for operation-GUC spoof probe");
+    let mut fenced = begin_app_scoped_tx(session_store.pool(), tenant_id, &subject_user_id)
+        .await
+        .expect("begin fenced subject erasure");
+    sqlx::query("SELECT set_config('moa.tenant_purge_operation_id', 'privacy-tenant-fence', true)")
+        .execute(fenced.as_mut())
+        .await
+        .expect("spoof tenant purge operation GUC");
+    let fenced_error = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT moa.erase_memory_data_subject($1, $2, $3)",
+    )
+    .bind(tenant_id.0)
+    .bind(contact_id.0)
+    .bind(json!({
+        "approver_id": "admin",
+        "approval_token_jti": "fenced-erasure"
+    }))
+    .fetch_one(fenced.as_mut())
+    .await
+    .expect_err("tenant-wide fence must reject the restricted privacy eraser");
     assert_eq!(
-        hard_purge_erase_candidates(session_store.pool(), &audit, &hidden)
+        fenced_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("55000"),
+        "fenced privacy erasure must be a policy refusal, not a privilege error"
+    );
+    fenced.rollback().await.expect("rollback fenced erasure");
+    let after_fenced_erase: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM moa.node_index WHERE uid = $1), \
+            (SELECT count(*) FROM moa.vector_sync_outbox WHERE uid = $1), \
+            (SELECT count(*) FROM moa.graph_changelog WHERE target_uid = $1)",
+    )
+    .bind(uid)
+    .fetch_one(session_store.pool())
+    .await
+    .expect("read erasure state after fenced refusal");
+    assert_eq!(
+        after_fenced_erase, before_fenced_erase,
+        "a fenced erasure must roll back graph, vector, and changelog mutations"
+    );
+    sqlx::query(
+        "DELETE FROM moa.destruction_operation_fence \
+         WHERE tenant_id = $1 AND subject_id IS NULL",
+    )
+    .bind(tenant_id.0)
+    .execute(session_store.pool())
+    .await
+    .expect("remove tenant-wide privacy fence");
+
+    let mut erase_tx = begin_app_scoped_tx(session_store.pool(), tenant_id, &audit.subject_user_id)
+        .await
+        .expect("begin caller-owned hidden-subject erase transaction");
+    assert_eq!(
+        hard_purge_erase_candidates(erase_tx.as_mut(), &audit, &hidden)
             .await
             .expect("erase hidden subject rows"),
         1
     );
+    erase_tx
+        .commit()
+        .await
+        .expect("commit caller-owned hidden-subject erase transaction");
     let remaining =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM moa.node_index WHERE uid = $1")
             .bind(uid)
@@ -740,8 +1456,9 @@ async fn privileged_erasure_is_barrier_independent_and_subject_bounded_db_memory
 
 #[tokio::test]
 async fn privileged_erasure_grants_do_not_give_app_bypassrls_db_memory() {
-    // Pins: the definer is fixed-path and NOLOGIN/NOBYPASSRLS; only moa_app can
-    // execute the function, and moa_app itself remains NOBYPASSRLS.
+    // Pins: the definer resolves only catalog and temporary objects and is
+    // NOLOGIN/NOBYPASSRLS; only moa_app can execute the function, and moa_app
+    // itself remains NOBYPASSRLS.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -796,7 +1513,7 @@ async fn privileged_erasure_grants_do_not_give_app_bypassrls_db_memory() {
     assert!(
         proconfig
             .iter()
-            .any(|entry| entry == "search_path=pg_catalog, moa")
+            .any(|entry| entry == "search_path=pg_catalog, pg_temp")
     );
 
     drop(session_store);
@@ -908,9 +1625,16 @@ async fn hard_purge_contact_candidates_writes_summary_under_app_role_db_memory()
         approver_id: "admin@example.test".to_string(),
         approval_token_jti: "approval-jti-erasure-db-memory".to_string(),
     };
-    let erased = hard_purge_erase_candidates(session_store.pool(), &audit, &candidates)
+    let mut erase_tx = begin_app_scoped_tx(session_store.pool(), tenant_id, &audit.subject_user_id)
+        .await
+        .expect("begin caller-owned contact erase transaction");
+    let erased = hard_purge_erase_candidates(erase_tx.as_mut(), &audit, &candidates)
         .await
         .expect("hard purge contact candidates");
+    erase_tx
+        .commit()
+        .await
+        .expect("commit caller-owned contact erase transaction");
     assert_eq!(erased, 1);
     assert!(
         graph
@@ -1020,9 +1744,16 @@ async fn hard_purge_tolerates_absent_candidate_db_memory() {
         approver_id: "admin@example.test".to_string(),
         approval_token_jti: "approval-jti-absent-candidate-db-memory".to_string(),
     };
-    let erased = hard_purge_erase_candidates(session_store.pool(), &audit, &candidates)
+    let mut erase_tx = begin_app_scoped_tx(session_store.pool(), tenant_id, &audit.subject_user_id)
+        .await
+        .expect("begin caller-owned resumed erase transaction");
+    let erased = hard_purge_erase_candidates(erase_tx.as_mut(), &audit, &candidates)
         .await
         .expect("hard purge tolerates already-absent candidate");
+    erase_tx
+        .commit()
+        .await
+        .expect("commit caller-owned resumed erase transaction");
     assert_eq!(erased, 1);
     assert!(
         graph
@@ -1066,15 +1797,22 @@ async fn delete_subject_digest_and_lineage_rows_db_memory() {
     )
     .await;
 
-    let digests_deleted = delete_subject_digests(session_store.pool(), tenant_id, &subject_user_id)
+    let mut erase_tx = begin_app_scoped_tx(session_store.pool(), tenant_id, &subject_user_id)
+        .await
+        .expect("begin caller-owned digest and lineage erase transaction");
+    let digests_deleted = delete_subject_digests(erase_tx.as_mut(), tenant_id, &subject_user_id)
         .await
         .expect("delete subject digests");
     assert_eq!(digests_deleted, 1);
     let lineage_deleted =
-        delete_subject_retrieval_lineage(session_store.pool(), tenant_id, &subject_user_id)
+        delete_subject_retrieval_lineage(erase_tx.as_mut(), tenant_id, &subject_user_id)
             .await
             .expect("delete subject retrieval lineage");
     assert_eq!(lineage_deleted, 1);
+    erase_tx
+        .commit()
+        .await
+        .expect("commit caller-owned digest and lineage erase transaction");
 
     let remaining_digests = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM moa.memory_digests WHERE storage_partition_id = $1",
@@ -1094,11 +1832,18 @@ async fn delete_subject_digest_and_lineage_rows_db_memory() {
     assert_eq!(remaining_lineage, 0);
 
     // A re-run is idempotent: nothing remains to delete.
+    let mut replay_tx = begin_app_scoped_tx(session_store.pool(), tenant_id, &subject_user_id)
+        .await
+        .expect("begin caller-owned digest replay transaction");
     let digests_deleted_again =
-        delete_subject_digests(session_store.pool(), tenant_id, &subject_user_id)
+        delete_subject_digests(replay_tx.as_mut(), tenant_id, &subject_user_id)
             .await
             .expect("re-run digest deletion");
     assert_eq!(digests_deleted_again, 0);
+    replay_tx
+        .commit()
+        .await
+        .expect("commit caller-owned digest replay transaction");
 
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
@@ -1330,9 +2075,16 @@ async fn hard_purge_contact_candidates_includes_historical_versions_db_memory() 
         approver_id: "admin@example.test".to_string(),
         approval_token_jti: "approval-jti-all-version-erasure-db-memory".to_string(),
     };
-    let erased = hard_purge_erase_candidates(session_store.pool(), &audit, &legacy_candidates)
+    let mut erase_tx = begin_app_scoped_tx(session_store.pool(), tenant_id, &audit.subject_user_id)
+        .await
+        .expect("begin caller-owned all-version erase transaction");
+    let erased = hard_purge_erase_candidates(erase_tx.as_mut(), &audit, &legacy_candidates)
         .await
         .expect("hard purge every target contact version");
+    erase_tx
+        .commit()
+        .await
+        .expect("commit caller-owned all-version erase transaction");
     assert_eq!(erased, 4);
 
     let remaining_target_nodes =

@@ -1,7 +1,5 @@
 //! Postgres batch storage plus COPY rendering.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -49,36 +47,56 @@ async fn lock_destruction_scopes(
     tx: &mut Transaction<'_, Postgres>,
     rows: &[PendingRow],
 ) -> Result<()> {
-    let mut scopes = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    let mut tenant_ids = Vec::<Uuid>::with_capacity(rows.len());
+    let mut subject_ids = Vec::<Uuid>::with_capacity(rows.len());
     for row in rows {
         let Ok(tenant_id) = Uuid::parse_str(&row.storage_partition_id()) else {
             continue;
         };
-        let subjects = scopes.entry(tenant_id).or_default();
+        tenant_ids.push(tenant_id);
         if let Some(user_id) = row.user_id()
             && let Some(subject_id) = privacy_subject_uuid(&user_id)
         {
-            subjects.insert(subject_id);
+            subject_ids.push(subject_id);
         }
     }
 
-    for (tenant_id, subjects) in scopes {
+    if !tenant_ids.is_empty() {
         sqlx::query(
-            "SELECT pg_advisory_xact_lock(\
-             hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+            r#"
+            SELECT pg_advisory_xact_lock_shared(
+                hashtextextended('moa:destruction:tenant:' || scope_id::text, 0)
+            )
+            FROM (
+                SELECT DISTINCT scope_id
+                FROM unnest($1::uuid[]) AS input(scope_id)
+                ORDER BY scope_id
+            ) AS ordered_scopes
+            ORDER BY scope_id
+            "#,
         )
-        .bind(tenant_id)
+        .bind(tenant_ids)
         .execute(&mut **tx)
         .await?;
-        for subject_id in subjects {
-            sqlx::query(
-                "SELECT pg_advisory_xact_lock(\
-                 hashtextextended('moa:destruction:subject:' || $1::text, 0))",
+    }
+
+    if !subject_ids.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT pg_advisory_xact_lock_shared(
+                hashtextextended('moa:destruction:subject:' || scope_id::text, 0)
             )
-            .bind(subject_id)
-            .execute(&mut **tx)
-            .await?;
-        }
+            FROM (
+                SELECT DISTINCT scope_id
+                FROM unnest($1::uuid[]) AS input(scope_id)
+                ORDER BY scope_id
+            ) AS ordered_scopes
+            ORDER BY scope_id
+            "#,
+        )
+        .bind(subject_ids)
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
 }

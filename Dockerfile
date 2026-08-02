@@ -20,7 +20,6 @@ RUN apt-get update \
     && chown -R 65532:65534 /var/lib/moa
 
 COPY --from=builder /build/target/release/moa-orchestrator-bin /usr/local/bin/moa-orchestrator
-COPY --from=builder /build/crates/moa-migrations/migrations /migrations
 
 EXPOSE 9080 9081
 

@@ -46,6 +46,19 @@ pub use skill_embeddings::{
 /// `i64` byte-count conversion could overflow.
 pub const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
+/// Maximum number of package files accepted for one artifact revision.
+///
+/// The cap bounds both request validation and the parameter count of the
+/// set-based artifact-file insert.
+pub const MAX_FILES_PER_REVISION: usize = 128;
+
+/// Maximum combined package-file bytes accepted for one artifact revision.
+///
+/// This 64 MiB request ceiling applies in addition to
+/// [`MAX_FILE_SIZE_BYTES`], so many individually valid files cannot make one
+/// revision transaction grow without bound.
+pub const MAX_TOTAL_FILE_SIZE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Artifact storage columns derived from artifact inheritance scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactScopeParts {

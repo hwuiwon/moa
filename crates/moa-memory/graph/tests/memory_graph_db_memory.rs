@@ -10,8 +10,6 @@ fn test_kms() -> Arc<dyn KeyManagementProvider> {
         .clone()
 }
 
-#[path = "memory_graph_db_memory/backfill_db_memory.rs"]
-mod backfill_db_memory;
 #[path = "memory_graph_db_memory/barrier_need_to_know_db_memory.rs"]
 mod barrier_need_to_know_db_memory;
 #[path = "memory_graph_db_memory/changelog_outbox_db_memory.rs"]

@@ -65,7 +65,7 @@ impl CredentialKind {
 pub struct CredentialIdentity {
     /// Owning tenant.
     pub tenant_id: TenantId,
-    /// Owning knowledge/MCP connection this credential belongs to.
+    /// Owning knowledge connection this credential belongs to.
     pub connection_uid: Uuid,
     /// Material kind stored under this identity.
     pub kind: CredentialKind,

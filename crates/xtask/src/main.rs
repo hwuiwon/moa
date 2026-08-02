@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 #[cfg(feature = "eval-tools")]
@@ -147,42 +147,112 @@ fn cmd_check_migrations() -> Result<()> {
 
 fn check_central_migration_files() -> Result<()> {
     let migrations_dir = Path::new(CENTRAL_MIGRATIONS_DIR);
-    let mut versions = BTreeMap::<u64, String>::new();
+    let mut entries = Vec::new();
     for entry in fs::read_dir(migrations_dir).context("read central migrations directory")? {
         let entry = entry.context("read central migration entry")?;
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) == Some("sql") {
-            let name = file_name(&path)?;
-            let version = parse_refinery_version(name)?;
-            if let Some(existing) = versions.insert(version, name.to_string()) {
-                bail!("duplicate migration version {version}: {existing}, {name}");
-            }
-        }
+        let name = entry.file_name().into_string().map_err(|name| {
+            anyhow!(
+                "central migration entry name is not valid UTF-8: {}",
+                name.to_string_lossy()
+            )
+        })?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read central migration entry type for {name}"))?;
+        let kind = if file_type.is_symlink() {
+            MigrationEntryKind::Symlink
+        } else if file_type.is_file() {
+            MigrationEntryKind::File
+        } else if file_type.is_dir() {
+            MigrationEntryKind::Directory
+        } else {
+            MigrationEntryKind::Other
+        };
+        entries.push(MigrationEntry { name, kind });
     }
+    validate_migration_entries(&entries)
+}
 
-    if versions.is_empty() {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MigrationEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug)]
+struct MigrationEntry {
+    name: String,
+    kind: MigrationEntryKind,
+}
+
+fn validate_migration_entries(entries: &[MigrationEntry]) -> Result<()> {
+    if entries.is_empty() {
         bail!("no central migrations found under {CENTRAL_MIGRATIONS_DIR}");
     }
 
+    let mut versions = BTreeMap::<u64, &str>::new();
+    for entry in entries {
+        if entry.kind != MigrationEntryKind::File {
+            bail!(
+                "central migration directory must contain regular files only; found {:?}: {}",
+                entry.kind,
+                entry.name
+            );
+        }
+        let version = parse_refinery_version(&entry.name)?;
+        if let Some(existing) = versions.insert(version, &entry.name) {
+            bail!(
+                "duplicate migration version {version}: {existing}, {}",
+                entry.name
+            );
+        }
+    }
+
+    for (index, version) in versions.keys().copied().enumerate() {
+        let expected = u64::try_from(index + 1).context("migration count exceeds u64")?;
+        if version != expected {
+            bail!(
+                "central migration versions must be exactly contiguous from V000001; expected V{expected:06}, found V{version:06}"
+            );
+        }
+    }
     Ok(())
 }
 
 fn parse_refinery_version(file_name: &str) -> Result<u64> {
-    let Some(rest) = file_name.strip_prefix('V') else {
-        bail!("migration file must start with V: {file_name}");
-    };
-    let Some((version, description)) = rest.split_once("__") else {
-        bail!("migration file must use V<version>__<description>.sql: {file_name}");
-    };
-    if !description.ends_with(".sql") {
+    let Some(stem) = file_name.strip_suffix(".sql") else {
         bail!("migration file must end with .sql: {file_name}");
+    };
+    let Some((version, description)) = stem.split_once("__") else {
+        bail!("migration file must use V<six digits>__<snake_case>.sql: {file_name}");
+    };
+    if version.len() != 7 || !version.starts_with('V') {
+        bail!("migration version must use uppercase V plus exactly six digits: {file_name}");
     }
-    if !version.chars().all(|character| character.is_ascii_digit()) {
-        bail!("migration version must be numeric: {file_name}");
+    let digits = &version[1..];
+    if !digits.chars().all(|character| character.is_ascii_digit()) {
+        bail!("migration version must use uppercase V plus exactly six digits: {file_name}");
     }
-    version
+    if description.is_empty()
+        || description.split('_').any(|segment| {
+            segment.is_empty()
+                || !segment
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        })
+    {
+        bail!("migration description must be non-empty lowercase snake_case: {file_name}");
+    }
+
+    let parsed = digits
         .parse::<u64>()
-        .with_context(|| format!("parse migration version in {file_name}"))
+        .with_context(|| format!("parse migration version in {file_name}"))?;
+    if parsed == 0 {
+        bail!("migration versions start at V000001, not V000000: {file_name}");
+    }
+    Ok(parsed)
 }
 
 fn check_no_noncentral_migration_dirs() -> Result<()> {
@@ -210,13 +280,15 @@ fn check_no_noncentral_migration_dirs() -> Result<()> {
 fn check_migration_ownership() -> Result<(usize, usize)> {
     let mut migration_files = Vec::new();
     collect_migration_sql_files(Path::new(CENTRAL_MIGRATIONS_DIR), &mut migration_files)?;
+    migration_files.sort();
 
     let mut statements = 0;
     let mut declared = BTreeSet::new();
     for path in migration_files {
         let sql = fs::read_to_string(&path)
             .with_context(|| format!("read migration {}", path.display()))?;
-        let tables = extract_create_tables(&sql);
+        let tables = extract_create_tables(&sql)
+            .with_context(|| format!("validate fresh-only catalog in {}", path.display()))?;
         statements += tables.len();
         declared.extend(tables);
     }
@@ -404,8 +476,16 @@ fn collect_migration_sql_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()
     )
 }
 
-fn extract_create_tables(sql: &str) -> Vec<TableIdentity> {
+fn extract_create_tables(sql: &str) -> Result<Vec<TableIdentity>> {
     let tokens = sql_tokens_without_comments(sql);
+    if tokens.windows(2).any(|tokens| {
+        tokens[0].eq_ignore_ascii_case("drop") && tokens[1].eq_ignore_ascii_case("table")
+    }) {
+        bail!(
+            "central migrations must not contain DROP TABLE; ownership describes the final fresh-database catalog"
+        );
+    }
+
     let mut tables = Vec::new();
     let mut index = 0;
     while index + 2 < tokens.len() {
@@ -436,7 +516,7 @@ fn extract_create_tables(sql: &str) -> Vec<TableIdentity> {
         }
         index = name_index + 1;
     }
-    tables
+    Ok(tables)
 }
 
 fn sql_tokens_without_comments(sql: &str) -> Vec<String> {
@@ -529,12 +609,6 @@ fn normalize_table_family(mut table: TableIdentity) -> TableIdentity {
         table.name = parent.to_string();
     }
     table
-}
-
-fn file_name(path: &Path) -> Result<&str> {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| format!("path has no UTF-8 file name: {}", path.display()))
 }
 
 fn cmd_audit_paths() -> Result<()> {
@@ -681,6 +755,84 @@ fn rg_forbid(label: &str, pattern: &str, paths: &[&str], options: &[&str]) -> Re
 mod check_migrations_tests {
     use super::*;
 
+    fn migration(name: &str) -> MigrationEntry {
+        MigrationEntry {
+            name: name.to_string(),
+            kind: MigrationEntryKind::File,
+        }
+    }
+
+    #[test]
+    fn check_migrations_accepts_only_a_contiguous_canonical_sequence() {
+        // Pins: central migration filenames form exactly V000001..V00000N.
+        validate_migration_entries(&[
+            migration("V000001__epoch.sql"),
+            migration("V000002__session_baseline.sql"),
+        ])
+        .expect("canonical contiguous sequence");
+    }
+
+    #[test]
+    fn check_migrations_rejects_noncanonical_file_names() {
+        // Pins: spelling, width, casing, extension, and unrelated files fail closed.
+        for name in [
+            "V000000__epoch.sql",
+            "V00001__epoch.sql",
+            "V0000001__epoch.sql",
+            "v000001__epoch.sql",
+            "V000001_epoch.sql",
+            "V000001__.sql",
+            "V000001__Not_snake.sql",
+            "V000001__not--snake.sql",
+            "V000001__not__snake.sql",
+            "V000001__epoch.SQL",
+            "README.md",
+        ] {
+            let error = validate_migration_entries(&[migration(name)])
+                .expect_err("noncanonical entry must fail");
+            assert!(!error.to_string().is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn check_migrations_rejects_gaps_and_duplicate_versions() {
+        // Pins: neither a missing identity nor two names sharing one identity can pass.
+        let gap = validate_migration_entries(&[
+            migration("V000001__epoch.sql"),
+            migration("V000003__later.sql"),
+        ])
+        .expect_err("gap must fail");
+        assert!(gap.to_string().contains("expected V000002"));
+
+        let duplicate = validate_migration_entries(&[
+            migration("V000001__epoch.sql"),
+            migration("V000001__other.sql"),
+        ])
+        .expect_err("duplicate must fail");
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate migration version 1")
+        );
+    }
+
+    #[test]
+    fn check_migrations_rejects_non_file_entries() {
+        // Pins: nested directories, symlinks, and special entries cannot hide from validation.
+        for kind in [
+            MigrationEntryKind::Directory,
+            MigrationEntryKind::Symlink,
+            MigrationEntryKind::Other,
+        ] {
+            let error = validate_migration_entries(&[MigrationEntry {
+                name: "V000001__epoch.sql".to_string(),
+                kind,
+            }])
+            .expect_err("non-file entry must fail");
+            assert!(error.to_string().contains("regular files only"));
+        }
+    }
+
     fn ownership(schema: &str, name: &str, owner: &str) -> MigrationOwnership {
         MigrationOwnership {
             name: name.to_string(),
@@ -716,6 +868,7 @@ mod check_migrations_tests {
         "#;
 
         let tables = extract_create_tables(sql)
+            .expect("supported CREATE TABLE forms must be accepted")
             .into_iter()
             .collect::<BTreeSet<_>>();
         assert_eq!(
@@ -729,6 +882,20 @@ mod check_migrations_tests {
                 ("public", "events"),
                 ("public", "session_event_dedupe"),
             ])
+        );
+    }
+
+    #[test]
+    fn check_migrations_rejects_tables_removed_later_from_the_fresh_catalog() {
+        // Pins: ownership is a bijection with the final catalog, not historical CREATE TABLE names.
+        let error = extract_create_tables(
+            "CREATE TABLE public.retired (id bigint); DROP TABLE public.retired;",
+        )
+        .expect_err("a later DROP TABLE must fail the fresh-only catalog invariant");
+
+        assert!(
+            error.to_string().contains("must not contain DROP TABLE"),
+            "{error:#}"
         );
     }
 

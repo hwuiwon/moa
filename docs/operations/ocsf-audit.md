@@ -56,7 +56,9 @@ replays and safe to alert on directly:
 The payload is content-free by construction: fixed title and description,
 closed-vocabulary detector signals, and MOA-minted identifiers only. No tool
 output, no matched span, and no attacker-supplied byte reaches a finding, so
-findings are safe to ship to an external SIEM verbatim.
+findings are safe for an operator-owned external SIEM integration to consume
+verbatim. MOA does not maintain OCSF destination, shipper-cursor, or retry-queue
+schema; signed Postgres events are the product record.
 
 **Alert on replay conflicts.** If a write returns a replay conflict, two
 genuinely different transitions collided on one deterministic identity, or a

@@ -1984,6 +1984,7 @@ struct FakeCredentialVersion {
     tenant_id: TenantId,
     connection_uid: Uuid,
     material: String,
+    active: bool,
     revoked: bool,
 }
 
@@ -2002,6 +2003,7 @@ struct FakeKnowledgeCredentialStore {
 struct FakeCredentialState {
     versions: HashMap<Uuid, FakeCredentialVersion>,
     operations: Vec<(String, CredentialPrincipal)>,
+    status_batch_calls: usize,
 }
 
 impl FakeKnowledgeCredentialStore {
@@ -2013,6 +2015,10 @@ impl FakeKnowledgeCredentialStore {
 
     fn stored_account_count(&self) -> usize {
         self.lock().versions.len()
+    }
+
+    fn status_batch_calls(&self) -> usize {
+        self.lock().status_batch_calls
     }
 
     /// Returns the opaque reference issued for one connection, if any.
@@ -2094,12 +2100,19 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
             return Ok(account.credential_ref.clone());
         };
         let reference = Uuid::now_v7();
-        self.lock().versions.insert(
+        let mut state = self.lock();
+        for version in state.versions.values_mut() {
+            if version.tenant_id == tenant_id && version.connection_uid == connection_uid {
+                version.active = false;
+            }
+        }
+        state.versions.insert(
             reference,
             FakeCredentialVersion {
                 tenant_id,
                 connection_uid,
                 material,
+                active: true,
                 revoked: false,
             },
         );
@@ -2162,27 +2175,32 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
         Ok(())
     }
 
-    async fn credential_status(
+    async fn credential_statuses(
         &self,
         tenant_id: TenantId,
-        connection: &KnowledgeConnection,
+        connections: &[&KnowledgeConnection],
         _caller: &KnowledgeCaller,
-    ) -> Result<Option<String>, KnowledgeServiceError> {
-        let Some(reference) = Uuid::parse_str(&connection.credential_ref).ok() else {
-            return Ok(None);
-        };
-        let state = self.lock();
-        Ok(Some(
-            match state
-                .versions
-                .get(&reference)
-                .filter(|version| version.tenant_id == tenant_id)
-            {
-                Some(version) if version.revoked => "revoked".to_string(),
-                Some(_) => "present".to_string(),
-                None => "missing".to_string(),
-            },
-        ))
+    ) -> Result<Vec<Option<String>>, KnowledgeServiceError> {
+        let mut state = self.lock();
+        state.status_batch_calls += 1;
+        Ok(connections
+            .iter()
+            .map(|connection| {
+                let reference = Uuid::parse_str(&connection.credential_ref).ok()?;
+                Some(
+                    match state
+                        .versions
+                        .get(&reference)
+                        .filter(|version| version.tenant_id == tenant_id)
+                    {
+                        Some(version) if version.revoked => "revoked".to_string(),
+                        Some(version) if !version.active => "superseded".to_string(),
+                        Some(_) => "present".to_string(),
+                        None => "missing".to_string(),
+                    },
+                )
+            })
+            .collect())
     }
 }
 

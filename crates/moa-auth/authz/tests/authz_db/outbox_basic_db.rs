@@ -1,7 +1,9 @@
 //! Outbox desired-state, convergence, and retry behavior against Postgres.
 
 use httpmock::{Method::POST, MockServer};
-use moa_authz::{FgaClient, FgaConfig, OutboxPoller, PollerConfig, enqueue};
+use moa_authz::{
+    AuthzError, FgaClient, FgaConfig, OutboxPoller, PollerConfig, enqueue, enqueue_batch,
+};
 use moa_authz_schema::{MODEL_VERSION, ObjectType, Relation, TupleKey, TupleOp, UserType};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
@@ -50,6 +52,61 @@ fn test_tuple() -> (TupleKey, Uuid) {
     (tuple, tenant_id)
 }
 
+fn tenant_operator_intent(op: TupleOp, user_id: Uuid, tenant_id: Uuid) -> (TupleOp, TupleKey) {
+    (
+        op,
+        TupleKey::new(
+            UserType::Operator,
+            user_id,
+            Relation::Operator,
+            ObjectType::Tenant,
+            tenant_id,
+        ),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct RawDesiredState {
+    tuple_user: String,
+    tuple_relation: String,
+    tuple_object: String,
+    model_version: i32,
+    tenant_id: Option<Uuid>,
+    op: String,
+    generation: i64,
+    status: String,
+    attempts: i32,
+    last_error: Option<String>,
+    lease_token: Option<Uuid>,
+    lease_expires_at: Option<String>,
+    next_attempt_at: String,
+    updated_at: String,
+}
+
+async fn raw_desired_states(pool: &PgPool) -> Vec<RawDesiredState> {
+    sqlx::query_as(
+        "SELECT tuple_user,
+                tuple_relation,
+                tuple_object,
+                model_version,
+                tenant_id,
+                op,
+                generation,
+                status,
+                attempts,
+                last_error,
+                lease_token,
+                lease_expires_at::TEXT AS lease_expires_at,
+                next_attempt_at::TEXT AS next_attempt_at,
+                updated_at::TEXT AS updated_at
+         FROM authz_outbox
+         ORDER BY tuple_user, tuple_relation, tuple_object",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("raw desired-state query should succeed")
+}
+
 /// The single desired-state row for a tuple identity: `(op, generation, status)`.
 async fn desired_state(pool: &PgPool, tuple: &TupleKey) -> Option<(String, i64, String)> {
     sqlx::query_as(
@@ -75,6 +132,39 @@ async fn row_count(pool: &PgPool, tuple: &TupleKey) -> i64 {
     .fetch_one(pool)
     .await
     .expect("count query should succeed")
+}
+
+async fn install_tenant_attribution_guard(pool: &PgPool) {
+    // The migration lane pins the complete tenant-attribution function. This isolated-schema
+    // fixture installs its immutable-attribution branch so the application SQL
+    // test does not depend on the developer's shared database migration state.
+    sqlx::query(
+        r#"
+        CREATE FUNCTION guard_authz_outbox_attribution()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id THEN
+                RAISE EXCEPTION 'authz outbox tuple identity and tenant attribution are immutable'
+                    USING ERRCODE = '55000';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("isolated tenant attribution guard function should install");
+    sqlx::query(
+        "CREATE TRIGGER authz_outbox_tenant_attribution_guard
+         BEFORE UPDATE ON authz_outbox
+         FOR EACH ROW EXECUTE FUNCTION guard_authz_outbox_attribution()",
+    )
+    .execute(pool)
+    .await
+    .expect("isolated tenant attribution guard trigger should attach");
 }
 
 fn failing_poller(pool: PgPool, max_attempts: i32) -> OutboxPoller {
@@ -122,6 +212,271 @@ async fn outbox_same_op_enqueue_is_idempotent_and_holds_generation_db() {
     assert_eq!(
         desired_state(&pool, &tuple).await,
         Some(("write".to_string(), 1, "pending".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn outbox_typed_batch_normalizes_and_converges_each_identity_once_db() {
+    // Pins: one typed batch reduces duplicate identities to their final requested
+    // state, leaves same-op active delivery state untouched, and resets only an
+    // operation change or dead-letter redrive.
+    let pool = test_pool().await;
+    let tenant_id = Uuid::new_v4();
+    let users: [Uuid; 4] = std::array::from_fn(|_| Uuid::new_v4());
+    let user_wires = users.map(|user_id| format!("operator:{user_id}"));
+
+    let mut transaction = pool.begin().await.expect("batch transaction should begin");
+    enqueue_batch(&mut transaction, tenant_id, &[])
+        .await
+        .expect("empty batch should be a no-op");
+    enqueue_batch(
+        &mut transaction,
+        tenant_id,
+        &[
+            tenant_operator_intent(TupleOp::Write, users[0], tenant_id),
+            tenant_operator_intent(TupleOp::Delete, users[1], tenant_id),
+            tenant_operator_intent(TupleOp::Write, users[2], tenant_id),
+        ],
+    )
+    .await
+    .expect("initial raw batch should succeed");
+    transaction
+        .commit()
+        .await
+        .expect("initial raw batch should commit");
+    assert_eq!(raw_desired_states(&pool).await.len(), 3);
+
+    let lease_token = Uuid::new_v4();
+    sqlx::query(
+        "UPDATE authz_outbox
+         SET status = CASE tuple_user
+                 WHEN $1 THEN 'in_flight'
+                 WHEN $2 THEN 'dead_letter'
+                 ELSE status
+             END,
+             attempts = CASE tuple_user WHEN $1 THEN 3 WHEN $2 THEN 7 ELSE attempts END,
+             last_error = CASE tuple_user WHEN $1 THEN 'retrying' WHEN $2 THEN 'terminal' END,
+             lease_token = CASE tuple_user WHEN $1 THEN $3 ELSE lease_token END,
+             lease_expires_at = CASE tuple_user
+                 WHEN $1 THEN NOW() + INTERVAL '5 minutes'
+                 ELSE lease_expires_at
+             END,
+             next_attempt_at = CASE tuple_user
+                 WHEN $1 THEN NOW() + INTERVAL '3 minutes'
+                 ELSE next_attempt_at
+             END
+         WHERE tuple_user IN ($1, $2)",
+    )
+    .bind(&user_wires[0])
+    .bind(&user_wires[1])
+    .bind(lease_token)
+    .execute(&pool)
+    .await
+    .expect("delivery states should be seeded");
+
+    let before = raw_desired_states(&pool).await;
+    let unchanged_before = before
+        .iter()
+        .find(|row| row.tuple_user == user_wires[0])
+        .expect("same-op row should exist before batch")
+        .clone();
+
+    let mut transaction = pool.begin().await.expect("batch transaction should begin");
+    enqueue_batch(
+        &mut transaction,
+        tenant_id,
+        &[
+            tenant_operator_intent(TupleOp::Delete, users[0], tenant_id),
+            tenant_operator_intent(TupleOp::Write, users[0], tenant_id),
+            tenant_operator_intent(TupleOp::Delete, users[1], tenant_id),
+            tenant_operator_intent(TupleOp::Write, users[2], tenant_id),
+            tenant_operator_intent(TupleOp::Delete, users[2], tenant_id),
+            tenant_operator_intent(TupleOp::Delete, users[3], tenant_id),
+            tenant_operator_intent(TupleOp::Write, users[3], tenant_id),
+        ],
+    )
+    .await
+    .expect("converging raw batch should succeed");
+    transaction
+        .commit()
+        .await
+        .expect("converging raw batch should commit");
+
+    let after = raw_desired_states(&pool).await;
+    assert_eq!(after.len(), 4, "one row must remain per tuple identity");
+    assert_eq!(
+        after
+            .iter()
+            .find(|row| row.tuple_user == user_wires[0])
+            .expect("same-op row should remain"),
+        &unchanged_before,
+        "same-op active state, including its lease and timestamps, must not reset"
+    );
+
+    let dead_letter = after
+        .iter()
+        .find(|row| row.tuple_user == user_wires[1])
+        .expect("dead-letter row should remain");
+    assert_eq!(dead_letter.op, "delete");
+    assert_eq!(dead_letter.generation, 2);
+    assert_eq!(dead_letter.status, "pending");
+    assert_eq!(dead_letter.attempts, 0);
+    assert_eq!(dead_letter.last_error, None);
+    assert_eq!(dead_letter.lease_token, None);
+
+    let changed = after
+        .iter()
+        .find(|row| row.tuple_user == user_wires[2])
+        .expect("changed-op row should remain");
+    assert_eq!(changed.op, "delete");
+    assert_eq!(changed.generation, 2);
+    assert_eq!(changed.status, "pending");
+    assert_eq!(changed.attempts, 0);
+
+    let inserted = after
+        .iter()
+        .find(|row| row.tuple_user == user_wires[3])
+        .expect("new normalized row should exist");
+    assert_eq!(inserted.op, "write", "last duplicate intent must win");
+    assert_eq!(inserted.generation, 1);
+    assert_eq!(inserted.status, "pending");
+    assert_eq!(inserted.tenant_id, Some(tenant_id));
+    assert_eq!(inserted.model_version, MODEL_VERSION as i32);
+}
+
+#[tokio::test]
+async fn outbox_typed_batch_cross_tenant_identity_aborts_caller_transaction_db() {
+    // Pins: tuple identity and tenant attribution are immutable; attempting to
+    // reuse another tenant's identity fails the statement and rolls back earlier
+    // outbox work in the caller's transaction.
+    let pool = test_pool().await;
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    install_tenant_attribution_guard(&pool).await;
+    let shared_user_id = Uuid::new_v4();
+    let shared_tuple = tenant_operator_intent(TupleOp::Write, shared_user_id, tenant_a).1;
+
+    let mut seed = pool.begin().await.expect("seed transaction should begin");
+    enqueue_batch(&mut seed, tenant_a, &[(TupleOp::Write, shared_tuple)])
+        .await
+        .expect("tenant A seed should succeed");
+    seed.commit().await.expect("tenant A seed should commit");
+
+    let marker_tuple = tenant_operator_intent(TupleOp::Write, Uuid::new_v4(), tenant_b).1;
+    let mut transaction = pool.begin().await.expect("caller transaction should begin");
+    enqueue_batch(
+        &mut transaction,
+        tenant_b,
+        &[(TupleOp::Write, marker_tuple)],
+    )
+    .await
+    .expect("earlier caller work should initially succeed");
+
+    let error = enqueue_batch(
+        &mut transaction,
+        tenant_b,
+        &[(TupleOp::Delete, shared_tuple)],
+    )
+    .await
+    .expect_err("cross-tenant tuple identity must be rejected");
+    let AuthzError::Database(error) = error else {
+        panic!("cross-tenant collision should return a database error");
+    };
+    let database_error = error
+        .as_database_error()
+        .expect("cross-tenant collision should expose structured database details");
+    assert_eq!(database_error.code().as_deref(), Some("55000"));
+    assert_eq!(
+        database_error.message(),
+        "authz outbox tuple identity and tenant attribution are immutable"
+    );
+    assert_eq!(
+        database_error.constraint(),
+        None,
+        "immutable attribution is a trigger contract, not a fabricated constraint failure"
+    );
+    transaction
+        .rollback()
+        .await
+        .expect("aborted caller transaction should roll back");
+
+    let rows = raw_desired_states(&pool).await;
+    assert_eq!(rows.len(), 1, "earlier tenant B work must be rolled back");
+    assert_eq!(rows[0].tuple_user, shared_tuple.user_wire());
+    assert_eq!(rows[0].tuple_relation, shared_tuple.relation.to_string());
+    assert_eq!(rows[0].tuple_object, shared_tuple.object_wire());
+    assert_eq!(rows[0].tenant_id, Some(tenant_a));
+    assert_eq!(rows[0].op, "write");
+    assert_eq!(rows[0].generation, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a full database with the bounded tenant-purge migration applied"]
+async fn outbox_typed_batch_tenant_purge_fence_aborts_caller_transaction_db() {
+    // Pins: the production outbox guard rejects ordinary desired writes for
+    // a fenced tenant, and that failure rolls back earlier allowed deletes in the
+    // same caller transaction.
+    let pool = test_pool().await;
+    let tenant_id = Uuid::new_v4();
+    let operation_id = format!("authz-batch-fence-{}", Uuid::new_v4());
+
+    sqlx::query(
+        "CREATE TRIGGER authz_outbox_tenant_purge_guard
+         BEFORE INSERT OR UPDATE ON authz_outbox
+         FOR EACH ROW EXECUTE FUNCTION moa.guard_authz_outbox_during_tenant_purge()",
+    )
+    .execute(&pool)
+    .await
+    .expect("the production tenant-purge guard should attach to the isolated outbox");
+
+    let mut transaction = pool.begin().await.expect("caller transaction should begin");
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("tenant purge fence should start");
+    enqueue_batch(
+        &mut transaction,
+        tenant_id,
+        &[tenant_operator_intent(
+            TupleOp::Delete,
+            Uuid::new_v4(),
+            tenant_id,
+        )],
+    )
+    .await
+    .expect("delete delivery should remain allowed after fencing");
+
+    let error = enqueue_batch(
+        &mut transaction,
+        tenant_id,
+        &[tenant_operator_intent(
+            TupleOp::Write,
+            Uuid::new_v4(),
+            tenant_id,
+        )],
+    )
+    .await
+    .expect_err("ordinary desired write must fail behind the tenant-purge fence");
+    let AuthzError::Database(error) = error else {
+        panic!("tenant fence should return a database error");
+    };
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref(),
+        Some("55000")
+    );
+    transaction
+        .rollback()
+        .await
+        .expect("fenced caller transaction should roll back");
+    assert_eq!(
+        raw_desired_states(&pool).await.len(),
+        0,
+        "the earlier delete must roll back with the rejected write"
     );
 }
 

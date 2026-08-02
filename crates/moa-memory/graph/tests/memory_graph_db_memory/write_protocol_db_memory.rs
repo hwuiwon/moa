@@ -8,7 +8,8 @@ use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
+    EdgeLabel, EdgeWriteIntent, GraphStore, MAX_BULK_INVALIDATE_NODES, NodeExpiryIntent, NodeLabel,
+    NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_vector::{PgvectorStore, VectorItem, VectorQuery, VectorStore};
 use moa_session::testing;
@@ -366,12 +367,259 @@ async fn changelog_node_create_count(pool: &PgPool, storage_partition_id: &str) 
     count
 }
 
+async fn changelog_edge_create_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.graph_changelog \
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'edge'",
+    )
+    .bind(storage_partition_id)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count edge create changelog rows");
+    conn.commit().await.expect("commit changelog count");
+    count
+}
+
+async fn invalidate_changelog_uids(pool: &PgPool, storage_partition_id: &str) -> Vec<Uuid> {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let uids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT target_uid FROM moa.graph_changelog \
+         WHERE storage_partition_id = $1 AND op = 'invalidate' AND target_kind = 'node' \
+         ORDER BY change_id",
+    )
+    .bind(storage_partition_id)
+    .fetch_all(conn.as_mut())
+    .await
+    .expect("read invalidate changelog uids");
+    conn.commit()
+        .await
+        .expect("commit invalidate changelog read");
+    uids
+}
+
+async fn active_incident_edge_count(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    uids: &[Uuid],
+) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.edge_index \
+         WHERE valid_to IS NULL AND (start_uid = ANY($1::UUID[]) OR end_uid = ANY($1::UUID[]))",
+    )
+    .bind(uids)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count active incident edges");
+    conn.commit()
+        .await
+        .expect("commit active incident edge count");
+    count
+}
+
+#[tokio::test]
+async fn bulk_invalidate_nodes_is_atomic_set_based_and_bounded_db_memory() {
+    // Pins: one bounded batch deterministically de-duplicates UIDs, skips missing
+    // nodes, invalidates every active node and incident edge atomically, deletes
+    // vectors in one call, emits one changelog row per node, and bumps the
+    // partition generation once for the changelog statement.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let partition = Uuid::now_v7().to_string();
+    let graph = graph_store(pool, &partition);
+    seed_workspace_embedder_state(pool, &partition).await;
+    let now = moa_test_support::fixtures::pg_now();
+    let nodes = vec![
+        node_intent(
+            &partition,
+            NodeLabel::Document,
+            "bulk invalidate document",
+            now,
+            Some(basis_vector(0)),
+        ),
+        node_intent(
+            &partition,
+            NodeLabel::Chunk,
+            "bulk invalidate chunk one",
+            now,
+            Some(basis_vector(1)),
+        ),
+        node_intent(
+            &partition,
+            NodeLabel::Chunk,
+            "bulk invalidate chunk two",
+            now,
+            Some(basis_vector(2)),
+        ),
+    ];
+    let mut node_uids = nodes.iter().map(|node| node.uid).collect::<Vec<_>>();
+    graph
+        .bulk_create_nodes(nodes)
+        .await
+        .expect("create bulk invalidation nodes");
+    graph
+        .bulk_create_edges(vec![
+            edge_intent(
+                &partition,
+                EdgeLabel::Contains,
+                node_uids[0],
+                node_uids[1],
+                20,
+            ),
+            edge_intent(
+                &partition,
+                EdgeLabel::Contains,
+                node_uids[0],
+                node_uids[2],
+                21,
+            ),
+        ])
+        .await
+        .expect("create bulk invalidation edges");
+    let missing_uid = Uuid::now_v7();
+    let version_before = workspace_version(pool, &partition).await;
+    let input = vec![
+        node_uids[2],
+        missing_uid,
+        node_uids[0],
+        node_uids[2],
+        node_uids[1],
+    ];
+
+    let invalidated = graph
+        .bulk_invalidate_nodes(&input, "knowledge_chunk_orphaned")
+        .await
+        .expect("bulk invalidate active nodes");
+
+    node_uids.sort_unstable();
+    assert_eq!(
+        invalidated, node_uids,
+        "return order is canonical UID order"
+    );
+    assert_eq!(
+        workspace_version(pool, &partition).await,
+        version_before + 1,
+        "one changelog statement bumps the partition exactly once"
+    );
+    assert_eq!(
+        invalidate_changelog_uids(pool, &partition).await,
+        node_uids,
+        "one ordered changelog row is retained per invalidated node"
+    );
+    assert_eq!(
+        active_incident_edge_count(pool, &partition, &node_uids).await,
+        0
+    );
+    let valid_to = node_valid_to(pool, &partition, node_uids[0])
+        .await
+        .expect("first node invalidated");
+    for uid in &node_uids {
+        assert_eq!(
+            node_valid_to(pool, &partition, *uid).await,
+            Some(valid_to),
+            "all nodes use one transaction timestamp"
+        );
+        assert_eq!(vector_count(pool, &partition, *uid).await, 0);
+    }
+
+    let oversized = vec![node_uids[0]; MAX_BULK_INVALIDATE_NODES + 1];
+    let version_before_oversized = workspace_version(pool, &partition).await;
+    let oversized_error = graph
+        .bulk_invalidate_nodes(&oversized, "must reject before I/O")
+        .await
+        .expect_err("oversized input fails closed even when it contains duplicates");
+    match oversized_error {
+        moa_memory_graph::Error::Conflict(message) => assert_eq!(
+            message,
+            format!(
+                "bulk node invalidation accepts at most {MAX_BULK_INVALIDATE_NODES} UIDs, got {}",
+                MAX_BULK_INVALIDATE_NODES + 1
+            )
+        ),
+        other => panic!("expected bounded-input conflict, got {other:?}"),
+    }
+    assert_eq!(
+        workspace_version(pool, &partition).await,
+        version_before_oversized,
+        "oversized input performs no database mutation"
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn bulk_invalidate_nodes_rolls_back_when_any_existing_node_is_inactive_db_memory() {
+    // Pins: preserving the single-node already-invalidated error does not leave
+    // earlier active nodes partially invalidated; validation and mutation share
+    // one transaction.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let partition = Uuid::now_v7().to_string();
+    let graph = graph_store(pool, &partition);
+    let now = moa_test_support::fixtures::pg_now();
+    let active = node_intent(&partition, NodeLabel::Chunk, "active chunk", now, None);
+    let inactive = node_intent(&partition, NodeLabel::Chunk, "inactive chunk", now, None);
+    let active_uid = active.uid;
+    let inactive_uid = inactive.uid;
+    graph
+        .bulk_create_nodes(vec![active, inactive])
+        .await
+        .expect("create inactive validation fixtures");
+    graph
+        .invalidate_node(inactive_uid, "fixture invalidation")
+        .await
+        .expect("invalidate one fixture");
+    let version_before = workspace_version(pool, &partition).await;
+
+    let error = graph
+        .bulk_invalidate_nodes(
+            &[active_uid, Uuid::now_v7(), inactive_uid],
+            "knowledge_chunk_orphaned",
+        )
+        .await
+        .expect_err("an already-invalidated member rejects the batch");
+    assert!(matches!(error, moa_memory_graph::Error::BiTemporal(_)));
+    assert_eq!(node_valid_to(pool, &partition, active_uid).await, None);
+    assert_eq!(workspace_version(pool, &partition).await, version_before);
+    assert_eq!(
+        invalidate_changelog_uids(pool, &partition).await,
+        vec![inactive_uid]
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+async fn edge_index_count(pool: &PgPool, storage_partition_id: &str, uids: &[Uuid]) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.edge_index WHERE uid = ANY($1::UUID[])",
+    )
+    .bind(uids)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count selected edge_index rows");
+    conn.commit().await.expect("commit selected edge count");
+    count
+}
+
 #[tokio::test]
 async fn bulk_create_nodes_matches_looped_singles_including_changelog_db_memory() {
     // Pins: bulk_create_nodes writes the same node_index rows in input order, one
-    // changelog row per node (so the storage-partition version bumps once per
-    // node, exactly like a loop of create_node), and the same per-node vector
-    // rows (item: bulk graph primitives).
+    // changelog row per node, one generation bump for the batch statement, and
+    // the same per-node vector rows.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -423,8 +671,9 @@ async fn bulk_create_nodes_matches_looped_singles_including_changelog_db_memory(
             .expect("single create node");
     }
 
-    // One storage-partition version bump per node in both paths.
-    assert_eq!(workspace_version(pool, &batch_partition).await, 3);
+    // The statement-level changelog trigger coalesces the batch statement to one
+    // bump; single statements still bump once apiece.
+    assert_eq!(workspace_version(pool, &batch_partition).await, 1);
     assert_eq!(workspace_version(pool, &loop_partition).await, 3);
     // Exactly one node-create changelog row per node in both paths.
     assert_eq!(changelog_node_create_count(pool, &batch_partition).await, 3);
@@ -440,6 +689,262 @@ async fn bulk_create_nodes_matches_looped_singles_including_changelog_db_memory(
     assert_eq!(vector_count(pool, &batch_partition, batch_uids[0]).await, 1);
     assert_eq!(vector_count(pool, &batch_partition, batch_uids[1]).await, 1);
     assert_eq!(vector_count(pool, &batch_partition, batch_uids[2]).await, 0);
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn bulk_create_edges_reports_only_mutations_and_bumps_generation_once_db_memory() {
+    // Pins: one set-based edge batch validates every endpoint before mutation,
+    // keeps the first duplicate UID, emits one changelog row per actual insert,
+    // and increments the partition generation once. Replay and rejected batches
+    // perform zero writes.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let partition = Uuid::now_v7().to_string();
+    let graph = graph_store(pool, &partition);
+    let now = moa_test_support::fixtures::pg_now();
+    let nodes = vec![
+        node_intent(
+            &partition,
+            NodeLabel::Document,
+            "edge batch document",
+            now,
+            None,
+        ),
+        node_intent(&partition, NodeLabel::Chunk, "edge batch chunk", now, None),
+        node_intent(&partition, NodeLabel::Fact, "edge batch fact", now, None),
+    ];
+    let node_uids = nodes.iter().map(|node| node.uid).collect::<Vec<_>>();
+    graph
+        .bulk_create_nodes(nodes)
+        .await
+        .expect("create edge endpoints");
+    let version_before = workspace_version(pool, &partition).await;
+
+    let mut first = edge_intent(
+        &partition,
+        EdgeLabel::Contains,
+        node_uids[0],
+        node_uids[1],
+        1,
+    );
+    let mut second = edge_intent(
+        &partition,
+        EdgeLabel::DerivedFrom,
+        node_uids[1],
+        node_uids[2],
+        2,
+    );
+    // Deliberately make caller order the reverse of lock order. The INSERT may
+    // lock in UID order, but its result contract remains caller order.
+    first.uid = Uuid::from_u128(2);
+    second.uid = Uuid::from_u128(1);
+    assert!(first.uid > second.uid, "fixture must oppose UID sort order");
+    let duplicate = EdgeWriteIntent {
+        properties: json!({ "kind": "must-not-win", "index": 99 }),
+        ..first.clone()
+    };
+    let inserted = graph
+        .bulk_create_edges(vec![first.clone(), second.clone(), duplicate])
+        .await
+        .expect("bulk create edges");
+    assert_eq!(inserted, vec![first.uid, second.uid]);
+    assert_eq!(
+        workspace_version(pool, &partition).await,
+        version_before + 1,
+        "N immutable edge mutations increment generation once"
+    );
+    assert_eq!(changelog_edge_create_count(pool, &partition).await, 2);
+    assert_eq!(
+        edge_index_count(pool, &partition, &[first.uid, second.uid]).await,
+        2,
+        "every prepared edge is inserted exactly once"
+    );
+    assert_eq!(
+        edge_index_row(pool, &partition, first.uid).await.properties,
+        first.properties,
+        "first duplicate occurrence owns the inserted edge"
+    );
+    assert_eq!(
+        edge_index_row(pool, &partition, second.uid)
+            .await
+            .properties,
+        second.properties
+    );
+
+    let replay_version = workspace_version(pool, &partition).await;
+    let replayed = graph
+        .bulk_create_edges(vec![first.clone(), second.clone()])
+        .await
+        .expect("replay edge batch");
+    assert!(replayed.is_empty(), "replays return no newly inserted UIDs");
+    assert_eq!(workspace_version(pool, &partition).await, replay_version);
+    assert_eq!(changelog_edge_create_count(pool, &partition).await, 2);
+
+    let missing_uid = Uuid::now_v7();
+    let invalid_endpoint = edge_intent(
+        &partition,
+        EdgeLabel::RelatesTo,
+        node_uids[0],
+        missing_uid,
+        3,
+    );
+    let endpoint_error = graph
+        .bulk_create_edges(vec![
+            edge_intent(
+                &partition,
+                EdgeLabel::RelatesTo,
+                node_uids[2],
+                node_uids[0],
+                4,
+            ),
+            invalid_endpoint,
+        ])
+        .await
+        .expect_err("one missing endpoint rejects the complete batch");
+    assert!(matches!(endpoint_error, moa_memory_graph::Error::NotFound(uid) if uid == missing_uid));
+
+    let invalid_scope = EdgeWriteIntent {
+        scope: "contact".to_string(),
+        ..edge_intent(
+            &partition,
+            EdgeLabel::RelatesTo,
+            node_uids[0],
+            node_uids[2],
+            5,
+        )
+    };
+    graph
+        .bulk_create_edges(vec![invalid_scope])
+        .await
+        .expect_err("scope mismatch rejects before mutation");
+    assert_eq!(changelog_edge_create_count(pool, &partition).await, 2);
+    assert_eq!(workspace_version(pool, &partition).await, replay_version);
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn edge_endpoint_validation_rejects_inactive_batch_end_and_in_transaction_start_db_memory() {
+    // Pins: single and set-based edge writes share the same endpoint validation.
+    // An inactive endpoint rejects the whole write with its exact active-state
+    // error, including when the invalidation is visible only in the caller's tx.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let partition = Uuid::now_v7().to_string();
+    let graph = graph_store(pool, &partition);
+    let now = moa_test_support::fixtures::pg_now();
+    let nodes = vec![
+        node_intent(&partition, NodeLabel::Document, "active start", now, None),
+        node_intent(&partition, NodeLabel::Chunk, "active middle", now, None),
+        node_intent(&partition, NodeLabel::Fact, "inactive end", now, None),
+    ];
+    let node_uids = nodes.iter().map(|node| node.uid).collect::<Vec<_>>();
+    graph
+        .bulk_create_nodes(nodes)
+        .await
+        .expect("create endpoint fixtures");
+    graph
+        .invalidate_node(node_uids[2], "inactive batch endpoint")
+        .await
+        .expect("invalidate batch end fixture");
+
+    let batch_edges = vec![
+        edge_intent(
+            &partition,
+            EdgeLabel::Contains,
+            node_uids[0],
+            node_uids[1],
+            10,
+        ),
+        edge_intent(
+            &partition,
+            EdgeLabel::DerivedFrom,
+            node_uids[1],
+            node_uids[2],
+            11,
+        ),
+    ];
+    let batch_edge_uids = batch_edges.iter().map(|edge| edge.uid).collect::<Vec<_>>();
+    let batch_version = workspace_version(pool, &partition).await;
+    let batch_error = graph
+        .bulk_create_edges(batch_edges)
+        .await
+        .expect_err("inactive batch end rejects every prepared edge");
+    match batch_error {
+        moa_memory_graph::Error::BiTemporal(message) => {
+            assert_eq!(message, format!("{} is not active", node_uids[2]));
+        }
+        other => panic!("expected inactive-end error, got {other:?}"),
+    }
+    assert_eq!(
+        edge_index_count(pool, &partition, &batch_edge_uids).await,
+        0
+    );
+    assert_eq!(changelog_edge_create_count(pool, &partition).await, 0);
+    assert_eq!(workspace_version(pool, &partition).await, batch_version);
+
+    let in_tx_edge = edge_intent(
+        &partition,
+        EdgeLabel::RelatesTo,
+        node_uids[0],
+        node_uids[1],
+        12,
+    );
+    let in_tx_edge_uid = in_tx_edge.uid;
+    let in_tx_version = workspace_version(pool, &partition).await;
+    {
+        let mut conn = scoped_conn(pool, &partition).await;
+        graph
+            .expire_node_in_conn(
+                conn.as_mut(),
+                NodeExpiryIntent {
+                    uid: node_uids[0],
+                    valid_to: now + Duration::seconds(1),
+                    invalidated_at: now + Duration::seconds(1),
+                    reason: "in-transaction inactive start".to_string(),
+                    actor_id: "test-system".to_string(),
+                    actor_kind: "system".to_string(),
+                },
+            )
+            .await
+            .expect("expire start inside caller transaction");
+        let in_tx_error =
+            moa_memory_graph::write::create_edge_in_conn(&graph, conn.as_mut(), in_tx_edge)
+                .await
+                .expect_err("in-transaction inactive start rejects edge");
+        match in_tx_error {
+            moa_memory_graph::Error::BiTemporal(message) => {
+                assert_eq!(message, format!("{} is not active", node_uids[0]));
+            }
+            other => panic!("expected inactive-start error, got {other:?}"),
+        }
+        // Dropping the caller-owned transaction rolls its invalidation back too.
+    }
+    assert_eq!(
+        node_valid_to(pool, &partition, node_uids[0]).await,
+        None,
+        "failed composed write rolls back its in-transaction invalidation"
+    );
+    assert_eq!(
+        edge_index_count(pool, &partition, &[in_tx_edge_uid]).await,
+        0
+    );
+    assert_eq!(changelog_edge_create_count(pool, &partition).await, 0);
+    assert_eq!(workspace_version(pool, &partition).await, in_tx_version);
 
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

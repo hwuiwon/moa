@@ -34,7 +34,7 @@ of the default tenant connection.
 
 ## Execution Run Operations
 
-### Fresh V000337 Inspection
+### Fresh Execution Analytics Inspection
 
 Validate the execution analytics cutover from a fresh schema, not a developer
 database whose migration history may contain an older checksum. For an
@@ -51,13 +51,14 @@ MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa \
   --ignored --exact --nocapture
 ```
 
-After migration, inspect `_refinery_schema_history` for version 337 and verify
-that `moa.execution_route_audit` has `decision`, nullable `strategy`, and bounded
-typed source/classifier provenance columns without free-form rationale. Verify
-that `moa.execution_run` and `analytics.execution_run_fact` retain typed source
-and plan-hash provenance without rationale or a constant run-mode dimension.
-Run the focused clean-apply/idempotency database test before trusting a second
-apply.
+After migration, verify that `moa.execution_route_audit` has `decision`,
+nullable `strategy`, and bounded typed source/classifier provenance columns
+without free-form rationale. Verify that `moa.execution_run` and
+`analytics.execution_run_fact` retain typed source and plan-hash provenance
+without rationale or a constant run-mode dimension. Run the focused
+clean-apply/idempotency database test before trusting a second apply. Migration
+history is validated by semantic identity and checksum through the canonical
+runner; operators should not use a hard-coded version probe as a schema check.
 
 ### Capacity And Backpressure
 

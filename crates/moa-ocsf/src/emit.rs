@@ -7,6 +7,7 @@
 //! ([`crate::init_background_audit`]); they never block or fail the caller and are
 //! used on hot request paths where an audit write must not gate the response.
 
+use crate::audit_sink::{SignedRow, insert_rows};
 use crate::classes::{
     AccountChangeEvent, Actor, AuthenticationEvent, AuthorizationEvent, DataAccess,
     DataAccessEvent, DetectionFindingEvent, EntityManagementEvent, FindingInfo, Metadata,
@@ -58,6 +59,62 @@ pub struct ActorInput {
     pub uid: String,
     /// OCSF actor user type id.
     pub type_id: i32,
+}
+
+/// One security-audit change produced by a SCIM group transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScimGroupAuditChange {
+    /// A group row was created.
+    Created {
+        /// Group identifier.
+        group_id: Uuid,
+    },
+    /// A group's durable metadata changed.
+    Updated {
+        /// Group identifier.
+        group_id: Uuid,
+    },
+    /// A group row was deleted.
+    Deleted {
+        /// Group identifier.
+        group_id: Uuid,
+    },
+    /// A membership row was inserted.
+    MembershipAdded {
+        /// Group identifier.
+        group_id: Uuid,
+        /// Added user identifier.
+        user_id: Uuid,
+    },
+    /// A membership row was deleted.
+    MembershipRemoved {
+        /// Group identifier.
+        group_id: Uuid,
+        /// Removed user identifier.
+        user_id: Uuid,
+    },
+    /// An authorization tuple was granted without changing membership.
+    PrivilegeGranted {
+        /// Group identifier whose mapping changed.
+        group_id: Uuid,
+        /// Retained member receiving the privilege.
+        user_id: Uuid,
+        /// Exact OpenFGA relation granted.
+        relation: String,
+        /// Exact OpenFGA object wire identifier granted.
+        object: String,
+    },
+    /// An authorization tuple was revoked without changing membership.
+    PrivilegeRevoked {
+        /// Group identifier whose mapping changed.
+        group_id: Uuid,
+        /// Retained member losing the privilege.
+        user_id: Uuid,
+        /// Exact OpenFGA relation revoked.
+        relation: String,
+        /// Exact OpenFGA object wire identifier revoked.
+        object: String,
+    },
 }
 
 struct EntityEventInput<'a> {
@@ -396,8 +453,11 @@ pub async fn emit_data_access(
     let event = data_access_event(&access);
     let value = serde_json::to_value(&event)?;
     let mut tx = pool.begin().await?;
-    let (signing_key_id, signature_hex, event_jcs) =
-        signing::sign_tx(&mut tx, tenant_id.0, &value).await?;
+    let signing::SignedPayload {
+        signing_key_id,
+        signature_hex,
+        event_jcs,
+    } = signing::sign_tx(&mut tx, tenant_id.0, &value).await?;
     let columns = EventColumns::from_value(&value);
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -695,98 +755,47 @@ pub async fn emit_scim_user_deleted_tx(
     .await
 }
 
-/// Emit a SCIM group creation event in an existing transaction.
-pub async fn emit_scim_group_created_tx(
+/// Emit a bounded batch of SCIM group changes in the caller's transaction.
+///
+/// The whole batch uses one active tenant signing key and one array/`UNNEST`
+/// insert. Empty input is a true no-op: it does not look up or create a key.
+pub async fn emit_scim_group_changes_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     actor: ActorInput,
-    group_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    emit_group_entity_tx(
-        tx,
-        tenant_id,
-        actor,
-        group_id,
-        entity_activity::CREATE,
-        "Create",
-    )
-    .await
-}
-
-/// Emit a SCIM group update event in an existing transaction.
-pub async fn emit_scim_group_updated_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    group_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    emit_group_entity_tx(
-        tx,
-        tenant_id,
-        actor,
-        group_id,
-        entity_activity::UPDATE,
-        "Update",
-    )
-    .await
-}
-
-/// Emit a SCIM group delete event in an existing transaction.
-pub async fn emit_scim_group_deleted_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    group_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    emit_group_entity_tx(
-        tx,
-        tenant_id,
-        actor,
-        group_id,
-        entity_activity::DELETE,
-        "Delete",
-    )
-    .await
-}
-
-/// Emit a group membership grant event in an existing transaction.
-pub async fn emit_group_membership_added_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    group_id: Uuid,
-    user_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    let object_uid = format!("scim_group:{group_id}");
-    let event = authorization_event(
-        actor,
-        &object_uid,
-        "scim_group",
-        &format!("member user:{user_id}"),
-        true,
-        authz_activity::GRANT_PRIVILEGES,
-    );
-    insert_tx(tx, tenant_id, &event, Some(&object_uid)).await
-}
-
-/// Emit a group membership revoke event in an existing transaction.
-pub async fn emit_group_membership_removed_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    group_id: Uuid,
-    user_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    let object_uid = format!("scim_group:{group_id}");
-    let event = authorization_event(
-        actor,
-        &object_uid,
-        "scim_group",
-        &format!("member user:{user_id}"),
-        true,
-        authz_activity::REVOKE_PRIVILEGES,
-    );
-    insert_tx(tx, tenant_id, &event, Some(&object_uid)).await
+    changes: &[ScimGroupAuditChange],
+) -> Result<Vec<Uuid>, EmitError> {
+    if changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (values, target_resource_uids): (Vec<_>, Vec<_>) = changes
+        .iter()
+        .map(|change| scim_group_event(actor.clone(), change))
+        .collect::<Result<Vec<_>, EmitError>>()?
+        .into_iter()
+        .unzip();
+    let signed = signing::sign_batch_tx(tx, tenant_id, &values).await?;
+    if signed.len() != values.len() {
+        return Err(EmitError::InvalidInput(
+            "SCIM group signing cardinality mismatch".to_string(),
+        ));
+    }
+    let rows: Vec<_> = values
+        .into_iter()
+        .zip(target_resource_uids)
+        .zip(signed)
+        .map(|((value, target_resource_uid), signed)| SignedRow {
+            columns: EventColumns::from_value(&value),
+            tenant_id,
+            target_resource_uid: Some(target_resource_uid),
+            event_jcs: signed.event_jcs,
+            signature_hex: signed.signature_hex,
+            signing_key_id: signed.signing_key_id,
+        })
+        .collect();
+    let ids = rows.iter().map(|row| row.columns.id).collect();
+    insert_rows(&mut **tx, &rows).await?;
+    Ok(ids)
 }
 
 /// Emit an approval decision event in an existing transaction.
@@ -819,7 +828,13 @@ async fn emit_entity_tx(
     actor: ActorInput,
     input: EntityEventInput<'_>,
 ) -> Result<Uuid, EmitError> {
-    let event = EntityManagementEvent {
+    let target_resource_uid = input.entity_uid.to_string();
+    let event = entity_event(actor, input);
+    insert_tx(tx, tenant_id, &event, Some(&target_resource_uid)).await
+}
+
+fn entity_event(actor: ActorInput, input: EntityEventInput<'_>) -> EntityManagementEvent {
+    EntityManagementEvent {
         class_uid: class_uid::ENTITY_MANAGEMENT,
         class_name: "Entity Management".to_string(),
         category_uid: category_uid::IAM,
@@ -838,8 +853,7 @@ async fn emit_entity_tx(
             resource_type: input.entity_type.to_string(),
         },
         comment: input.comment.map(str::to_string),
-    };
-    insert_tx(tx, tenant_id, &event, Some(input.entity_uid)).await
+    }
 }
 
 async fn emit_account_tx(
@@ -879,28 +893,119 @@ async fn emit_account_tx(
     insert_tx(tx, tenant_id, &event, Some(user_uid)).await
 }
 
-async fn emit_group_entity_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
+fn scim_group_event(
+    actor: ActorInput,
+    change: &ScimGroupAuditChange,
+) -> Result<(Value, String), EmitError> {
+    let (event, target_resource_uid) = match change {
+        ScimGroupAuditChange::Created { group_id } => {
+            scim_group_entity_event(actor, *group_id, entity_activity::CREATE, "Create")?
+        }
+        ScimGroupAuditChange::Updated { group_id } => {
+            scim_group_entity_event(actor, *group_id, entity_activity::UPDATE, "Update")?
+        }
+        ScimGroupAuditChange::Deleted { group_id } => {
+            scim_group_entity_event(actor, *group_id, entity_activity::DELETE, "Delete")?
+        }
+        ScimGroupAuditChange::MembershipAdded { group_id, user_id } => scim_group_membership_event(
+            actor,
+            *group_id,
+            *user_id,
+            authz_activity::GRANT_PRIVILEGES,
+        )?,
+        ScimGroupAuditChange::MembershipRemoved { group_id, user_id } => {
+            scim_group_membership_event(
+                actor,
+                *group_id,
+                *user_id,
+                authz_activity::REVOKE_PRIVILEGES,
+            )?
+        }
+        ScimGroupAuditChange::PrivilegeGranted {
+            group_id,
+            user_id,
+            relation,
+            object,
+        } => scim_group_privilege_event(
+            actor,
+            *group_id,
+            *user_id,
+            relation,
+            object,
+            authz_activity::GRANT_PRIVILEGES,
+        )?,
+        ScimGroupAuditChange::PrivilegeRevoked {
+            group_id,
+            user_id,
+            relation,
+            object,
+        } => scim_group_privilege_event(
+            actor,
+            *group_id,
+            *user_id,
+            relation,
+            object,
+            authz_activity::REVOKE_PRIVILEGES,
+        )?,
+    };
+    Ok((event, target_resource_uid))
+}
+
+fn scim_group_entity_event(
     actor: ActorInput,
     group_id: Uuid,
     activity_id: i32,
     activity_name: &str,
-) -> Result<Uuid, EmitError> {
-    let entity_uid = format!("scim_group:{group_id}");
-    emit_entity_tx(
-        tx,
-        tenant_id,
+) -> Result<(Value, String), EmitError> {
+    let target = format!("scim_group:{group_id}");
+    let event = entity_event(
         actor,
         EntityEventInput {
             activity_id,
             activity_name,
-            entity_uid: &entity_uid,
+            entity_uid: &target,
             entity_type: "scim_group",
             comment: None,
         },
-    )
-    .await
+    );
+    Ok((serde_json::to_value(event)?, target))
+}
+
+fn scim_group_membership_event(
+    actor: ActorInput,
+    group_id: Uuid,
+    user_id: Uuid,
+    activity_id: i32,
+) -> Result<(Value, String), EmitError> {
+    let target = format!("scim_group:{group_id}");
+    let event = authorization_event(
+        actor,
+        &target,
+        "scim_group",
+        &format!("member user:{user_id}"),
+        true,
+        activity_id,
+    );
+    Ok((serde_json::to_value(event)?, target))
+}
+
+fn scim_group_privilege_event(
+    actor: ActorInput,
+    group_id: Uuid,
+    user_id: Uuid,
+    relation: &str,
+    object: &str,
+    activity_id: i32,
+) -> Result<(Value, String), EmitError> {
+    let resource_type = object
+        .split_once(':')
+        .map_or("authorization_object", |pair| pair.0);
+    let mut event = authorization_event(actor, object, resource_type, relation, true, activity_id);
+    event.privileges.extend([
+        format!("subject:operator:{user_id}"),
+        format!("source:scim_group:{group_id}"),
+    ]);
+    Ok((serde_json::to_value(event)?, object.to_string()))
 }
 
 async fn insert_pool<E: serde::Serialize>(
@@ -922,35 +1027,24 @@ async fn insert_tx<E: serde::Serialize>(
     target_resource_uid: Option<&str>,
 ) -> Result<Uuid, EmitError> {
     let value = serde_json::to_value(event)?;
-    let (signing_key_id, signature_hex, event_jcs) =
-        signing::sign_tx(tx, tenant_id, &value).await?;
+    let signing::SignedPayload {
+        signing_key_id,
+        signature_hex,
+        event_jcs,
+    } = signing::sign_tx(tx, tenant_id, &value).await?;
     let columns = EventColumns::from_value(&value);
     let id = columns.id;
-
-    sqlx::query(
-        r#"
-        INSERT INTO security_events
-            (id, tenant_id, class_uid, activity_id, category_uid, severity_id,
-             type_uid, actor_user_uid, actor_session_uid, target_resource_uid,
-             event_jcs, signature_hex, signing_key_id, occurred_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-        "#,
+    insert_rows(
+        &mut **tx,
+        &[SignedRow {
+            columns,
+            tenant_id,
+            target_resource_uid: target_resource_uid.map(str::to_string),
+            event_jcs,
+            signature_hex,
+            signing_key_id,
+        }],
     )
-    .bind(id)
-    .bind(tenant_id)
-    .bind(columns.class_uid)
-    .bind(columns.activity_id)
-    .bind(columns.category_uid)
-    .bind(columns.severity_id)
-    .bind(columns.type_uid)
-    .bind(columns.actor_user_uid)
-    .bind(columns.actor_session_uid)
-    .bind(target_resource_uid)
-    .bind(&event_jcs)
-    .bind(signature_hex)
-    .bind(signing_key_id)
-    .bind(columns.occurred_at)
-    .execute(&mut **tx)
     .await?;
 
     Ok(id)
@@ -1182,8 +1276,11 @@ pub async fn emit_prompt_injection_finding(
     let columns = EventColumns::from_value(&value);
 
     let mut tx = pool.begin().await?;
-    let (signing_key_id, signature_hex, event_jcs) =
-        signing::sign_tx(&mut tx, tenant_id.0, &value).await?;
+    let signing::SignedPayload {
+        signing_key_id,
+        signature_hex,
+        event_jcs,
+    } = signing::sign_tx(&mut tx, tenant_id.0, &value).await?;
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO security_events

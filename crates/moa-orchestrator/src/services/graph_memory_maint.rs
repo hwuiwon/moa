@@ -4,7 +4,7 @@ use chrono::{NaiveDate, Utc};
 use moa_config::MoaConfig;
 use moa_core::types::identifiers::TenantId;
 use moa_memory_lifecycle::TenantConsolidationCursor;
-use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
+use moa_memory_vector::{VECTOR_SYNC_DRAIN_MAX_LIMIT, VectorStoreFactory, VectorSyncReport};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,8 @@ use std::sync::Arc;
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateRequest, consolidate_workflow_id,
 };
+
+const DEFAULT_VECTOR_SYNC_DRAIN_LIMIT: i64 = 512;
 
 /// Request payload for graph-memory compaction.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -174,15 +176,13 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("GraphMemoryMaint", "sync_vectors");
         let request = request.into_inner();
-        if request.limit <= 0 {
-            return Err(TerminalError::new("vector sync drain limit must be positive").into());
-        }
+        let limit = validate_vector_sync_drain_limit(request.limit)?;
         let pool = self.pool.clone();
         let config = self.config.clone();
         Ok(ctx
             .run(|| async move {
                 let report = VectorStoreFactory::from_config(config.as_ref())
-                    .drain_external_sync(&pool, request.limit)
+                    .drain_external_sync(&pool, limit)
                     .await
                     .map_err(|error| TerminalError::new(format!("drain vector sync: {error}")))?;
                 Ok::<_, HandlerError>(Json::from(report))
@@ -226,7 +226,17 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
 }
 
 fn default_vector_sync_drain_limit() -> i64 {
-    512
+    DEFAULT_VECTOR_SYNC_DRAIN_LIMIT
+}
+
+fn validate_vector_sync_drain_limit(limit: i64) -> Result<i64, HandlerError> {
+    if !(1..=VECTOR_SYNC_DRAIN_MAX_LIMIT).contains(&limit) {
+        return Err(TerminalError::new(format!(
+            "vector sync drain limit must be between 1 and {VECTOR_SYNC_DRAIN_MAX_LIMIT}, got {limit}"
+        ))
+        .into());
+    }
+    Ok(limit)
 }
 
 async fn discover_tenant_cursors(
@@ -386,6 +396,24 @@ mod tests {
         };
 
         assert_eq!(request.tenant_id, Some(tenant(7)));
+    }
+
+    #[test]
+    fn vector_sync_drain_limit_is_positive_and_bounded() {
+        // Pins: the maintenance wire boundary accepts the documented default/max
+        // and rejects values that could create an unbounded claim transaction.
+        assert_eq!(
+            default_vector_sync_drain_limit(),
+            DEFAULT_VECTOR_SYNC_DRAIN_LIMIT
+        );
+        assert_eq!(validate_vector_sync_drain_limit(1).ok(), Some(1));
+        assert_eq!(
+            validate_vector_sync_drain_limit(VECTOR_SYNC_DRAIN_MAX_LIMIT).ok(),
+            Some(VECTOR_SYNC_DRAIN_MAX_LIMIT)
+        );
+        assert!(validate_vector_sync_drain_limit(0).is_err());
+        assert!(validate_vector_sync_drain_limit(-1).is_err());
+        assert!(validate_vector_sync_drain_limit(VECTOR_SYNC_DRAIN_MAX_LIMIT + 1).is_err());
     }
 
     fn tenant(value: u128) -> TenantId {

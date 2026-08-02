@@ -50,9 +50,9 @@ ON CONFLICT (tuple_user, tuple_relation, tuple_object, model_version) DO NOTHING
 ```
 
 Normal tenant provisioning and tenant-admin setup paths enqueue the tenant
-attachment automatically. Existing tenants are backfilled by the workspace authz
-migration using the canonical workspace id and the current `MODEL_VERSION`
-from `moa-authz-schema`. Every tenant should have exactly one current tenant-to-workspace tuple.
+attachment automatically using the canonical workspace id and the current
+`MODEL_VERSION` from `moa-authz-schema`. Every tenant should have exactly one
+current tenant-to-workspace tuple.
 
 The public authz administration route is intentionally limited to typed
 API-key tenant role grants and revocations. Do not use public HTTP routes to

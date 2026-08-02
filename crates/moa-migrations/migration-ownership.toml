@@ -75,10 +75,9 @@ readers = ["moa-orchestrator", "moa-messaging"]
 
 [[table]]
 name = "session_attachments"
-schema = "%I"
+schema = "public"
 owner = "moa-session"
 readers = ["moa-edge", "moa-orchestrator", "moa-brain"]
-notes = "Created in each tenant schema by a format-qualified migration."
 
 [[table]]
 name = "api_keys"
@@ -101,15 +100,10 @@ schema = "public"
 owner = "moa-orchestrator"
 
 [[table]]
-name = "tenant_audit_destinations"
-schema = "public"
-owner = "moa-ocsf"
-
-[[table]]
 name = "security_events"
 schema = "public"
 owner = "moa-ocsf"
-notes = "OCSF event storage; retrieval idempotency DDL is owned by V000345."
+notes = "OCSF event storage with retrieval idempotency enforced by its final-shape schema."
 
 [[table]]
 name = "node_index"
@@ -209,10 +203,9 @@ readers = ["moa-lineage/audit", "moa-memory/pii"]
 
 [[table]]
 name = "session_blobs"
-schema = "%I"
+schema = "public"
 owner = "moa-session"
 readers = ["moa-edge", "moa-orchestrator", "moa-brain"]
-notes = "Created in each tenant schema by a format-qualified migration."
 
 [[table]]
 name = "audit_roots"
@@ -238,21 +231,6 @@ owner = "moa-analytics"
 name = "compliance_tenants"
 schema = "analytics"
 owner = "moa-analytics"
-
-[[table]]
-name = "eval_dataset_items"
-schema = "analytics"
-owner = "moa-eval"
-
-[[table]]
-name = "eval_datasets"
-schema = "analytics"
-owner = "moa-eval"
-
-[[table]]
-name = "eval_run_status"
-schema = "analytics"
-owner = "moa-eval"
 
 [[table]]
 name = "lineage_dead_letters"
@@ -288,11 +266,6 @@ owner = "moa-artifacts"
 
 [[table]]
 name = "artifact_file"
-schema = "moa"
-owner = "moa-artifacts"
-
-[[table]]
-name = "artifact_node_run"
 schema = "moa"
 owner = "moa-artifacts"
 
@@ -334,7 +307,7 @@ name = "artifact_activation_audit"
 schema = "moa"
 owner = "moa-artifacts"
 readers = ["moa-orchestrator"]
-notes = "Append-only during normal operation: one record per serving pointer move or rollback, written in the same transaction. Tenant erasure uses the owner-only exact-partition purge seam."
+notes = "Append-only during normal operation: one record per serving pointer move or rollback, written in the same transaction. Tenant offboarding deletes it only through the validated, bounded catalog purge."
 
 [[table]]
 name = "artifact_release_dispatch_outbox"
@@ -360,11 +333,6 @@ name = "artifact_release_attempt"
 schema = "moa"
 owner = "moa-orchestrator"
 notes = "Release-attempt and attestation review surface for hand-authored and learned artifacts."
-
-[[table]]
-name = "artifact_run"
-schema = "moa"
-owner = "moa-artifacts"
 
 [[table]]
 name = "audit_jti_used"
@@ -713,6 +681,13 @@ schema = "moa"
 owner = "moa-orchestrator"
 
 [[table]]
+name = "tenant_purge_catalog"
+schema = "moa"
+owner = "moa-orchestrator"
+readers = ["moa-migrations"]
+notes = "Closed 130-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
+
+[[table]]
 name = "tenant_user_invitations"
 schema = "public"
 owner = "moa-edge"
@@ -762,42 +737,6 @@ name = "knowledge_source_principal_group_bindings"
 schema = "moa"
 owner = "moa-knowledge"
 readers = ["moa-db"]
-
-[[table]]
-name = "tenant_mcp_connection_bindings"
-schema = "public"
-owner = "moa-hands"
-notes = "Historical ownership record for V000358; V000367 drops this unsupported tenant-owned MCP table."
-
-[[table]]
-name = "knowledge_rebuild_operation"
-schema = "moa"
-owner = "moa-memory-vector"
-notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
-
-[[table]]
-name = "knowledge_rebuild_generation"
-schema = "moa"
-owner = "moa-memory-vector"
-notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
-
-[[table]]
-name = "knowledge_active_generation"
-schema = "moa"
-owner = "moa-memory-vector"
-notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
-
-[[table]]
-name = "knowledge_rebuild_candidate_vector"
-schema = "moa"
-owner = "moa-memory-vector"
-notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
-
-[[table]]
-name = "knowledge_rechunk_staging"
-schema = "moa"
-owner = "moa-knowledge"
-notes = "Historical ownership record for V000351; V000366 drops the unsupported rechunk schema."
 
 [[table]]
 name = "learning_candidate_source"

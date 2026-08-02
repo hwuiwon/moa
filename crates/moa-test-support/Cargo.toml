@@ -17,6 +17,7 @@ orchestrator-fixture = [
     "dep:moa-authz",
     "dep:moa-authz-schema",
     "dep:moa-execution",
+    "dep:moa-migrations",
     "dep:nix",
     "dep:opentelemetry-proto",
     "dep:prost",
@@ -34,6 +35,7 @@ moa-authz-schema = { workspace = true, optional = true }
 moa-core = { workspace = true }
 moa-wire = { workspace = true }
 moa-execution = { workspace = true, optional = true }
+moa-migrations = { workspace = true, optional = true }
 moa-security = { workspace = true }
 moa-session = { workspace = true }
 nix = { version = "0.29", features = ["signal", "process"], optional = true }

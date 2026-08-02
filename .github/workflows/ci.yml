@@ -36,6 +36,9 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Verify central migration history and ownership
+        run: CARGO_TARGET_DIR=target/tools cargo run -p xtask --locked -- check-migrations
+
       - name: Check formatting
         run: cargo fmt --all --check
 

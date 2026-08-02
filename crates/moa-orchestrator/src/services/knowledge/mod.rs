@@ -856,17 +856,18 @@ pub trait KnowledgeCredentialStore: Send + Sync {
         caller: &KnowledgeCaller,
     ) -> Result<(), KnowledgeServiceError>;
 
-    /// Reports whether one connection's MOA-managed credential is still usable.
+    /// Reports credential status for exact, already-authorized connections.
     ///
-    /// Returns `None` for a provider-native handle that MOA does not store. This
-    /// deliberately takes one exact connection rather than listing a tenant's
-    /// credentials: there is no enumeration surface to authorize.
-    async fn credential_status(
+    /// The returned vector matches input order. Provider-native handles return
+    /// `None`; managed references report present, revoked, superseded, or
+    /// missing. Implementations must use one batch metadata read rather than a
+    /// tenant credential enumeration or one read per connection.
+    async fn credential_statuses(
         &self,
         tenant_id: TenantId,
-        connection: &KnowledgeConnection,
+        connections: &[&KnowledgeConnection],
         caller: &KnowledgeCaller,
-    ) -> Result<Option<String>, KnowledgeServiceError>;
+    ) -> Result<Vec<Option<String>>, KnowledgeServiceError>;
 }
 
 /// Credential store backed by MOA's durable tenant credential owner.
@@ -1031,31 +1032,58 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             .map_err(credential_error)
     }
 
-    async fn credential_status(
+    async fn credential_statuses(
         &self,
         tenant_id: TenantId,
-        connection: &KnowledgeConnection,
+        connections: &[&KnowledgeConnection],
         caller: &KnowledgeCaller,
-    ) -> Result<Option<String>, KnowledgeServiceError> {
-        let Some(reference) = managed_credential_reference(&connection.credential_ref) else {
-            return Ok(None);
-        };
-        // Status is a metadata read for a reference this tenant already holds:
-        // no material is opened and no listing is performed.
+    ) -> Result<Vec<Option<String>>, KnowledgeServiceError> {
+        let mut requested = Vec::new();
+        let mut selectors = Vec::new();
+        for connection in connections {
+            if connection.tenant_id != tenant_id {
+                return Err(KnowledgeServiceError::NotFound("knowledge connection"));
+            }
+            if let Some(reference) = managed_credential_reference(&connection.credential_ref) {
+                requested.push((connection.connection_uid, reference));
+                selectors.push(format!(
+                    "{}:{}",
+                    connection.connection_uid,
+                    reference.as_uuid()
+                ));
+            }
+        }
+        let selector_refs = selectors.iter().map(String::as_str).collect::<Vec<_>>();
         let ctx = Self::context(
             tenant_id,
             caller.principal(),
             CredentialOperation::Resolve,
-            &caller.step(&format!("credential-status-{}", connection.connection_uid)),
-            &[&connection.connection_uid.to_string()],
+            &caller.step("credential-status-batch"),
+            &selector_refs,
         );
-        match self.vault.describe(reference, &ctx).await {
-            Ok(version) if version.revoked => Ok(Some("revoked".to_string())),
-            Ok(version) if !version.active => Ok(Some("superseded".to_string())),
-            Ok(_) => Ok(Some("present".to_string())),
-            Err(CredentialError::NotFound) => Ok(Some("missing".to_string())),
-            Err(error) => Err(credential_error(error)),
-        }
+        let versions = self
+            .vault
+            .describe_batch(&requested, &ctx)
+            .await
+            .map_err(credential_error)?;
+        let versions = versions.into_iter().collect::<HashMap<_, _>>();
+
+        Ok(connections
+            .iter()
+            .map(|connection| {
+                let reference = managed_credential_reference(&connection.credential_ref)?;
+                Some(match versions.get(&connection.connection_uid) {
+                    Some(version) if version.reference == reference && version.revoked => {
+                        "revoked".to_string()
+                    }
+                    Some(version) if version.reference == reference && !version.active => {
+                        "superseded".to_string()
+                    }
+                    Some(version) if version.reference == reference => "present".to_string(),
+                    _ => "missing".to_string(),
+                })
+            })
+            .collect())
     }
 }
 

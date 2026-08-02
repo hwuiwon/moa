@@ -9,7 +9,7 @@
 //!   contribution, retention, consent, and erasure provenance the plan demands.
 //! * [`ReleaseCase`] denies unknown fields, so a case body that smuggles a
 //!   `transcript` key fails to deserialize before it ever reaches an assertion --
-//!   the same rule the `V000374` check constraint states in the schema.
+//!   the same rule the release-evaluation schema constraint states.
 //! * [`CohortVisibility`] separates the authoring cases a tenant may see from the
 //!   hidden release cohort that decides, and [`MergedCasePlan`] accepts only the
 //!   platform-owned plan revision shared by both packs.
@@ -124,6 +124,46 @@ pub struct PinnedDependency {
     pub revision_uid: Uuid,
 }
 
+/// Maximum number of draft dependencies one release submission may pin.
+///
+/// The cap bounds both the serialized dispatch payload and the relation used to
+/// validate pins before a release attempt is enqueued.
+pub const MAX_PINNED_DEPENDENCIES: usize = 256;
+
+/// Returns the bounded canonical dependency set for one release submission.
+///
+/// Exact duplicates collapse to one pin. Pinning one artifact to more than one
+/// revision is ambiguous and therefore rejected rather than resolved by input
+/// order.
+pub(super) fn canonicalize_pinned_dependencies(
+    mut pins: Vec<PinnedDependency>,
+) -> Result<Vec<PinnedDependency>, Error> {
+    if pins.len() > MAX_PINNED_DEPENDENCIES {
+        return Err(Error::PinnedDependencyInvalid(format!(
+            "a release may pin at most {MAX_PINNED_DEPENDENCIES} dependencies; received {}",
+            pins.len()
+        )));
+    }
+
+    pins.sort_unstable_by_key(|pin| (pin.artifact_uid, pin.revision_uid));
+    let mut canonical: Vec<PinnedDependency> = Vec::with_capacity(pins.len());
+    for pin in pins {
+        if let Some(previous) = canonical.last()
+            && previous.artifact_uid == pin.artifact_uid
+        {
+            if previous.revision_uid != pin.revision_uid {
+                return Err(Error::PinnedDependencyInvalid(format!(
+                    "artifact {} is pinned to conflicting revisions {} and {}",
+                    pin.artifact_uid, previous.revision_uid, pin.revision_uid
+                )));
+            }
+            continue;
+        }
+        canonical.push(pin);
+    }
+    Ok(canonical)
+}
+
 /// Whether a case pack is tenant-visible authoring signal or the hidden gate.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -199,7 +239,7 @@ pub enum ScenarioSource {
 ///
 /// `deny_unknown_fields` is the point: a case body carrying `transcript`,
 /// `messages`, `events`, or `turns` fails to deserialize here, which is the Rust
-/// half of the `V000374` schema check.
+/// half of the release-evaluation schema check.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseCase {
@@ -803,6 +843,48 @@ mod tests {
             scenario_source: ScenarioSource::ApprovedPack,
             pack_hash: Digest32([7_u8; 32]),
         }
+    }
+
+    // Pins: the canonical pin relation accepts its exact documented boundary,
+    // removes exact duplicates, orders rows, and rejects one row beyond the cap.
+    #[test]
+    fn pinned_dependency_set_is_canonical_and_bounded_offline() {
+        let reversed = (1..=MAX_PINNED_DEPENDENCIES)
+            .rev()
+            .map(|index| PinnedDependency {
+                artifact_uid: Uuid::from_u128(index as u128),
+                revision_uid: Uuid::from_u128((MAX_PINNED_DEPENDENCIES + index) as u128),
+            })
+            .collect::<Vec<_>>();
+        let canonical = canonicalize_pinned_dependencies(reversed.clone())
+            .expect("the exact maximum of unique pins is valid");
+        assert_eq!(canonical.len(), MAX_PINNED_DEPENDENCIES);
+        assert!(
+            canonical
+                .windows(2)
+                .all(|pins| pins[0].artifact_uid < pins[1].artifact_uid),
+            "canonical dependencies must be strictly artifact-ordered"
+        );
+        let deduplicated =
+            canonicalize_pinned_dependencies(vec![reversed[0], reversed[1], reversed[0]])
+                .expect("exact duplicate pins collapse");
+        assert_eq!(deduplicated, vec![reversed[1], reversed[0]]);
+
+        let mut over_cap = reversed;
+        over_cap.push(PinnedDependency {
+            artifact_uid: Uuid::from_u128((MAX_PINNED_DEPENDENCIES + 1) as u128),
+            revision_uid: Uuid::from_u128((MAX_PINNED_DEPENDENCIES * 3) as u128),
+        });
+        let error = canonicalize_pinned_dependencies(over_cap)
+            .expect_err("one input row beyond the cap must be refused");
+        assert!(matches!(
+            error,
+            Error::PinnedDependencyInvalid(detail)
+                if detail == format!(
+                    "a release may pin at most {MAX_PINNED_DEPENDENCIES} dependencies; received {}",
+                    MAX_PINNED_DEPENDENCIES + 1
+                )
+        ));
     }
 
     // Pins: a raw transcript cannot be represented as scenario or persona input,

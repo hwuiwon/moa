@@ -189,7 +189,7 @@ fn executable_skill_artifact_revision_files_convert_to_skill_package() {
     assert_eq!(
         error.to_string(),
         format!(
-            "artifact revision {} is archived and is not executable skill content",
+            "validation error: artifact revision {} is archived and is not executable skill content",
             revision.revision_uid
         )
     );

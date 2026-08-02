@@ -1,14 +1,17 @@
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
-    ArtifactFile, ArtifactRegistry, MAX_FILE_SIZE_BYTES, NewArtifactDraft, NewArtifactFile,
+    ArtifactFile, ArtifactRegistry, MAX_FILE_SIZE_BYTES, MAX_FILES_PER_REVISION,
+    MAX_TOTAL_FILE_SIZE_BYTES, NewArtifactDraft, NewArtifactFile,
 };
 use moa_artifacts::release::{ActivationTarget, TenantScope};
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
-    types::contact::ContactId, types::identifiers::TenantId,
+    types::contact::ContactId, types::identifiers::TenantId, types::memory::RlsContext,
 };
+use moa_db::ScopedConn;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -152,6 +155,170 @@ async fn registry_rejects_oversize_artifact_file_db_memory() -> Result<()> {
             .await?
             .is_none(),
         "rolled-back oversize draft must not persist an artifact"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_persists_maximum_artifact_file_count_db_memory() -> Result<()> {
+    // Pins: the exact 128-file boundary is accepted, and every row keeps its
+    // bytes, digest, content type, executable bit, and deterministic path order.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+    let name = format!("max-files-{}", Uuid::now_v7());
+    let document = skill_doc(&name, "maximum artifact file count");
+    let source = document.to_yaml().expect("serialize doc");
+    let files = (0..MAX_FILES_PER_REVISION)
+        .rev()
+        .map(|index| NewArtifactFile {
+            path: format!("files/{index:03}.bin"),
+            content: vec![u8::try_from(index).expect("128 files fit in u8"); index + 1],
+            content_type: Some(format!("application/x-moa-fixture-{index:03}")),
+            executable: index % 2 == 0,
+        })
+        .collect::<Vec<_>>();
+
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &files,
+            },
+        )
+        .await?;
+    let loaded = registry.load_files(&scope, draft.revision_uid).await?;
+
+    assert_eq!(loaded.len(), MAX_FILES_PER_REVISION);
+    for (index, file) in loaded.iter().enumerate() {
+        let expected_content = vec![u8::try_from(index).expect("128 files fit in u8"); index + 1];
+        assert_eq!(file.path, format!("files/{index:03}.bin"));
+        assert_eq!(file.content, expected_content);
+        assert_eq!(file.content_sha256, Sha256::digest(&file.content).to_vec());
+        assert_eq!(
+            file.content_type.as_deref(),
+            Some(format!("application/x-moa-fixture-{index:03}").as_str())
+        );
+        assert_eq!(file.executable, index % 2 == 0);
+        assert_eq!(
+            file.file_size_bytes,
+            i64::try_from(index + 1).expect("fixture size fits i64")
+        );
+    }
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_rejects_file_count_above_limit_before_revision_dml_db_memory() -> Result<()> {
+    // Pins: request-wide validation runs before artifact/revision/file DML. The
+    // caller intentionally commits its still-usable transaction after the error;
+    // a validation check placed after any DML would leak that partial state.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let name = format!("too-many-files-{}", Uuid::now_v7());
+    let document = skill_doc(&name, "too many artifact files");
+    let source = document.to_yaml().expect("serialize doc");
+    let files = (0..=MAX_FILES_PER_REVISION)
+        .map(|index| NewArtifactFile::new(format!("files/{index:03}.txt"), vec![b'x']))
+        .collect::<Vec<_>>();
+    let mut conn = ScopedConn::begin(registry.pool(), &RlsContext::tenant(tenant_id)).await?;
+
+    let error = ArtifactRegistry::create_draft_in_tx(
+        conn.as_mut(),
+        &scope,
+        NewArtifactDraft {
+            document: &document,
+            source_format: "yaml",
+            source_text: source.as_bytes(),
+            files: &files,
+        },
+    )
+    .await
+    .expect_err("a revision above the file-count cap must reject");
+    assert!(
+        matches!(error, MoaError::ValidationError(ref message) if message.contains("too many files")),
+        "unexpected error: {error:?}"
+    );
+    conn.commit().await?;
+
+    assert!(
+        registry
+            .load_visible(&scope, ArtifactKind::Skill, &name)
+            .await?
+            .is_none(),
+        "committing after validation failure must not expose partial artifact or revision DML"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_rejects_total_file_bytes_above_limit_before_revision_dml_db_memory() -> Result<()>
+{
+    // Pins: individually valid files whose collection is one byte above 64 MiB
+    // fail before artifact/revision/file DML, even if the caller commits afterward.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let name = format!("too-many-file-bytes-{}", Uuid::now_v7());
+    let document = skill_doc(&name, "too many artifact file bytes");
+    let source = document.to_yaml().expect("serialize doc");
+    let full_files = MAX_TOTAL_FILE_SIZE_BYTES / MAX_FILE_SIZE_BYTES;
+    let final_size = MAX_TOTAL_FILE_SIZE_BYTES % MAX_FILE_SIZE_BYTES + 1;
+    let mut files = (0..full_files)
+        .map(|index| {
+            NewArtifactFile::new(
+                format!("files/full-{index:02}.bin"),
+                vec![0_u8; MAX_FILE_SIZE_BYTES],
+            )
+        })
+        .collect::<Vec<_>>();
+    files.push(NewArtifactFile::new(
+        "files/remainder.bin",
+        vec![0_u8; final_size],
+    ));
+    let mut conn = ScopedConn::begin(registry.pool(), &RlsContext::tenant(tenant_id)).await?;
+
+    let error = ArtifactRegistry::create_draft_in_tx(
+        conn.as_mut(),
+        &scope,
+        NewArtifactDraft {
+            document: &document,
+            source_format: "yaml",
+            source_text: source.as_bytes(),
+            files: &files,
+        },
+    )
+    .await
+    .expect_err("a revision above the total file-byte cap must reject");
+    assert!(
+        matches!(error, MoaError::ValidationError(ref message) if message.contains("total bytes")),
+        "unexpected error: {error:?}"
+    );
+    conn.commit().await?;
+
+    assert!(
+        registry
+            .load_visible(&scope, ArtifactKind::Skill, &name)
+            .await?
+            .is_none(),
+        "committing after validation failure must not expose partial artifact or revision DML"
     );
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await

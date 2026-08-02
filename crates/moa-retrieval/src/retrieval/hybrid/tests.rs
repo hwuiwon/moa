@@ -1522,6 +1522,9 @@ fn retrieval_error_classification_matches_fatal_transient_table() {
     assert!(is_fatal_retrieval_error(&RetrievalError::Graph(
         Error::MissingScope
     )));
+    assert!(is_fatal_retrieval_error(&RetrievalError::Graph(
+        Error::InvalidSealedContent("persisted sealed row is inconsistent".to_string())
+    )));
     assert!(is_fatal_retrieval_error(&RetrievalError::Vector(
         VectorError::TurbopufferBaaRequired {
             storage_partition_id: "sp".to_string(),
@@ -2085,6 +2088,13 @@ impl GraphStore for EmptyGraph {
         &self,
         _intent: moa_memory_graph::EdgeWriteIntent,
     ) -> std::result::Result<Uuid, Error> {
+        unreachable!("not used by retrieval tests")
+    }
+
+    async fn bulk_create_edges(
+        &self,
+        _intents: Vec<moa_memory_graph::EdgeWriteIntent>,
+    ) -> std::result::Result<Vec<Uuid>, Error> {
         unreachable!("not used by retrieval tests")
     }
 

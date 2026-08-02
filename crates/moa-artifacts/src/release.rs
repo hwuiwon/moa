@@ -70,9 +70,9 @@ pub const PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID: Uuid =
 
 /// Tenant scope accepted by the release system.
 ///
-/// The release type system accepts a tenant scope only. Contact-scoped serving
-/// artifacts were archived by migration `V000373`, and this newtype is why they
-/// cannot come back: a contact scope has no conversion into a release subject.
+/// The release type system accepts a tenant scope only. A contact scope has no
+/// conversion into a release subject, so contact-scoped serving artifacts are
+/// unrepresentable.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TenantScope {
     tenant_id: TenantId,

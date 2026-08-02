@@ -155,6 +155,48 @@ async fn delete_empty_session_rejects_session_with_append_only_events() {
 }
 
 #[tokio::test]
+async fn events_require_a_positive_turn_number_without_a_default() {
+    // Pins: every event ordinal is supplied by the serialized append path; the
+    // database neither fabricates a fallback nor accepts an invalid ordinal.
+    let test_db = test_db().await;
+    let event_id = seeded_event(&test_db).await;
+    let events = shared::qualified(test_db.schema_name(), "events");
+
+    let persisted: i64 =
+        sqlx::query_scalar(&format!("SELECT turn_number FROM {events} WHERE id = $1"))
+            .bind(event_id)
+            .fetch_one(test_db.store().pool())
+            .await
+            .expect("stored event should carry a turn ordinal");
+    assert_eq!(persisted, 1, "the first event belongs to turn one");
+
+    let (nullable, default): (String, Option<String>) = sqlx::query_as(
+        "SELECT is_nullable, column_default FROM information_schema.columns \
+         WHERE table_schema = $1 AND table_name = 'events' AND column_name = 'turn_number'",
+    )
+    .bind(test_db.schema_name())
+    .fetch_one(test_db.store().pool())
+    .await
+    .expect("turn_number catalog row should exist");
+    assert_eq!(nullable, "NO");
+    assert_eq!(default, None, "turn_number must have no database default");
+
+    let constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(constraint_row.oid) \
+         FROM pg_constraint constraint_row \
+         JOIN pg_class relation ON relation.oid = constraint_row.conrelid \
+         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+         WHERE namespace.nspname = $1 AND relation.relname = 'events' \
+           AND constraint_row.conname = 'events_turn_number_positive'",
+    )
+    .bind(test_db.schema_name())
+    .fetch_one(test_db.store().pool())
+    .await
+    .expect("positive turn-number constraint should exist");
+    assert_eq!(constraint, "CHECK ((turn_number >= 1))");
+}
+
+#[tokio::test]
 async fn update_on_events_is_blocked_for_app_role() {
     let test_db = test_db().await;
     let event_id = seeded_event(&test_db).await;

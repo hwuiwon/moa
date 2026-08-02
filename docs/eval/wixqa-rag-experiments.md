@@ -207,7 +207,8 @@ These runs used 10 questions over 100 articles and are useful only for quick smo
 
 - Milestone 4 first slice adds ingestion-time Wix/support semantic extraction without query-time provider calls. The extractor emits schema-constrained entities and relations, stores confidence/provenance in graph properties, maps relations onto existing graph labels, and persists a tenant-scoped cache keyed by chunk hash, content hash, schema version, model, and prompt version.
 - The graph delta now writes semantic `Entity` nodes, `Chunk -> Entity` mention edges, semantic entity-to-entity relation edges, and conservative same-document chunk-to-chunk `RELATES_TO` links for shared high-confidence entities. Existing `AnchoredRescue` and `SourceGraph` policies do not consume semantic entity seeds by default.
-- The local eval database needed the new migration applied before rebuilding WixQA caches: `crates/moa-migrations/migrations/postgres/V000326__knowledge_semantic_graph_extractions.sql`.
+- The local eval database needed the `knowledge_semantic_graph_extractions`
+  logical migration applied before rebuilding WixQA caches.
 - Rebuilt a 10-question / 100-article Gemini 2 semantic graph smoke cache: `wixqa-semgraph-m4-smoke-10q-100a`. The cache has 100 articles, 116 chunks, and 116 semantic extraction cache rows.
 - SourceGraph on the rebuilt semantic cache stayed safe: `.moa/wixqa/reports/simulated-10q-100a-tp-gemini2-1024-k25-article-graph-semantic-m4-final-smoke.json` reached recall/hit/MRR/NDCG 1.000, total p95 610 ms, and 0 hurt / 0 rescue / 10 neutral.
 - Graph-off on the same cache also reached recall/hit/MRR/NDCG 1.000 with total p95 573 ms. This small set is too easy to show quality lift.

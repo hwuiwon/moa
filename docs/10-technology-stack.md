@@ -61,9 +61,11 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
-`moa-migrations` owns the central table-ownership manifest. The current 157
-table declarations resolve to 149 owned logical families, enforced by
-`cargo run -p xtask --locked -- check-migrations`.
+`moa-migrations` owns the fresh-install-only, contiguous 49-file PostgreSQL
+chain and the central table-ownership manifest. The current 139 table
+families span 142 `CREATE TABLE` declarations and map one-to-one to 139
+ownership entries. `cargo run -p xtask --locked -- check-migrations` enforces
+this contract.
 
 ## External Services
 
@@ -217,8 +219,12 @@ cargo test --workspace --no-run --locked --timings
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 MOA_DATABASE_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
-MOA_DATABASE_ADMIN_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- migrate
+MOA_DATABASE_URL=postgres://runtime-role@... MOA_DATABASE_ADMIN_URL=postgres://migration-role@... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- migrate
 ```
+
+Run `migrate` as a distinct deployment phase before any runtime replica. The
+default orchestrator command opens only `MOA_DATABASE_URL`, validates the exact
+complete embedded history, and fails closed without executing migration DDL.
 
 ## Configuration
 

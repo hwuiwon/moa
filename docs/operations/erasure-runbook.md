@@ -47,7 +47,7 @@ non-dry-run erasures with matching candidates, it records the JTI in
 If the tenant opts into dual control by setting
 `ComplianceConfig.require_dual_control_for_erasure` (default `false`), the
 erase call additionally enforces a four-eyes gate: it consumes an approved
-`moa.dual_control_request` row (migration `V000344`) bound to this exact
+`moa.dual_control_request` row, owned by the dual-control schema, bound to this exact
 erasure request, approved by a distinct second admin. Without that approval,
 the erasure fails closed with 403.
 

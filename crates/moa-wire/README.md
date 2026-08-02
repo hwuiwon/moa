@@ -14,7 +14,6 @@ One module per service surface:
 - `agents` — configured-agent service
 - `analytics` — analytics service
 - `artifacts` — artifact service
-- `eval` — hosted eval service
 - `experiments` — experiment and agent-revision simulation
 - `knowledge` — tenant knowledge-base service
 - `lineage` — lineage administration

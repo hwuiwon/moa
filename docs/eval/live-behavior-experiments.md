@@ -7,9 +7,8 @@ _Boundary between regression evals, production-path experiments, and analytics._
 Use a regression eval when the question is "did this behavior regress under a
 controlled scenario?" Regression evals live in `moa-eval`. They use datasets,
 transcripts, scripted providers, replay, and budget gates so CI and nightly
-jobs can compare runs deterministically. The `Eval` service is an
-internal-only Restate surface; hosted run status is persisted in Postgres.
-Public edge builds do not translate `/v1/evals/*` product routes.
+jobs can compare runs deterministically. There is no hosted `Eval` Restate
+service, tenant eval persistence, or `/v1/evals/*` product route.
 
 Use a live behavior experiment when the question is "what happens when this
 variant uses real MOA execution paths?" Live experiments live in
@@ -177,8 +176,7 @@ Do not put live or billed experiment checks in the default test lane.
 
 | Surface | Required authorization |
 |---|---|
-| Internal `Eval` suites, plan, run, status, datasets, replay, scores, compare | `Tenant:Operator`, which includes tenant admins and workspace admins |
-| `Eval/execute_run` | Internal dispatch token created by `Eval/run` |
+| Platform regression eval harness | CI or explicitly enabled operator-run `xtask`/live lanes; it is not tenant-authorized product traffic |
 | `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Tenant:Operator`, which includes tenant admins and workspace admins |
 | `Experiments/status`, `list`, `list_plans`, `trials`, `trial_status`, `scores`, `compare` | `Tenant:Operator`, which includes tenant admins and workspace admins |
 | `Experiments/run_agent_revision_simulation`, `compare_agent_revision_simulation` | `Tenant:Operator`, which includes tenant admins and workspace admins |
@@ -186,8 +184,7 @@ Do not put live or billed experiment checks in the default test lane.
 | direct edge `POST /v1/analytics/query` | `Tenant:Operator` |
 | direct edge `lineage/explain`, `query`, `verify` | tenant-authorized direct edge read |
 
-Future MCP support is a thin adapter over product/default typed services such
-as `Experiments`, direct edge analytics/lineage reads, and `Skills`. If it exposes
-internal eval at all, that surface must remain explicitly internal. MCP must
-forward through the same DTOs and authorization boundaries instead of owning
-eval, experiment, analytics, lineage, or learning domain logic.
+MCP is a thin adapter over product/default typed services such as `Experiments`,
+direct edge analytics/lineage reads, and `Skills`. It exposes no regression-eval
+tools. MCP forwards through the same DTOs and authorization boundaries instead
+of owning experiment, analytics, lineage, or learning domain logic.

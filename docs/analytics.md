@@ -108,12 +108,17 @@ schema contract):
 
 - A leader-leased exporter in the `moa-analytics-export` crate
   incrementally copies dimension rows, the `events_raw` stream (with
-  exporter-stamped `turn_number`), and the Postgres-computed windowed facts
+  the append-time authoritative `turn_number`), and the Postgres-computed windowed facts
   (`turn_fact`, `tool_call_fact`) into ClickHouse on a poll interval
   (`clickhouse.export_poll_secs`, default 15 s). Execution dimensions use a
   sequence-backed bounded high-water cursor; other datasets retain their
   timestamp cursor. Durable cursor state lives in
   `analytics.clickhouse_export_state`.
+- Event export reads the stored turn ordinal directly. Fact recomputation first
+  joins the bounded input-session relation to every event source and loads the
+  earliest result/error terminals set-wise; a result wins when both terminal
+  kinds exist, matching the Postgres read-model contract without correlated
+  per-event probes.
 - `moa-analytics` compiles each catalog dataset to ClickHouse SQL
   (`AnalyticsBackend::ClickHouse`) and executes via
   `AnalyticsClickHouseClient`; `moa-edge` selects the backend from config and

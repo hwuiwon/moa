@@ -1003,11 +1003,27 @@ impl IsolatedDatabase {
             .await
             .with_context(|| format!("create isolated database {name}"))?;
         pool.close().await;
-        Ok(Self {
+        let database = Self {
             name,
             maintenance_url,
             database_url,
-        })
+        };
+
+        if let Err(error) = moa_migrations::run(&database.database_url).await {
+            let migration_error = error.context(format!(
+                "apply central migrations to isolated database {}",
+                database.name
+            ));
+            if let Err(cleanup_error) = database.drop_database().await {
+                return Err(migration_error.context(format!(
+                    "also failed to clean up isolated database {}: {cleanup_error:#}",
+                    database.name
+                )));
+            }
+            return Err(migration_error);
+        }
+
+        Ok(database)
     }
 
     async fn drop_database(&self) -> Result<()> {

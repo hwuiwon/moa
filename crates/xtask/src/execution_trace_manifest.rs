@@ -953,6 +953,13 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/artifact_release_evaluation/mod.rs",
+        "settle_terminal_failure",
+        TRACE_HELPER,
+        "ArtifactReleaseEvaluationClient",
+        "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/artifact_release_evaluation/mod.rs",
         "wait_for_terminal_experiment",
         IDENTITY_TRACE_HELPER,
         "ExperimentsClient",
@@ -2628,7 +2635,7 @@ mod tests {
                 "ingest_turn",
             ),
             (
-                "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
+                "crates/moa-orchestrator/src/workflows/turn_execution/responses.rs",
                 "IngestionVOClient",
                 "ingest_turn",
             ),

@@ -258,6 +258,7 @@ async fn new_version_reoccurs_unchanged_text_and_invalidates_the_superseded_one_
     let object_uid = object_uid(connection_uid);
     let first = occurrence_rows(&pool, object_uid).await;
     assert_eq!(first.len(), 2, "{first:?}");
+    let invalidate_calls_before_edit = graph.invalidate_call_count();
 
     let second_run = create_run(&repository, tenant_id, connection_uid).await;
     let edited = pipeline
@@ -316,6 +317,11 @@ async fn new_version_reoccurs_unchanged_text_and_invalidates_the_superseded_one_
         "exactly the superseded occurrences are invalidated"
     );
     assert_eq!(graph.vector_count(), 2);
+    assert_eq!(
+        graph.invalidate_call_count(),
+        invalidate_calls_before_edit + 1,
+        "all superseded chunk occurrences must use one bounded invalidation call"
+    );
     assert_eq!(
         edited.embeddings_created, 2,
         "both new occurrences get an association, unchanged content included"

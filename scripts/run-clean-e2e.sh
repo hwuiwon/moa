@@ -360,6 +360,13 @@ orchestrator_binary_path() {
   printf '%s/debug/moa-orchestrator-bin\n' "$(orchestrator_fixture_target_dir)"
 }
 
+apply_central_migrations() {
+  env \
+    MOA_DATABASE_URL="${DB_URL}" \
+    MOA_DATABASE_ADMIN_URL="${DB_URL}" \
+    cargo run -p moa-orchestrator --bin moa-orchestrator-bin --locked -- migrate
+}
+
 fga_request() {
   local method="$1"
   local path="$2"
@@ -660,6 +667,7 @@ run docker compose exec -T postgres psql -U moa_owner -d postgres \
   -v ON_ERROR_STOP=1 \
   -c "CREATE DATABASE ${DB_NAME} OWNER moa_owner"
 DB_CREATED=1
+run_phase "apply central database migrations" apply_central_migrations
 
 run_phase "bootstrap OpenFGA model" bootstrap_openfga_model
 

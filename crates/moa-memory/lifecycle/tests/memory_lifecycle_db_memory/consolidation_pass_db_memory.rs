@@ -610,9 +610,13 @@ async fn idle_floor_facts_expire_bitemporally_and_rerun_is_noop_db_memory() {
     )
     .await;
 
-    let stats = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts)
-        .await
-        .expect("run idle expiry");
+    let stats = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts),
+    )
+    .await
+    .expect("idle expiry must not deadlock behind its retention guard")
+    .expect("run idle expiry");
 
     assert_eq!(stats.expired_idle, 1, "unexpected expiry count");
     let (valid_to, reason) = node_validity(pool, expired).await;
@@ -692,9 +696,13 @@ async fn legal_hold_skips_held_subject_expiry_db_memory() {
     .await
     .expect("place legal hold");
 
-    let stats = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts)
-        .await
-        .expect("run expiry under hold");
+    let stats = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts),
+    )
+    .await
+    .expect("held-subject expiry must not deadlock on an unheld subject")
+    .expect("run expiry under hold");
 
     assert_eq!(stats.expired_idle, 1, "only the unheld subject expires");
     // The held subject's fact stays active; the unheld one is closed.

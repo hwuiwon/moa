@@ -59,7 +59,14 @@ impl Default for LineageConfig {
 }
 
 impl LineageConfig {
-    /// Refuses zero-sized queues, batches, polling intervals, leases, or drain budgets.
+    /// Maximum number of lineage rows accepted or claimed in one batch.
+    ///
+    /// This is eight times the production default: enough headroom for deliberate
+    /// throughput tuning while bounding the writer's eager allocation, one
+    /// acceptance statement, and one destruction-lock array.
+    pub const MAX_BATCH_SIZE: usize = 4_096;
+
+    /// Refuses unbounded batches and zero-sized runtime controls.
     pub fn validate(&self) -> Result<()> {
         let invalid = [
             (self.channel_capacity == 0, "channel_capacity"),
@@ -77,6 +84,16 @@ impl LineageConfig {
             Some(field) => Err(MoaError::ConfigError(format!(
                 "observability.lineage.{field} must be greater than zero"
             ))),
+            None if self.batch_size > Self::MAX_BATCH_SIZE => Err(MoaError::ConfigError(format!(
+                "observability.lineage.batch_size must be at most {}",
+                Self::MAX_BATCH_SIZE
+            ))),
+            None if self.claim_batch_size > Self::MAX_BATCH_SIZE => {
+                Err(MoaError::ConfigError(format!(
+                    "observability.lineage.claim_batch_size must be at most {}",
+                    Self::MAX_BATCH_SIZE
+                )))
+            }
             None => Ok(()),
         }
     }
@@ -116,6 +133,42 @@ mod tests {
                 error.to_string(),
                 format!(
                     "configuration error: observability.lineage.{field} must be greater than zero"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn lineage_batches_are_bounded_at_the_documented_maximum() {
+        // Pins: configured ingress allocations and claim lock arrays cannot be
+        // made arbitrarily large, while the documented maximum remains usable.
+        let mut config = LineageConfig {
+            batch_size: LineageConfig::MAX_BATCH_SIZE,
+            claim_batch_size: LineageConfig::MAX_BATCH_SIZE,
+            ..LineageConfig::default()
+        };
+        config
+            .validate()
+            .expect("the documented lineage batch maximum should be valid");
+
+        for field in ["batch_size", "claim_batch_size"] {
+            match field {
+                "batch_size" => config.batch_size = LineageConfig::MAX_BATCH_SIZE + 1,
+                "claim_batch_size" => {
+                    config.batch_size = LineageConfig::MAX_BATCH_SIZE;
+                    config.claim_batch_size = LineageConfig::MAX_BATCH_SIZE + 1;
+                }
+                _ => unreachable!("the test table contains only bounded lineage fields"),
+            }
+
+            let error = config
+                .validate()
+                .expect_err("a lineage batch above the maximum must be rejected");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "configuration error: observability.lineage.{field} must be at most {}",
+                    LineageConfig::MAX_BATCH_SIZE
                 )
             );
         }

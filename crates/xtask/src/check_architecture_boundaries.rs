@@ -1398,8 +1398,8 @@ fn scan_roots(roots: &[&str]) -> Result<Vec<Finding>> {
 /// Refuses raw production writes to the two release-control tables.
 ///
 /// Reads remain available to serving and replay repositories. All writes must
-/// cross the checked V373 SECURITY DEFINER functions, so a new Rust call site
-/// cannot silently regain direct pointer or audit DML.
+/// cross the checked release-control `SECURITY DEFINER` functions, so a new Rust
+/// call site cannot silently regain direct pointer or audit DML.
 fn scan_release_serving_writes(root: &Path) -> Result<Vec<Finding>> {
     let mut files = Vec::new();
     collect_rust_files(root, &mut files)?;
@@ -1429,7 +1429,7 @@ fn scan_release_serving_writes(root: &Path) -> Result<Vec<Finding>> {
                     findings.push(Finding::budget(
                         Rule::ReleaseServingWriteBoundary,
                         path_text.clone(),
-                        format!("`{forbidden}` bypasses the checked V373 transition functions"),
+                        format!("`{forbidden}` bypasses the checked release transition functions"),
                     ));
                 }
             }

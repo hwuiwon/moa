@@ -21,7 +21,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
 use moa_security::ActionPolicies;
-use moa_session::testing;
+use moa_test_support::postgres::bootstrap_test_db;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracing::Id;
@@ -92,10 +92,9 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     config.general.workspace_instructions = Some("Cache integration guidance.\n".repeat(200));
     config.compaction.recent_turns_verbatim = 2;
 
-    let (session_store, _database_url, _schema_name) =
-        testing::create_isolated_test_store().await?;
-    let graph_pool = session_store.pool().clone();
-    let session_store = Arc::new(session_store);
+    let test_db = bootstrap_test_db().await?;
+    let graph_pool = test_db.store().pool().clone();
+    let session_store = Arc::new(test_db.store().clone());
     let dyn_session_store: Arc<dyn SessionStore> = session_store.clone();
     let tenant_id = TenantId::from(uuid::Uuid::now_v7());
     let contact_id = ContactId::new();

@@ -35,7 +35,7 @@ Trusted headers:
 | Authorization | Self-hosted OpenFGA | Auth0 FGA-compatible engine later |
 | Token vault | `NullTokenVaultProvider` | Auth0 Token Vault |
 | Async approvals | Builtin approvals | Auth0 CIBA |
-| Security audit | OCSF rows in Postgres | Per-tenant S3/Object Lock shipping |
+| Security audit | Signed, immutable OCSF rows in Postgres | Deployment-owned external archival |
 
 Self-hosted single-tenant deployments must work without Auth0 or any managed
 identity provider. `auth.provider = "disabled"` is only for isolated local

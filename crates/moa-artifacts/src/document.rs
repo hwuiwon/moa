@@ -72,7 +72,7 @@ impl FromStr for ArtifactKind {
 /// For release-gated kinds (skill, action, agent) this is the candidate
 /// lifecycle, and none of its states serve: a session resolves the type-owned
 /// serving pointer, never a status. [`Self::Ready`] means "evaluated and
-/// activatable", not "visible". Migration `V000373` installs a trigger that makes
+/// activatable", not "visible". The artifact release-control schema makes
 /// [`Self::Published`] unrepresentable for those kinds.
 ///
 /// [`Self::Published`] survives only for kinds whose activation seam is owned

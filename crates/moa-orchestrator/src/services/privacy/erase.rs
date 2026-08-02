@@ -1,8 +1,8 @@
 //! Privacy erasure orchestration across graph memory and PII vault state.
 
 use moa_core::{
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::identifiers::UserId,
+    types::contact::ContactId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
 };
 use moa_lineage_audit::PiiVault;
 use moa_memory_pii::erasure::{
@@ -261,7 +261,7 @@ async fn run_erasure_stages(
     // learning would survive unattributably, which is the exact failure this
     // stage exists to prevent.
     if progress.stage == ErasureJobStage::Learning {
-        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+        let mut guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
             &ctx.pool,
             ctx.tenant_id,
             &destruction_subjects,
@@ -269,13 +269,14 @@ async fn run_erasure_stages(
         )
         .await
         .map_err(handler_error)?;
+        guard.assume_owner_role().await.map_err(handler_error)?;
         // The deletions and the dispositions that explain them commit in ONE
         // transaction inside this call. Splitting them would leave a window in
         // which rows are gone and nothing on record says why or under whose
         // authority — the one state a subject-access request cannot be answered
         // from.
         let decisions = erase_learning_closure(
-            &ctx.pool,
+            &mut guard,
             ctx.tenant_id,
             subject_user_id,
             attempt_id,
@@ -303,7 +304,7 @@ async fn run_erasure_stages(
     }
 
     if progress.stage == ErasureJobStage::Vault {
-        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+        let mut guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
             &ctx.pool,
             ctx.tenant_id,
             &destruction_subjects,
@@ -311,14 +312,16 @@ async fn run_erasure_stages(
         )
         .await
         .map_err(handler_error)?;
-        progress.pii_vault_erased = erase_pii_vault_subjects(ctx, subjects).await?;
+        guard.assume_owner_role().await.map_err(handler_error)?;
+        progress.pii_vault_erased =
+            erase_pii_vault_subjects(guard.connection(), ctx, subjects).await?;
         guard.finish().await.map_err(handler_error)?;
         progress.stage = ErasureJobStage::Graph;
         save_erasure_job_progress(&ctx.pool, &ctx.claims.jti, &progress).await?;
     }
 
     if progress.stage == ErasureJobStage::Graph {
-        let graph_guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+        let mut graph_guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
             &ctx.pool,
             ctx.tenant_id,
             &destruction_subjects,
@@ -327,15 +330,18 @@ async fn run_erasure_stages(
         .await
         .map_err(handler_error)?;
         for (subject, subject_candidates) in candidate_groups {
+            graph_guard
+                .assume_app_contact_scope(ctx.tenant_id, ContactId(subject.target_uid))
+                .await
+                .map_err(handler_error)?;
             hard_purge_erase_candidates(
-                &ctx.pool,
+                graph_guard.connection(),
                 &graph_erasure_audit(ctx, subject),
                 subject_candidates,
             )
             .await
             .map_err(handler_error)?;
         }
-        graph_guard.finish().await.map_err(handler_error)?;
         // Defense-in-depth: after hard-purging the live rows, destroy each
         // subject's per-subject KEK so any sealed restricted/PHI content is
         // cryptographically unrecoverable even where a `DELETE` cannot reach
@@ -348,16 +354,11 @@ async fn run_erasure_stages(
         // required context dependency: erasure fails instead of silently
         // skipping crypto-shred when composition is incomplete.
         for subject in subjects {
-            crypto_shred_erased_subject(
-                &ctx.pool,
-                ctx.kms.as_ref(),
-                ctx.tenant_id,
-                subject.target_uid,
-                destruction_operation_id,
-            )
-            .await
-            .map_err(handler_error)?;
+            crypto_shred_erased_subject(ctx.kms.as_ref(), ctx.tenant_id, subject.target_uid)
+                .await
+                .map_err(handler_error)?;
         }
+        graph_guard.finish().await.map_err(handler_error)?;
         // After the graph stage completes without error, every enumerated
         // candidate is absent — purged in this run or an earlier partial run —
         // so the authoritative candidate count is the erased count.
@@ -367,7 +368,7 @@ async fn run_erasure_stages(
     }
 
     if progress.stage == ErasureJobStage::Digest {
-        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+        let mut guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
             &ctx.pool,
             ctx.tenant_id,
             &destruction_subjects,
@@ -377,8 +378,12 @@ async fn run_erasure_stages(
         .map_err(handler_error)?;
         let mut deleted = 0u64;
         for subject in subjects {
+            guard
+                .assume_app_contact_scope(ctx.tenant_id, ContactId(subject.target_uid))
+                .await
+                .map_err(handler_error)?;
             deleted = deleted.saturating_add(
-                delete_subject_digests(&ctx.pool, ctx.tenant_id, &subject.user_id)
+                delete_subject_digests(guard.connection(), ctx.tenant_id, &subject.user_id)
                     .await
                     .map_err(handler_error)?,
             );
@@ -390,7 +395,7 @@ async fn run_erasure_stages(
     }
 
     if progress.stage == ErasureJobStage::Lineage {
-        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+        let mut guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
             &ctx.pool,
             ctx.tenant_id,
             &destruction_subjects,
@@ -400,10 +405,18 @@ async fn run_erasure_stages(
         .map_err(handler_error)?;
         let mut deleted = 0u64;
         for subject in subjects {
+            guard
+                .assume_app_contact_scope(ctx.tenant_id, ContactId(subject.target_uid))
+                .await
+                .map_err(handler_error)?;
             deleted = deleted.saturating_add(
-                delete_subject_retrieval_lineage(&ctx.pool, ctx.tenant_id, &subject.user_id)
-                    .await
-                    .map_err(handler_error)?,
+                delete_subject_retrieval_lineage(
+                    guard.connection(),
+                    ctx.tenant_id,
+                    &subject.user_id,
+                )
+                .await
+                .map_err(handler_error)?,
             );
         }
         guard.finish().await.map_err(handler_error)?;
@@ -714,6 +727,7 @@ fn flatten_erase_candidates(
 }
 
 async fn erase_pii_vault_subjects(
+    conn: &mut sqlx::PgConnection,
     ctx: &PrivacyEraseContext,
     subjects: &[PrivacySubject],
 ) -> Result<u64, HandlerError> {
@@ -726,7 +740,7 @@ async fn erase_pii_vault_subjects(
         return Ok(0);
     };
 
-    let vault = PiiVault::with_pool(ctx.pool.clone(), secret, "privacy-erase");
+    let vault = PiiVault::new_dev(secret);
     let mut erased = 0u64;
     for subject in subjects {
         let subject_pseudonym = vault
@@ -734,7 +748,7 @@ async fn erase_pii_vault_subjects(
             .map_err(handler_error)?;
         erased = erased.saturating_add(
             vault
-                .erase_subject(&ctx.storage_partition_id, &subject_pseudonym)
+                .erase_subject(conn, &ctx.storage_partition_id, &subject_pseudonym)
                 .await
                 .map_err(handler_error)?,
         );

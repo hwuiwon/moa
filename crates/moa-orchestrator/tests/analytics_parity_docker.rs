@@ -27,7 +27,8 @@ use clickhouse::{Client, Row};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
 use moa_analytics_export::AnalyticsExporter;
 use moa_config::ClickHouseConfig;
-use moa_core::types::identifiers::TenantId;
+use moa_core::types::{identifiers::TenantId, resource::ResourceAmounts};
+use moa_experiments::model::ExperimentResourceEnvelope;
 use moa_wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDataset, AnalyticsDimension, AnalyticsFieldKind,
     AnalyticsFieldRole, AnalyticsFilter, AnalyticsFilterOperator, AnalyticsMeasure,
@@ -1484,24 +1485,29 @@ async fn seed_events(
     events: &[SeededEvent<'_>],
     base: DateTime<Utc>,
 ) -> TestResult<()> {
+    let mut turn_number = 1_i64;
     for (sequence_num, event_type, payload, token_count, offset_ms) in events {
         sqlx::query(
             "INSERT INTO events \
                  (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, \
-                  event_type, payload, token_count, timestamp) \
-             VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8, $9)",
+                  turn_number, event_type, payload, token_count, timestamp) \
+             VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(Uuid::now_v7())
         .bind(session)
         .bind(tenant.to_string())
         .bind(tenant)
         .bind(*sequence_num)
+        .bind(turn_number)
         .bind(*event_type)
         .bind(payload)
         .bind(*token_count)
         .bind(base + Duration::milliseconds(*offset_ms))
         .execute(pool)
         .await?;
+        if *event_type == "BrainResponse" {
+            turn_number += 1;
+        }
     }
     Ok(())
 }
@@ -1762,13 +1768,25 @@ async fn seed_experiment_run(
     started_at: DateTime<Utc>,
     completed_at: Option<DateTime<Utc>>,
 ) -> TestResult<()> {
+    let limits = ResourceAmounts {
+        cost_micro_usd: 1_000_000,
+        tokens: 100_000,
+        turns: 8,
+        model_calls: 16,
+        tool_calls: 32,
+    };
+    let resource_envelope = serde_json::to_value(ExperimentResourceEnvelope::new(
+        limits,
+        limits,
+        started_at + Duration::hours(1),
+    ))?;
     sqlx::query(
         "INSERT INTO moa.experiment_run \
              (run_uid, tenant_id, storage_partition_id, user_id, name, target_kind, status, \
               target, variant, score_run_id, session_id, created_by_identity, started_at, \
-              completed_at) \
+              completed_at, resource_envelope) \
          VALUES ($1, $2, $3, 'user-1', $4, 'agent_loop', $5, '{}'::jsonb, '{}'::jsonb, $6, $7, \
-              '{}'::jsonb, $8, $9)",
+              '{}'::jsonb, $8, $9, $10)",
     )
     .bind(Uuid::now_v7())
     .bind(tenant)
@@ -1779,6 +1797,7 @@ async fn seed_experiment_run(
     .bind(session)
     .bind(started_at)
     .bind(completed_at)
+    .bind(resource_envelope)
     .execute(pool)
     .await?;
     Ok(())

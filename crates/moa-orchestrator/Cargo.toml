@@ -51,6 +51,7 @@ clap.workspace = true
 croner = "2.2"
 ed25519-dalek.workspace = true
 flate2 = "1"
+futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true
 moa-authz.workspace = true

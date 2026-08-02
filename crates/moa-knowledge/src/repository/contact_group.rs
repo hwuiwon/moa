@@ -87,65 +87,68 @@ pub(super) async fn replace_contact_group_memberships(
         membership.evidence.dedup();
         memberships_by_contact.insert(membership.contact_id.0, membership);
     }
-    let active_contact_ids = memberships_by_contact.keys().copied().collect::<Vec<_>>();
-    if active_contact_ids.is_empty() {
-        sqlx::query(
-            r#"
-            UPDATE moa.knowledge_contact_group_memberships
-            SET active = FALSE, updated_at = now()
-            WHERE group_id = $1
-              AND active = TRUE
-            "#,
+    let desired = serde_json::to_value(memberships_by_contact.into_values().collect::<Vec<_>>())
+        .map_err(|error| {
+            Error::Repository(format!(
+                "failed to encode contact-group memberships: {error}"
+            ))
+        })?;
+    sqlx::query(
+        r#"
+        WITH desired AS MATERIALIZED (
+            SELECT (entry->>'contact_id')::UUID AS contact_id,
+                   ARRAY(
+                       SELECT evidence.value::UUID
+                       FROM jsonb_array_elements_text(
+                           COALESCE(entry->'evidence', '[]'::JSONB)
+                       ) AS evidence(value)
+                   ) AS evidence_ids,
+                   COALESCE(entry->'metadata', '{}'::JSONB) AS metadata
+            FROM jsonb_array_elements($2::JSONB) AS entry
+        ),
+        deactivated AS (
+            UPDATE moa.knowledge_contact_group_memberships AS membership
+               SET active = FALSE,
+                   updated_at = now()
+             WHERE membership.group_id = $1
+               AND membership.active = TRUE
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM desired
+                   WHERE desired.contact_id = membership.contact_id
+               )
+            RETURNING membership.membership_uid
         )
-        .bind(group_uid)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-    } else {
-        sqlx::query(
-            r#"
-            UPDATE moa.knowledge_contact_group_memberships
-            SET active = FALSE, updated_at = now()
-            WHERE group_id = $1
-              AND active = TRUE
-              AND NOT (contact_id = ANY($2::UUID[]))
-            "#,
+        INSERT INTO moa.knowledge_contact_group_memberships (
+            tenant_id, storage_partition_id, group_id, contact_id,
+            active, evidence_ids, metadata
         )
-        .bind(group_uid)
-        .bind(&active_contact_ids)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-    for membership in memberships_by_contact.into_values() {
-        sqlx::query(
-            r#"
-            INSERT INTO moa.knowledge_contact_group_memberships (
-                tenant_id, storage_partition_id, group_id, contact_id,
-                active, evidence_ids, metadata
-            )
-            SELECT tenant_id, storage_partition_id, group_uid, $2, TRUE, $3, $4
-            FROM moa.knowledge_contact_groups
-            WHERE group_uid = $1
-            ON CONFLICT (tenant_id, group_id, contact_id) WHERE active = TRUE
-            DO UPDATE SET
-                evidence_ids = EXCLUDED.evidence_ids,
-                metadata = EXCLUDED.metadata,
-                updated_at = now()
-            WHERE moa.knowledge_contact_group_memberships.evidence_ids
-                    IS DISTINCT FROM EXCLUDED.evidence_ids
-               OR moa.knowledge_contact_group_memberships.metadata
-                    IS DISTINCT FROM EXCLUDED.metadata
-            "#,
-        )
-        .bind(group_uid)
-        .bind(membership.contact_id.0)
-        .bind(membership.evidence)
-        .bind(membership.metadata)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-    }
+        SELECT contact_group.tenant_id,
+               contact_group.storage_partition_id,
+               contact_group.group_uid,
+               desired.contact_id,
+               TRUE,
+               desired.evidence_ids,
+               desired.metadata
+        FROM moa.knowledge_contact_groups AS contact_group
+        CROSS JOIN desired
+        WHERE contact_group.group_uid = $1
+        ON CONFLICT (tenant_id, group_id, contact_id) WHERE active = TRUE
+        DO UPDATE SET
+            evidence_ids = EXCLUDED.evidence_ids,
+            metadata = EXCLUDED.metadata,
+            updated_at = now()
+        WHERE moa.knowledge_contact_group_memberships.evidence_ids
+                IS DISTINCT FROM EXCLUDED.evidence_ids
+           OR moa.knowledge_contact_group_memberships.metadata
+                IS DISTINCT FROM EXCLUDED.metadata
+        "#,
+    )
+    .bind(group_uid)
+    .bind(desired)
+    .execute(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
     conn.commit().await.map_err(map_moa_error)
 }
 

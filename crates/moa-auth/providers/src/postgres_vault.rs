@@ -102,11 +102,11 @@ impl PostgresTokenVaultProvider {
 
     /// Persist or explicitly relink a user's connection token, tenant-scoped.
     ///
-    /// Upserts on `(tenant_id, user_id, connection_name)`. Re-linking increments
-    /// the durable generation and clears any refresh lease, fencing an older
-    /// refresh winner from overwriting the newly supplied credential. The write
-    /// runs under a tenant-scoped `moa_app` transaction, so the row-level-security
-    /// policy rejects any attempt to store a token under a mismatched tenant.
+    /// Upserts on the globally unique `(user_id, connection_name)` identity.
+    /// Re-linking increments the durable generation and clears any refresh lease,
+    /// fencing an older refresh winner from overwriting the newly supplied
+    /// credential. The write runs under a tenant-scoped `moa_app` transaction, so
+    /// row-level security rejects any attempt to move that identity across tenants.
     pub async fn store_token(&self, request: StoreTokenRequest<'_>) -> Result<(), TokenVaultError> {
         let ctx = token_encryption_context(
             request.tenant_id.0,
@@ -143,7 +143,7 @@ impl PostgresTokenVaultProvider {
                 updated_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-            ON CONFLICT (tenant_id, user_id, connection_name) DO UPDATE SET
+            ON CONFLICT (user_id, connection_name) DO UPDATE SET
                 provider = EXCLUDED.provider,
                 external_account_id = EXCLUDED.external_account_id,
                 access_token_sealed = EXCLUDED.access_token_sealed,
@@ -736,7 +736,7 @@ struct TokenRow {
     refresh_lease_active: bool,
 }
 
-/// Parsed durable refresh state enforced by V338.
+/// Parsed durable refresh state enforced by the token-vault schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefreshState {
     Ready,

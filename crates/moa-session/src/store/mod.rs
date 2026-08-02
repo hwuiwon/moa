@@ -148,6 +148,8 @@ pub struct SessionChannelBindingReplacement<'a> {
 
 impl PostgresSessionStore {
     /// Creates a session store from config using the configured `PostgreSQL` pool settings.
+    ///
+    /// The database must already have the complete central migration history.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options_and_config(
             config.database.runtime_url(),
@@ -162,10 +164,10 @@ impl PostgresSessionStore {
 
     /// Creates a session store bound to a schema that is already migrated.
     ///
-    /// This connects and configures the search path but skips migrations, so it
-    /// is only safe when the target schema already contains the session tables —
-    /// for example a per-test database cloned from a pre-migrated template by the
-    /// test harness.
+    /// This connects, validates the central migration history, and configures
+    /// the search path. It is only safe when the target schema already contains
+    /// the session tables — for example a per-test database cloned from a
+    /// pre-migrated template by the test harness.
     pub async fn new_in_existing_schema(database_url: &str, schema_name: &str) -> Result<Self> {
         // Pool is capped well below the compose Postgres server limit
         // (max_connections = 100): several isolated test stores run
@@ -186,6 +188,7 @@ impl PostgresSessionStore {
 
     /// Creates a session store from an existing Postgres pool using configured blob storage.
     pub async fn from_existing_pool_with_config(config: &MoaConfig, pool: PgPool) -> Result<Self> {
+        validate_migration_history(&pool).await?;
         let blob_store = blob_store_from_config(config, pool.clone()).await?;
         let attachment_store = AttachmentObjectStore::from_config(config)?;
         let store = Self {
@@ -364,8 +367,7 @@ impl PostgresSessionStore {
         }
 
         // `analytics.event_fact` is intentionally absent: it is a plain VIEW over
-        // the `events` table (see V000325), so it reflects live data and must not
-        // be refreshed.
+        // the `events` table, so it reflects live data and must not be refreshed.
         for qualified in [
             "analytics.session_fact",
             "analytics.turn_fact",
@@ -375,7 +377,6 @@ impl PostgresSessionStore {
             "analytics.execution_task_fact",
             "analytics.learning_candidate_fact",
             "analytics.experiment_run_fact",
-            "analytics.guardrail_hourly",
         ] {
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
@@ -443,6 +444,7 @@ impl PostgresSessionStore {
             schema_name,
         )
         .await?;
+        validate_migration_history(&pool).await?;
         let store = Self {
             url: database_url.to_string(),
             pool,
@@ -472,9 +474,7 @@ impl PostgresSessionStore {
             schema_name,
         )
         .await?;
-        if schema_name.is_none() {
-            migrate_database(database_url).await?;
-        }
+        validate_migration_history(&pool).await?;
         let blob_store = blob_store_from_config(config, pool.clone()).await?;
         let attachment_store = AttachmentObjectStore::from_config(config)?;
         let backends = SessionStorageBackends {
@@ -652,10 +652,14 @@ fn isolated_test_backends() -> Result<SessionStorageBackends> {
     })
 }
 
-async fn migrate_database(database_url: &str) -> Result<()> {
-    moa_migrations::run(database_url)
+async fn validate_migration_history(pool: &PgPool) -> Result<()> {
+    moa_migrations::validate_complete_history(pool)
         .await
-        .map_err(|error| MoaError::StorageError(format!("postgres migration failed: {error:#}")))
+        .map_err(|error| {
+            MoaError::StorageError(format!(
+                "postgres migration history validation failed: {error:#}"
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -668,10 +672,9 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-    async fn configured_schema_binds_without_running_migrations_db() {
-        // Pins: database.schema is a bind-only contract. A deliberately
-        // divergent refinery checksum would make any migration attempt fail,
-        // while binding to the already-provisioned public schema still works.
+    async fn configured_schema_rejects_divergent_migration_history_db() {
+        // Pins: every constructor validates the complete embedded history and
+        // fails closed when even the terminal migration checksum diverges.
         let (database_url, schema_name) = provision_cloned_database()
             .await
             .expect("provision migrated clone");
@@ -681,10 +684,14 @@ mod tests {
                 .max_connections(1)
                 .connect(&database_url)
                 .await?;
-            sqlx::query("UPDATE refinery_schema_history SET checksum = $1 WHERE version = 337")
-                .bind("0")
-                .execute(&mutation_pool)
-                .await?;
+            let mutation = sqlx::query(
+                "UPDATE refinery_schema_history SET checksum = $1
+                 WHERE version = (SELECT MAX(version) FROM refinery_schema_history)",
+            )
+            .bind("0")
+            .execute(&mutation_pool)
+            .await?;
+            assert_eq!(mutation.rows_affected(), 1);
             mutation_pool.close().await;
 
             let mut config = local_rustfs_config();
@@ -693,23 +700,22 @@ mod tests {
             config.database.schema = Some(schema_name.clone());
             config.database.max_connections = 2;
 
-            let store = PostgresSessionStore::from_config(&config).await?;
-            let retained_checksum: String = sqlx::query_scalar(
-                "SELECT checksum FROM refinery_schema_history WHERE version = 337",
-            )
-            .fetch_one(store.pool())
-            .await?;
-            let bound_schema = store.schema_name().map(ToOwned::to_owned);
-            store.pool().close().await;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((bound_schema, retained_checksum))
+            let constructor = PostgresSessionStore::from_config(&config).await;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(constructor)
         }
         .await;
 
         let cleanup = cleanup_test_schema(&database_url, &schema_name).await;
-        let (bound_schema, retained_checksum) =
-            outcome.expect("configured schema must not invoke refinery");
+        let error = outcome
+            .expect("corrupt terminal migration checksum")
+            .err()
+            .expect("divergent migration history must fail closed");
         cleanup.expect("cleanup cloned database");
-        assert_eq!(bound_schema.as_deref(), Some("public"));
-        assert_eq!(retained_checksum, "0");
+        assert!(
+            error
+                .to_string()
+                .contains("postgres migration history validation failed"),
+            "unexpected validation error: {error:#}"
+        );
     }
 }

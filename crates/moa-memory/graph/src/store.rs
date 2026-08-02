@@ -119,9 +119,13 @@ impl PostgresGraphStore {
         crate::write::close_existing_node_with_supersession(self, intent).await
     }
 
-    /// Closes an active node without a replacement, at caller-provided instants.
-    pub async fn expire_node(&self, intent: NodeExpiryIntent) -> Result<bool, Error> {
-        crate::write::expire_node(self, intent).await
+    /// Closes an active node without a replacement in a caller-owned transaction.
+    pub async fn expire_node_in_conn(
+        &self,
+        conn: &mut PgConnection,
+        intent: NodeExpiryIntent,
+    ) -> Result<bool, Error> {
+        crate::write::expire_node_in_conn(self, conn, intent).await
     }
 
     /// Replaces a node's complete mutable content in place.

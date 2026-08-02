@@ -214,31 +214,6 @@ impl ClickHouseStore {
             .collect()
     }
 
-    /// Loads lineage rows whose payload contains a DSAR subject string,
-    /// mirroring the Postgres DSAR export shape.
-    pub async fn load_dsar_export_records(
-        &self,
-        storage_partition_id: &StoragePartitionId,
-        subject: &str,
-    ) -> Result<Vec<serde_json::Value>> {
-        let rows = self
-            .client
-            .query(
-                "SELECT turn_id, session_id, user_id, storage_partition_id, ts, record_kind,
-                        payload, integrity_hash, prev_hash
-                 FROM ?.turn_lineage
-                 WHERE storage_partition_id = ? AND positionCaseInsensitive(payload, ?) > 0
-                 ORDER BY ts ASC, turn_id ASC, record_kind ASC
-                 LIMIT 10000",
-            )
-            .bind(Identifier(&self.database))
-            .bind(storage_partition_id.as_str())
-            .bind(subject)
-            .fetch_all::<ClickHouseDsarRow>()
-            .await?;
-        rows.into_iter().map(ClickHouseDsarRow::into_json).collect()
-    }
-
     /// Deletes a tenant partition's lineage rows during offboarding.
     pub async fn delete_partition_rows(
         &self,
@@ -320,40 +295,6 @@ impl ClickHouseQueryRow {
             payload: serde_json::from_str(&self.payload)?,
             answer_text: self.answer_text,
         })
-    }
-}
-
-/// DSAR export row including the integrity hashes.
-#[derive(Row, Deserialize)]
-struct ClickHouseDsarRow {
-    #[serde(with = "clickhouse::serde::uuid")]
-    turn_id: Uuid,
-    #[serde(with = "clickhouse::serde::uuid")]
-    session_id: Uuid,
-    user_id: String,
-    storage_partition_id: String,
-    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
-    ts: DateTime<Utc>,
-    record_kind: i16,
-    payload: String,
-    integrity_hash: String,
-    prev_hash: Option<String>,
-}
-
-impl ClickHouseDsarRow {
-    fn into_json(self) -> Result<serde_json::Value> {
-        let payload: serde_json::Value = serde_json::from_str(&self.payload)?;
-        Ok(serde_json::json!({
-            "turn_id": self.turn_id,
-            "session_id": self.session_id,
-            "user_id": self.user_id,
-            "storage_partition_id": self.storage_partition_id,
-            "ts": self.ts,
-            "record_kind": self.record_kind,
-            "payload": payload,
-            "integrity_hash": self.integrity_hash,
-            "prev_hash": self.prev_hash,
-        }))
     }
 }
 

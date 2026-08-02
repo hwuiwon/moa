@@ -295,7 +295,24 @@ async fn build_template_locked(
                 MoaError::StorageError(format!("check template existence: {error}"))
             })?;
     if exists {
-        return Ok(());
+        let template_url = with_database(maintenance_url, template_name)?;
+        let template_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(60))
+            .connect(&template_url)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!("connect to cached template database: {error}"))
+            })?;
+        let validation = moa_migrations::validate_complete_history(&template_pool)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!(
+                    "validate cached template migration history: {error:#}"
+                ))
+            });
+        template_pool.close().await;
+        return validation;
     }
 
     let staging = format!("{template_name}_building_{}", std::process::id());
@@ -356,20 +373,22 @@ async fn build_staging_schema(maintenance_url: &str, staging: &str) -> Result<()
             MoaError::StorageError(format!("connect to template staging database: {error}"))
         })?;
     let result = build_template_contents(&build_pool).await;
+    let result = match result {
+        Ok(()) => moa_migrations::validate_complete_history(&build_pool)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!(
+                    "validate template staging migration history: {error:#}"
+                ))
+            }),
+        Err(error) => Err(error),
+    };
     build_pool.close().await;
     result
 }
 
-/// Materializes the full schema surface every cloned test database needs.
-///
-/// Ensures the standalone lineage schema and the runtime grants that sit outside
-/// the canonical refinery migration sequence.
+/// Materializes the runtime grants that sit outside the canonical migrations.
 async fn build_template_contents(pool: &PgPool) -> Result<()> {
-    moa_migrations::ensure_lineage_schema(pool)
-        .await
-        .map_err(|error| {
-            MoaError::StorageError(format!("build template lineage schema: {error:#}"))
-        })?;
     apply_template_grants(pool, TEMPLATE_SCHEMA).await
 }
 
@@ -526,16 +545,8 @@ mod tests {
                 .connect(&second_url)
                 .await?;
 
-            let first_cutovers: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM refinery_schema_history WHERE version IN (336, 337)",
-            )
-            .fetch_one(&first)
-            .await?;
-            let second_cutovers: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM refinery_schema_history WHERE version IN (336, 337)",
-            )
-            .fetch_one(&second)
-            .await?;
+            moa_migrations::validate_complete_history(&first).await?;
+            moa_migrations::validate_complete_history(&second).await?;
             let first_lineage: bool =
                 sqlx::query_scalar("SELECT to_regclass('analytics.turn_lineage') IS NOT NULL")
                     .fetch_one(&first)
@@ -556,9 +567,7 @@ mod tests {
 
             first.close().await;
             second.close().await;
-            Ok::<_, sqlx::Error>((
-                first_cutovers,
-                second_cutovers,
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
                 first_lineage,
                 second_lineage,
                 leaked_to_second,
@@ -568,15 +577,13 @@ mod tests {
 
         let first_cleanup = cleanup_test_schema(&first_url, &first_schema).await;
         let second_cleanup = cleanup_test_schema(&second_url, &second_schema).await;
-        let (first_cutovers, second_cutovers, first_lineage, second_lineage, leaked_to_second) =
+        let (first_lineage, second_lineage, leaked_to_second) =
             outcome.expect("inspect cloned databases");
         first_cleanup.expect("cleanup first clone");
         second_cleanup.expect("cleanup second clone");
 
         assert_eq!(first_schema, "public");
         assert_eq!(second_schema, "public");
-        assert_eq!(first_cutovers, 2);
-        assert_eq!(second_cutovers, 2);
         assert!(first_lineage);
         assert!(second_lineage);
         assert!(!leaked_to_second);

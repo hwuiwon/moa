@@ -33,6 +33,7 @@ use uuid::Uuid;
 use moa_core::types::{identifiers::TenantId, memory::RlsContext};
 
 use crate::erasure::{ErasureError, Result};
+use crate::legal_hold::DestructionGuard;
 
 /// What was decided about one enumerated record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,18 +254,32 @@ pub async fn enumerate_learning_closure(
     // roll back the whole erase.
     let derived = sqlx::query_as::<_, (String, Uuid)>(
         r#"
-        WITH RECURSIVE derived(kind, id) AS (
+        WITH RECURSIVE subject_source_anchors(source_kind, privacy_anchor_id) AS (
+            SELECT 'contact'::TEXT, contact_id
+            FROM unnest($2::UUID[]) AS contact(contact_id)
+            UNION ALL
+            SELECT 'session'::TEXT, session_id
+            FROM unnest($3::UUID[]) AS session(session_id)
+            UNION ALL
+            SELECT 'event'::TEXT, session_id
+            FROM unnest($3::UUID[]) AS session(session_id)
+            UNION ALL
+            SELECT 'task_segment'::TEXT, segment_id
+            FROM unnest($4::UUID[]) AS segment(segment_id)
+            UNION ALL
+            SELECT 'experience'::TEXT, experience_id
+            FROM unnest($5::UUID[]) AS experience(experience_id)
+            UNION ALL
+            SELECT 'attribution'::TEXT, attribution_id
+            FROM unnest($6::UUID[]) AS attribution(attribution_id)
+        ),
+        derived(kind, id) AS (
             SELECT 'candidate'::TEXT, source.candidate_id
-            FROM learning_candidate_source AS source
-            WHERE source.tenant_id = $1
-              AND (
-                  source.contact_id = ANY($2)
-                  OR source.session_id = ANY($3)
-                  OR source.event_session_id = ANY($3)
-                  OR source.segment_id = ANY($4)
-                  OR source.experience_id = ANY($5)
-                  OR source.attribution_id = ANY($6)
-              )
+            FROM subject_source_anchors AS anchor
+            JOIN learning_candidate_source AS source
+              ON source.tenant_id = $1
+             AND source.source_kind = anchor.source_kind
+             AND source.privacy_anchor_id = anchor.privacy_anchor_id
             UNION
             SELECT next.kind, next.id
             FROM derived AS parent
@@ -272,12 +287,11 @@ pub async fn enumerate_learning_closure(
                 SELECT 'candidate'::TEXT AS kind, source.candidate_id AS id
                 FROM learning_candidate_source AS source
                 WHERE source.tenant_id = $1
-                  AND (
-                      (parent.kind = 'candidate'
-                       AND source.promotion_candidate_id = parent.id)
-                      OR (parent.kind = 'revision'
-                          AND source.artifact_revision_uid = parent.id)
-                  )
+                  AND source.source_kind = CASE parent.kind
+                      WHEN 'candidate' THEN 'promotion_candidate'
+                      WHEN 'revision' THEN 'artifact_revision'
+                  END
+                  AND source.privacy_anchor_id = parent.id
                 UNION
                 SELECT 'revision'::TEXT, contribution.revision_uid
                 FROM moa.artifact_revision_contribution AS contribution
@@ -308,16 +322,28 @@ pub async fn enumerate_learning_closure(
 
     let learning_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
+        WITH source_anchors(source_kind, privacy_anchor_id) AS (
+            SELECT 'candidate'::TEXT, candidate_id
+            FROM unnest($2::UUID[]) AS candidate(candidate_id)
+            UNION ALL
+            SELECT 'session'::TEXT, session_id
+            FROM unnest($3::UUID[]) AS session(session_id)
+            UNION ALL
+            SELECT 'experience'::TEXT, experience_id
+            FROM unnest($4::UUID[]) AS experience(experience_id)
+            UNION ALL
+            SELECT 'task_segment'::TEXT, segment_id
+            FROM unnest($5::UUID[]) AS segment(segment_id)
+            UNION ALL
+            SELECT 'artifact_revision'::TEXT, revision_uid
+            FROM unnest($6::UUID[]) AS revision(revision_uid)
+        )
         SELECT DISTINCT source.learning_id
-        FROM learning_log_source AS source
-        WHERE source.tenant_id = $1
-          AND (
-              source.candidate_id = ANY($2)
-              OR source.session_id = ANY($3)
-              OR source.experience_id = ANY($4)
-              OR source.segment_id = ANY($5)
-              OR source.artifact_revision_uid = ANY($6)
-          )
+        FROM source_anchors AS anchor
+        JOIN learning_log_source AS source
+          ON source.tenant_id = $1
+         AND source.source_kind = anchor.source_kind
+         AND source.privacy_anchor_id = anchor.privacy_anchor_id
         ORDER BY 1
         "#,
     )
@@ -413,7 +439,6 @@ async fn record_decisions_in(
     attempt_id: &str,
     decisions: &[RecordDecision],
 ) -> Result<u64> {
-    let mut recorded = 0u64;
     for decision in decisions {
         if decision.applied && !decision.disposition.can_be_applied() {
             return Err(ErasureError::Scope(
@@ -425,30 +450,70 @@ async fn record_decisions_in(
                 )),
             ));
         }
-        recorded += sqlx::query(
-            r#"
-            INSERT INTO moa.privacy_erasure_record_decision
-                (decision_uid, tenant_id, subject_user_id, attempt_id, record_kind, record_id,
-                 disposition, applied, reason)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT
-                (tenant_id, subject_user_id, attempt_id, record_kind, record_id)
-                DO NOTHING
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(tenant_id.0)
-        .bind(subject_user_id)
-        .bind(attempt_id)
-        .bind(decision.kind.as_str())
-        .bind(&decision.record_id)
-        .bind(decision.disposition.as_str())
-        .bind(decision.applied)
-        .bind(decision.reason.as_deref())
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
     }
+
+    if decisions.is_empty() {
+        return Ok(0);
+    }
+
+    let decision_uids = decisions.iter().map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    let record_kinds = decisions
+        .iter()
+        .map(|decision| decision.kind.as_str().to_string())
+        .collect::<Vec<_>>();
+    let record_ids = decisions
+        .iter()
+        .map(|decision| decision.record_id.clone())
+        .collect::<Vec<_>>();
+    let dispositions = decisions
+        .iter()
+        .map(|decision| decision.disposition.as_str().to_string())
+        .collect::<Vec<_>>();
+    let applied = decisions
+        .iter()
+        .map(|decision| decision.applied)
+        .collect::<Vec<_>>();
+    let reasons = decisions
+        .iter()
+        .map(|decision| decision.reason.clone())
+        .collect::<Vec<_>>();
+
+    let recorded = sqlx::query(
+        r#"
+        INSERT INTO moa.privacy_erasure_record_decision
+            (decision_uid, tenant_id, subject_user_id, attempt_id, record_kind, record_id,
+             disposition, applied, reason)
+        SELECT decision.decision_uid,
+               $2,
+               $3,
+               $4,
+               decision.record_kind,
+               decision.record_id,
+               decision.disposition,
+               decision.applied,
+               decision.reason
+        FROM unnest(
+            $1::UUID[], $5::TEXT[], $6::TEXT[], $7::TEXT[], $8::BOOLEAN[], $9::TEXT[]
+        ) AS decision(
+            decision_uid, record_kind, record_id, disposition, applied, reason
+        )
+        ON CONFLICT
+            (tenant_id, subject_user_id, attempt_id, record_kind, record_id)
+            DO NOTHING
+        "#,
+    )
+    .bind(&decision_uids)
+    .bind(tenant_id.0)
+    .bind(subject_user_id)
+    .bind(attempt_id)
+    .bind(&record_kinds)
+    .bind(&record_ids)
+    .bind(&dispositions)
+    .bind(&applied)
+    .bind(&reasons)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
     Ok(recorded)
 }
 
@@ -485,14 +550,14 @@ pub fn dry_run_decisions(closure: &LearningClosure) -> Vec<RecordDecision> {
 /// files, and serving state cleared — while their identity remains available to
 /// runtime and audit rows that legitimately pin it.
 ///
-/// The dispositions commit in the SAME transaction as the mutations they
-/// describe. That is the whole reason this function owns the transaction rather
-/// than returning decisions for a caller to persist afterwards: a crash between
-/// the two would leave rows deleted with nothing on record saying why or under
-/// whose authority, which is precisely the state a subject-access request or an
-/// audit cannot be answered from.
+/// The caller must supply an open destruction guard already transitioned to its
+/// owner role. This function performs every mutation through the guard, then
+/// uses the guard's typed `moa_app` transition before writing the decision
+/// ledger. The caller remains the sole commit owner through
+/// [`DestructionGuard::finish`], so a crash can never leave rows deleted with
+/// nothing on record saying why or under whose authority.
 pub async fn erase_learning_closure(
-    pool: &PgPool,
+    guard: &mut DestructionGuard<'_>,
     tenant_id: TenantId,
     subject_user_id: &str,
     attempt_id: &str,
@@ -500,14 +565,13 @@ pub async fn erase_learning_closure(
 ) -> Result<Vec<RecordDecision>> {
     let tenant_key = tenant_id.to_string();
     let decisions = applied_decisions(closure);
-    let mut tx = ScopedConn::begin(pool, &RlsContext::tenant(tenant_id)).await?;
 
     sqlx::query(
         "DELETE FROM moa.artifact_suite_contribution WHERE tenant_id = $1 AND contribution_uid = ANY($2)",
     )
     .bind(&tenant_key)
     .bind(&closure.suite_contribution_uids)
-    .execute(tx.as_mut())
+    .execute(guard.connection())
     .await?;
 
     sqlx::query(
@@ -515,18 +579,18 @@ pub async fn erase_learning_closure(
     )
     .bind(&tenant_key)
     .bind(&closure.candidate_ids)
-    .execute(tx.as_mut())
+    .execute(guard.connection())
     .await?;
 
     sqlx::query("DELETE FROM learning_log_source WHERE tenant_id = $1 AND learning_id = ANY($2)")
         .bind(&tenant_key)
         .bind(&closure.learning_ids)
-        .execute(tx.as_mut())
+        .execute(guard.connection())
         .await?;
     sqlx::query("DELETE FROM learning_log WHERE tenant_id = $1 AND id = ANY($2)")
         .bind(&tenant_key)
         .bind(&closure.learning_ids)
-        .execute(tx.as_mut())
+        .execute(guard.connection())
         .await?;
 
     sqlx::query(
@@ -534,7 +598,7 @@ pub async fn erase_learning_closure(
     )
     .bind(&tenant_key)
     .bind(&closure.candidate_ids)
-    .execute(tx.as_mut())
+    .execute(guard.connection())
     .await?;
     // Delete every source before either its owner or its referent. This is what
     // makes recursive promotion/revision dependencies erasable under RESTRICT.
@@ -543,58 +607,56 @@ pub async fn erase_learning_closure(
     )
     .bind(&tenant_key)
     .bind(&closure.candidate_ids)
-    .execute(tx.as_mut())
+    .execute(guard.connection())
     .await?;
     sqlx::query("DELETE FROM learning_candidates WHERE tenant_id = $1 AND id = ANY($2)")
         .bind(&tenant_key)
         .bind(&closure.candidate_ids)
-        .execute(tx.as_mut())
+        .execute(guard.connection())
         .await?;
 
     // Never delete an artifact revision. Other runtime tables legitimately pin
     // revision identity with restrictive FKs, while privacy requires removing
     // attributable bytes and serving eligibility, not destroying that identity.
-    for revision_uid in &closure.revision_uids {
-        sqlx::query(
-            r#"
-            UPDATE moa.artifact_revision
-            SET definition = '{}'::JSONB,
-                source_text = ''::BYTEA,
-                validation_report = '{}'::JSONB,
-                status = 'archived',
-                published_at = NULL,
-                valid_to = COALESCE(valid_to, now()),
-                updated_at = now()
-            WHERE revision_uid = $1 AND tenant_id = $2
-            "#,
-        )
-        .bind(revision_uid)
+    sqlx::query(
+        r#"
+        UPDATE moa.artifact_revision
+        SET definition = '{}'::JSONB,
+            source_text = ''::BYTEA,
+            validation_report = '{}'::JSONB,
+            status = 'archived',
+            published_at = NULL,
+            valid_to = COALESCE(valid_to, now()),
+            updated_at = now()
+        WHERE tenant_id = $1 AND revision_uid = ANY($2)
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(&closure.revision_uids)
+    .execute(guard.connection())
+    .await?;
+    sqlx::query("DELETE FROM moa.artifact_file WHERE tenant_id = $1 AND revision_uid = ANY($2)")
         .bind(tenant_id.0)
-        .execute(tx.as_mut())
+        .bind(&closure.revision_uids)
+        .execute(guard.connection())
         .await?;
-        sqlx::query("DELETE FROM moa.artifact_file WHERE revision_uid = $1 AND tenant_id = $2")
-            .bind(revision_uid)
-            .bind(tenant_id.0)
-            .execute(tx.as_mut())
-            .await?;
-    }
 
     sqlx::query("DELETE FROM experience_attributions WHERE tenant_id = $1 AND id = ANY($2)")
         .bind(&tenant_key)
         .bind(&closure.attribution_ids)
-        .execute(tx.as_mut())
+        .execute(guard.connection())
         .await?;
     sqlx::query("DELETE FROM experience_records WHERE tenant_id = $1 AND id = ANY($2)")
         .bind(&tenant_key)
         .bind(&closure.experience_ids)
-        .execute(tx.as_mut())
+        .execute(guard.connection())
         .await?;
 
     // The protected ledger is the final write, after which this transaction has
     // no reason to retain the owner role used for multi-subject closure cleanup.
-    tx.assume_app_role().await?;
+    guard.assume_app_role().await?;
     record_decisions_in(
-        tx.as_mut(),
+        guard.connection(),
         tenant_id,
         subject_user_id,
         attempt_id,
@@ -602,7 +664,6 @@ pub async fn erase_learning_closure(
     )
     .await?;
 
-    tx.commit().await?;
     Ok(decisions)
 }
 

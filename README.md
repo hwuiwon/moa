@@ -140,16 +140,24 @@ make loadtest-live
 Cloud mode runs the `moa-orchestrator-bin` Restate handler service plus Postgres/Neon and the configured hand provider.
 
 ```bash
-POSTGRES_URL=postgres://...
-RESTATE_ADMIN_URL=http://localhost:10011
+MOA_DATABASE_URL=postgres://runtime-role@... \
+MOA_DATABASE_ADMIN_URL=postgres://migration-role@... \
+  cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- migrate
+
+MOA_DATABASE_URL=postgres://runtime-role@... \
+MOA_RESTATE_ADMIN_URL=http://localhost:10011 \
 MOA_OPENAI_API_KEY=...
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
+Migration is an explicit deployment phase. Normal runtime startup only
+validates the already-complete migration history through `MOA_DATABASE_URL`;
+it never applies DDL or reads `MOA_DATABASE_ADMIN_URL`.
+
 The binary serves these Restate surfaces: virtual objects `Session`, `Worker`,
 `Tenant`, `CronJob`, and `IngestionVO`; services `AgentDefinitions`, `Agents`,
 `AdminMaintenance`, `Artifacts`, `ActionReviews`, `ApiKeys`, `Authz`,
-`AuthzChallenges`, `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`,
+`AuthzChallenges`, `Contacts`, `Experiments`, `GraphMemoryMaint`,
 `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
 `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, and `ActionPolicy`; and
 workflows `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
@@ -163,8 +171,8 @@ The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bi
 Required cloud process configuration includes:
 
 ```bash
-POSTGRES_URL=postgres://...
-RESTATE_ADMIN_URL=http://localhost:10011
+MOA_DATABASE_URL=postgres://runtime-role@...
+MOA_RESTATE_ADMIN_URL=http://localhost:10011
 MOA_OPENAI_API_KEY=...
 DAYTONA_API_KEY=... # optional, depending on hand provider
 ```

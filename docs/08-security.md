@@ -442,11 +442,9 @@ summary the same bytes; a raw stored summary would fork them, so a row's vector
 would describe text the row does not contain and semantic routing would degrade
 with no failure signal.
 
-**Bounded, named gap:** rows written before this change still hold unredacted
-summaries. Redaction at rest is a write-path property, so it applies going
-forward only — a migration cannot classify, and one that pretended to would
-fabricate a guarantee. Pre-existing rows are reachable only through the erasure
-path described above.
+The fresh-only schema admits no pre-redaction compatibility state. Every
+`experience_records.task_summary` write follows the sanitized path above; the
+erasure path remains responsible for subject deletion.
 
 ## Agent Guardrails
 

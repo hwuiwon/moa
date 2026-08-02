@@ -14,6 +14,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn turbopuffer_offline_round_trip() {
+    // Pins: upsert, query, and delete all use the one serving namespace derived
+    // from vector type plus storage partition; there is no rebuild override.
     let server = MockServer::start().await;
     let uid = Uuid::now_v7();
     Mock::given(method("POST"))
@@ -74,6 +76,19 @@ async fn turbopuffer_offline_round_trip() {
         .await
         .expect("wiremock should expose captured requests");
     assert_eq!(requests.len(), 3);
+    let namespace = format!("/v2/namespaces/moa-test-f16-{storage_partition_id}");
+    let query_namespace = format!("{namespace}/query");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.url.path())
+            .collect::<Vec<_>>(),
+        vec![
+            namespace.as_str(),
+            query_namespace.as_str(),
+            namespace.as_str(),
+        ]
+    );
 }
 
 #[tokio::test]

@@ -90,29 +90,38 @@ pub(super) async fn replace_object_acl_snapshot(
 
             // Entries arrive canonically sorted from `ProviderAclSnapshot::normalized`
             // and are inserted in that order, so two writers racing on the same
-            // snapshot acquire row locks in the same sequence.
-            for (index, entry) in snapshot.entries.iter().enumerate() {
-                sqlx::query(
+            // snapshot acquire row locks in the same sequence. The domain cap
+            // keeps this eight-bind statement below PostgreSQL's parameter limit.
+            if !snapshot.entries.is_empty() {
+                let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
                     r#"
                     INSERT INTO moa.knowledge_source_acl_entries (
                         entry_uid, tenant_id, storage_partition_id, snapshot_id,
                         entry_kind, principal_kind, principal_fingerprint, fingerprint_key_version
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (snapshot_id, entry_kind, principal_fingerprint) DO NOTHING
                     "#,
-                )
-                .bind(entry_uid(snapshot.snapshot_uid, index))
-                .bind(snapshot.tenant_id.0)
-                .bind(storage_partition_id(snapshot.tenant_id))
-                .bind(snapshot.snapshot_uid)
-                .bind(entry.entry_kind.as_str())
-                .bind(entry.principal_kind.as_str())
-                .bind(entry.principal.as_bytes())
-                .bind(i32::from(entry.principal.key_version()))
-                .execute(conn.as_mut())
-                .await
-                .map_err(map_sqlx_error)?;
+                );
+                builder.push_values(
+                    snapshot.entries.iter().enumerate(),
+                    |mut row, (index, entry)| {
+                        row.push_bind(entry_uid(snapshot.snapshot_uid, index))
+                            .push_bind(snapshot.tenant_id.0)
+                            .push_bind(storage_partition_id(snapshot.tenant_id))
+                            .push_bind(snapshot.snapshot_uid)
+                            .push_bind(entry.entry_kind.as_str())
+                            .push_bind(entry.principal_kind.as_str())
+                            .push_bind(entry.principal.as_bytes())
+                            .push_bind(i32::from(entry.principal.key_version()));
+                    },
+                );
+                builder.push(
+                    " ON CONFLICT (snapshot_id, entry_kind, principal_fingerprint) DO NOTHING",
+                );
+                builder
+                    .build()
+                    .execute(conn.as_mut())
+                    .await
+                    .map_err(map_sqlx_error)?;
             }
 
             if snapshot.complete {

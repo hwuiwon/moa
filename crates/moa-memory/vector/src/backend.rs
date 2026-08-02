@@ -17,8 +17,8 @@ use crate::{
     sync::{
         VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncJob, begin_vector_sync_remote_guard,
         claim_pending_vector_sync, enqueue_external_vector_sync, fetch_current_vector_items,
-        mark_vector_sync_failed_batch, mark_vector_sync_processed_batch,
-        redrive_dead_lettered_vector_sync,
+        mark_vector_sync_failed_batch_on, mark_vector_sync_processed_batch,
+        mark_vector_sync_processed_batch_on, redrive_dead_lettered_vector_sync,
     },
 };
 
@@ -195,7 +195,7 @@ impl VectorStoreFactory {
         };
 
         for (storage_partition_id, jobs) in group_jobs_by_partition(jobs) {
-            let Some(remote_guard) =
+            let Some(mut remote_guard) =
                 begin_vector_sync_remote_guard(pool, &storage_partition_id).await?
             else {
                 let job_refs = jobs.iter().collect::<Vec<_>>();
@@ -205,7 +205,7 @@ impl VectorStoreFactory {
             };
             if remote_guard.is_fenced() {
                 let job_refs = jobs.iter().collect::<Vec<_>>();
-                mark_vector_sync_processed_batch(pool, &job_refs).await?;
+                mark_vector_sync_processed_batch_on(remote_guard.connection(), &job_refs).await?;
                 report.skipped += jobs.len() as u64;
                 remote_guard.finish().await?;
                 continue;
@@ -218,6 +218,7 @@ impl VectorStoreFactory {
                 Ok(Some(target)) => {
                     self.drain_external_sync_partition(
                         pool,
+                        remote_guard.connection(),
                         target,
                         &storage_partition_id,
                         &jobs,
@@ -227,12 +228,19 @@ impl VectorStoreFactory {
                 }
                 Ok(None) => {
                     let job_refs = jobs.iter().collect::<Vec<_>>();
-                    mark_vector_sync_processed_batch(pool, &job_refs).await?;
+                    mark_vector_sync_processed_batch_on(remote_guard.connection(), &job_refs)
+                        .await?;
                     report.skipped += jobs.len() as u64;
                 }
                 Err(error) => {
                     let job_refs = jobs.iter().collect::<Vec<_>>();
-                    fail_vector_sync_jobs(pool, &job_refs, &error, &mut report).await?;
+                    fail_vector_sync_jobs_on(
+                        remote_guard.connection(),
+                        &job_refs,
+                        &error,
+                        &mut report,
+                    )
+                    .await?;
                 }
             }
             remote_guard.finish().await?;
@@ -244,6 +252,7 @@ impl VectorStoreFactory {
     async fn drain_external_sync_partition(
         &self,
         pool: &PgPool,
+        settlement_conn: &mut sqlx::PgConnection,
         target: Arc<dyn VectorStore>,
         storage_partition_id: &str,
         jobs: &[crate::sync::VectorSyncJob],
@@ -276,17 +285,27 @@ impl VectorStoreFactory {
                 if !items.is_empty() {
                     match target.upsert(&items).await {
                         Ok(()) => {
-                            mark_vector_sync_processed_batch(pool, &found_upsert_jobs).await?;
+                            mark_vector_sync_processed_batch_on(
+                                settlement_conn,
+                                &found_upsert_jobs,
+                            )
+                            .await?;
                             report.succeeded += found_upsert_jobs.len() as u64;
                         }
                         Err(error) => {
-                            fail_vector_sync_jobs(pool, &found_upsert_jobs, &error, report).await?;
+                            fail_vector_sync_jobs_on(
+                                settlement_conn,
+                                &found_upsert_jobs,
+                                &error,
+                                report,
+                            )
+                            .await?;
                         }
                     }
                 }
             }
             Err(error) => {
-                fail_vector_sync_jobs(pool, &upsert_jobs, &error, report).await?;
+                fail_vector_sync_jobs_on(settlement_conn, &upsert_jobs, &error, report).await?;
             }
         }
 
@@ -305,11 +324,12 @@ impl VectorStoreFactory {
 
         match target.delete(&delete_uids).await {
             Ok(()) => {
-                mark_vector_sync_processed_batch(pool, &delete_mark_jobs).await?;
+                mark_vector_sync_processed_batch_on(settlement_conn, &delete_mark_jobs).await?;
                 report.succeeded += delete_mark_jobs.len() as u64;
             }
             Err(error) => {
-                fail_vector_sync_jobs(pool, &delete_mark_jobs, &error, report).await?;
+                fail_vector_sync_jobs_on(settlement_conn, &delete_mark_jobs, &error, report)
+                    .await?;
             }
         }
         Ok(())
@@ -352,19 +372,15 @@ impl VectorStoreFactory {
     }
 }
 
-/// Fails a batch of claimed vector-sync jobs, classifying transient vs permanent
-/// errors and folding the outcome into the drain report.
-///
-/// Permanent failures (and transient ones that exhaust the attempt budget) are
-/// quarantined and logged; recoverable failures back off for a later retry.
-async fn fail_vector_sync_jobs(
-    pool: &PgPool,
+/// Persists failure on the connection that already owns the remote-I/O lock.
+async fn fail_vector_sync_jobs_on(
+    conn: &mut sqlx::PgConnection,
     jobs: &[&VectorSyncJob],
     error: &Error,
     report: &mut VectorSyncReport,
 ) -> Result<()> {
     let permanent = error.is_permanent();
-    let dead_lettered = mark_vector_sync_failed_batch(pool, jobs, error, permanent).await?;
+    let dead_lettered = mark_vector_sync_failed_batch_on(conn, jobs, error, permanent).await?;
     report.failed += jobs.len() as u64;
     report.dead_lettered += dead_lettered;
     if dead_lettered > 0 {

@@ -1,6 +1,6 @@
 //! Atomic graph write protocol for relational rows, vectors, and changelog records.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use moa_core::types::{memory::InformationBarrierId, security::SensitivityClass};
@@ -12,8 +12,8 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use crate::{
-    Error, PostgresGraphStore, Result,
-    changelog::{ChangelogRecord, write_and_bump},
+    Error, MAX_BULK_INVALIDATE_NODES, PostgresGraphStore, Result,
+    changelog::{ChangelogRecord, write_and_bump, write_batch_and_bump},
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{
         ExistingSupersessionIntent, NodeContentUpdateIntent, NodeEmbeddingIntent, NodeExpiryIntent,
@@ -65,6 +65,13 @@ struct PreparedNodeFields {
     properties: Value,
     /// Envelope ciphertext of the complete content document, or `None`.
     content_sealed: Option<Vec<u8>>,
+}
+
+/// One edge intent paired with the exact runtime scope written to Postgres.
+struct ScopedEdgeWrite {
+    intent: EdgeWriteIntent,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
 }
 
 /// Seals one node's restricted/PHI content ahead of the SQL transaction.
@@ -333,10 +340,9 @@ async fn write_created_node(
 /// All nodes are written inside one transaction: the `node_index` rows are
 /// inserted with a single `UNNEST` multi-row statement (JSON travels as `TEXT[]`
 /// cast to `JSONB`, mirroring the tenant-knowledge batch inserts), every
-/// embedding-bearing node's vector is upserted in one call, and each node still
-/// writes its own `graph_changelog` outbox row so the per-node create audit and
-/// the storage-partition version bump match a loop of [`create_node`]. Returns
-/// the created uids in input order.
+/// embedding-bearing node's vector is upserted in one call, and one changelog
+/// statement retains a row per node while incrementing the storage-partition
+/// generation once. Returns the created uids in input order.
 pub async fn bulk_create_nodes(
     store: &PostgresGraphStore,
     mut intents: Vec<NodeWriteIntent>,
@@ -497,13 +503,14 @@ pub async fn bulk_create_nodes(
                 vector.upsert_in_tx(conn.as_mut(), &vector_items).await?;
             }
 
-            for (intent, changelog_props) in intents.iter().zip(&changelog_properties) {
-                write_and_bump(
-                    conn.as_mut(),
-                    create_changelog(intent, changelog_props, None),
-                )
-                .await?;
-            }
+            let changelog_records = intents
+                .iter()
+                .zip(&changelog_properties)
+                .map(|(intent, changelog_props)| {
+                    create_changelog(intent, changelog_props, None)
+                })
+                .collect::<Vec<_>>();
+            write_batch_and_bump(conn.as_mut(), &changelog_records).await?;
 
             conn.commit().await?;
             Ok(())
@@ -687,6 +694,104 @@ pub async fn invalidate_node(store: &PostgresGraphStore, uid: Uuid, reason: &str
     Ok(())
 }
 
+/// Soft-invalidates a bounded node batch and removes its vector projections atomically.
+///
+/// Caller input is capped before de-duplication, then sorted by UID so row locks,
+/// returned UIDs, and changelog rows are deterministic. Missing nodes are
+/// omitted. If any visible node is already invalidated, the transaction fails
+/// before changing another node.
+pub async fn bulk_invalidate_nodes(
+    store: &PostgresGraphStore,
+    uids: &[Uuid],
+    reason: &str,
+) -> Result<Vec<Uuid>> {
+    if uids.len() > MAX_BULK_INVALIDATE_NODES {
+        return Err(Error::Conflict(format!(
+            "bulk node invalidation accepts at most {MAX_BULK_INVALIDATE_NODES} UIDs, got {}",
+            uids.len()
+        )));
+    }
+    let mut requested_uids = uids.to_vec();
+    requested_uids.sort_unstable();
+    requested_uids.dedup();
+    if requested_uids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut conn = store.begin_required().await?;
+    let stored_nodes = fetch_stored_nodes(conn.as_mut(), &requested_uids).await?;
+    if let Some((uid, _)) = stored_nodes
+        .iter()
+        .find(|(_, node)| node.valid_to.is_some())
+    {
+        return Err(Error::BiTemporal(format!("{uid} is already invalidated")));
+    }
+    let invalidated_uids = stored_nodes.iter().map(|(uid, _)| *uid).collect::<Vec<_>>();
+    if invalidated_uids.is_empty() {
+        conn.commit().await?;
+        return Ok(Vec::new());
+    }
+
+    let now = Utc::now();
+    let (actor_id, actor_kind) = mutation_actor(store);
+    let updated = sqlx::query(
+        r#"
+        UPDATE moa.node_index
+        SET valid_to = $1,
+            invalidated_at = $1,
+            invalidated_by = $2,
+            invalidated_reason = $3
+        WHERE uid = ANY($4::UUID[])
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(now)
+    .bind(actor_id.as_deref().and_then(actor_uuid))
+    .bind(reason)
+    .bind(&invalidated_uids)
+    .execute(conn.as_mut())
+    .await?;
+    if updated.rows_affected() != invalidated_uids.len() as u64 {
+        return Err(Error::BiTemporal(
+            "bulk node invalidation lost an active row lock".to_string(),
+        ));
+    }
+    close_incident_edges_batch(conn.as_mut(), &invalidated_uids, now).await?;
+    if let Some(vector) = store.vector() {
+        vector
+            .delete_in_tx(conn.as_mut(), &invalidated_uids)
+            .await?;
+    }
+
+    let changelog_records = stored_nodes
+        .into_iter()
+        .map(|(uid, old)| ChangelogRecord {
+            storage_partition_id: old.storage_partition_id,
+            contact_id: old.contact_id,
+            scope: old.scope,
+            actor_id: actor_id.clone(),
+            actor_kind: actor_kind.clone(),
+            op: "invalidate".to_string(),
+            target_kind: "node".to_string(),
+            target_label: old.label.as_str().to_string(),
+            target_uid: uid,
+            payload: json!({
+                "before": old.properties_summary,
+                "reason": reason,
+                "valid_to": now.to_rfc3339(),
+            }),
+            redaction_marker: None,
+            pii_class: old.pii_class.as_str().to_string(),
+            audit_metadata: None,
+            cause_change_id: None,
+        })
+        .collect::<Vec<_>>();
+    write_batch_and_bump(conn.as_mut(), &changelog_records).await?;
+
+    conn.commit().await?;
+    Ok(invalidated_uids)
+}
+
 /// Closes one active graph node into an already-existing replacement node atomically.
 pub(crate) async fn close_existing_node_with_supersession(
     store: &PostgresGraphStore,
@@ -779,12 +884,12 @@ pub(crate) async fn close_existing_node_with_supersession(
 /// are closed or removed, and a changelog record is written — history and as-of
 /// reads keep working. Returns `false` without writing when the node is already
 /// closed, so scheduled passes rerun idempotently at the same `now`.
-pub(crate) async fn expire_node(
+pub(crate) async fn expire_node_in_conn(
     store: &PostgresGraphStore,
+    conn: &mut PgConnection,
     intent: NodeExpiryIntent,
 ) -> Result<bool> {
-    let mut conn = store.begin_required().await?;
-    let old = fetch_stored_node(conn.as_mut(), intent.uid)
+    let old = fetch_stored_node(&mut *conn, intent.uid)
         .await?
         .ok_or(Error::NotFound(intent.uid))?;
     if old.valid_to.is_some() {
@@ -792,7 +897,7 @@ pub(crate) async fn expire_node(
     }
 
     close_node_index(
-        conn.as_mut(),
+        &mut *conn,
         intent.uid,
         intent.valid_to,
         intent.invalidated_at,
@@ -800,12 +905,12 @@ pub(crate) async fn expire_node(
         &intent.reason,
     )
     .await?;
-    close_incident_edges(conn.as_mut(), intent.uid, intent.valid_to).await?;
+    close_incident_edges(&mut *conn, intent.uid, intent.valid_to).await?;
     if let Some(vector) = store.vector() {
-        vector.delete_in_tx(conn.as_mut(), &[intent.uid]).await?;
+        vector.delete_in_tx(&mut *conn, &[intent.uid]).await?;
     }
     write_and_bump(
-        conn.as_mut(),
+        &mut *conn,
         ChangelogRecord {
             storage_partition_id: old.storage_partition_id,
             contact_id: old.contact_id,
@@ -829,7 +934,6 @@ pub(crate) async fn expire_node(
     )
     .await?;
 
-    conn.commit().await?;
     Ok(true)
 }
 
@@ -1107,21 +1211,73 @@ pub async fn hard_purge_with_audit(
 
 /// Creates a graph edge and changelog row atomically.
 pub async fn create_edge(store: &PostgresGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
-    // `create_edge_in_conn` is idempotent (it no-ops when the edge already
-    // exists), so a deadlock victim — e.g. an edge onto a shared entity node
-    // whose partition changelog row another writer holds — is retried on a fresh
-    // transaction rather than aborting the ingesting document.
+    let uid = intent.uid;
+    bulk_create_edges(store, vec![intent]).await?;
+    Ok(uid)
+}
+
+/// Creates graph edges and their changelog rows in one scoped transaction.
+///
+/// Duplicate UIDs retain their first input occurrence. Only rows inserted by
+/// this call are returned and emitted to the changelog, so replaying a batch is
+/// a true no-op. Endpoint validation and row locking happen before either
+/// mutation statement.
+pub async fn bulk_create_edges(
+    store: &PostgresGraphStore,
+    intents: Vec<EdgeWriteIntent>,
+) -> Result<Vec<Uuid>> {
+    let mut seen = HashSet::with_capacity(intents.len());
+    let intents = intents
+        .into_iter()
+        .filter(|intent| seen.insert(intent.uid))
+        .collect::<Vec<_>>();
+    if intents.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let writes = intents
+        .into_iter()
+        .map(|intent| {
+            validate_edge_scope(&intent)?;
+            let (tenant_id, contact_id) = runtime_ids_from_parts(
+                store,
+                intent.storage_partition_id.as_deref(),
+                intent.contact_id.as_deref(),
+                "edges",
+            )?;
+            Ok(ScopedEdgeWrite {
+                intent,
+                tenant_id,
+                contact_id,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // The mutation is idempotent, so a deadlock victim can retry on a fresh
+    // scoped transaction without creating duplicate edges or outbox rows.
     let mut attempt = 0_u32;
     loop {
-        let outcome: Result<Uuid> = async {
+        let outcome: Result<Vec<Uuid>> = async {
             let mut conn = store.begin_required().await?;
-            let uid = create_edge_in_conn(store, conn.as_mut(), intent.clone()).await?;
+            validate_edge_endpoints_batch(conn.as_mut(), &writes).await?;
+            let inserted = insert_edge_index_batch(conn.as_mut(), &writes).await?;
+            if !inserted.is_empty() {
+                let write_by_uid = writes
+                    .iter()
+                    .map(|write| (write.intent.uid, write))
+                    .collect::<HashMap<_, _>>();
+                let changelog_records = inserted
+                    .iter()
+                    .map(|uid| edge_changelog(&write_by_uid[uid].intent))
+                    .collect::<Vec<_>>();
+                write_batch_and_bump(conn.as_mut(), &changelog_records).await?;
+            }
             conn.commit().await?;
-            Ok(uid)
+            Ok(inserted)
         }
         .await;
         match outcome {
-            Ok(uid) => return Ok(uid),
+            Ok(inserted) => return Ok(inserted),
             Err(error) if is_deadlock(&error) && attempt < MAX_DEADLOCK_RETRIES => {
                 attempt += 1;
                 deadlock_backoff(attempt).await;
@@ -1149,32 +1305,122 @@ pub async fn create_edge_in_conn(
     if !insert_edge_index(store, &mut *conn, &intent).await? {
         return Ok(intent.uid);
     }
-    write_and_bump(
-        &mut *conn,
-        ChangelogRecord {
-            storage_partition_id: intent.storage_partition_id.clone(),
-            contact_id: intent.contact_id.clone(),
-            scope: intent.scope.clone(),
-            actor_id: Some(intent.actor_id.clone()),
-            actor_kind: intent.actor_kind.clone(),
-            op: "create".to_string(),
-            target_kind: "edge".to_string(),
-            target_label: intent.label.as_str().to_string(),
-            target_uid: intent.uid,
-            payload: json!({
-                "after": intent.properties,
-                "start_uid": intent.start_uid,
-                "end_uid": intent.end_uid,
-            }),
-            redaction_marker: None,
-            pii_class: "none".to_string(),
-            audit_metadata: None,
-            cause_change_id: None,
-        },
-    )
-    .await?;
+    write_and_bump(&mut *conn, edge_changelog(&intent)).await?;
 
     Ok(intent.uid)
+}
+
+fn edge_changelog(intent: &EdgeWriteIntent) -> ChangelogRecord {
+    ChangelogRecord {
+        storage_partition_id: intent.storage_partition_id.clone(),
+        contact_id: intent.contact_id.clone(),
+        scope: intent.scope.clone(),
+        actor_id: Some(intent.actor_id.clone()),
+        actor_kind: intent.actor_kind.clone(),
+        op: "create".to_string(),
+        target_kind: "edge".to_string(),
+        target_label: intent.label.as_str().to_string(),
+        target_uid: intent.uid,
+        payload: json!({
+            "after": intent.properties,
+            "start_uid": intent.start_uid,
+            "end_uid": intent.end_uid,
+        }),
+        redaction_marker: None,
+        pii_class: "none".to_string(),
+        audit_metadata: None,
+        cause_change_id: None,
+    }
+}
+
+async fn insert_edge_index_batch(
+    conn: &mut PgConnection,
+    writes: &[ScopedEdgeWrite],
+) -> Result<Vec<Uuid>> {
+    let uids = writes
+        .iter()
+        .map(|write| write.intent.uid)
+        .collect::<Vec<_>>();
+    let labels = writes
+        .iter()
+        .map(|write| write.intent.label.as_str())
+        .collect::<Vec<_>>();
+    let start_uids = writes
+        .iter()
+        .map(|write| write.intent.start_uid)
+        .collect::<Vec<_>>();
+    let end_uids = writes
+        .iter()
+        .map(|write| write.intent.end_uid)
+        .collect::<Vec<_>>();
+    let storage_partition_ids = writes
+        .iter()
+        .map(|write| write.intent.storage_partition_id.as_deref())
+        .collect::<Vec<_>>();
+    let user_ids = writes
+        .iter()
+        .map(|write| write.intent.contact_id.as_deref())
+        .collect::<Vec<_>>();
+    let tenant_ids = writes
+        .iter()
+        .map(|write| write.tenant_id)
+        .collect::<Vec<_>>();
+    let contact_ids = writes
+        .iter()
+        .map(|write| write.contact_id)
+        .collect::<Vec<_>>();
+    let valid_froms = writes
+        .iter()
+        .map(|write| write.intent.valid_from)
+        .collect::<Vec<_>>();
+    let properties = writes
+        .iter()
+        .map(|write| serde_json::to_string(&write.intent.properties))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH input AS (
+            SELECT row.uid, row.label, row.start_uid, row.end_uid,
+                   row.storage_partition_id, row.user_id, row.tenant_id,
+                   row.contact_id, row.valid_from, row.properties::JSONB,
+                   row.input_ordinal
+            FROM UNNEST(
+                $1::UUID[], $2::TEXT[], $3::UUID[], $4::UUID[], $5::TEXT[],
+                $6::TEXT[], $7::UUID[], $8::UUID[], $9::TIMESTAMPTZ[], $10::TEXT[]
+            ) WITH ORDINALITY AS row(
+                uid, label, start_uid, end_uid, storage_partition_id, user_id,
+                tenant_id, contact_id, valid_from, properties, input_ordinal
+            )
+        ), inserted AS (
+            INSERT INTO moa.edge_index
+                (uid, label, start_uid, end_uid, storage_partition_id, user_id,
+                 tenant_id, contact_id, valid_from, properties)
+            SELECT uid, label, start_uid, end_uid, storage_partition_id, user_id,
+                   tenant_id, contact_id, valid_from, properties
+            FROM input
+            ORDER BY uid
+            ON CONFLICT (uid) DO NOTHING
+            RETURNING uid
+        )
+        SELECT input.uid
+        FROM input
+        JOIN inserted USING (uid)
+        ORDER BY input.input_ordinal
+        "#,
+    )
+    .bind(&uids)
+    .bind(&labels)
+    .bind(&start_uids)
+    .bind(&end_uids)
+    .bind(&storage_partition_ids)
+    .bind(&user_ids)
+    .bind(&tenant_ids)
+    .bind(&contact_ids)
+    .bind(&valid_froms)
+    .bind(&properties)
+    .fetch_all(conn)
+    .await?)
 }
 
 async fn edge_exists(conn: &mut PgConnection, uid: Uuid) -> Result<bool> {
@@ -1245,6 +1491,27 @@ async fn close_incident_edges(
     Ok(())
 }
 
+/// Closes every active edge touching any UID in one bounded invalidation batch.
+async fn close_incident_edges_batch(
+    conn: &mut PgConnection,
+    uids: &[Uuid],
+    valid_to: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE moa.edge_index
+        SET valid_to = $1
+        WHERE (start_uid = ANY($2::UUID[]) OR end_uid = ANY($2::UUID[]))
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(valid_to)
+    .bind(uids)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_supersedes_edge_index(
     store: &PostgresGraphStore,
@@ -1293,6 +1560,57 @@ async fn validate_edge_endpoints(conn: &mut PgConnection, intent: &EdgeWriteInte
     let end = fetch_stored_node(conn, intent.end_uid)
         .await?
         .ok_or(Error::NotFound(intent.end_uid))?;
+    validate_loaded_edge_endpoints(intent, &start, &end)
+}
+
+async fn validate_edge_endpoints_batch(
+    conn: &mut PgConnection,
+    writes: &[ScopedEdgeWrite],
+) -> Result<()> {
+    let mut endpoint_uids = writes
+        .iter()
+        .flat_map(|write| [write.intent.start_uid, write.intent.end_uid])
+        .collect::<Vec<_>>();
+    endpoint_uids.sort_unstable();
+    endpoint_uids.dedup();
+
+    let rows = sqlx::query(
+        r#"
+        SELECT uid, label, storage_partition_id, user_id, tenant_id, data_subject_id,
+               scope, pii_class, barrier, valid_from, valid_to, properties_summary
+        FROM moa.node_index
+        WHERE uid = ANY($1)
+        ORDER BY uid
+        FOR UPDATE
+        "#,
+    )
+    .bind(&endpoint_uids)
+    .fetch_all(conn)
+    .await?;
+    let mut endpoints = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let uid = row.try_get::<Uuid, _>("uid")?;
+        endpoints.insert(uid, stored_node_from_row(row)?);
+    }
+
+    for write in writes {
+        let intent = &write.intent;
+        let start = endpoints
+            .get(&intent.start_uid)
+            .ok_or(Error::NotFound(intent.start_uid))?;
+        let end = endpoints
+            .get(&intent.end_uid)
+            .ok_or(Error::NotFound(intent.end_uid))?;
+        validate_loaded_edge_endpoints(intent, start, end)?;
+    }
+    Ok(())
+}
+
+fn validate_loaded_edge_endpoints(
+    intent: &EdgeWriteIntent,
+    start: &StoredNode,
+    end: &StoredNode,
+) -> Result<()> {
     if start.valid_to.is_some() {
         return Err(Error::BiTemporal(format!(
             "{} is not active",
@@ -1305,9 +1623,8 @@ async fn validate_edge_endpoints(conn: &mut PgConnection, intent: &EdgeWriteInte
             intent.end_uid
         )));
     }
-    ensure_same_scope(intent, &start, "edge endpoints must share the edge scope")?;
-    ensure_same_scope(intent, &end, "edge endpoints must share the edge scope")?;
-    ensure_same_scope(&start, &end, "supersession nodes must share the same scope")
+    ensure_same_scope(intent, start, "edge endpoints must share the edge scope")?;
+    ensure_same_scope(intent, end, "edge endpoints must share the edge scope")
 }
 
 fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
@@ -1672,6 +1989,32 @@ async fn fetch_stored_node(conn: &mut PgConnection, uid: Uuid) -> Result<Option<
     .fetch_optional(conn)
     .await?;
     row.map(stored_node_from_row).transpose()
+}
+
+/// Locks and returns every visible stored node in canonical UID order.
+async fn fetch_stored_nodes(
+    conn: &mut PgConnection,
+    uids: &[Uuid],
+) -> Result<Vec<(Uuid, StoredNode)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT uid, label, storage_partition_id, user_id, tenant_id, data_subject_id, scope,
+               pii_class, barrier, valid_from, valid_to, properties_summary
+        FROM moa.node_index
+        WHERE uid = ANY($1::UUID[])
+        ORDER BY uid
+        FOR UPDATE
+        "#,
+    )
+    .bind(uids)
+    .fetch_all(conn)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let uid = row.try_get("uid")?;
+            Ok((uid, stored_node_from_row(row)?))
+        })
+        .collect()
 }
 
 async fn fetch_current_supersession_target(

@@ -428,7 +428,7 @@ pub async fn expire_idle_facts(
         // Hold the canonical tenant-then-subject advisory lock across the graph
         // transaction. Hold-first therefore makes expiry wait and skip, while
         // expiry-first completes before hold placement can commit.
-        let Some(guard) =
+        let Some(mut guard) =
             moa_memory_pii::legal_hold::begin_retention_guard(pool, *tenant_id, contact_id).await?
         else {
             continue;
@@ -441,14 +441,17 @@ pub async fn expire_idle_facts(
             .entry(contact_id)
             .or_insert_with(|| scoped_graph_for(pool, scope, kms.clone()));
         let closed = store
-            .expire_node(NodeExpiryIntent {
-                uid,
-                valid_to: now,
-                invalidated_at: now,
-                reason: EXPIRED_IDLE_REASON.to_string(),
-                actor_id: CONSOLIDATION_ACTOR.to_string(),
-                actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),
-            })
+            .expire_node_in_conn(
+                guard.connection(),
+                NodeExpiryIntent {
+                    uid,
+                    valid_to: now,
+                    invalidated_at: now,
+                    reason: EXPIRED_IDLE_REASON.to_string(),
+                    actor_id: CONSOLIDATION_ACTOR.to_string(),
+                    actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),
+                },
+            )
             .await?;
         guard.finish().await?;
         if closed {

@@ -14,19 +14,19 @@
       cpu: "1"
       memory: 2Gi
 - op: add
-  path: /spec/template/spec/initContainers
+  path: /spec/template/spec/initContainers/0
   value:
-    - name: wait-for-local-dependencies
-      image: busybox:1.36
-      command:
-        - sh
-        - -ec
-        - |
-          for target in postgres:5432 valkey:6379 rustfs:9000; do
-            until nc -z "${target%:*}" "${target#*:}"; do
-              sleep 1
-            done
+    name: wait-for-local-dependencies
+    image: busybox:1.36
+    command:
+      - sh
+      - -ec
+      - |
+        for target in postgres:5432 valkey:6379 rustfs:9000; do
+          until nc -z "${target%:*}" "${target#*:}"; do
+            sleep 1
           done
+        done
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:

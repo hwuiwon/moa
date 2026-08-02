@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
+use moa_core::types::contact::ContactId;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
@@ -81,6 +82,47 @@ pub struct DestructionGuard<'a> {
 }
 
 impl DestructionGuard<'_> {
+    /// Returns the guarded transaction connection for the irreversible mutation.
+    ///
+    /// The caller must perform the protected mutation on this connection so its
+    /// row changes and advisory locks share one transaction. Role and scope
+    /// transitions must use the typed methods on this guard.
+    pub fn connection(&mut self) -> &mut PgConnection {
+        self.conn.as_mut()
+    }
+
+    /// Restores the transaction's canonical owner role without releasing its
+    /// advisory locks or changing its installed RLS scope.
+    pub async fn assume_owner_role(&mut self) -> Result<()> {
+        sqlx::query("RESET ROLE")
+            .execute(self.conn.as_mut())
+            .await?;
+        Ok(())
+    }
+
+    /// Assumes the application role on this guarded transaction.
+    ///
+    /// This is crate-private so destructive helpers can make the typed
+    /// owner-to-application transition without exposing a second public role
+    /// control surface or issuing raw role SQL.
+    pub(crate) async fn assume_app_role(&mut self) -> moa_core::error::Result<()> {
+        self.conn.assume_app_role().await
+    }
+
+    /// Replaces the guarded transaction's RLS context with one app contact
+    /// scope while preserving the same connection and advisory locks.
+    pub async fn assume_app_contact_scope(
+        &mut self,
+        tenant_id: TenantId,
+        contact_id: ContactId,
+    ) -> Result<()> {
+        self.assume_owner_role().await?;
+        self.conn
+            .assume_app_contact_scope(tenant_id, contact_id)
+            .await?;
+        Ok(())
+    }
+
     /// Releases the advisory locks by committing the otherwise read-only guard transaction.
     pub async fn finish(self) -> Result<()> {
         self.conn.commit().await?;
@@ -237,17 +279,21 @@ pub async fn start_destruction(
         .execute(conn.as_mut())
         .await?;
     } else {
-        for subject in &subjects {
-            sqlx::query(
-                "INSERT INTO moa.destruction_operation_fence (tenant_id, subject_id, operation_id, operation_kind) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            )
-            .bind(tenant_id.0)
-            .bind(subject)
-            .bind(operation_id)
-            .bind(operation_kind)
-            .execute(conn.as_mut())
-            .await?;
-        }
+        sqlx::query(
+            r#"
+            INSERT INTO moa.destruction_operation_fence
+                (tenant_id, subject_id, operation_id, operation_kind)
+            SELECT $1, subject_id, $3, $4
+            FROM unnest($2::UUID[]) AS subject(subject_id)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(&subjects)
+        .bind(operation_id)
+        .bind(operation_kind)
+        .execute(conn.as_mut())
+        .await?;
     }
     validate_expected_fences(
         conn.as_mut(),
@@ -323,7 +369,11 @@ pub async fn begin_retention_guard<'a>(
     subject_id: Option<Uuid>,
 ) -> Result<Option<DestructionGuard<'a>>> {
     let subjects = subject_id.into_iter().collect::<Vec<_>>();
-    let mut conn = begin_tenant(pool, tenant_id).await?;
+    let scope = subject_id.map_or_else(
+        || RlsContext::tenant(tenant_id),
+        |subject_id| RlsContext::contact(tenant_id, ContactId(subject_id)),
+    );
+    let mut conn = ScopedConn::begin_as_app(pool, &scope, true).await?;
     lock_tenant_and_subjects(conn.as_mut(), tenant_id.0, &subjects).await?;
     if active_hold_query(conn.as_mut(), tenant_id.0, &subjects, subject_id.is_none()).await? {
         return Ok(None);
@@ -347,12 +397,19 @@ pub async fn lock_tenant_and_subjects(
 }
 
 async fn lock_subjects(conn: &mut PgConnection, subjects: &[Uuid]) -> Result<()> {
-    for subject in sorted_subjects(subjects) {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:subject:' || $1::text, 0))")
-            .bind(subject)
-            .execute(&mut *conn)
-            .await?;
-    }
+    let subjects = sorted_subjects(subjects);
+    sqlx::query(
+        r#"
+        SELECT pg_advisory_xact_lock(
+            hashtextextended('moa:destruction:subject:' || subject_id::TEXT, 0)
+        )
+        FROM unnest($1::UUID[]) AS subject(subject_id)
+        ORDER BY subject_id
+        "#,
+    )
+    .bind(&subjects)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 

@@ -313,9 +313,9 @@ without re-parsing or re-embedding anything. A permission-bearing record whose
 ACL could not be fully enumerated is recorded as `incomplete` — which hides it —
 and only then raises a typed error.
 
-Migration semantics: V000348 promotes nothing. Every pre-existing object becomes
-`incomplete`; content ingested before ACLs were captured is invisible to
-everyone until a resync captures real permissions.
+New objects start `incomplete` and remain invisible until ingestion captures a
+complete provider ACL snapshot. The fresh-only schema has no compatibility
+backfill or promoted legacy visibility state.
 
 See [Security](08-security.md) for the cross-referenced policy.
 
@@ -340,10 +340,11 @@ The public HTTP routes for this surface are:
 - `POST /v1/knowledge/webhooks/nango`
 - `POST /v1/knowledge/webhooks/merge`
 
-MOA does not expose an online index-rebuild or rechunk API. A storage partition
-pins its embedding model and dimensions; incompatible writes and queries fail
-closed. Changing that contract currently requires an offline replacement
-procedure rather than an operator endpoint that could mix vector spaces.
+MOA has no index-rebuild/rechunk API, workflow, or durable rebuild-state schema.
+A storage partition pins its embedding model and dimensions; incompatible
+writes and queries fail closed. Changing that contract requires provisioning a
+replacement partition and re-ingesting through the normal ingestion path before
+routing queries to it, so one partition never mixes vector spaces.
 
 Authenticated routes inject tenant identity before calling Restate. Provider
 webhook routes do not expose tenant reads; the orchestrator verifies provider

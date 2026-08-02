@@ -20,6 +20,29 @@ spec:
     spec:
       terminationGracePeriodSeconds: 600
       initContainers:
+        # Runtime replicas have no migration credential and never execute DDL.
+        # The same immutable image exposes the explicit migration command used
+        # here before any handler process can start.
+        - name: database-migrations
+          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          args:
+            - migrate
+          envFrom:
+            - configMapRef:
+                name: moa-runtime-config
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: MOA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+            - name: MOA_DATABASE_ADMIN_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: admin-url
         # Converge the required per-scope Restate rule before this pod can
         # accept work. `rules set` is idempotent across replica startups.
         - name: restate-rules-bootstrap

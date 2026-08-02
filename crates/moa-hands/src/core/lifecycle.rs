@@ -1040,8 +1040,8 @@ fn lease_expired(lease: &HandLease) -> bool {
 ///
 /// The comparison is on the policy identity hash alone, which already covers
 /// the six-dimension profile, all five source revisions, and the provider's
-/// capability revision. A lease with no persisted policy — only the legacy rows
-/// V000359 marked stale — never matches.
+/// capability revision. A lease with no complete persisted policy never
+/// matches.
 fn lease_matches_policy(lease: &HandLease, policy: &HandLeasePolicy) -> bool {
     lease
         .policy

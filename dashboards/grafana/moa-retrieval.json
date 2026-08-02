@@ -9,22 +9,6 @@
     {
       "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        {
-          "format": "time_series",
-          "rawSql": "SELECT bucket AS time, storage_partition_id::text AS metric, zero_recall::double precision / NULLIF(turns, 0) AS value FROM analytics.turn_recall_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') ORDER BY 1",
-          "refId": "A"
-        }
-      ],
-      "title": "Zero-recall rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
       "id": 2,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },

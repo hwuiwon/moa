@@ -73,21 +73,5 @@ Kubernetes Jobs are immutable. Delete the completed `moa-kms-rewrap` Job before
 applying it for a later rotation. This removes only the completed Job object;
 the operation state and KEKs remain in Postgres.
 
-## Seal historical memory
-
-The separate `moa-memory-sealing-backfill` Job seals historical restricted/PHI
-memory with the same Postgres KMS and mounted keyring:
-
-```bash
-kubectl apply -k k8s/jobs
-kubectl -n moa-system wait --for=condition=complete \
-  job/moa-memory-sealing-backfill --timeout=3600s
-kubectl -n moa-system logs job/moa-memory-sealing-backfill
-```
-
-`backfill-memory-sealed-content --batch-size 100` uses bounded transactions,
-records progress in Postgres, and validates the plaintext/vector prohibition.
-It is safe to retry until it reports no remaining work.
-
-Do not add either maintenance Job to `k8s/base` or an application overlay. The
-operator must opt in to these write operations deliberately.
+Do not add the maintenance Job to `k8s/base` or an application overlay. The
+operator must opt in to this write operation deliberately.

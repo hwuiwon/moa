@@ -156,6 +156,7 @@ pub struct RegisteredService {
 pub fn build_endpoint(
     session_store: Arc<moa_session::PostgresSessionStore>,
     pool: sqlx::PgPool,
+    background_pool: sqlx::PgPool,
     kms: Arc<dyn moa_crypto::KeyManagementProvider>,
     fga_client: Option<FgaClient>,
     providers: Arc<ProviderRegistry>,
@@ -262,7 +263,15 @@ pub fn build_endpoint(
             .serve(),
         )
         .bind(NeonMaintImpl::new(config.clone()).serve())
-        .bind(PrivacyImpl::new(pool.clone(), config.compliance.clone(), kms.clone()).serve())
+        .bind(
+            PrivacyImpl::new(
+                pool.clone(),
+                background_pool,
+                config.compliance.clone(),
+                kms.clone(),
+            )
+            .serve(),
+        )
         .bind(SkillsImpl::new(pool.clone()).serve())
         .bind(CronJobImpl.serve())
         .bind(
@@ -286,15 +295,7 @@ pub fn build_endpoint(
         )
         .bind(TenantsImpl::new(pool.clone(), fga_client.clone()).serve())
         .bind(TenantImpl::new(pool.clone()).serve())
-        .bind(
-            TenantPurgeImpl::new(
-                pool.clone(),
-                fga_client.clone(),
-                credential_vault.clone(),
-                config.as_ref(),
-            )
-            .serve(),
-        )
+        .bind(TenantPurgeImpl::new(pool.clone(), credential_vault.clone(), config.as_ref()).serve())
         .bind(
             ExecutionRunImpl::new(
                 pool.clone(),

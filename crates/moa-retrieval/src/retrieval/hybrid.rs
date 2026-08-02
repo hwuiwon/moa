@@ -1083,7 +1083,7 @@ fn is_fatal_graph_error(error: &Error) -> bool {
         | Error::UnknownEdgeLabel(_)
         | Error::SealedEmbedding
         | Error::DataSubjectMismatch { .. }
-        | Error::Backfill(_)
+        | Error::InvalidSealedContent(_)
         | Error::ChangelogScopeMismatch { .. }
         | Error::InvalidChangelogScope => true,
         // Ordinary backend/query failures degrade this leg. A crypto failure
@@ -1111,6 +1111,7 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         | VectorError::StoragePartitionEmbedderStateMissing { .. }
         | VectorError::EmbedderModelMismatch { .. }
         | VectorError::QueryLimitTooLarge(_)
+        | VectorError::VectorSyncLimitOutOfRange { .. }
         | VectorError::StoragePartitionRequired { .. }
         | VectorError::TurbopufferUnavailable { .. }
         | VectorError::TurbopufferBaaRequired { .. }

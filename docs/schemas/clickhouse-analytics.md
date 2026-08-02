@@ -33,10 +33,9 @@ CREATE TABLE IF NOT EXISTS <db>.events_raw (
     storage_partition_id String,
     user_id String,
     sequence_num Int64,
-    turn_number Int64,          -- stamped by exporter: 1 + count of BrainResponse
-                                -- events with lower sequence_num in the session;
-                                -- a BrainResponse event closes its own turn (its
-                                -- turn_number counts itself)
+    turn_number Int64,          -- assigned at Postgres append time: 1 + count of
+                                -- earlier BrainResponse events in the session;
+                                -- a BrainResponse event closes its own turn
     event_type LowCardinality(String),
     token_count Nullable(Int32),
     payload String,
@@ -143,7 +142,7 @@ error Nullable(String), started_at Nullable(DateTime64(6,'UTC')),
 completed_at Nullable(DateTime64(6,'UTC')), created_at DateTime64(6,'UTC'),
 updated_at DateTime64(6,'UTC'), export_version DateTime64(6,'UTC')`
 
-If a `V000325` fact view selects a source column that is missing above, the
+If an `analytics_query_read_models` fact view selects a source column that is missing above, the
 implementer adds it to the dim (and to this document) rather than dropping the
 dataset field.
 
@@ -160,8 +159,7 @@ input_tokens_cache_write Int64, input_tokens_cache_read Int64,
 total_input_tokens Int64, output_tokens Int64, cost_cents Int64,
 export_version DateTime64(6,'UTC')`
 
-Row values must match `session_turn_metrics`
-(`V000307__tenant_runtime_boundaries.sql:515`) row-for-row: same turn
+Row values must match the `session_turn_metrics` source view row-for-row: same turn
 numbering (ROW_NUMBER over BrainResponse), same tool window
 (`prev_response_seq < tool_call_seq < response_seq`), same first-match
 ToolResult/ToolError duration fallback.
@@ -174,12 +172,9 @@ tool_name String, success Nullable(Bool), duration_ms Nullable(Float64),
 model_tier Nullable(String), ts DateTime64(6,'UTC'),
 export_version DateTime64(6,'UTC')`
 
-Row values must match the effective `tool_call_analytics` view logic
-(`V000001__session_baseline.sql:396`, from `V000008`, which adds the
-constant `model_tier = 'main'`). `turn_number` is not a column of that view;
-the exporter stamps each tool call with its enclosing turn
-(`1 + count of earlier BrainResponses`, the same prefix function used for
-`events_raw`). `tool_id` is `(call_data ->> 'tool_id')::UUID`.
+Row values must match the effective `tool_call_analytics` source-view logic,
+including the constant `model_tier = 'main'`. The exporter reads the tool call's persisted
+`events.turn_number`; `tool_id` is `(call_data ->> 'tool_id')::UUID`.
 
 ## Dataset mapping (moa-analytics CH backend)
 
@@ -220,10 +215,10 @@ cheap at query time in CH; MVs come later only if profiling demands (and any MV 
    `(updated_at)` btree index. Execution runs/tasks use the non-null
    `analytics_change_seq` plus primary UUID tuple and its supporting index;
    their exporter never scans or orders by `updated_at`.
-5. **Turn stamping is a full-prefix computation.** `turn_number` for an
-   exported event counts BrainResponse events over the session's entire
-   prefix (indexed per-session lookup over `(session_id, …)`), never a
-   window over the current export batch alone.
+5. **Turn stamping happens once at append.** `events.turn_number` is a required
+   positive value assigned under the locked `sessions` row, with no default or
+   trigger fallback. Exporters read it directly and never recompute a session
+   prefix from the current batch or historical partitions.
 6. **Compiled limits always apply.** The CH dialect keeps the compiler's
    row-limit clamp on every query, same as Postgres.
 7. **Client reuse.** The ClickHouse `Client` is constructed once and reused

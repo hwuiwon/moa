@@ -22,7 +22,8 @@ pub use promotion::{
     VectorPartitionPromotion, finalize_promotion, rollback_promotion,
 };
 pub use sync::{
-    VECTOR_SYNC_MAX_ATTEMPTS, VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncOperation, VectorSyncReport,
+    VECTOR_SYNC_DRAIN_MAX_LIMIT, VECTOR_SYNC_MAX_ATTEMPTS, VECTOR_SYNC_POST_COMMIT_LIMIT,
+    VectorSyncOperation, VectorSyncReport,
 };
 pub use turbopuffer::{TurbopufferStore, TurbopufferTextQuery};
 
@@ -113,6 +114,14 @@ pub enum Error {
     /// The configured query limit is too large for Postgres.
     #[error("vector query limit {0} does not fit into i64")]
     QueryLimitTooLarge(usize),
+    /// A vector-sync drain requested a non-positive or unbounded claim batch.
+    #[error("vector sync drain limit must be between 1 and {max}, got {limit}")]
+    VectorSyncLimitOutOfRange {
+        /// Rejected claim-batch size.
+        limit: i64,
+        /// Largest supported claim-batch size.
+        max: i64,
+    },
     /// The vector backend needs a scoped storage partition.
     #[error("vector backend `{backend}` requires a scoped storage partition for {operation}")]
     StoragePartitionRequired {
@@ -219,6 +228,7 @@ impl Error {
             | Self::StoragePartitionEmbedderStateMissing { .. }
             | Self::StoragePartitionRequired { .. }
             | Self::QueryLimitTooLarge(_)
+            | Self::VectorSyncLimitOutOfRange { .. }
             | Self::TurbopufferUnavailable { .. }
             | Self::TurbopufferBaaRequired { .. }
             | Self::TurbopufferConfig(_)

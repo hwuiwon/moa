@@ -7,7 +7,9 @@ use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
+use moa_memory_graph::{
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
+};
 use moa_test_support::fixtures::stable_uuid_from_label;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::strategy::{Strategy, ValueTree};
@@ -79,6 +81,28 @@ fn node_intent(
         embedding_model_version: None,
         embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
+        actor_kind: "system".to_string(),
+    }
+}
+
+fn edge_intent(
+    storage_partition_id: &str,
+    uid: Uuid,
+    start_uid: Uuid,
+    end_uid: Uuid,
+    valid_from: DateTime<Utc>,
+) -> EdgeWriteIntent {
+    EdgeWriteIntent {
+        uid,
+        label: EdgeLabel::RelatesTo,
+        start_uid,
+        end_uid,
+        valid_from,
+        properties: json!({ "source": "concurrent_edge_batch" }),
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
+        scope: "tenant".to_string(),
+        actor_id: "system".to_string(),
         actor_kind: "system".to_string(),
     }
 }
@@ -289,6 +313,93 @@ async fn concurrent_writes_to_different_nodes_in_same_workspace_do_not_interfere
         assert_eq!(count, 1);
     }
     conn.commit().await.expect("commit independent node read");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_replayed_edge_batches_insert_each_edge_once_db_memory() {
+    // Pins: concurrent batches that contain the same edge UIDs in different
+    // orders serialize without deadlock, report only the rows each call inserted,
+    // and emit exactly one changelog mutation per durable edge.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let partition = Uuid::now_v7().to_string();
+    let graph = graph_store(&test_db, &partition);
+    let now = moa_test_support::fixtures::pg_now();
+    let nodes = (0..9)
+        .map(|index| {
+            node_intent(
+                &partition,
+                Uuid::now_v7(),
+                format!("edge endpoint {index}"),
+                now,
+                "endpoint",
+            )
+        })
+        .collect::<Vec<_>>();
+    let node_uids = nodes.iter().map(|node| node.uid).collect::<Vec<_>>();
+    graph
+        .bulk_create_nodes(nodes)
+        .await
+        .expect("create concurrent edge endpoints");
+    let edges = (0..8)
+        .map(|index| {
+            edge_intent(
+                &partition,
+                stable_uuid_from_label(&format!("concurrent-edge-{index}")),
+                node_uids[index],
+                node_uids[index + 1],
+                now,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut tasks = Vec::new();
+    for writer in 0..8 {
+        let graph = graph.clone();
+        let mut batch = edges.clone();
+        batch.rotate_left(writer);
+        tasks.push(tokio::spawn(
+            async move { graph.bulk_create_edges(batch).await },
+        ));
+    }
+
+    let mut inserted_total = 0_usize;
+    let mut mutating_batches = 0_i64;
+    for task in tasks {
+        let inserted = task
+            .await
+            .expect("join concurrent edge writer")
+            .expect("concurrent edge batch succeeds");
+        inserted_total += inserted.len();
+        mutating_batches += i64::from(!inserted.is_empty());
+    }
+    assert_eq!(inserted_total, edges.len());
+
+    let mut conn = scoped_conn(test_db.store().pool(), &partition).await;
+    let durable_edges =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.edge_index WHERE uid = ANY($1)")
+            .bind(edges.iter().map(|edge| edge.uid).collect::<Vec<_>>())
+            .fetch_one(conn.as_mut())
+            .await
+            .expect("count durable concurrent edges");
+    let changelog_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.graph_changelog \
+         WHERE target_kind = 'edge' AND target_uid = ANY($1)",
+    )
+    .bind(edges.iter().map(|edge| edge.uid).collect::<Vec<_>>())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count concurrent edge changelog rows");
+    conn.commit().await.expect("commit concurrent edge read");
+    assert_eq!(durable_edges, 8);
+    assert_eq!(changelog_rows, 8);
+    assert_eq!(
+        changelog_version(test_db.store().pool(), &partition).await,
+        1 + mutating_batches,
+        "one node batch plus one generation per mutating edge statement"
+    );
 }
 
 #[tokio::test]

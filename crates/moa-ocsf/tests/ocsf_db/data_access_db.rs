@@ -224,6 +224,20 @@ async fn emit_data_access_persists_queryable_datastore_read_summary_db() {
     .await
     .expect("verify signature");
     assert!(verified, "data-access audit signature must verify");
+
+    let update_error = sqlx::query("UPDATE security_events SET severity_id = 6 WHERE id = $1")
+        .bind(event_id)
+        .execute(&pool)
+        .await
+        .expect_err("signed security evidence must reject ordinary updates");
+    assert_eq!(
+        update_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("55000"),
+        "signed security evidence must fail with object-not-in-prerequisite-state"
+    );
 }
 
 #[tokio::test]

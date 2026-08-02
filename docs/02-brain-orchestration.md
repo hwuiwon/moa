@@ -23,19 +23,27 @@ _Restate orchestration, hosted API runtime mode, turn execution, and workers._
 registered with Restate. At startup it:
 
 1. Loads shared `MoaConfig` from flat `MOA_...` environment variables.
-2. Connects to Postgres and runs session migrations.
+2. Connects with the runtime Postgres URL and validates that the exact complete
+   central migration history is already installed.
 3. Builds the Postgres session store, graph memory stack, provider registry,
    embedding provider, runtime cache, and tool router.
 4. Installs an `OrchestratorCtx` singleton for handlers.
 5. Binds Restate services, virtual objects, and workflows.
 6. Starts the Restate endpoint and a separate health/readiness endpoint.
 
+Schema changes are an explicit deployment phase. Only
+`moa-orchestrator migrate` uses `MOA_DATABASE_ADMIN_URL` and executes migration
+DDL; the default runtime command never falls back to migration authority and
+fails closed before dependency construction when history is missing or drifts.
+Kubernetes runs that command in an init container before starting each runtime
+replica.
+
 Core production Restate bindings:
 
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
 | Workflow | `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `SkillLearning`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
 
 Internal application boundaries for action reviews, builtin async-authz

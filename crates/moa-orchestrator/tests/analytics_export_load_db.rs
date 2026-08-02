@@ -55,9 +55,7 @@ const DIM_SESSIONS_PULL_SQL: &str = "SELECT s.id AS session_id, s.tenant_id, s.s
 /// batch size; the driving `events` scan must use `idx_events_timestamp`.
 const EVENTS_PULL_SQL: &str = "SELECT e.id AS event_id, e.session_id, s.tenant_id, \
         e.storage_partition_id, e.user_id, e.sequence_num, \
-        (1 + (SELECT COUNT(*) FROM events b \
-              WHERE b.session_id = e.session_id AND b.event_type = 'BrainResponse' \
-                AND b.sequence_num < e.sequence_num))::BIGINT AS turn_number, \
+        e.turn_number, \
         e.event_type, e.token_count, e.payload::text AS payload, e.timestamp AS ts \
      FROM events e \
      JOIN sessions s ON s.id = e.session_id \
@@ -79,15 +77,16 @@ async fn analytics_export_full_pass_load_db() -> TestResult<()> {
     let seed_start = Instant::now();
     seed_sessions(&pool, tenant, now).await?;
     let event_total = seed_events(&pool, tenant, now).await?;
+    seed_completed_execution_upgrade_state(&pool, now).await?;
     println!(
         "seeded {SESSION_COUNT} sessions and {event_total} events in {:?}",
         seed_start.elapsed()
     );
 
-    // Mock ClickHouse that returns 200 for every request (schema DDL and every
-    // insert); the controls are dropped since only timing and completion matter.
-    // `non_exhaustive` allows the unused surplus handlers (the pass makes ~16
-    // requests: 11 schema + dims/events/facts inserts).
+    // Mock ClickHouse that returns 200 for every insert; the controls are
+    // dropped since only timing and completion matter. Schema/bootstrap
+    // correctness belongs to the real ClickHouse lane, while this test isolates
+    // the steady-state Postgres pull and transform cost.
     let mut mock = Mock::new();
     mock.non_exhaustive();
     for _ in 0..64 {
@@ -103,7 +102,6 @@ async fn analytics_export_full_pass_load_db() -> TestResult<()> {
     );
 
     let pass_start = Instant::now();
-    exporter.ensure_clickhouse_schema().await?;
     exporter.run_one_pass().await?;
     let pass_elapsed = pass_start.elapsed();
     println!(
@@ -128,6 +126,45 @@ async fn analytics_export_full_pass_load_db() -> TestResult<()> {
     assert_plan_indexed(&events_plan, "events", "_timestamp_idx");
 
     pool.close().await;
+    Ok(())
+}
+
+/// Seeds the completed execution-dimension bootstrap required before normal
+/// steady-state passes may run. The load corpus contains no execution rows.
+async fn seed_completed_execution_upgrade_state(
+    pool: &PgPool,
+    export_version_floor: DateTime<Utc>,
+) -> TestResult<()> {
+    sqlx::query(
+        "INSERT INTO analytics.clickhouse_schema_upgrade_state ( \
+             upgrade_key, database_uuid, run_table_uuid, task_table_uuid, \
+             stage, upgrade_version, export_version_floor, \
+             run_high_water_seq, run_high_water_id, task_high_water_seq, task_high_water_id, \
+             run_page_seq, run_page_id, task_page_seq, task_page_id, completed_at \
+         ) VALUES ( \
+             'execution_dimensions', $3, $4, $5, 'complete', $1, $1, \
+             0, $2, 0, $2, 0, $2, 0, $2, NOW() \
+         )",
+    )
+    .bind(export_version_floor)
+    .bind(Uuid::nil())
+    .bind(Uuid::from_u128(1))
+    .bind(Uuid::from_u128(2))
+    .bind(Uuid::from_u128(3))
+    .execute(pool)
+    .await?;
+    for table in ["dim_execution_runs", "dim_execution_tasks"] {
+        sqlx::query(
+            "INSERT INTO analytics.clickhouse_export_state ( \
+                 table_name, cursor_ts, cursor_id, exported_at, cursor_seq \
+             ) VALUES ($1, $2, $3, $2, 0)",
+        )
+        .bind(table)
+        .bind(DateTime::<Utc>::UNIX_EPOCH)
+        .bind(Uuid::nil())
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 
@@ -189,6 +226,7 @@ async fn seed_events(pool: &PgPool, tenant: Uuid, now: DateTime<Utc>) -> TestRes
     let mut event_ids = Vec::with_capacity(total);
     let mut owner_ids = Vec::with_capacity(total);
     let mut sequence_nums = Vec::with_capacity(total);
+    let mut turn_numbers = Vec::with_capacity(total);
     let mut event_types = Vec::with_capacity(total);
     let mut timestamps = Vec::with_capacity(total);
 
@@ -200,6 +238,7 @@ async fn seed_events(pool: &PgPool, tenant: Uuid, now: DateTime<Utc>) -> TestRes
             event_ids.push(Uuid::now_v7());
             owner_ids.push(*session_id);
             sequence_nums.push((event_index + 1) as i64);
+            turn_numbers.push(((event_index + 1) / 4 + 1) as i64);
             event_types.push(event_type_for(event_index).to_string());
             timestamps.push(session_base + ChronoDuration::seconds(event_index as i64));
         }
@@ -213,8 +252,8 @@ async fn seed_events(pool: &PgPool, tenant: Uuid, now: DateTime<Utc>) -> TestRes
         sqlx::query(
             "INSERT INTO events \
                  (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, \
-                  event_type, payload, timestamp) \
-             SELECT e.id, e.session_id, $6, 'user-1', $7, e.seq, e.etype, \
+                  turn_number, event_type, payload, timestamp) \
+             SELECT e.id, e.session_id, $7, 'user-1', $8, e.seq, e.turn_number, e.etype, \
                  CASE e.etype \
                      WHEN 'BrainResponse' THEN '{\"data\":{\"model\":\"claude\",\"cost_cents\":5,\"input_tokens_uncached\":10,\"input_tokens_cache_write\":1,\"input_tokens_cache_read\":2,\"output_tokens\":4}}'::jsonb \
                      WHEN 'ToolCall' THEN '{\"data\":{\"tool_id\":\"00000000-0000-4000-8000-000000000001\",\"tool_name\":\"search\"}}'::jsonb \
@@ -222,12 +261,13 @@ async fn seed_events(pool: &PgPool, tenant: Uuid, now: DateTime<Utc>) -> TestRes
                      ELSE '{\"data\":{}}'::jsonb \
                  END, \
                  e.ts \
-             FROM UNNEST($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::timestamptz[]) \
-                 AS e(id, session_id, seq, etype, ts)",
+             FROM UNNEST($1::uuid[], $2::uuid[], $3::bigint[], $4::bigint[], $5::text[], $6::timestamptz[]) \
+                 AS e(id, session_id, seq, turn_number, etype, ts)",
         )
         .bind(&event_ids[offset..end])
         .bind(&owner_ids[offset..end])
         .bind(&sequence_nums[offset..end])
+        .bind(&turn_numbers[offset..end])
         .bind(&event_types[offset..end])
         .bind(&timestamps[offset..end])
         .bind(tenant.to_string())

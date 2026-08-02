@@ -253,15 +253,15 @@ impl ArtifactRegistry {
         Ok(affected > 0)
     }
 
-    /// Advances an existing embedding's `updated_at` without re-embedding.
+    /// Retargets an existing embedding to the current revision without re-embedding.
     ///
     /// The driver calls this when a candidate surfaced as stale (its artifact was
     /// reactivated) but the identity digest is unchanged and the stored vector is
-    /// already in the active space, so the row stops re-selecting on the next tick
-    /// without a wasted provider call. Guarded by `observed_artifact_updated_at`
-    /// like [`Self::set_skill_embedding`], so a concurrent pointer or identity
-    /// change is not masked by a bumped timestamp. Returns whether a row was
-    /// touched.
+    /// already in the active space, so the row's revision provenance and
+    /// `updated_at` advance together without a wasted provider call. Guarded by
+    /// `observed_artifact_updated_at` like [`Self::set_skill_embedding`], so a
+    /// concurrent pointer or identity change is not masked by a retargeted row.
+    /// Returns whether a row was touched.
     pub async fn touch_skill_embedding(
         &self,
         artifact_uid: Uuid,
@@ -283,10 +283,10 @@ impl ArtifactRegistry {
                  WHERE p.revision_uid = $2 \
                  FOR UPDATE OF p \
              ) \
-             UPDATE moa.skill_embedding se SET updated_at = now() \
+             UPDATE moa.skill_embedding se \
+             SET revision_uid = $2, updated_at = now() \
              FROM current \
-             WHERE se.artifact_uid = current.artifact_uid \
-               AND se.revision_uid = $2",
+             WHERE se.artifact_uid = current.artifact_uid",
         )
         .bind(artifact_uid)
         .bind(revision_uid)

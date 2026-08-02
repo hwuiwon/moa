@@ -218,21 +218,23 @@ async fn insert_event(
     tenant: Uuid,
     session: Uuid,
     sequence_num: i64,
+    turn_number: i64,
     event_type: &str,
     payload: serde_json::Value,
     ts: DateTime<Utc>,
 ) -> TestResult<()> {
     sqlx::query(
         "INSERT INTO events \
-             (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, event_type, \
+             (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, turn_number, event_type, \
               payload, timestamp) \
-         VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8)",
+         VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8, $9)",
     )
     .bind(Uuid::now_v7())
     .bind(session)
     .bind(tenant.to_string())
     .bind(tenant)
     .bind(sequence_num)
+    .bind(turn_number)
     .bind(event_type)
     .bind(payload)
     .bind(ts)
@@ -248,8 +250,9 @@ async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> Te
     let tool_a = Uuid::now_v7();
     let tool_b = Uuid::now_v7();
 
-    for (seq, event_type, payload, offset_ms) in [
+    for (seq, turn_number, event_type, payload, offset_ms) in [
         (
+            1,
             1,
             "ToolCall",
             json!({"data": {"tool_id": tool_a, "tool_name": "search"}}),
@@ -257,12 +260,14 @@ async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> Te
         ),
         (
             2,
+            1,
             "ToolResult",
             json!({"data": {"tool_id": tool_a, "success": true, "duration_ms": 42.0}}),
             50,
         ),
         (
             3,
+            1,
             "BrainResponse",
             json!({"data": {"model": "claude", "duration_ms": 100.0,
                 "input_tokens_uncached": 10, "input_tokens_cache_write": 2,
@@ -271,18 +276,21 @@ async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> Te
         ),
         (
             4,
+            2,
             "ToolCall",
             json!({"data": {"tool_id": tool_b, "tool_name": "fetch"}}),
             1000,
         ),
         (
             5,
+            2,
             "ToolResult",
             json!({"data": {"tool_id": tool_b, "success": false, "duration_ms": 10.0}}),
             1020,
         ),
         (
             6,
+            2,
             "BrainResponse",
             json!({"data": {"model": "claude", "duration_ms": 200.0,
                 "input_tokens_uncached": 20, "input_tokens_cache_write": 0,
@@ -295,6 +303,7 @@ async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> Te
             tenant,
             session,
             seq,
+            turn_number,
             event_type,
             payload,
             base + Duration::milliseconds(offset_ms),

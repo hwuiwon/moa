@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn execution_export_sql_is_normalized_and_sequence_bounded() {
-        // Pins: execution export reads V337's normalized bounded fields and
+        // Pins: execution export reads the normalized bounded fields and
         // immutable sequence fence; raw prose and compatibility aliases never
         // cross the analytics boundary.
         assert!(

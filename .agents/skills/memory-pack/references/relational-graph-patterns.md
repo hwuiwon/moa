@@ -32,6 +32,6 @@ to new memory-pack work.
   helpers.
 - `crates/moa-memory/graph/src/write.rs` for graph write and changelog
   patterns.
-- `crates/moa-migrations/migrations/postgres/V000001__session_baseline.sql`
+- `crates/moa-migrations/migrations/postgres/V000002__session_baseline.sql`
   for `moa.node_index`, `moa.edge_index`, embeddings, RLS helpers, and indexes.
 - `docs/04-memory-architecture.md` for the graph-memory model.

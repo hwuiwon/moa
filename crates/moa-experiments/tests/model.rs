@@ -233,17 +233,16 @@ fn storage_enum_conversions_reject_unknown_database_values_offline() {
 }
 
 #[test]
-fn action_policy_migration_allows_current_trial_stop_reasons_offline() {
-    // Pins: the forward action-policy migration must accept every stop reason the Rust store persists.
-    const MIGRATION: &str = include_str!(
-        "../../moa-migrations/migrations/postgres/V000302__action_policy_auto_mode.sql"
-    );
+fn session_baseline_allows_current_trial_stop_reasons_offline() {
+    // Pins: the final session baseline must accept every stop reason the Rust store persists.
+    const MIGRATION: &str =
+        include_str!("../../moa-migrations/migrations/postgres/V000002__session_baseline.sql");
     let migration_values = trial_stop_reason_values_from_migration(MIGRATION);
     let model_values = current_trial_stop_reason_values();
 
     assert_eq!(
         migration_values, model_values,
-        "V000302 experiment_trial_stop_reason_check must match ExperimentTrialStopReason::as_str"
+        "V000002 experiment_trial stop reasons must match ExperimentTrialStopReason::as_str"
     );
 }
 
@@ -388,9 +387,9 @@ fn current_trial_stop_reason_values() -> BTreeSet<&'static str> {
 
 fn trial_stop_reason_values_from_migration(sql: &'static str) -> BTreeSet<&'static str> {
     let constraint = sql
-        .split("ADD CONSTRAINT experiment_trial_stop_reason_check")
+        .split("CREATE TABLE IF NOT EXISTS moa.experiment_trial")
         .nth(1)
-        .expect("V000302 should recreate experiment_trial_stop_reason_check");
+        .expect("V000002 should define moa.experiment_trial");
     let values = constraint
         .split("stop_reason IN (")
         .nth(1)

@@ -1,6 +1,7 @@
 //! Postgres-backed session-store contract coverage for the orchestrator crate.
 
 use anyhow::Result;
+use chrono::{Duration, Utc};
 use moa_core::{
     events::Event, traits::SessionStore, types::channel::ChannelRef, types::contact::ContactId,
     types::contact::ContactRef, types::contact::ContactVerificationState,
@@ -9,7 +10,9 @@ use moa_core::{
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::session::SessionFilter, types::session::SessionMeta, types::session::SessionStatus,
 };
-use moa_session::{PostgresSessionStore, store::SessionChannelBindingReplacement, testing};
+use moa_session::{
+    EventAppend, PostgresSessionStore, store::SessionChannelBindingReplacement, testing,
+};
 use moa_test_support::fixtures::contact_ref_fixture;
 use uuid::Uuid;
 
@@ -395,37 +398,102 @@ async fn update_status_affects_get_session() -> Result<()> {
 }
 
 #[tokio::test]
-async fn search_events_finds_by_payload() -> Result<()> {
+async fn search_events_bounds_tenant_history_and_preserves_session_search() -> Result<()> {
+    // Pins: admin-wide search is tenant/time bounded and server-clamped while
+    // the tool-facing session path remains isolated to its requested session.
     let (store, database_url, schema_name) = test_store().await?;
+    let tenant_id = test_session_meta("search").tenant_id;
     let session_id = store.create_session(test_session_meta("search")).await?;
+    let same_tenant_session_id = store
+        .create_session(test_session_meta("same-tenant-search"))
+        .await?;
+    let other_tenant_id = TenantId::new();
+    let other_tenant_session_id = store
+        .create_session(SessionMeta {
+            tenant_id: other_tenant_id,
+            ..test_session_meta("other-tenant-search")
+        })
+        .await?;
 
+    let records = store
+        .append_events(
+            session_id,
+            (0..105)
+                .map(|index| EventAppend {
+                    event: Event::UserMessage {
+                        text: format!("boundedneedle event {index}"),
+                        attachments: vec![],
+                    },
+                    dedupe_key: None,
+                })
+                .collect(),
+        )
+        .await?;
+    for search_session_id in [session_id, same_tenant_session_id] {
+        store
+            .emit_event(
+                search_session_id,
+                Event::UserMessage {
+                    text: "session-isolation-needle".to_string(),
+                    attachments: vec![],
+                },
+            )
+            .await?;
+    }
     store
         .emit_event(
-            session_id,
+            other_tenant_session_id,
             Event::UserMessage {
-                text: "Fix the OAuth refresh token bug".to_string(),
+                text: "boundedneedle event from another tenant".to_string(),
                 attachments: vec![],
             },
         )
         .await?;
-    store
-        .emit_event(
-            session_id,
-            Event::UserMessage {
-                text: "Debug the refresh-token rotation failure".to_string(),
-                attachments: vec![],
+
+    let tenant_events = store
+        .search_events(
+            "boundedneedle",
+            EventFilter {
+                tenant_id: Some(tenant_id),
+                from_time: Some(Utc::now() - Duration::days(1)),
+                to_time: Some(Utc::now() + Duration::days(1)),
+                limit: Some(10_000),
+                ..EventFilter::default()
             },
         )
         .await?;
+    assert_eq!(tenant_events.len(), 100);
+    assert!(
+        tenant_events
+            .iter()
+            .all(|record| record.session_id == session_id)
+    );
+    assert_eq!(
+        tenant_events
+            .iter()
+            .map(|record| record.sequence_num)
+            .collect::<Vec<_>>(),
+        (5..105).rev().collect::<Vec<_>>()
+    );
+    assert!(
+        tenant_events
+            .iter()
+            .all(|record| record.timestamp == records[0].timestamp)
+    );
 
-    let events = store
-        .search_events("refresh-token", EventFilter::default())
+    let session_events = store
+        .search_events(
+            "session-isolation-needle",
+            EventFilter {
+                session_id: Some(session_id),
+                limit: Some(1000),
+                ..EventFilter::default()
+            },
+        )
         .await?;
-
-    assert!(events.iter().any(|record| matches!(
-        &record.event,
-        Event::UserMessage { text, .. } if text.contains("refresh-token")
-    )));
+    assert_eq!(session_events.len(), 1);
+    assert_eq!(session_events[0].session_id, session_id);
+    assert_eq!(session_events[0].sequence_num, 105);
 
     cleanup(&database_url, &schema_name).await
 }

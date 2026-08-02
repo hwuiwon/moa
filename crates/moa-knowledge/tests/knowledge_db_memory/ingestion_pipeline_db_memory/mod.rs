@@ -255,6 +255,7 @@ struct FakeGraphWriter {
     edge_keys: Mutex<Vec<(String, String, String)>>,
     vectors: Mutex<HashSet<Uuid>>,
     invalidated: Mutex<Vec<Uuid>>,
+    invalidate_calls: AtomicUsize,
     /// When set, `invalidate_chunks` fails for any non-empty request, simulating
     /// a graph-invalidation backend error mid-transition or mid-deletion.
     fail_nonempty_invalidate: AtomicBool,
@@ -320,6 +321,10 @@ impl FakeGraphWriter {
             .lock()
             .expect("invalidated mutex should not be poisoned")
             .len()
+    }
+
+    fn invalidate_call_count(&self) -> usize {
+        self.invalidate_calls.load(Ordering::SeqCst)
     }
 
     fn properties_json(&self) -> String {
@@ -406,6 +411,7 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
         &self,
         graph_node_uids: &[Uuid],
     ) -> moa_knowledge::Result<GraphWriteReport> {
+        self.invalidate_calls.fetch_add(1, Ordering::SeqCst);
         if !graph_node_uids.is_empty() && self.fail_nonempty_invalidate.load(Ordering::SeqCst) {
             return Err(moa_knowledge::Error::Repository(
                 "injected invalidate_chunks failure".to_string(),

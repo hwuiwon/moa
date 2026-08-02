@@ -18,7 +18,7 @@ what must stay out of Restate state.
 |---|---|---|
 | Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `Execution`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SecurityEvents`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `KnowledgeIndexRebuild`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run or task per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run or task per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -49,8 +49,10 @@ because one admitted turn should have one observable durable run. `ExecutionRun`
 and `ExecutionTask` are workflows because typed graph work has stable run/task
 identities, durable waits, recovery, and explicit terminal outcomes. Tenant
 knowledge sync ingestion and consolidation are workflows for the same reason.
-Hosted eval status is a Postgres row; it is not a workflow unless the eval body
-gains real durable-step semantics.
+Knowledge index rebuild/rechunk and the hosted tenant `Eval` service are not
+runtime surfaces. Regression evals run through the platform-only
+`moa-eval`/`xtask` harness; live behavior trials use the `Experiments` service
+and its workflows.
 
 ## Runtime Flow
 
@@ -156,8 +158,8 @@ Core production bindings:
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `KnowledgeIndexRebuild`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SecurityEvents`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SecurityEvents`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
 
 Feature-gated bindings:
 

@@ -51,33 +51,6 @@ pub async fn execute_prepared_lineage_query(
     Ok(rows)
 }
 
-/// Loads hot lineage rows matching a subject for DSAR export.
-pub async fn load_dsar_export_records(
-    pool: &PgPool,
-    storage_partition_id: &StoragePartitionId,
-    subject: &str,
-) -> Result<Vec<Value>> {
-    let pattern = format!("%{subject}%");
-    let records = sqlx::query_scalar(
-        r#"
-        SELECT row_to_json(lineage_row)::jsonb
-        FROM (
-            SELECT turn_id, session_id, user_id, storage_partition_id, ts, record_kind, payload,
-                   integrity_hash, prev_hash
-            FROM analytics.turn_lineage
-            WHERE storage_partition_id = $1 AND payload::text ILIKE $2
-            ORDER BY ts ASC, turn_id ASC, record_kind ASC
-            LIMIT 10000
-        ) lineage_row
-        "#,
-    )
-    .bind(storage_partition_id.as_str())
-    .bind(pattern)
-    .fetch_all(pool)
-    .await?;
-    Ok(records)
-}
-
 fn lineage_record_from_row(row: sqlx::postgres::PgRow) -> Result<LineageRecordView> {
     let session_id: Uuid = row.try_get("session_id")?;
     let user_id: String = row.try_get("user_id")?;

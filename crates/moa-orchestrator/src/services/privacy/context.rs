@@ -18,8 +18,8 @@ use super::approval::ApprovalClaims;
 /// Context for one server-side privacy export.
 #[derive(Debug)]
 pub struct PrivacyExportContext {
-    /// Postgres pool used for privacy reads and audit writes.
-    pub pool: PgPool,
+    /// Foreground Postgres pool used only for the terminal success audit.
+    pub audit_pool: PgPool,
     /// Tenant that authorized the privacy operation.
     pub tenant_id: TenantId,
     /// Storage partition derived from the tenant id.

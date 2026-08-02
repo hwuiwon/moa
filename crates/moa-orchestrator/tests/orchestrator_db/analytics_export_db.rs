@@ -6,8 +6,7 @@
 //! contracts that have no other integration coverage:
 //! - `turn_fact` rows equal the `session_turn_metrics` matview field-for-field
 //!   (parity by construction, since the SQL is shared);
-//! - `events_raw` `turn_number` is stamped as the session's BrainResponse prefix
-//!   count;
+//! - `events_raw` reads the authoritative append-time `turn_number`;
 //! - a dimension upsert supersedes a mutated row with a higher `export_version`;
 //! - the events cursor resumes from the persisted position after a restart.
 
@@ -50,7 +49,7 @@ async fn seed_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<
     .bind("user-1")
     .execute(&mut *tx)
     .await?;
-    // The system-default artifact revision seeded by V000306; satisfies the
+    // The system-default artifact revision seeded by V000009; satisfies the
     // agent_revision_uid FK to moa.artifact_revision.
     let default_revision = Uuid::parse_str("00000000-0000-4000-8000-000000000a02")?;
     sqlx::query(
@@ -68,107 +67,118 @@ async fn seed_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<
     Ok(())
 }
 
-async fn insert_event(
-    pool: &PgPool,
+struct EventFixture<'a> {
+    pool: &'a PgPool,
     tenant: Uuid,
     session: Uuid,
-    sequence_num: i64,
-    event_type: &str,
-    payload: serde_json::Value,
-    ts: DateTime<Utc>,
-) -> TestResult<()> {
-    sqlx::query(
-        "INSERT INTO events \
-             (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, event_type, \
-              payload, timestamp) \
-         VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(session)
-    .bind(tenant.to_string())
-    .bind(tenant)
-    .bind(sequence_num)
-    .bind(event_type)
-    .bind(payload)
-    .bind(ts)
-    .execute(pool)
-    .await?;
-    Ok(())
+}
+
+impl EventFixture<'_> {
+    async fn insert(
+        &self,
+        sequence_num: i64,
+        turn_number: i64,
+        event_type: &str,
+        payload: serde_json::Value,
+        timestamp: DateTime<Utc>,
+    ) -> TestResult<()> {
+        sqlx::query(
+            "INSERT INTO events \
+                 (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, turn_number, event_type, \
+                  payload, timestamp) \
+             VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(self.session)
+        .bind(self.tenant.to_string())
+        .bind(self.tenant)
+        .bind(sequence_num)
+        .bind(turn_number)
+        .bind(event_type)
+        .bind(payload)
+        .bind(timestamp)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 /// Seeds a two-turn session: for each turn a ToolCall, its ToolResult, then a
 /// BrainResponse carrying token/cost/model data.
-async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<()> {
+async fn seed_two_turn_session(
+    pool: &PgPool,
+    tenant: Uuid,
+    session: Uuid,
+) -> TestResult<[Uuid; 2]> {
     seed_session(pool, tenant, session).await?;
     let base = moa_test_support::fixtures::pg_now() - Duration::days(1);
     let tool_a = Uuid::now_v7();
     let tool_b = Uuid::now_v7();
+    let events = EventFixture {
+        pool,
+        tenant,
+        session,
+    };
 
-    insert_event(
-        pool,
-        tenant,
-        session,
-        1,
-        "ToolCall",
-        json!({"data": {"tool_id": tool_a, "tool_name": "search"}}),
-        base,
-    )
-    .await?;
-    insert_event(
-        pool,
-        tenant,
-        session,
-        2,
-        "ToolResult",
-        json!({"data": {"tool_id": tool_a, "success": true, "duration_ms": 42.0}}),
-        base + Duration::milliseconds(50),
-    )
-    .await?;
-    insert_event(
-        pool,
-        tenant,
-        session,
-        3,
-        "BrainResponse",
-        json!({"data": {"model": "claude", "duration_ms": 100.0, "input_tokens_uncached": 10,
+    events
+        .insert(
+            1,
+            1,
+            "ToolCall",
+            json!({"data": {"tool_id": tool_a, "tool_name": "search"}}),
+            base,
+        )
+        .await?;
+    events
+        .insert(
+            2,
+            1,
+            "ToolResult",
+            json!({"data": {"tool_id": tool_a, "success": true, "duration_ms": 42.0}}),
+            base + Duration::milliseconds(50),
+        )
+        .await?;
+    events
+        .insert(
+            3,
+            1,
+            "BrainResponse",
+            json!({"data": {"model": "claude", "duration_ms": 100.0, "input_tokens_uncached": 10,
             "input_tokens_cache_write": 2, "input_tokens_cache_read": 3, "output_tokens": 7,
             "cost_cents": 5}}),
-        base + Duration::milliseconds(100),
-    )
-    .await?;
-    insert_event(
-        pool,
-        tenant,
-        session,
-        4,
-        "ToolCall",
-        json!({"data": {"tool_id": tool_b, "tool_name": "fetch"}}),
-        base + Duration::seconds(1),
-    )
-    .await?;
-    insert_event(
-        pool,
-        tenant,
-        session,
-        5,
-        "ToolResult",
-        json!({"data": {"tool_id": tool_b, "success": false, "duration_ms": 10.0}}),
-        base + Duration::seconds(1) + Duration::milliseconds(20),
-    )
-    .await?;
-    insert_event(
-        pool,
-        tenant,
-        session,
-        6,
-        "BrainResponse",
-        json!({"data": {"model": "claude", "duration_ms": 200.0, "input_tokens_uncached": 20,
+            base + Duration::milliseconds(100),
+        )
+        .await?;
+    events
+        .insert(
+            4,
+            2,
+            "ToolCall",
+            json!({"data": {"tool_id": tool_b, "tool_name": "fetch"}}),
+            base + Duration::seconds(1),
+        )
+        .await?;
+    events
+        .insert(
+            5,
+            2,
+            "ToolResult",
+            json!({"data": {"tool_id": tool_b, "success": false, "duration_ms": 10.0}}),
+            base + Duration::seconds(1) + Duration::milliseconds(20),
+        )
+        .await?;
+    events
+        .insert(
+            6,
+            2,
+            "BrainResponse",
+            json!({"data": {"model": "claude", "duration_ms": 200.0, "input_tokens_uncached": 20,
             "input_tokens_cache_write": 0, "input_tokens_cache_read": 1, "output_tokens": 9,
             "cost_cents": 8}}),
-        base + Duration::seconds(1) + Duration::milliseconds(100),
-    )
-    .await?;
-    Ok(())
+            base + Duration::seconds(1) + Duration::milliseconds(100),
+        )
+        .await?;
+    Ok([tool_a, tool_b])
 }
 
 /// Matview projection used to diff `turn_fact` row-for-row.
@@ -574,21 +584,46 @@ async fn analytics_export_turn_fact_matches_matview_db() -> TestResult<()> {
     let pool = test_db.store().pool().clone();
     let tenant = Uuid::now_v7();
     let session = Uuid::now_v7();
-    seed_two_turn_session(&pool, tenant, session).await?;
+    let [tool_a, _tool_b] = seed_two_turn_session(&pool, tenant, session).await?;
+    let base = moa_test_support::fixtures::pg_now() - Duration::hours(12);
+    let events = EventFixture {
+        pool: &pool,
+        tenant,
+        session,
+    };
+    events
+        .insert(
+            7,
+            3,
+            "ToolError",
+            json!({"data": {"tool_id": tool_a}}),
+            base,
+        )
+        .await?;
+    events
+        .insert(
+            8,
+            3,
+            "ToolResult",
+            json!({"data": {"tool_id": tool_a, "success": false, "duration_ms": 999.0}}),
+            base + Duration::milliseconds(1),
+        )
+        .await?;
+
+    let noisy_session = Uuid::now_v7();
+    seed_two_turn_session(&pool, tenant, noisy_session).await?;
 
     let mock = Mock::new();
-    let events_handler = mock.add(handlers::record::<EventRawRow>());
     let turn_handler = mock.add(handlers::record::<TurnFactRow>());
     let tool_handler = mock.add(handlers::record::<ToolCallFactRow>());
     let exporter = exporter(pool.clone(), &mock);
 
-    let touched = exporter.export_events().await?;
-    exporter.export_facts(&touched).await?;
+    exporter.export_facts(&[session]).await?;
 
-    let _events: Vec<EventRawRow> = events_handler.collect().await;
     let mut turn_rows: Vec<TurnFactRow> = turn_handler.collect().await;
-    let _tool_rows: Vec<ToolCallFactRow> = tool_handler.collect().await;
+    let mut tool_rows: Vec<ToolCallFactRow> = tool_handler.collect().await;
     turn_rows.sort_by_key(|row| row.turn_number);
+    tool_rows.sort_by_key(|row| row.call_sequence_num);
 
     sqlx::query("REFRESH MATERIALIZED VIEW session_turn_metrics")
         .execute(&pool)
@@ -609,6 +644,16 @@ async fn analytics_export_turn_fact_matches_matview_db() -> TestResult<()> {
         "turn_fact row count must match matview"
     );
     assert_eq!(turn_rows.len(), 2, "two BrainResponse turns expected");
+    assert!(
+        turn_rows.iter().all(|row| row.session_id == session),
+        "the explicit input-session relation must exclude unrelated noisy sessions"
+    );
+    assert_eq!(
+        tool_rows.len(),
+        2,
+        "only the target session's tool calls export"
+    );
+    assert!(tool_rows.iter().all(|row| row.session_id == session));
     for (exported, expected) in turn_rows.iter().zip(matview.iter()) {
         assert_eq!(
             exported.tenant_id, tenant,
@@ -646,6 +691,8 @@ async fn analytics_export_turn_fact_matches_matview_db() -> TestResult<()> {
     // per-turn tool window and duration fallback carried through.
     assert!((turn_rows[0].tool_ms - 42.0).abs() < 1e-9);
     assert!((turn_rows[1].tool_ms - 10.0).abs() < 1e-9);
+    assert_eq!(tool_rows[0].success, Some(true));
+    assert_eq!(tool_rows[0].duration_ms, Some(42.0));
 
     pool.close().await;
     Ok(())
@@ -653,8 +700,8 @@ async fn analytics_export_turn_fact_matches_matview_db() -> TestResult<()> {
 
 #[tokio::test]
 async fn analytics_export_events_stamp_turn_number_db() -> TestResult<()> {
-    // Pins: each events_raw row is stamped with 1 + count of prior BrainResponse
-    // events in its session; a BrainResponse counts itself.
+    // Pins: events_raw reads the authoritative append-time ordinal; a
+    // BrainResponse counts itself.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let tenant = Uuid::now_v7();
@@ -683,10 +730,9 @@ async fn analytics_export_events_stamp_turn_number_db() -> TestResult<()> {
 
 #[tokio::test]
 async fn analytics_export_turn_number_spans_batch_boundary_db() -> TestResult<()> {
-    // Pins: turn_number counts BrainResponses over the session's entire prefix,
-    // not just the current export batch. With batch_rows=2 the six events are
-    // pulled in three batches; the second turn's events land in a later batch
-    // than the BrainResponse that opened turn 1, yet are still stamped turn 2.
+    // Pins: the stored turn ordinal survives exporter batch boundaries. With
+    // batch_rows=2 the six events are pulled in three batches; the second turn's
+    // events land in a later batch than the BrainResponse that opened turn 1.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let tenant = Uuid::now_v7();
@@ -718,7 +764,7 @@ async fn analytics_export_turn_number_spans_batch_boundary_db() -> TestResult<()
     assert_eq!(
         turn_numbers,
         vec![1, 1, 1, 2, 2, 2],
-        "later-batch events keep the correct turn from the full-prefix count"
+        "later-batch events keep the append-time turn ordinal"
     );
 
     pool.close().await;
@@ -771,7 +817,7 @@ async fn analytics_export_dim_sessions_supersedes_on_update_db() -> TestResult<(
 
 #[tokio::test]
 async fn execution_analytics_export_matches_postgres_facts_field_for_field_db() -> TestResult<()> {
-    // Pins: sequence-backed execution export emits every normalized V337 field
+    // Pins: sequence-backed execution export emits every normalized execution field
     // exactly as the Postgres facts do, with page versions monotonic even when
     // the durable floor is ahead of the database clock.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
@@ -964,36 +1010,32 @@ async fn analytics_export_events_cursor_resumes_after_restart_db() -> TestResult
 
     let base = moa_test_support::fixtures::pg_now() - Duration::days(1);
     let empty = json!({"data": {}});
-    insert_event(
-        &pool,
+    let events = EventFixture {
+        pool: &pool,
         tenant,
         session,
-        1,
-        "BrainResponse",
-        empty.clone(),
-        base,
-    )
-    .await?;
-    insert_event(
-        &pool,
-        tenant,
-        session,
-        2,
-        "BrainResponse",
-        empty.clone(),
-        base + Duration::seconds(10),
-    )
-    .await?;
-    insert_event(
-        &pool,
-        tenant,
-        session,
-        3,
-        "BrainResponse",
-        empty.clone(),
-        base + Duration::seconds(20),
-    )
-    .await?;
+    };
+    events
+        .insert(1, 1, "BrainResponse", empty.clone(), base)
+        .await?;
+    events
+        .insert(
+            2,
+            2,
+            "BrainResponse",
+            empty.clone(),
+            base + Duration::seconds(10),
+        )
+        .await?;
+    events
+        .insert(
+            3,
+            3,
+            "BrainResponse",
+            empty.clone(),
+            base + Duration::seconds(20),
+        )
+        .await?;
 
     let mock = Mock::new();
     let exporter = exporter(pool.clone(), &mock);
@@ -1004,16 +1046,9 @@ async fn analytics_export_events_cursor_resumes_after_restart_db() -> TestResult
     assert_eq!(first.len(), 3, "the first pass backfills all three events");
 
     // A new event well past the two-second overlap window.
-    insert_event(
-        &pool,
-        tenant,
-        session,
-        4,
-        "BrainResponse",
-        empty,
-        base + Duration::seconds(120),
-    )
-    .await?;
+    events
+        .insert(4, 4, "BrainResponse", empty, base + Duration::seconds(120))
+        .await?;
 
     let second_handler = mock.add(handlers::record::<EventRawRow>());
     exporter.export_events().await?;

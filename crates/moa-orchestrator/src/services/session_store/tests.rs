@@ -730,14 +730,29 @@ async fn search_events_db_finds_by_payload() -> Result<()> {
 
     let events = service
         .store
-        .search_events("refresh-token", EventFilter::default())
+        .search_events(
+            "refresh-token",
+            EventFilter {
+                session_id: Some(session_id),
+                ..EventFilter::default()
+            },
+        )
         .await
         .map_err(into_anyhow)?;
 
-    assert!(events.iter().any(|record| matches!(
-        &record.event,
-        Event::UserMessage { text, .. } if text.contains("refresh-token")
-    )));
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|record| record.session_id == session_id));
+    assert_eq!(
+        events
+            .iter()
+            .map(|record| record.sequence_num)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    assert!(matches!(
+        &events[0].event,
+        Event::UserMessage { text, .. } if text == "Debug the refresh-token rotation failure"
+    ));
 
     cleanup(&database_url, &schema_name).await
 }

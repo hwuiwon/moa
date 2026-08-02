@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use uuid::Uuid;
 
-pub mod backfill;
 pub mod changelog;
 pub mod edge;
 pub mod error;
@@ -32,6 +31,13 @@ pub use validity::push_validity_filter;
 
 /// Result type returned by graph-memory helpers.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Maximum caller-supplied UID cardinality for one bulk node invalidation.
+///
+/// The limit applies before de-duplication so a request cannot hide unbounded
+/// input behind repeated UIDs. Larger requests fail closed; callers must bound
+/// their own work rather than turning one transaction into an unbounded write.
+pub const MAX_BULK_INVALIDATE_NODES: usize = 4_096;
 
 /// One path discovered while expanding graph retrieval seeds.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,11 +174,30 @@ pub trait GraphStore: Send + Sync {
     /// Soft-invalidates a node by setting its validity end and invalidation metadata.
     async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<()>;
 
+    /// Soft-invalidates a bounded UID batch in one transaction.
+    ///
+    /// Implementations de-duplicate and order UIDs canonically, omit missing
+    /// nodes, and return the UIDs they invalidated. An already-invalidated node
+    /// rejects the complete batch. Stores without an atomic relational batch
+    /// capability fail closed instead of falling back to per-node transactions.
+    async fn bulk_invalidate_nodes(&self, _uids: &[Uuid], _reason: &str) -> Result<Vec<Uuid>> {
+        Err(Error::Conflict(
+            "atomic bulk node invalidation is not supported by this store".to_string(),
+        ))
+    }
+
     /// Hard-purges a node from graph tables, preserving an erase changelog marker.
     async fn hard_purge(&self, uid: Uuid, redaction_marker: &str) -> Result<()>;
 
     /// Creates an edge between two nodes.
     async fn create_edge(&self, intent: EdgeWriteIntent) -> Result<Uuid>;
+
+    /// Creates several edges in one scoped transaction.
+    ///
+    /// Intents are de-duplicated by UID in deterministic first-occurrence input
+    /// order. The returned UIDs are only the rows inserted by this call, in that
+    /// same order; replayed UIDs are omitted.
+    async fn bulk_create_edges(&self, intents: Vec<EdgeWriteIntent>) -> Result<Vec<Uuid>>;
 
     /// Looks up a single node by stable uid.
     async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>>;

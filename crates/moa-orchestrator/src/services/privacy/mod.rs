@@ -14,7 +14,7 @@ pub use context::{
 pub use erase::{
     DUAL_CONTROL_OPERATION_ERASE, ensure_erase_dual_control, erase_operation_ref, run_privacy_erase,
 };
-pub use export::write_export_readme;
+pub use export::{execute_privacy_export, write_export_readme};
 pub use manifest::{Ed25519ManifestSigner, finalize_archive_to_bytes, write_manifest};
 
 use moa_authz_schema::Relation;
@@ -30,8 +30,6 @@ use restate_sdk::prelude::*;
 use std::sync::Arc;
 
 use crate::handlers::authz_shim::authorize_tenant;
-
-use self::export::execute_privacy_export;
 
 /// Restate service surface for protected privacy administration.
 #[restate_sdk::service]
@@ -71,7 +69,8 @@ pub trait Privacy {
 /// Concrete privacy service implementation.
 #[derive(Clone)]
 pub struct PrivacyImpl {
-    pool: sqlx::PgPool,
+    foreground_pool: sqlx::PgPool,
+    background_pool: sqlx::PgPool,
     compliance: ComplianceConfig,
     kms: Arc<dyn moa_crypto::KeyManagementProvider>,
 }
@@ -80,12 +79,14 @@ impl PrivacyImpl {
     /// Creates the privacy adapter with its repository pool and approval configuration.
     #[must_use]
     pub fn new(
-        pool: sqlx::PgPool,
+        foreground_pool: sqlx::PgPool,
+        background_pool: sqlx::PgPool,
         compliance: ComplianceConfig,
         kms: Arc<dyn moa_crypto::KeyManagementProvider>,
     ) -> Self {
         Self {
-            pool,
+            foreground_pool,
+            background_pool,
             compliance,
             kms,
         }
@@ -109,14 +110,22 @@ impl Privacy for PrivacyImpl {
             &subject_user_id,
             request.tenant_id,
         )?;
-        let pool = self.pool.clone();
+        let foreground_pool = self.foreground_pool.clone();
+        let background_pool = self.background_pool.clone();
         let compliance_config = self.compliance.clone();
 
         Ok(ctx
             .run(|| async move {
-                execute_privacy_export(pool, request.tenant_id, request, claims, compliance_config)
-                    .await
-                    .map(Json::from)
+                execute_privacy_export(
+                    foreground_pool,
+                    background_pool,
+                    request.tenant_id,
+                    request,
+                    claims,
+                    compliance_config,
+                )
+                .await
+                .map(Json::from)
             })
             .name("privacy_export")
             .await?)
@@ -138,7 +147,7 @@ impl Privacy for PrivacyImpl {
             &subject_user_id,
             request.tenant_id,
         )?;
-        let pool = self.pool.clone();
+        let pool = self.foreground_pool.clone();
         let erase_ctx = PrivacyEraseContext::from_request(
             pool,
             request,
@@ -165,7 +174,7 @@ impl Privacy for PrivacyImpl {
         // exactly like the erasure it guards. The distinct-approver (SoD) rule is
         // enforced at approval time, not here.
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
-        let pool = self.pool.clone();
+        let pool = self.foreground_pool.clone();
         let requested_by = identity.id.to_string();
         let operation_ref = erase_operation_ref(
             request.tenant_id,
@@ -203,7 +212,7 @@ impl Privacy for PrivacyImpl {
         // registry additionally rejects an approver that is the requester
         // (segregation of duties).
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
-        let pool = self.pool.clone();
+        let pool = self.foreground_pool.clone();
         let approver = identity.id.to_string();
 
         Ok(ctx
@@ -233,7 +242,7 @@ impl Privacy for PrivacyImpl {
         // Placing a legal hold is a privileged compliance mutation; the registry
         // performs no authorization, so gate it on tenant admin here.
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
-        let pool = self.pool.clone();
+        let pool = self.foreground_pool.clone();
         let placed_by = identity.id.to_string();
 
         Ok(ctx
@@ -267,7 +276,7 @@ impl Privacy for PrivacyImpl {
         let request = request.into_inner();
         // Releasing a legal hold is privileged; gate it on tenant admin.
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
-        let pool = self.pool.clone();
+        let pool = self.foreground_pool.clone();
         let released_by = identity.id.to_string();
 
         Ok(ctx

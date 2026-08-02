@@ -58,6 +58,16 @@ pub(crate) struct ActiveKey {
     pub key: SecretString,
 }
 
+/// Canonical bytes and signature produced with one tenant signing key.
+pub(crate) struct SignedPayload {
+    /// Signing key row id.
+    pub(crate) signing_key_id: Uuid,
+    /// Hex-encoded HMAC-SHA256 signature.
+    pub(crate) signature_hex: String,
+    /// RFC 8785 canonical event bytes.
+    pub(crate) event_jcs: Vec<u8>,
+}
+
 /// Fetch the active signing-key row for a tenant, if one exists.
 ///
 /// Works against any `sqlx` executor (a pool or a transaction connection) so the
@@ -110,10 +120,7 @@ pub(crate) async fn rotate_key_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
 ) -> Result<Uuid, SigningError> {
-    let mut key_bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut key_bytes);
-    let key_b64 = B64.encode(key_bytes);
-    let key_id = Uuid::new_v4();
+    let (key_id, key_b64) = fresh_key_row();
 
     sqlx::query(
         r#"
@@ -194,10 +201,11 @@ async fn active_key_cached(pool: &PgPool, tenant_id: Uuid) -> Result<ActiveKey, 
 /// concurrent first-event signers race on it, the loser's insert is a no-op,
 /// and every signer converges on the winner's key. Unlike [`rotate_key`], this
 /// never deactivates an existing key, so it cannot create a second generation.
-async fn create_first_key_if_absent(pool: &PgPool, tenant_id: Uuid) -> Result<(), SigningError> {
-    let mut key_bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut key_bytes);
-    let key_b64 = B64.encode(key_bytes);
+async fn create_first_key_if_absent<'e, E>(exec: E, tenant_id: Uuid) -> Result<(), SigningError>
+where
+    E: PgExecutor<'e>,
+{
+    let (key_id, key_b64) = fresh_key_row();
     sqlx::query(
         r#"
         INSERT INTO tenant_signing_keys (id, tenant_id, key_b64, active)
@@ -205,12 +213,19 @@ async fn create_first_key_if_absent(pool: &PgPool, tenant_id: Uuid) -> Result<()
         ON CONFLICT (tenant_id) WHERE active = TRUE DO NOTHING
         "#,
     )
-    .bind(Uuid::new_v4())
+    .bind(key_id)
     .bind(tenant_id)
     .bind(key_b64)
-    .execute(pool)
+    .execute(exec)
     .await?;
     Ok(())
+}
+
+fn fresh_key_row() -> (Uuid, String) {
+    let mut key_bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut key_bytes);
+    let key_b64 = B64.encode(key_bytes);
+    (Uuid::new_v4(), key_b64)
 }
 
 /// Sign a JSON event inside an existing transaction.
@@ -218,14 +233,54 @@ pub(crate) async fn sign_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     event_json: &Value,
-) -> Result<(Uuid, String, Vec<u8>), SigningError> {
+) -> Result<SignedPayload, SigningError> {
+    let (signing_key_id, key_bytes) = active_key_material_tx(tx, tenant_id).await?;
+    sign_payload(signing_key_id, &key_bytes, event_json)
+}
+
+/// Sign a batch of JSON events with one transaction-scoped active tenant key.
+///
+/// Empty input returns before key lookup or creation. For non-empty input the
+/// active key is resolved once, decoded once, and reused for every canonical
+/// payload so the caller can persist the key and events atomically.
+pub(crate) async fn sign_batch_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    event_json: &[Value],
+) -> Result<Vec<SignedPayload>, SigningError> {
+    if event_json.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (signing_key_id, key_bytes) = active_key_material_tx(tx, tenant_id).await?;
+    event_json
+        .iter()
+        .map(|event| sign_payload(signing_key_id, &key_bytes, event))
+        .collect()
+}
+
+async fn active_key_material_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+) -> Result<(Uuid, Vec<u8>), SigningError> {
     let active = active_or_create_key_tx(tx, tenant_id).await?;
     let key_bytes = B64
         .decode(active.key.expose_secret())
         .map_err(|error| SigningError::InvalidKey(error.to_string()))?;
+    Ok((active.key_id, key_bytes))
+}
+
+fn sign_payload(
+    signing_key_id: Uuid,
+    key_bytes: &[u8],
+    event_json: &Value,
+) -> Result<SignedPayload, SigningError> {
     let event_jcs = jcs::canonicalize(event_json)?;
-    let signature_hex = hmac_hex(&key_bytes, &event_jcs)?;
-    Ok((active.key_id, signature_hex, event_jcs))
+    let signature_hex = hmac_hex(key_bytes, &event_jcs)?;
+    Ok(SignedPayload {
+        signing_key_id,
+        signature_hex,
+        event_jcs,
+    })
 }
 
 /// Verify an existing signed event using the key it was signed with.
@@ -303,7 +358,7 @@ async fn active_or_create_key_tx(
     if let Some(row) = fetch_active_key_row(&mut **tx, tenant_id).await? {
         return active_key_from_row(Some(row), tenant_id);
     }
-    rotate_key_tx(tx, tenant_id).await?;
+    create_first_key_if_absent(&mut **tx, tenant_id).await?;
     let row = fetch_active_key_row(&mut **tx, tenant_id).await?;
     active_key_from_row(row, tenant_id)
 }

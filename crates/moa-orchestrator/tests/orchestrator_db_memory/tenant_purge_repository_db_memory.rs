@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use moa_artifacts::release::PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID;
-use moa_authz::{FgaClient, FgaConfig};
 use moa_core::types::identifiers::{StoragePartitionId, TenantId};
 use moa_memory_pii::legal_hold::{
     LegalHoldError, begin_destruction_stage_guard, complete_destruction, place_hold, release_hold,
@@ -13,6 +13,21 @@ use moa_orchestrator::workflows::tenant_purge::repository::{
 use moa_test_support::postgres::bootstrap_test_db;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
+
+type AuthzOutboxIdentityState = (
+    String,
+    String,
+    String,
+    String,
+    i32,
+    Option<Uuid>,
+    String,
+    i64,
+    i32,
+    Option<String>,
+    bool,
+);
+type AuthzOutboxDeliveryState = (Uuid, String, String, i64, i32, Option<String>, bool, bool);
 
 #[tokio::test]
 async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves_exact_residue_db_memory()
@@ -51,6 +66,26 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
     // hatch the purge opens is closed again when its transaction ends.
     let purged_session_id = seed_session_transcript(&test_db, tenant_id).await;
     seed_session_transcript(&test_db, NEIGHBOUR_TENANT).await;
+    // Tenant purge inverts only durable actual desired tuples. Seed both
+    // identities explicitly so this test cannot pass by synthesizing a guessed
+    // users-by-sessions Cartesian product.
+    sqlx::query(
+        r#"
+        INSERT INTO authz_outbox
+            (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
+        VALUES
+            ('write', $1, 'workspace', $2, 1, $3),
+            ('write', $4, 'tenant', $5, 1, $3)
+        "#,
+    )
+    .bind(format!("workspace:{}", moa_core::WORKSPACE_ID))
+    .bind(format!("tenant:{tenant_id}"))
+    .bind(tenant_id)
+    .bind(format!("tenant:{tenant_id}"))
+    .bind(format!("session:{purged_session_id}"))
+    .execute(pool)
+    .await
+    .expect("seed actual desired tenant authorization tuples");
     start_destruction(
         pool,
         TenantId::from(tenant_id),
@@ -68,19 +103,18 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
     // ran next on it. Asserting through the large shared pool would almost always
     // pick a connection the purge never touched and prove nothing.
     //
-    // Two, not one: the purge holds its destruction stage guard on one connection
-    // while its transaction runs on another, so a single-connection pool deadlocks
-    // waiting for itself.
+    // Two connections also exercise progress hand-off across pooled connections;
+    // every purge batch itself is one short autocommit transaction.
     const PURGE_POOL_CONNECTIONS: u32 = 2;
     let purge_pool = PgPoolOptions::new()
         .max_connections(PURGE_POOL_CONNECTIONS)
         .connect(test_db.database_url())
         .await
         .expect("open a bounded pool for the purge");
-    let first = purge_relational(&purge_pool, &offline_fga(), tenant_id, &operation_id)
+    let first = purge_relational(&purge_pool, tenant_id, &operation_id)
         .await
         .expect("registered tenant families should purge");
-    let replay = purge_relational(&purge_pool, &offline_fga(), tenant_id, &operation_id)
+    let replay = purge_relational(&purge_pool, tenant_id, &operation_id)
         .await
         .expect("same purge operation should replay idempotently");
     assert_eq!(first, RelationalPurgeOutcome::Committed);
@@ -167,10 +201,10 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
         );
     }
 
-    // The neighbour tenant's rebuild state is untouched. This is the failure the
+    // The neighbour tenant's source-ACL state is untouched. This is the failure the
     // purged-tenant residue map structurally cannot catch: a step that dropped
     // its `WHERE tenant_id = $1` would leave that map empty and still have
-    // destroyed every other tenant's rebuild.
+    // destroyed every other tenant's source-ACL state.
     let neighbour_acl: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
@@ -312,6 +346,300 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
 }
 
 #[tokio::test]
+async fn tenant_purge_locked_delete_rollback_retries_same_stage_db_memory() {
+    // Pins: a row already locked by an uncommitted DELETE must make the purge
+    // batch fail quickly and atomically. It must not skip the row, advance the
+    // durable stage, or count work that did not commit; once the DELETE rolls
+    // back, the same stage must retry and remove the restored row.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap locked tenant-purge db");
+    let pool = test_db.store().pool();
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    let storage_partition_id = StoragePartitionId::for_tenant(TenantId::from(tenant_id));
+
+    seed_tenant(pool, tenant_id).await;
+    sqlx::query("INSERT INTO users (id, tenant_id, email) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(format!("locked-delete-{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("seed the user row that DELETE will lock");
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(pool)
+        .await
+        .expect("start the bounded tenant purge");
+
+    // All stages before users are empty in this focused fixture. Advance the
+    // durable cursor directly so the first production batch reaches the locked
+    // row without spending 65 empty transactions on test setup.
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'public.users' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .execute(pool)
+    .await
+    .expect("focus purge progress on the users stage");
+    let progress_before: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("load purge progress before the conflicting DELETE");
+    assert_eq!(
+        progress_before,
+        (
+            "in_progress".to_string(),
+            "public.users".to_string(),
+            0,
+            0,
+            0,
+        )
+    );
+
+    let mut locked_delete = pool.begin().await.expect("begin the locking DELETE");
+    let locked_rows = sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(user_id)
+        .bind(tenant_id)
+        .execute(&mut *locked_delete)
+        .await
+        .expect("delete the user without committing");
+    assert_eq!(locked_rows.rows_affected(), 1);
+
+    let started = Instant::now();
+    let locked_error = tokio::time::timeout(
+        Duration::from_secs(3),
+        sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT batch_state, stage, affected \
+             FROM moa.run_tenant_purge_batch($1, $2)",
+        )
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .fetch_one(pool),
+    )
+    .await
+    .expect("the transaction-local one-second lock timeout must bound the purge batch")
+    .expect_err("the purge batch must report the locked row instead of skipping it");
+    let elapsed = started.elapsed();
+    let sqlstate = locked_error
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.into_owned()));
+    assert_eq!(sqlstate.as_deref(), Some("55P03"));
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "locked purge batch exceeded its bound: {elapsed:?}"
+    );
+
+    let progress_after_timeout: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("load purge progress after the lock timeout");
+    assert_eq!(
+        progress_after_timeout, progress_before,
+        "a timed-out batch must leave the stage and every counter unchanged"
+    );
+
+    locked_delete
+        .rollback()
+        .await
+        .expect("roll back the conflicting DELETE and restore the user");
+    let restored: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .expect("count the restored user");
+    assert_eq!(restored, 1);
+
+    let retry: (String, String, i64) = sqlx::query_as(
+        "SELECT batch_state, stage, affected \
+         FROM moa.run_tenant_purge_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("retry the same users stage after releasing the row lock");
+    assert_eq!(
+        retry,
+        ("in_progress".to_string(), "public.users".to_string(), 1)
+    );
+    let user_residue: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .expect("count user residue after the successful retry");
+    assert_eq!(user_residue, 0);
+
+    let outcome = purge_relational(pool, tenant_id, &operation_id)
+        .await
+        .expect("finish the tenant purge after the successful retry");
+    assert_eq!(outcome, RelationalPurgeOutcome::Committed);
+    let final_progress: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("load committed purge progress");
+    assert_eq!(final_progress.0, "relationally_committed");
+    assert_eq!(final_progress.1, "complete");
+    assert_eq!(final_progress.2, 2, "user plus tenant must be deleted");
+    assert!(
+        final_progress.3 > 1,
+        "completion must durably advance stages"
+    );
+    assert_eq!(
+        tenant_residue(pool, tenant_id, storage_partition_id.as_str()).await,
+        BTreeMap::from([
+            ("moa.destruction_operation_fence".to_string(), 1),
+            ("moa.tenant_purge_operations".to_string(), 1),
+        ]),
+        "only committed purge-control rows may remain"
+    );
+}
+
+#[tokio::test]
+async fn tenant_purge_unknown_stage_and_invalid_state_pair_fail_closed_db_memory() {
+    // Pins: corrupted durable progress is never interpreted as finalization.
+    // SQL owns catalog membership, while Rust rejects impossible state/stage
+    // pairs before issuing a relational batch; neither path may advance state.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap invalid tenant-purge progress db");
+    let pool = test_db.store().pool();
+
+    let unknown_tenant = Uuid::new_v4();
+    let unknown_operation = format!("tenant-purge-{unknown_tenant}");
+    seed_tenant(pool, unknown_tenant).await;
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(unknown_tenant)
+        .bind(&unknown_operation)
+        .execute(pool)
+        .await
+        .expect("start unknown-stage purge fixture");
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'moa.unknown_stage' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(unknown_tenant)
+    .bind(&unknown_operation)
+    .execute(pool)
+    .await
+    .expect("inject unknown durable stage");
+    let unknown_before: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(unknown_tenant)
+    .fetch_one(pool)
+    .await
+    .expect("load unknown-stage progress");
+
+    let sql_error = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT batch_state, stage, affected \
+         FROM moa.run_tenant_purge_batch($1, $2)",
+    )
+    .bind(unknown_tenant)
+    .bind(&unknown_operation)
+    .fetch_one(pool)
+    .await
+    .expect_err("SQL must reject an unknown durable purge stage");
+    assert_eq!(
+        sql_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("55000")
+    );
+    assert!(
+        sql_error.to_string().contains("unknown tenant purge stage"),
+        "unexpected unknown-stage SQL error: {sql_error}"
+    );
+    let repository_error = purge_relational(pool, unknown_tenant, &unknown_operation)
+        .await
+        .expect_err("repository must propagate the unknown-stage failure");
+    assert!(
+        repository_error.contains("unknown tenant purge stage"),
+        "unexpected repository unknown-stage error: {repository_error}"
+    );
+    let unknown_after: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(unknown_tenant)
+    .fetch_one(pool)
+    .await
+    .expect("reload unknown-stage progress");
+    assert_eq!(unknown_after, unknown_before);
+
+    let invalid_tenant = Uuid::new_v4();
+    let invalid_operation = format!("tenant-purge-{invalid_tenant}");
+    seed_tenant(pool, invalid_tenant).await;
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(invalid_tenant)
+        .bind(&invalid_operation)
+        .execute(pool)
+        .await
+        .expect("start invalid-pair purge fixture");
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'complete' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(invalid_tenant)
+    .bind(&invalid_operation)
+    .execute(pool)
+    .await
+    .expect("inject invalid in-progress/complete pair");
+    let invalid_before: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(invalid_tenant)
+    .fetch_one(pool)
+    .await
+    .expect("load invalid-pair progress");
+    let invalid_error = purge_relational(pool, invalid_tenant, &invalid_operation)
+        .await
+        .expect_err("repository must reject an invalid progress pair");
+    assert_eq!(
+        invalid_error,
+        "invalid tenant purge progress state/stage pair in_progress/complete"
+    );
+    let invalid_after: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(invalid_tenant)
+    .fetch_one(pool)
+    .await
+    .expect("reload invalid-pair progress");
+    assert_eq!(invalid_after, invalid_before);
+}
+
+#[tokio::test]
 async fn tenant_purge_catalog_preserves_global_simulator_authority_db_memory() {
     // Pins: nullable global-RLS scope columns do not make the platform mandate
     // and evidence import tenant-owned. Catalog coverage must ignore both, and a
@@ -353,7 +681,7 @@ async fn tenant_purge_catalog_preserves_global_simulator_authority_db_memory() {
     .expect("start global-authority catalog fence");
 
     assert_eq!(
-        purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
+        purge_relational(pool, tenant_id, &operation_id)
             .await
             .expect("global authority tables are outside tenant purge ownership"),
         RelationalPurgeOutcome::Committed
@@ -375,9 +703,10 @@ async fn tenant_purge_catalog_preserves_global_simulator_authority_db_memory() {
 }
 
 #[tokio::test]
-async fn tenant_purge_rejects_an_unregistered_tenant_table_and_rolls_back_db_memory() {
+async fn tenant_purge_catalog_drift_fails_closed_with_resumable_progress_db_memory() {
     // Pins: adding a tenant-owned table without registering its purge behavior
-    // fails closed before the relational transaction can leave a partial purge.
+    // prevents final commitment. Earlier bounded batches remain durably recorded,
+    // so correcting the catalog can resume instead of rolling back unbounded work.
     let test_db = bootstrap_test_db()
         .await
         .expect("bootstrap catalog-check db");
@@ -407,35 +736,45 @@ async fn tenant_purge_rejects_an_unregistered_tenant_table_and_rolls_back_db_mem
     .await
     .expect("start catalog-check destruction fence");
 
-    let error = purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
+    let error = purge_relational(pool, tenant_id, &operation_id)
         .await
         .expect_err("unregistered tenant table must reject purge");
-    assert_eq!(
-        error,
-        "tenant purge catalog has unregistered tenant-owned tables: moa.unregistered_tenant_payload"
+    assert!(
+        error.contains("tenant purge catalog drift")
+            && error.contains("moa.unregistered_tenant_payload"),
+        "unexpected catalog-drift error: {error}"
     );
-    let rows_after_failure: (i64, i64, i64) = sqlx::query_as(
+    let rows_after_failure: (i64, i64, String, String) = sqlx::query_as(
         r#"
         SELECT
             (SELECT count(*) FROM tenants WHERE id = $1),
             (SELECT count(*) FROM moa.unregistered_tenant_payload WHERE tenant_id = $1),
-            (SELECT count(*) FROM moa.tenant_purge_operations WHERE tenant_id = $1)
+            (SELECT status FROM moa.tenant_purge_operations WHERE tenant_id = $1),
+            (SELECT current_stage FROM moa.tenant_purge_operations WHERE tenant_id = $1)
         "#,
     )
     .bind(tenant_id)
     .fetch_one(pool)
     .await
-    .expect("inspect rollback state");
-    assert_eq!(rows_after_failure, (1, 1, 0));
+    .expect("inspect durable failed-finalization state");
+    assert_eq!(
+        rows_after_failure,
+        (
+            0,
+            1,
+            "in_progress".to_string(),
+            "moa.tenant_purge_operations".to_string()
+        ),
+        "catalog drift must preserve the fence/progress and the unowned residue, but must never commit"
+    );
 }
 
 #[tokio::test]
-async fn tenant_purge_rejects_nonpending_or_unrelated_inverse_tuple_residue_and_rolls_back_db_memory()
+async fn tenant_purge_preserves_active_and_receipted_deletes_and_reactivates_dead_letters_db_memory()
  {
-    // Pins: only the exact pending inverse tuple identities created by this
-    // purge may survive; unrelated pending, in-flight, succeeded, and
-    // dead-letter delete intent all reject the transaction without partial data
-    // removal.
+    // Pins: actual tenant-attributed tuples are the source of truth. Existing
+    // pending/in-flight deletes remain active, succeeded deletes remain receipts,
+    // and a dead-letter delete is reactivated without changing tuple identity.
     let test_db = bootstrap_test_db()
         .await
         .expect("bootstrap exact-residue db");
@@ -470,33 +809,51 @@ async fn tenant_purge_rejects_nonpending_or_unrelated_inverse_tuple_residue_and_
     .await
     .expect("start exact-residue destruction fence");
 
-    let error = purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
-        .await
-        .expect_err("disallowed authz residue must reject purge");
     assert_eq!(
-        error,
-        "tenant purge left invalid intentional residue: kek=0, legal_hold=0, authz_outbox_invalid=4, authz_outbox_missing=0"
+        purge_relational(pool, tenant_id, &operation_id)
+            .await
+            .expect("valid delete states must drain and finalize"),
+        RelationalPurgeOutcome::Committed
     );
-    let rows_after_failure: (i64, i64, i64) = sqlx::query_as(
+    let rows_after_purge: (i64, String, i64) = sqlx::query_as(
         r#"
         SELECT
             (SELECT count(*) FROM tenants WHERE id = $1),
-            (SELECT count(*) FROM moa.tenant_purge_operations WHERE tenant_id = $1),
+            (SELECT status FROM moa.tenant_purge_operations WHERE tenant_id = $1),
             (SELECT count(*) FROM authz_outbox WHERE tenant_id = $1)
         "#,
     )
     .bind(tenant_id)
     .fetch_one(pool)
     .await
-    .expect("inspect exact-residue rollback state");
-    assert_eq!(rows_after_failure, (1, 0, 4));
+    .expect("inspect exact authz residue state");
+    assert_eq!(
+        rows_after_purge,
+        (0, "relationally_committed".to_string(), 4)
+    );
+    let states: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT split_part(tuple_object, ':', 3), status, generation \
+         FROM authz_outbox WHERE tenant_id = $1 ORDER BY 1",
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .expect("load preserved and reactivated authz states");
+    assert_eq!(
+        states,
+        vec![
+            ("dead_letter".to_string(), "pending".to_string(), 2),
+            ("in_flight".to_string(), "in_flight".to_string(), 1),
+            ("pending".to_string(), "pending".to_string(), 1),
+            ("succeeded".to_string(), "succeeded".to_string(), 1),
+        ]
+    );
 }
 
 #[tokio::test]
-async fn tenant_purge_relational_cleanup_waits_for_pre_fence_vector_claim_db_memory() {
-    // Pins: the relational stage cannot remove its outbox/source rows while a
-    // pre-fence vector worker still owns a live lease; once that lease expires,
-    // the same durable purge operation resumes and commits.
+async fn tenant_purge_removes_an_expired_vector_claim_as_bounded_residue_db_memory() {
+    // Pins: after real vector remote-I/O releases its shared tenant lock, an
+    // expired durable claim is ordinary bounded residue and cannot strand purge.
     let test_db = bootstrap_test_db()
         .await
         .expect("bootstrap vector-claim residue db");
@@ -515,7 +872,7 @@ async fn tenant_purge_relational_cleanup_waits_for_pre_fence_vector_claim_db_mem
         INSERT INTO moa.vector_sync_outbox
             (storage_partition_id, uid, op, claim_token, claim_expires_at,
              processing_started_at)
-        VALUES ($1, $2, 'upsert', $3, now() + INTERVAL '5 minutes', now())
+        VALUES ($1, $2, 'upsert', $3, now() - INTERVAL '1 second', now())
         "#,
     )
     .bind(storage_partition_id.as_str())
@@ -523,7 +880,7 @@ async fn tenant_purge_relational_cleanup_waits_for_pre_fence_vector_claim_db_mem
     .bind(Uuid::new_v4())
     .execute(pool)
     .await
-    .expect("seed live pre-fence vector claim");
+    .expect("seed expired pre-fence vector claim");
     start_destruction(
         pool,
         TenantId::from(tenant_id),
@@ -534,41 +891,552 @@ async fn tenant_purge_relational_cleanup_waits_for_pre_fence_vector_claim_db_mem
     .await
     .expect("start vector-claim destruction fence");
 
-    let error = purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
-        .await
-        .expect_err("live pre-fence vector claim must delay relational cleanup");
     assert_eq!(
-        error,
-        "relational purge is waiting for active vector-sync claims to settle or expire"
+        purge_relational(pool, tenant_id, &operation_id)
+            .await
+            .expect("expired vector claim should be bounded purge residue"),
+        RelationalPurgeOutcome::Committed
     );
-    let rollback_state: (i64, i64, i64) = sqlx::query_as(
+    let committed_state: (i64, i64, String) = sqlx::query_as(
         r#"
         SELECT
             (SELECT count(*) FROM tenants WHERE id = $1),
             (SELECT count(*) FROM moa.vector_sync_outbox WHERE storage_partition_id = $2),
-            (SELECT count(*) FROM moa.tenant_purge_operations WHERE tenant_id = $1)
+            (SELECT status FROM moa.tenant_purge_operations WHERE tenant_id = $1)
         "#,
     )
     .bind(tenant_id)
     .bind(storage_partition_id.as_str())
     .fetch_one(pool)
     .await
-    .expect("inspect live-claim rollback state");
-    assert_eq!(rollback_state, (1, 1, 0));
+    .expect("inspect committed expired-claim purge state");
+    assert_eq!(
+        committed_state,
+        (0, 0, "relationally_committed".to_string())
+    );
+}
 
+#[tokio::test]
+async fn tenant_purge_rejects_and_drains_concurrent_writers_for_every_scope_mode_db_memory() {
+    // Pins: every catalog scope resolver takes exactly one shared advisory lock
+    // per distinct tenant in a multi-row statement. Purge admission must wait
+    // for that pre-fence statement to commit, then the durable fence must reject
+    // the same target-plus-neighbour statement with 55000 and roll it back as a
+    // unit, including the otherwise-unfenced neighbour rows.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap scope-mode tenant-purge db");
+    let observer_pool = test_db.store().pool();
+
+    for mode in TenantWriteScopeMode::ALL {
+        let target_tenant = Uuid::new_v4();
+        let neighbour_tenant = Uuid::new_v4();
+        seed_tenant(observer_pool, target_tenant).await;
+        seed_tenant(observer_pool, neighbour_tenant).await;
+        let fixture =
+            seed_tenant_write_scope_fixture(&test_db, mode, target_tenant, neighbour_tenant).await;
+        let operation_id = format!("scope-mode-{}-{target_tenant}", mode.name());
+        let replica_pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(test_db.database_url())
+            .await
+            .unwrap_or_else(|error| panic!("connect {} replica pool: {error}", mode.name()));
+
+        let mut writer = replica_pool
+            .begin()
+            .await
+            .unwrap_or_else(|error| panic!("begin {} pre-fence writer: {error}", mode.name()));
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap_or_else(|error| panic!("read {} writer pid: {error}", mode.name()));
+        let pre_fence_write = sqlx::query(&fixture.update_sql)
+            .bind(&fixture.pre_marker)
+            .execute(&mut *writer)
+            .await
+            .unwrap_or_else(|error| panic!("run {} pre-fence statement: {error}", mode.name()));
+        assert_eq!(
+            pre_fence_write.rows_affected(),
+            fixture.expected_rows,
+            "{} fixture must touch duplicate target rows plus its neighbour",
+            mode.name()
+        );
+
+        let writer_locks: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT mode, granted FROM pg_locks \
+             WHERE pid = $1 AND locktype = 'advisory' \
+             ORDER BY mode, granted",
+        )
+        .bind(writer_pid)
+        .fetch_all(observer_pool)
+        .await
+        .unwrap_or_else(|error| panic!("inspect {} writer locks: {error}", mode.name()));
+        assert_eq!(
+            writer_locks,
+            vec![
+                ("ShareLock".to_string(), true),
+                ("ShareLock".to_string(), true),
+            ],
+            "{} transition table must coalesce duplicate rows to the target and neighbour tenants",
+            mode.name()
+        );
+
+        let mut purge_connection = replica_pool
+            .acquire()
+            .await
+            .unwrap_or_else(|error| panic!("acquire {} purge connection: {error}", mode.name()));
+        let purge_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *purge_connection)
+            .await
+            .unwrap_or_else(|error| panic!("read {} purge pid: {error}", mode.name()));
+        let purge_tenant = target_tenant;
+        let purge_operation = operation_id.clone();
+        let purge_task = tokio::spawn(async move {
+            sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+                .bind(purge_tenant)
+                .bind(purge_operation)
+                .execute(&mut *purge_connection)
+                .await
+        });
+
+        wait_for_advisory_lock_waiter(observer_pool, purge_pid)
+            .await
+            .unwrap_or_else(|error| panic!("observe {} purge lock waiter: {error}", mode.name()));
+        let fence_while_writer_open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.destruction_operation_fence \
+             WHERE tenant_id = $1 AND subject_id IS NULL",
+        )
+        .bind(target_tenant)
+        .fetch_one(observer_pool)
+        .await
+        .unwrap_or_else(|error| panic!("inspect {} blocked fence: {error}", mode.name()));
+        assert_eq!(
+            fence_while_writer_open,
+            0,
+            "{} purge must not publish a fence before the pre-fence writer drains",
+            mode.name()
+        );
+
+        writer
+            .commit()
+            .await
+            .unwrap_or_else(|error| panic!("commit {} pre-fence writer: {error}", mode.name()));
+        tokio::time::timeout(Duration::from_secs(3), purge_task)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{} purge remained blocked after writer commit", mode.name())
+            })
+            .unwrap_or_else(|error| panic!("join {} purge task: {error}", mode.name()))
+            .unwrap_or_else(|error| panic!("start {} tenant purge: {error}", mode.name()));
+
+        assert_eq!(
+            count_tenant_write_fixture_marker(observer_pool, &fixture, &fixture.pre_marker).await,
+            fixture.expected_rows as i64,
+            "{} pre-fence statement must commit all fixture rows",
+            mode.name()
+        );
+        let post_fence_result = sqlx::query(&fixture.update_sql)
+            .bind(&fixture.post_marker)
+            .execute(&replica_pool)
+            .await;
+        let post_fence_error = match post_fence_result {
+            Ok(result) => panic!(
+                "{} post-fence statement unexpectedly updated {} rows",
+                mode.name(),
+                result.rows_affected()
+            ),
+            Err(error) => error,
+        };
+        let post_fence_sqlstate = post_fence_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()));
+        assert_eq!(
+            post_fence_sqlstate.as_deref(),
+            Some("55000"),
+            "{} post-fence statement must fail with object-not-in-prerequisite-state",
+            mode.name()
+        );
+        assert_eq!(
+            count_tenant_write_fixture_marker(observer_pool, &fixture, &fixture.post_marker).await,
+            0,
+            "{} rejected statement must not change target or neighbour rows",
+            mode.name()
+        );
+        assert_eq!(
+            count_tenant_write_fixture_marker(observer_pool, &fixture, &fixture.pre_marker).await,
+            fixture.expected_rows as i64,
+            "{} rejected target-plus-neighbour statement must roll back atomically",
+            mode.name()
+        );
+
+        replica_pool.close().await;
+    }
+}
+
+#[tokio::test]
+async fn tenant_purge_dead_letter_behind_authz_cursor_resets_and_redrains_db_memory() {
+    // Pins: a delete that dead-letters after its UUID has fallen behind the
+    // persisted authz cursor cannot strand finalization. The final relational
+    // stage rewinds authz to NULL, and the production inversion batch requeues
+    // exactly that row without perturbing the already-active neighbour tuple.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap behind-cursor dead-letter db");
+    let pool = test_db.store().pool();
+    let tenant_id = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    let behind_id = Uuid::from_u128(1);
+    let first_cursor_id = Uuid::from_u128(1000);
+    let final_cursor_id = Uuid::from_u128(1001);
+    seed_tenant(pool, tenant_id).await;
     sqlx::query(
-        "UPDATE moa.vector_sync_outbox SET claim_expires_at = now() - INTERVAL '1 second' WHERE storage_partition_id = $1",
+        r#"
+        INSERT INTO authz_outbox
+            (id, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
+        SELECT
+            lpad(to_hex(ordinal), 32, '0')::UUID,
+            'write',
+            format('user:%s', ordinal),
+            'member',
+            format('tenant:%s:tuple:%s', $1::TEXT, ordinal),
+            1,
+            $1
+        FROM generate_series(1, 1001) AS ordinal
+        "#,
     )
-    .bind(storage_partition_id.as_str())
+    .bind(tenant_id)
     .execute(pool)
     .await
-    .expect("expire pre-fence vector claim");
+    .expect("seed 1001 deterministically ordered desired authz tuples");
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(pool)
+        .await
+        .expect("start behind-cursor tenant purge");
+
+    let first_page: (i32, i32, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT scanned, inverted, exhausted, next_cursor \
+         FROM moa.invert_tenant_authz_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("invert the initial ordered authz page");
+    assert_eq!(first_page, (1000, 1000, false, Some(first_cursor_id)));
+    sqlx::query(
+        "UPDATE authz_outbox \
+         SET status = 'dead_letter', attempts = 7, last_error = 'delivery exhausted', \
+             lease_token = $2, lease_expires_at = now() + INTERVAL '1 minute' \
+         WHERE id = $1",
+    )
+    .bind(behind_id)
+    .bind(Uuid::new_v4())
+    .execute(pool)
+    .await
+    .expect("dead-letter the delete behind the persisted 1000-row cursor");
+    let behind_before_redrain: AuthzOutboxIdentityState = sqlx::query_as(
+        "SELECT op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id, \
+                status, generation, attempts, last_error, lease_token IS NOT NULL \
+         FROM authz_outbox WHERE id = $1",
+    )
+    .bind(behind_id)
+    .fetch_one(pool)
+    .await
+    .expect("load behind-cursor dead letter before the redrain");
     assert_eq!(
-        purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
-            .await
-            .expect("expired vector claim should let relational cleanup resume"),
-        RelationalPurgeOutcome::Committed
+        behind_before_redrain,
+        (
+            "delete".to_string(),
+            "user:1".to_string(),
+            "member".to_string(),
+            format!("tenant:{tenant_id}:tuple:1"),
+            1,
+            Some(tenant_id),
+            "dead_letter".to_string(),
+            2,
+            7,
+            Some("delivery exhausted".to_string()),
+            true,
+        ),
+        "delivery failure must not rewrite tuple identity or tenant attribution"
     );
+    let final_page: (i32, i32, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT scanned, inverted, exhausted, next_cursor \
+         FROM moa.invert_tenant_authz_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("invert the one-row tail beyond the persisted cursor");
+    assert_eq!(final_page, (1, 1, false, Some(final_cursor_id)));
+    let exhausted_page: (i32, i32, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT scanned, inverted, exhausted, next_cursor \
+         FROM moa.invert_tenant_authz_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("advance from the exhausted 1001-row authz pass");
+    assert_eq!(exhausted_page, (0, 0, true, None));
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'moa.tenant_purge_operations' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .execute(pool)
+    .await
+    .expect("focus finalization on the last catalog stage");
+
+    let rewind: (String, String, i64) = sqlx::query_as(
+        "SELECT batch_state, stage, affected \
+         FROM moa.run_tenant_purge_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("rewind finalization for the behind-cursor dead letter");
+    assert_eq!(rewind, ("in_progress".to_string(), "authz".to_string(), 0));
+    let rewound_progress: (String, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT current_stage, authz_cursor, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("load rewound authz progress");
+    assert_eq!(rewound_progress, ("authz".to_string(), None, 4));
+
+    let redrain: (i32, i32, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT scanned, inverted, exhausted, next_cursor \
+         FROM moa.invert_tenant_authz_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("redrain from the reset authz cursor");
+    assert_eq!(redrain, (1000, 1, false, Some(first_cursor_id)));
+    let exact_states: Vec<AuthzOutboxDeliveryState> = sqlx::query_as(
+        "SELECT id, op, status, generation, attempts, last_error, \
+                    lease_token IS NULL, lease_expires_at IS NULL \
+             FROM authz_outbox WHERE id IN ($1, $2, $3) ORDER BY id",
+    )
+    .bind(behind_id)
+    .bind(first_cursor_id)
+    .bind(final_cursor_id)
+    .fetch_all(pool)
+    .await
+    .expect("load representative exact redrained authz tuple state");
+    assert_eq!(
+        exact_states,
+        vec![
+            (
+                behind_id,
+                "delete".to_string(),
+                "pending".to_string(),
+                3,
+                0,
+                None,
+                true,
+                true,
+            ),
+            (
+                first_cursor_id,
+                "delete".to_string(),
+                "pending".to_string(),
+                2,
+                0,
+                None,
+                true,
+                true,
+            ),
+            (
+                final_cursor_id,
+                "delete".to_string(),
+                "pending".to_string(),
+                2,
+                0,
+                None,
+                true,
+                true,
+            ),
+        ],
+        "only the behind-cursor dead letter may be reactivated and generation-bumped"
+    );
+    let aggregate_state: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*), \
+                count(*) FILTER (WHERE generation = 2), \
+                count(*) FILTER (WHERE generation = 3), \
+                count(*) FILTER (WHERE status = 'pending' AND attempts = 0 \
+                                 AND last_error IS NULL AND lease_token IS NULL \
+                                 AND lease_expires_at IS NULL) \
+         FROM authz_outbox WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("load aggregate exact redrain state");
+    assert_eq!(aggregate_state, (1001, 1000, 1, 1001));
+    let redrain_tail: (i32, i32, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT scanned, inverted, exhausted, next_cursor \
+         FROM moa.invert_tenant_authz_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("scan the one-row tail of the reset authz pass");
+    assert_eq!(redrain_tail, (1, 0, false, Some(final_cursor_id)));
+    let redrain_exhausted: (i32, i32, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT scanned, inverted, exhausted, next_cursor \
+         FROM moa.invert_tenant_authz_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("finish the reset 1001-row authz pass");
+    assert_eq!(redrain_exhausted, (0, 0, true, None));
+    let final_progress: (String, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT current_stage, authz_cursor, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("load progress after the exact redrain");
+    assert_eq!(final_progress.0, "public.oauth_tokens");
+    assert_eq!(final_progress.1, Some(final_cursor_id));
+    assert_eq!(final_progress.2, 7);
+}
+
+#[tokio::test]
+async fn tenant_purge_release_stage_resumes_after_process_loss_at_1001_boundary_db_memory() {
+    // Pins: the release-control stage commits 1,000 then 1 target policy rows,
+    // persists its counters between process-local pools, and resumes to final
+    // commitment through the production repository on process C. A different
+    // tenant's policy must survive every batch.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap release-policy boundary db");
+    let pool = test_db.store().pool();
+    let tenant_id = Uuid::new_v4();
+    let neighbour_tenant = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    seed_tenant(pool, tenant_id).await;
+    seed_tenant(pool, neighbour_tenant).await;
+    seed_release_policy_rows(pool, tenant_id, 1001)
+        .await
+        .expect("seed 1001 target release policies");
+    seed_release_policy_rows(pool, neighbour_tenant, 1)
+        .await
+        .expect("seed neighbour release policy");
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(pool)
+        .await
+        .expect("start release-policy boundary purge");
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'moa.artifact_release_policy' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .execute(pool)
+    .await
+    .expect("focus progress on the release-policy stage");
+
+    let first =
+        run_one_purge_batch_from_fresh_pool(test_db.database_url(), tenant_id, &operation_id).await;
+    assert_eq!(
+        first,
+        (
+            "in_progress".to_string(),
+            "moa.artifact_release_policy".to_string(),
+            1000,
+        )
+    );
+    assert_eq!(
+        release_policy_progress(pool, tenant_id).await,
+        ("moa.artifact_release_policy".to_string(), 1000, 1000, 1,)
+    );
+    assert_eq!(
+        release_policy_counts(pool, tenant_id, neighbour_tenant).await,
+        (1, 1)
+    );
+
+    let second =
+        run_one_purge_batch_from_fresh_pool(test_db.database_url(), tenant_id, &operation_id).await;
+    assert_eq!(
+        second,
+        (
+            "in_progress".to_string(),
+            "moa.artifact_release_policy".to_string(),
+            1,
+        )
+    );
+    assert_eq!(
+        release_policy_progress(pool, tenant_id).await,
+        ("moa.artifact_release_policy".to_string(), 1001, 1001, 2,)
+    );
+    assert_eq!(
+        release_policy_counts(pool, tenant_id, neighbour_tenant).await,
+        (0, 1)
+    );
+
+    let process_c = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(test_db.database_url())
+        .await
+        .expect("connect process C purge pool");
+    let resumed = purge_relational(&process_c, tenant_id, &operation_id)
+        .await
+        .expect("process C must resume and complete the persisted purge");
+    assert_eq!(resumed, RelationalPurgeOutcome::Committed);
+    process_c.close().await;
+
+    let committed_progress: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT status, current_stage, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("load process-loss resumed purge completion");
+    assert_eq!(committed_progress.0, "relationally_committed");
+    assert_eq!(committed_progress.1, "complete");
+    assert_eq!(
+        committed_progress.2, 1002,
+        "1001 release policies plus the target tenant must be deleted"
+    );
+    assert!(
+        committed_progress.3 > 3,
+        "process C must durably traverse the remaining catalog stages"
+    );
+    assert_eq!(
+        release_policy_counts(pool, tenant_id, neighbour_tenant).await,
+        (0, 1)
+    );
+    let tenant_counts: (i64, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM tenants WHERE id = $1), \
+             (SELECT count(*) FROM tenants WHERE id = $2)",
+    )
+    .bind(tenant_id)
+    .bind(neighbour_tenant)
+    .fetch_one(pool)
+    .await
+    .expect("load target and neighbour tenants after process-loss resume");
+    assert_eq!(tenant_counts, (0, 1));
 }
 
 #[tokio::test]
@@ -684,6 +1552,507 @@ async fn legal_hold_and_destruction_interleavings_are_linearizable_across_pools_
     assert_eq!(outcomes, (1, 0, 0, 1, "committed".to_string()));
 
     second_pool.close().await;
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TenantWriteScopeMode {
+    TenantId,
+    StoragePartitionId,
+    TenantPrimaryKey,
+    Auth0CibaApproval,
+    LinkedConnection,
+    ScimGroupMember,
+    ApiKeyRevocation,
+    SessionEventDedupe,
+}
+
+impl TenantWriteScopeMode {
+    const ALL: [Self; 8] = [
+        Self::TenantId,
+        Self::StoragePartitionId,
+        Self::TenantPrimaryKey,
+        Self::Auth0CibaApproval,
+        Self::LinkedConnection,
+        Self::ScimGroupMember,
+        Self::ApiKeyRevocation,
+        Self::SessionEventDedupe,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::TenantId => "tenant_id",
+            Self::StoragePartitionId => "storage_partition_id",
+            Self::TenantPrimaryKey => "tenant_primary_key",
+            Self::Auth0CibaApproval => "auth0_ciba_approval",
+            Self::LinkedConnection => "linked_connection",
+            Self::ScimGroupMember => "scim_group_member",
+            Self::ApiKeyRevocation => "api_key_revocation",
+            Self::SessionEventDedupe => "session_event_dedupe",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TenantWriteScopeFixture {
+    update_sql: String,
+    count_sql: String,
+    pre_marker: String,
+    post_marker: String,
+    expected_rows: u64,
+}
+
+async fn seed_tenant_write_scope_fixture(
+    test_db: &moa_test_support::postgres::TestDb,
+    mode: TenantWriteScopeMode,
+    target_tenant: Uuid,
+    neighbour_tenant: Uuid,
+) -> TenantWriteScopeFixture {
+    let pool = test_db.store().pool();
+    let pre_marker = format!("pre-{}-{target_tenant}", mode.name());
+    let post_marker = format!("post-{}-{target_tenant}", mode.name());
+
+    let (update_sql, count_sql, expected_rows) = match mode {
+        TenantWriteScopeMode::TenantId => {
+            let mut user_ids = seed_scope_users(pool, target_tenant, 2, mode.name()).await;
+            user_ids.extend(seed_scope_users(pool, neighbour_tenant, 1, mode.name()).await);
+            let predicate = uuid_in_predicate("id", &user_ids);
+            (
+                format!("UPDATE users SET display_name = $1 WHERE {predicate}"),
+                format!("SELECT count(*) FROM users WHERE {predicate} AND display_name = $1"),
+                3,
+            )
+        }
+        TenantWriteScopeMode::StoragePartitionId => {
+            let mut sync_ids = Vec::with_capacity(3);
+            for tenant_id in [target_tenant, target_tenant, neighbour_tenant] {
+                let sync_id: i64 = sqlx::query_scalar(
+                    "INSERT INTO moa.vector_sync_outbox \
+                     (storage_partition_id, uid, op) VALUES ($1, $2, 'delete') \
+                     RETURNING sync_id",
+                )
+                .bind(tenant_id.to_string())
+                .bind(Uuid::new_v4())
+                .fetch_one(pool)
+                .await
+                .expect("seed storage-partition scope row");
+                sync_ids.push(sync_id);
+            }
+            let ids = sync_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                format!(
+                    "UPDATE moa.vector_sync_outbox SET last_error = $1 WHERE sync_id IN ({ids})"
+                ),
+                format!(
+                    "SELECT count(*) FROM moa.vector_sync_outbox \
+                     WHERE sync_id IN ({ids}) AND last_error = $1"
+                ),
+                3,
+            )
+        }
+        TenantWriteScopeMode::TenantPrimaryKey => {
+            let tenant_ids = [target_tenant, neighbour_tenant];
+            let predicate = uuid_in_predicate("id", &tenant_ids);
+            (
+                format!("UPDATE tenants SET name = $1 WHERE {predicate}"),
+                format!("SELECT count(*) FROM tenants WHERE {predicate} AND name = $1"),
+                2,
+            )
+        }
+        TenantWriteScopeMode::Auth0CibaApproval => {
+            let mut user_ids = seed_scope_users(pool, target_tenant, 2, mode.name()).await;
+            user_ids.extend(seed_scope_users(pool, neighbour_tenant, 1, mode.name()).await);
+            let session_ids = [
+                seed_scope_session(test_db, target_tenant).await,
+                seed_scope_session(test_db, target_tenant).await,
+                seed_scope_session(test_db, neighbour_tenant).await,
+            ];
+            let approval_ids = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+            for ((approval_id, session_id), user_id) in approval_ids
+                .iter()
+                .zip(session_ids.iter())
+                .zip(user_ids.iter())
+            {
+                sqlx::query(
+                    r#"
+                    INSERT INTO auth0_ciba_approvals
+                        (id, session_id, deciding_user_id, awakeable_id, auth_req_id,
+                         poll_interval_ms, next_poll_at, expires_at)
+                    VALUES ($1, $2, $3, $4, $5, 1000, now(), now() + INTERVAL '1 hour')
+                    "#,
+                )
+                .bind(approval_id)
+                .bind(session_id)
+                .bind(user_id)
+                .bind(format!("awakeable-{approval_id}"))
+                .bind(format!("auth-request-{approval_id}"))
+                .execute(pool)
+                .await
+                .expect("seed CIBA approval scope row");
+            }
+            let predicate = uuid_in_predicate("id", &approval_ids);
+            (
+                format!("UPDATE auth0_ciba_approvals SET deny_reason = $1 WHERE {predicate}"),
+                format!(
+                    "SELECT count(*) FROM auth0_ciba_approvals \
+                     WHERE {predicate} AND deny_reason = $1"
+                ),
+                3,
+            )
+        }
+        TenantWriteScopeMode::LinkedConnection => {
+            let target_user = seed_scope_users(pool, target_tenant, 1, mode.name()).await[0];
+            let neighbour_user = seed_scope_users(pool, neighbour_tenant, 1, mode.name()).await[0];
+            let rows = [
+                (target_user, format!("{}-a-{target_tenant}", mode.name())),
+                (target_user, format!("{}-b-{target_tenant}", mode.name())),
+                (
+                    neighbour_user,
+                    format!("{}-neighbour-{neighbour_tenant}", mode.name()),
+                ),
+            ];
+            for (user_id, connection_name) in &rows {
+                sqlx::query(
+                    "INSERT INTO linked_connections (user_id, connection_name) VALUES ($1, $2)",
+                )
+                .bind(user_id)
+                .bind(connection_name)
+                .execute(pool)
+                .await
+                .expect("seed linked-connection scope row");
+            }
+            let predicate = rows
+                .iter()
+                .map(|(user_id, connection_name)| {
+                    format!(
+                        "(user_id = '{user_id}'::UUID AND connection_name = '{connection_name}')"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            (
+                format!("UPDATE linked_connections SET external_sub = $1 WHERE {predicate}"),
+                format!(
+                    "SELECT count(*) FROM linked_connections \
+                     WHERE ({predicate}) AND external_sub = $1"
+                ),
+                3,
+            )
+        }
+        TenantWriteScopeMode::ScimGroupMember => {
+            let mut user_ids = seed_scope_users(pool, target_tenant, 2, mode.name()).await;
+            user_ids.extend(seed_scope_users(pool, neighbour_tenant, 1, mode.name()).await);
+            let target_group = seed_scope_group(pool, target_tenant, mode.name()).await;
+            let neighbour_group = seed_scope_group(pool, neighbour_tenant, mode.name()).await;
+            for (group_id, user_id) in [
+                (target_group, user_ids[0]),
+                (target_group, user_ids[1]),
+                (neighbour_group, user_ids[2]),
+            ] {
+                sqlx::query("INSERT INTO scim_group_members (group_id, user_id) VALUES ($1, $2)")
+                    .bind(group_id)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .expect("seed SCIM group-member scope row");
+            }
+            let predicate = uuid_in_predicate("user_id", &user_ids);
+            (
+                format!(
+                    "UPDATE scim_group_members SET added_at = $1::TIMESTAMPTZ WHERE {predicate}"
+                ),
+                format!(
+                    "SELECT count(*) FROM scim_group_members \
+                     WHERE {predicate} AND added_at = $1::TIMESTAMPTZ"
+                ),
+                3,
+            )
+        }
+        TenantWriteScopeMode::ApiKeyRevocation => {
+            let mut user_ids = seed_scope_users(pool, target_tenant, 2, mode.name()).await;
+            user_ids.extend(seed_scope_users(pool, neighbour_tenant, 1, mode.name()).await);
+            let tenant_ids = [target_tenant, target_tenant, neighbour_tenant];
+            let mut revocation_ids = Vec::with_capacity(3);
+            for (user_id, tenant_id) in user_ids.iter().zip(tenant_ids) {
+                let api_key_id = Uuid::new_v4();
+                sqlx::query(
+                    r#"
+                    INSERT INTO api_keys
+                        (id, prefix, hash, owner_user_id, tenant_id, name, env)
+                    VALUES ($1, $2, 'fixture-hash', $3, $4, 'purge fixture', 'dev')
+                    "#,
+                )
+                .bind(api_key_id)
+                .bind(format!("scope-{api_key_id}"))
+                .bind(user_id)
+                .bind(tenant_id)
+                .execute(pool)
+                .await
+                .expect("seed API key parent for revocation scope");
+                let revocation_id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO api_key_revocations (id, api_key_id, reason) \
+                     VALUES ($1, $2, 'scope fixture')",
+                )
+                .bind(revocation_id)
+                .bind(api_key_id)
+                .execute(pool)
+                .await
+                .expect("seed API-key revocation scope row");
+                revocation_ids.push(revocation_id);
+            }
+            let predicate = uuid_in_predicate("id", &revocation_ids);
+            (
+                format!("UPDATE api_key_revocations SET reason = $1 WHERE {predicate}"),
+                format!(
+                    "SELECT count(*) FROM api_key_revocations WHERE {predicate} AND reason = $1"
+                ),
+                3,
+            )
+        }
+        TenantWriteScopeMode::SessionEventDedupe => {
+            let session_ids = [
+                seed_scope_session(test_db, target_tenant).await,
+                seed_scope_session(test_db, target_tenant).await,
+                seed_scope_session(test_db, neighbour_tenant).await,
+            ];
+            let dedupe_key = format!("scope-dedupe-{target_tenant}");
+            for session_id in &session_ids {
+                sqlx::query(
+                    "INSERT INTO session_event_dedupe (session_id, dedupe_key, sequence_num) \
+                     VALUES ($1, $2, 0)",
+                )
+                .bind(session_id)
+                .bind(&dedupe_key)
+                .execute(pool)
+                .await
+                .expect("seed session-event dedupe scope row");
+            }
+            let predicate = uuid_in_predicate("session_id", &session_ids);
+            (
+                format!(
+                    "UPDATE session_event_dedupe SET sequence_num = $1::BIGINT \
+                     WHERE {predicate} AND dedupe_key = '{dedupe_key}'"
+                ),
+                format!(
+                    "SELECT count(*) FROM session_event_dedupe \
+                     WHERE {predicate} AND dedupe_key = '{dedupe_key}' \
+                       AND sequence_num = $1::BIGINT"
+                ),
+                3,
+            )
+        }
+    };
+
+    let (pre_marker, post_marker) = match mode {
+        TenantWriteScopeMode::ScimGroupMember => (
+            "2000-01-01T00:00:00Z".to_string(),
+            "2001-01-01T00:00:00Z".to_string(),
+        ),
+        TenantWriteScopeMode::SessionEventDedupe => ("41".to_string(), "42".to_string()),
+        _ => (pre_marker, post_marker),
+    };
+    TenantWriteScopeFixture {
+        update_sql,
+        count_sql,
+        pre_marker,
+        post_marker,
+        expected_rows,
+    }
+}
+
+async fn seed_scope_users(pool: &PgPool, tenant_id: Uuid, count: usize, label: &str) -> Vec<Uuid> {
+    let mut user_ids = Vec::with_capacity(count);
+    for ordinal in 0..count {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, external_id, display_name) \
+             VALUES ($1, $2, $3, $4, 'scope fixture')",
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(format!("{label}-{ordinal}-{user_id}@example.test"))
+        .bind(format!("{label}-{ordinal}-{user_id}"))
+        .execute(pool)
+        .await
+        .expect("seed scope-mode user parent");
+        user_ids.push(user_id);
+    }
+    user_ids
+}
+
+async fn seed_scope_group(pool: &PgPool, tenant_id: Uuid, label: &str) -> Uuid {
+    let group_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO scim_groups (id, tenant_id, display_name) VALUES ($1, $2, $3)")
+        .bind(group_id)
+        .bind(tenant_id)
+        .bind(format!("{label}-{group_id}"))
+        .execute(pool)
+        .await
+        .expect("seed SCIM group parent");
+    group_id
+}
+
+async fn seed_scope_session(test_db: &moa_test_support::postgres::TestDb, tenant_id: Uuid) -> Uuid {
+    moa_core::traits::SessionStore::create_session(
+        test_db.store(),
+        moa_core::types::session::SessionMeta {
+            tenant_id: TenantId::from(tenant_id),
+            created_by: Some(moa_core::types::contact::SessionActorRef::Identity {
+                id: Uuid::new_v4(),
+            }),
+            model: moa_core::types::identifiers::ModelId::new("purge-scope-test"),
+            agent_context: Some(moa_core::types::agent::AgentContext::system_default()),
+            ..moa_core::types::session::SessionMeta::default()
+        },
+    )
+    .await
+    .expect("seed session parent for scope-mode fixture")
+    .0
+}
+
+fn uuid_in_predicate(column: &str, ids: &[Uuid]) -> String {
+    let values = ids
+        .iter()
+        .map(|id| format!("'{id}'::UUID"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{column} IN ({values})")
+}
+
+async fn wait_for_advisory_lock_waiter(pool: &PgPool, pid: i32) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let locks: Vec<(String, bool)> = sqlx::query_as(
+                "SELECT mode, granted FROM pg_locks \
+                 WHERE pid = $1 AND locktype = 'advisory' \
+                 ORDER BY mode, granted",
+            )
+            .bind(pid)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("query purge advisory locks: {error}"))?;
+            if locks == vec![("ExclusiveLock".to_string(), false)] {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "purge never appeared as the single exclusive advisory waiter".to_string())?
+}
+
+async fn count_tenant_write_fixture_marker(
+    pool: &PgPool,
+    fixture: &TenantWriteScopeFixture,
+    marker: &str,
+) -> i64 {
+    sqlx::query_scalar(&fixture.count_sql)
+        .bind(marker)
+        .fetch_one(pool)
+        .await
+        .expect("count exact scope-mode fixture marker")
+}
+
+async fn seed_release_policy_rows(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    count: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        WITH policies AS (
+            SELECT
+                gen_random_uuid() AS policy_uid,
+                $1::TEXT AS storage_partition_id,
+                format('purge-boundary-%s-%s', $1::TEXT, ordinal) AS name,
+                ordinal AS revision,
+                '[{"id":"target_completed","version":"v1"}]'::JSONB
+                    AS blocking_assertions,
+                '[{"metric":"target_completed"}]'::JSONB AS primary_gate_family,
+                3600::BIGINT AS attestation_ttl_secs,
+                digest(format('resource-%s-%s', $1::TEXT, ordinal), 'sha256')
+                    AS resource_policy_hash
+            FROM generate_series(1, $2::INT) AS ordinal
+        )
+        INSERT INTO moa.artifact_release_policy (
+            policy_uid, storage_partition_id, user_id, name, revision, target_class,
+            blocking_assertions, primary_gate_family, attestation_ttl_secs,
+            resource_policy_hash, policy_hash, valid_to
+        )
+        SELECT
+            policy_uid, storage_partition_id, NULL, name, revision, 'skill_visibility',
+            blocking_assertions, primary_gate_family, attestation_ttl_secs,
+            resource_policy_hash,
+            moa.artifact_release_policy_content_hash(
+                name, revision, 'skill_visibility', blocking_assertions,
+                primary_gate_family, attestation_ttl_secs, resource_policy_hash
+            ),
+            now()
+        FROM policies
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn run_one_purge_batch_from_fresh_pool(
+    database_url: &str,
+    tenant_id: Uuid,
+    operation_id: &str,
+) -> (String, String, i64) {
+    let process_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect fresh process-loss purge pool");
+    let outcome = sqlx::query_as(
+        "SELECT batch_state, stage, affected \
+         FROM moa.run_tenant_purge_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(operation_id)
+    .fetch_one(&process_pool)
+    .await
+    .expect("run one bounded purge batch from a fresh pool");
+    process_pool.close().await;
+    outcome
+}
+
+async fn release_policy_progress(pool: &PgPool, tenant_id: Uuid) -> (String, i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT current_stage, stage_deleted_count, total_deleted_count, batch_count \
+         FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("load release-policy purge progress")
+}
+
+async fn release_policy_counts(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    neighbour_tenant: Uuid,
+) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM moa.artifact_release_policy \
+              WHERE storage_partition_id = $1::TEXT), \
+             (SELECT count(*) FROM moa.artifact_release_policy \
+              WHERE storage_partition_id = $2::TEXT)",
+    )
+    .bind(tenant_id)
+    .bind(neighbour_tenant)
+    .fetch_one(pool)
+    .await
+    .expect("load target and neighbour release-policy counts")
 }
 
 #[derive(Debug)]
@@ -1008,16 +2377,6 @@ async fn seed_session_transcript(
 /// and distinct from every generated fixture tenant.
 const NEIGHBOUR_TENANT: Uuid = Uuid::from_u128(0x5EED_0000_0000_0000_0000_0000_0000_0001);
 
-/// Seeds every V000351 index-rebuild table so the exact-residue assertion proves
-/// they are purged rather than merely registered.
-///
-/// Registration alone only satisfies `assert_catalog_coverage`. A `DELETE`
-/// against a forced-RLS table the purge role has no policy for removes zero
-/// rows and raises no error, and the residue `SELECT count(*)` that follows it
-/// is filtered by the same policy — so both read zero and the step looks
-/// covered while the rows survive. Seeding is the only thing that distinguishes
-/// "deleted" from "invisible".
-///
 /// Seeds every source-ACL table so the exact-residue assertion proves they are
 /// purged rather than merely registered.
 ///
@@ -1230,24 +2589,13 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn offline_fga() -> FgaClient {
-    FgaClient::new(FgaConfig {
-        url: "http://127.0.0.1:1".to_string(),
-        preshared_key: "tenant-purge-test".to_string(),
-        store_id: "tenant-purge-test".to_string(),
-        model_id: "tenant-purge-test".to_string(),
-        timeout_ms: 100,
-    })
-    .expect("offline FGA fixture config")
-}
-
 fn hex64(character: char) -> String {
     std::iter::repeat_n(character, 64).collect()
 }
 
 /// Seeds one experiment run, trial, score run, and provenance row for a tenant.
 ///
-/// The provenance row is the point; the rest exist because V000361's composite
+/// The provenance row is the point; the rest exist because V000041's composite
 /// foreign keys refuse a provenance row whose trial, run, pinned plan revision,
 /// and storage partition do not line up exactly.
 async fn seed_experiment_score_provenance(

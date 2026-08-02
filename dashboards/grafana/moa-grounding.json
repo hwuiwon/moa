@@ -6,38 +6,6 @@
     {
       "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        {
-          "format": "time_series",
-          "rawSql": "SELECT bucket AS time, storage_partition_id::text AS metric, verified_rate AS value FROM analytics.grounding_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') ORDER BY 1",
-          "refId": "A"
-        }
-      ],
-      "title": "Verified citation rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
-      "id": 2,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        {
-          "format": "time_series",
-          "rawSql": "SELECT bucket AS time, storage_partition_id::text || ' p50' AS metric, p50 AS value FROM analytics.nli_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') UNION ALL SELECT bucket AS time, storage_partition_id::text || ' p95' AS metric, p95 AS value FROM analytics.nli_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') ORDER BY 1",
-          "refId": "A"
-        }
-      ],
-      "title": "NLI entailment distribution",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
       "id": 3,
       "options": { "displayLabels": ["name", "percent"], "legend": { "displayMode": "list", "placement": "right" }, "pieType": "pie" },

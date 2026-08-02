@@ -17,7 +17,7 @@ use super::*;
 use crate::archive::{
     ArchiveBody, ArchiveOutcome, ArchiveRefusal, ArchivedEvent, SESSION_ARCHIVE_DIGEST_LEN,
     SESSION_ARCHIVE_FORMAT_VERSION, SessionEventArchive, apply_archive_range, archive_digest,
-    is_terminal_status, terminal_status_strings,
+    is_terminal_status,
 };
 
 /// Columns selected from `session_event_archives` when reading an archive row.
@@ -56,14 +56,13 @@ impl PostgresSessionStore {
             "SELECT id FROM {sessions} \
              WHERE tenant_id = $1 \
                AND events_archived_at IS NULL \
-               AND status = ANY($2) \
-               AND COALESCE(completed_at, updated_at) <= $3 \
+               AND status IN ('completed', 'cancelled', 'failed') \
+               AND COALESCE(completed_at, updated_at) <= $2 \
                AND event_count > 0 \
-             ORDER BY COALESCE(completed_at, updated_at) ASC \
-             LIMIT $4"
+             ORDER BY COALESCE(completed_at, updated_at) ASC, id ASC \
+             LIMIT $3"
         ))
         .bind(tenant_id.0)
-        .bind(terminal_status_strings())
         .bind(boundary)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -142,7 +141,7 @@ impl PostgresSessionStore {
         // the check below and before the delete, and the rows it was meant to
         // preserve would already be gone.
         sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
         )
         .bind(locked.tenant_id)
         .execute(&mut *tx)

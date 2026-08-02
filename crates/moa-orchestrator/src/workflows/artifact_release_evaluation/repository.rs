@@ -42,8 +42,8 @@ use super::Error;
 use super::types::{
     ArmRole, AttemptReviewState, CohortVisibility, DispatchRecord, DispatchStatus, MergedCasePlan,
     PinnedDependency, ProvisionedAttempt, ProvisionedTrial, ReleaseAttemptRow, ReleaseCase,
-    ReleaseCasePack, ScenarioSource, dispatch_idempotency_key, merge_case_packs,
-    release_seed_material,
+    ReleaseCasePack, ScenarioSource, canonicalize_pinned_dependencies, dispatch_idempotency_key,
+    merge_case_packs, release_seed_material,
 };
 
 /// How long a provisioned overlay may resolve before it stops answering.
@@ -218,6 +218,7 @@ impl ReleaseEvaluationRepository {
         request: SubmitCandidate,
         pinned_dependencies: Vec<PinnedDependency>,
     ) -> Result<SubmittedCandidate, Error> {
+        let pinned_dependencies = canonicalize_pinned_dependencies(pinned_dependencies)?;
         let now = Utc::now();
         let scope = request.scope;
         let mut conn = self.begin(&scope).await?;
@@ -246,9 +247,7 @@ impl ReleaseEvaluationRepository {
                 now,
             )
             .await?;
-            for pin in &pinned_dependencies {
-                ensure_pinned_dependency(conn.as_mut(), &scope, pin).await?;
-            }
+            ensure_pinned_dependencies(conn.as_mut(), &scope, &pinned_dependencies).await?;
             let record = enqueue_dispatch(
                 conn.as_mut(),
                 &scope,
@@ -1425,37 +1424,54 @@ fn attempt_from_row(row: &sqlx::postgres::PgRow) -> Result<ReleaseAttemptRow, Er
     })
 }
 
-/// Refuses a pin whose revision is not a revision of that artifact in this tenant.
-async fn ensure_pinned_dependency(
+/// Refuses pins whose revisions are not revisions of those artifacts in this tenant.
+async fn ensure_pinned_dependencies(
     conn: &mut PgConnection,
     scope: &TenantScope,
-    pin: &PinnedDependency,
+    pins: &[PinnedDependency],
 ) -> Result<(), Error> {
-    let exists: bool = sqlx::query_scalar(
+    if pins.is_empty() {
+        return Ok(());
+    }
+
+    let artifact_uids = pins.iter().map(|pin| pin.artifact_uid).collect::<Vec<_>>();
+    let revision_uids = pins.iter().map(|pin| pin.revision_uid).collect::<Vec<_>>();
+    let missing: Vec<(Uuid, Uuid)> = sqlx::query_as(
         r#"
-        SELECT EXISTS (
+        WITH requested AS (
+            SELECT artifact_uid, revision_uid
+            FROM unnest($1::uuid[], $2::uuid[]) AS pin(artifact_uid, revision_uid)
+        )
+        SELECT pin.artifact_uid, pin.revision_uid
+        FROM requested pin
+        WHERE NOT EXISTS (
             SELECT 1
             FROM moa.artifact_revision r
             JOIN moa.artifact a ON a.artifact_uid = r.artifact_uid
-            WHERE r.revision_uid = $1
-              AND r.artifact_uid = $2
+            WHERE r.revision_uid = pin.revision_uid
+              AND r.artifact_uid = pin.artifact_uid
               AND r.valid_to IS NULL
               AND a.valid_to IS NULL
               AND a.user_id IS NULL
               AND a.storage_partition_id = $3
         )
+        ORDER BY pin.artifact_uid, pin.revision_uid
         "#,
     )
-    .bind(pin.revision_uid)
-    .bind(pin.artifact_uid)
+    .bind(artifact_uids)
+    .bind(revision_uids)
     .bind(scope.storage_partition_id().to_string())
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await
     .map_err(storage)?;
-    if !exists {
+    if !missing.is_empty() {
+        let missing = missing
+            .iter()
+            .map(|(artifact_uid, revision_uid)| format!("{artifact_uid}:{revision_uid}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(Error::PinnedDependencyInvalid(format!(
-            "pinned revision {} is not a live tenant-scoped revision of artifact {}",
-            pin.revision_uid, pin.artifact_uid
+            "pinned dependencies are not live tenant-scoped artifact/revision pairs: [{missing}]"
         )));
     }
     Ok(())

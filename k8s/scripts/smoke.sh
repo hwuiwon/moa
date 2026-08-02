@@ -29,6 +29,22 @@ assert_excludes() {
   [[ "${content}" != *"${forbidden}"* ]] || die "${description}"
 }
 
+assert_occurrences() {
+  local content="$1"
+  local expected="$2"
+  local needle="$3"
+  local description="$4"
+  local observed
+  observed="$(
+    awk -v needle="${needle}" '
+      index($0, needle) { count += 1 }
+      END { print count + 0 }
+    ' <<<"${content}"
+  )"
+  [[ "${observed}" -eq "${expected}" ]] \
+    || die "${description}: expected ${expected}, found ${observed}"
+}
+
 manifest_document() {
   local manifest="$1"
   local target_kind="$2"
@@ -111,7 +127,7 @@ validate_manifests() {
   local local_orchestrator production_orchestrator local_edge production_edge
   local local_runtime_config production_runtime_config local_key_secret
   local local_restate production_restate
-  local rewrap_job backfill_job application_content
+  local rewrap_job application_content
   work_dir="$(mktemp -d)"
   trap 'rm -rf -- "${work_dir}"' RETURN
   local_manifest="${work_dir}/local.yaml"
@@ -132,14 +148,23 @@ validate_manifests() {
   production_runtime_config="$(manifest_document "${production_manifest}" ConfigMap moa-runtime-config)"
   local_key_secret="$(manifest_document "${local_manifest}" Secret moa-kms-root-keys)"
   rewrap_job="$(manifest_document "${jobs_manifest}" Job moa-kms-rewrap)"
-  backfill_job="$(manifest_document "${jobs_manifest}" Job moa-memory-sealing-backfill)"
 
   for orchestrator in "${local_orchestrator}" "${production_orchestrator}"; do
     assert_contains "${orchestrator}" "name: moa-runtime-config" "orchestrator is missing the runtime ConfigMap"
     assert_contains "${orchestrator}" "secretName: moa-kms-root-keys" "orchestrator is missing the KMS Secret volume"
     assert_contains "${orchestrator}" "mountPath: /var/run/secrets/moa-kms/root-keys" "orchestrator is missing the KMS mount path"
     assert_contains "${orchestrator}" "readOnly: true" "orchestrator KMS mount is not read-only"
+    assert_contains "${orchestrator}" "name: database-migrations" "orchestrator is missing the explicit database migration init container"
+    assert_contains "${orchestrator}" "key: admin-url" "database migration init container is missing the admin database Secret key"
+    assert_occurrences "${orchestrator}" 1 "name: MOA_DATABASE_ADMIN_URL" \
+      "database admin authority must be scoped to the migration init container"
+    assert_occurrences "${orchestrator}" 1 "- migrate" \
+      "orchestrator must execute exactly one explicit migration init command"
   done
+  assert_occurrences "${local_orchestrator}" 2 "image: moa/orchestrator:kind" \
+    "local runtime and migration init must use the same orchestrator image"
+  assert_occurrences "${production_orchestrator}" 2 "image: ghcr.io/hwuiwon/moa-orchestrator:latest" \
+    "production runtime and migration init must use the same orchestrator image"
   for runtime_config in "${local_runtime_config}" "${production_runtime_config}"; do
     assert_contains "${runtime_config}" "MOA_KMS_PROVIDER: postgres" "runtime config does not select Postgres KMS"
     assert_contains "${runtime_config}" "MOA_KMS_ROOT_KEY_DIR: /var/run/secrets/moa-kms/root-keys" "runtime config has the wrong keyring directory"
@@ -199,18 +224,14 @@ validate_manifests() {
   for application in "${local_manifest}" "${production_manifest}"; do
     application_content="$(<"${application}")"
     assert_excludes "${application_content}" "name: moa-kms-rewrap" "application overlay installs the KMS rewrap Job"
-    assert_excludes "${application_content}" "name: moa-memory-sealing-backfill" "application overlay installs the sealing backfill Job"
   done
 
   assert_contains "${rewrap_job}" $'args:\n        - kms-rewrap\n        - --batch-size\n        - "100"' "KMS rewrap Job command is not exact"
-  assert_contains "${backfill_job}" $'args:\n        - backfill-memory-sealed-content\n        - --batch-size\n        - "100"' "memory sealing Job command is not exact"
-  for job in "${rewrap_job}" "${backfill_job}"; do
-    assert_contains "${job}" "name: moa-postgres" "maintenance Job does not use the database Secret"
-    assert_contains "${job}" "value: postgres" "maintenance Job does not use Postgres KMS"
-    assert_contains "${job}" "secretName: moa-kms-root-keys" "maintenance Job is missing the KMS Secret"
-    assert_contains "${job}" "mountPath: /var/run/secrets/moa-kms/root-keys" "maintenance Job is missing the KMS mount path"
-    assert_contains "${job}" "readOnly: true" "maintenance Job KMS mount is not read-only"
-  done
+  assert_contains "${rewrap_job}" "name: moa-postgres" "maintenance Job does not use the database Secret"
+  assert_contains "${rewrap_job}" "value: postgres" "maintenance Job does not use Postgres KMS"
+  assert_contains "${rewrap_job}" "secretName: moa-kms-root-keys" "maintenance Job is missing the KMS Secret"
+  assert_contains "${rewrap_job}" "mountPath: /var/run/secrets/moa-kms/root-keys" "maintenance Job is missing the KMS mount path"
+  assert_contains "${rewrap_job}" "readOnly: true" "maintenance Job KMS mount is not read-only"
 
   # Termination grace periods, asserted by content because they CANNOT be
   # schema-validated. `spec.template.spec` in the RestateDeployment CRD carries

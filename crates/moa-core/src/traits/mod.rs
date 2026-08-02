@@ -943,18 +943,16 @@ pub trait CredentialVault: Send + Sync {
         ctx: &CredentialContext,
     ) -> std::result::Result<RedactedSecret, CredentialError>;
 
-    /// Describes one exact stored version without opening its material.
+    /// Describes exact connection/reference pairs without opening their material.
     ///
-    /// This is a status read for a reference the caller already holds, not an
-    /// enumeration: the exact reference must be supplied, the tenant in `ctx`
-    /// must own it, and nothing is decrypted. It exists so an operator surface
-    /// can report that a connection's credential is present, revoked, or gone
-    /// without a tenant-wide listing and without a plaintext resolution.
-    async fn describe(
+    /// This is a set-based status read, not enumeration: every requested
+    /// reference must be paired with the connection that already authorized it.
+    /// Missing or mismatched pairs are omitted from the result.
+    async fn describe_batch(
         &self,
-        reference: CredentialRef,
+        references: &[(Uuid, CredentialRef)],
         ctx: &CredentialContext,
-    ) -> std::result::Result<CredentialVersion, CredentialError>;
+    ) -> std::result::Result<Vec<(Uuid, CredentialVersion)>, CredentialError>;
 
     /// Stores a new active version, superseding `current` under compare-and-swap.
     ///

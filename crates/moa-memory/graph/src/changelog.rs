@@ -73,6 +73,120 @@ pub async fn write_and_bump(conn: &mut PgConnection, rec: ChangelogRecord) -> Re
     Ok(row)
 }
 
+/// Inserts several immutable changelog rows in one statement.
+///
+/// The statement-level changelog trigger increments every touched storage
+/// partition once for the complete statement while this function retains one
+/// append-only row per mutation.
+pub(crate) async fn write_batch_and_bump(
+    conn: &mut PgConnection,
+    records: &[ChangelogRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    for record in records {
+        validate_scope(record)?;
+    }
+
+    let storage_partition_ids = records
+        .iter()
+        .map(|record| record.storage_partition_id.as_deref())
+        .collect::<Vec<_>>();
+    let contact_ids = records
+        .iter()
+        .map(|record| record.contact_id.as_deref())
+        .collect::<Vec<_>>();
+    let actor_ids = records
+        .iter()
+        .map(|record| record.actor_id.as_deref())
+        .collect::<Vec<_>>();
+    let actor_kinds = records
+        .iter()
+        .map(|record| record.actor_kind.as_str())
+        .collect::<Vec<_>>();
+    let operations = records
+        .iter()
+        .map(|record| record.op.as_str())
+        .collect::<Vec<_>>();
+    let target_kinds = records
+        .iter()
+        .map(|record| record.target_kind.as_str())
+        .collect::<Vec<_>>();
+    let target_labels = records
+        .iter()
+        .map(|record| record.target_label.as_str())
+        .collect::<Vec<_>>();
+    let target_uids = records
+        .iter()
+        .map(|record| record.target_uid)
+        .collect::<Vec<_>>();
+    let payloads = records
+        .iter()
+        .map(|record| serde_json::to_string(&record.payload))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let redaction_markers = records
+        .iter()
+        .map(|record| record.redaction_marker.as_deref())
+        .collect::<Vec<_>>();
+    let pii_classes = records
+        .iter()
+        .map(|record| record.pii_class.as_str())
+        .collect::<Vec<_>>();
+    let audit_metadata = records
+        .iter()
+        .map(|record| {
+            record
+                .audit_metadata
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let cause_change_ids = records
+        .iter()
+        .map(|record| record.cause_change_id)
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.graph_changelog
+            (storage_partition_id, user_id, actor_id, actor_kind, op, target_kind, target_label,
+             target_uid, payload, redaction_marker, pii_class, audit_metadata, cause_change_id)
+        SELECT row.storage_partition_id, row.contact_id, row.actor_id, row.actor_kind,
+               row.op, row.target_kind, row.target_label, row.target_uid,
+               row.payload::JSONB, row.redaction_marker, row.pii_class,
+               row.audit_metadata::JSONB, row.cause_change_id
+        FROM UNNEST(
+            $1::TEXT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::TEXT[], $6::TEXT[],
+            $7::TEXT[], $8::UUID[], $9::TEXT[], $10::TEXT[], $11::TEXT[], $12::TEXT[],
+            $13::BIGINT[]
+        ) WITH ORDINALITY AS row(
+            storage_partition_id, contact_id, actor_id, actor_kind, op, target_kind,
+            target_label, target_uid, payload, redaction_marker, pii_class,
+            audit_metadata, cause_change_id, input_ordinal
+        )
+        ORDER BY row.input_ordinal
+        "#,
+    )
+    .bind(&storage_partition_ids)
+    .bind(&contact_ids)
+    .bind(&actor_ids)
+    .bind(&actor_kinds)
+    .bind(&operations)
+    .bind(&target_kinds)
+    .bind(&target_labels)
+    .bind(&target_uids)
+    .bind(&payloads)
+    .bind(&redaction_markers)
+    .bind(&pii_classes)
+    .bind(&audit_metadata)
+    .bind(&cause_change_ids)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 fn validate_scope(rec: &ChangelogRecord) -> Result<()> {
     let expected = crate::write::expected_scope_tier(
         rec.storage_partition_id.as_deref(),

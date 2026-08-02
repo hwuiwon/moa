@@ -4,6 +4,7 @@ use super::*;
 use crate::release::{ActivationTargetClass, TenantScope};
 use crate::validation::validate_for_status;
 use moa_core::types::contact::ContactId;
+use sqlx::{Postgres, QueryBuilder};
 
 /// Outcome of attempting to roll a serving skill revision back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +59,7 @@ impl ArtifactRegistry {
         // A contact-scoped skill, action, or agent has no representable release
         // subject, so it could never be evaluated and could never serve. Refusing
         // it here is what makes contact-scoped release subjects unrepresentable
-        // rather than merely unactivatable: migration V000373 archived the ones
-        // that already existed, and this is why none can come back.
+        // rather than merely unactivatable.
         if ActivationTargetClass::is_release_gated(&draft.document.kind)
             && matches!(scope, ActionRuleScope::Contact { .. })
         {
@@ -69,6 +69,7 @@ impl ArtifactRegistry {
                 draft.document.kind
             )));
         }
+        let files = validate_files(draft.files)?;
         let parts = ArtifactScopeParts::from_scope(scope);
         let artifact_uid = ensure_artifact(conn, &parts, draft.document).await?;
         let version = next_revision_version(conn, artifact_uid).await?;
@@ -116,7 +117,7 @@ impl ArtifactRegistry {
         .await
         .map_err(map_sqlx_error)?;
 
-        insert_files(conn, &parts, artifact_uid, revision_uid, draft.files).await?;
+        insert_files(conn, &parts, artifact_uid, revision_uid, &files).await?;
         load_revision_by_uid(conn, revision_uid).await
     }
 
@@ -661,8 +662,58 @@ async fn insert_files(
     parts: &ArtifactScopeParts,
     artifact_uid: Uuid,
     revision_uid: Uuid,
-    files: &[NewArtifactFile],
+    files: &[ValidatedArtifactFile<'_>],
 ) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        INSERT INTO moa.artifact_file (
+            file_uid, artifact_uid, revision_uid, tenant_id, storage_partition_id, user_id,
+            path, content, content_sha256, content_type, executable, file_size_bytes
+        )
+        "#,
+    );
+    builder.push_values(files, |mut row, validated| {
+        let file = validated.file;
+        row.push_bind(Uuid::now_v7())
+            .push_bind(artifact_uid)
+            .push_bind(revision_uid)
+            .push_bind(parts.tenant_id)
+            .push_bind(parts.storage_partition_id.as_deref())
+            .push_bind(parts.user_id.as_deref())
+            .push_bind(file.path.as_str())
+            .push_bind(file.content.as_slice())
+            .push_bind(validated.content_sha256.as_slice())
+            .push_bind(file.content_type.as_deref())
+            .push_bind(file.executable)
+            .push_bind(validated.file_size_bytes);
+    });
+    builder
+        .build()
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+struct ValidatedArtifactFile<'a> {
+    file: &'a NewArtifactFile,
+    content_sha256: Vec<u8>,
+    file_size_bytes: i64,
+}
+
+fn validate_files(files: &[NewArtifactFile]) -> Result<Vec<ValidatedArtifactFile<'_>>> {
+    if files.len() > MAX_FILES_PER_REVISION {
+        return Err(MoaError::ValidationError(format!(
+            "artifact revision has too many files: {} exceeds the {MAX_FILES_PER_REVISION}-file limit",
+            files.len(),
+        )));
+    }
+
+    let mut total_size_bytes = 0_usize;
     for file in files {
         if file.content.len() > MAX_FILE_SIZE_BYTES {
             return Err(MoaError::ValidationError(format!(
@@ -671,37 +722,32 @@ async fn insert_files(
                 file.content.len(),
             )));
         }
-        let digest = Sha256::digest(&file.content).to_vec();
-        let file_size_bytes = i64::try_from(file.content.len()).map_err(|_| {
-            MoaError::ValidationError(format!("artifact file {} is too large", file.path))
-        })?;
-        sqlx::query(
-            r#"
-            INSERT INTO moa.artifact_file (
-                file_uid, artifact_uid, revision_uid, tenant_id, storage_partition_id, user_id,
-                path, content, content_sha256, content_type, executable,
-                file_size_bytes
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(artifact_uid)
-        .bind(revision_uid)
-        .bind(parts.tenant_id)
-        .bind(parts.storage_partition_id.as_deref())
-        .bind(parts.user_id.as_deref())
-        .bind(&file.path)
-        .bind(&file.content)
-        .bind(digest)
-        .bind(file.content_type.as_deref())
-        .bind(file.executable)
-        .bind(file_size_bytes)
-        .execute(&mut *conn)
-        .await
-        .map_err(map_sqlx_error)?;
+        total_size_bytes = total_size_bytes
+            .checked_add(file.content.len())
+            .ok_or_else(|| {
+                MoaError::ValidationError(
+                    "artifact revision total file size exceeds platform limits".to_string(),
+                )
+            })?;
     }
-    Ok(())
+    if total_size_bytes > MAX_TOTAL_FILE_SIZE_BYTES {
+        return Err(MoaError::ValidationError(format!(
+            "artifact revision files are too large: {total_size_bytes} total bytes exceeds the {MAX_TOTAL_FILE_SIZE_BYTES}-byte limit",
+        )));
+    }
+
+    let mut validated = Vec::with_capacity(files.len());
+    for file in files {
+        validated.push(ValidatedArtifactFile {
+            file,
+            content_sha256: Sha256::digest(&file.content).to_vec(),
+            file_size_bytes: i64::try_from(file.content.len()).map_err(|_| {
+                MoaError::ValidationError(format!("artifact file {} is too large", file.path))
+            })?,
+        });
+    }
+    validated.sort_by(|left, right| left.file.path.cmp(&right.file.path));
+    Ok(validated)
 }
 
 async fn load_revision_by_uid(
@@ -879,4 +925,34 @@ fn validate_source_format(source_format: &str) -> Result<()> {
     Err(MoaError::ValidationError(format!(
         "unsupported artifact source format: {source_format}"
     )))
+}
+
+#[cfg(test)]
+/// Unit coverage for request-wide artifact file validation.
+mod file_validation_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_file_collection_accepts_exact_count_and_total_byte_limits() {
+        // Pins: exactly 128 files and exactly 64 MiB remain valid; changing
+        // either strict upper-bound check to inclusive rejection must fail.
+        let bytes_per_file = MAX_TOTAL_FILE_SIZE_BYTES / MAX_FILES_PER_REVISION;
+        let files = (0..MAX_FILES_PER_REVISION)
+            .map(|index| {
+                NewArtifactFile::new(format!("files/{index:03}.bin"), vec![0_u8; bytes_per_file])
+            })
+            .collect::<Vec<_>>();
+
+        let validated = validate_files(&files).expect("exact collection limits should be accepted");
+
+        assert_eq!(validated.len(), MAX_FILES_PER_REVISION);
+        assert_eq!(
+            validated
+                .iter()
+                .map(|file| usize::try_from(file.file_size_bytes)
+                    .expect("validated size fits usize"))
+                .sum::<usize>(),
+            MAX_TOTAL_FILE_SIZE_BYTES
+        );
+    }
 }

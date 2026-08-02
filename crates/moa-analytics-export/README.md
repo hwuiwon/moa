@@ -7,6 +7,11 @@ dimension tables, and the two windowed fact tables (`turn_fact`,
 `tool_call_fact`). Postgres stays the transactional source of truth;
 ClickHouse holds analytical copies only.
 
+`events.turn_number` is assigned once under the serialized session-row lock.
+The exporter reads that ordinal directly; it never reconstructs a session
+prefix for each exported row. Windowed fact pulls first materialize their
+bounded input-session relation, then load tool terminals set-wise.
+
 The exporter is a plain background tokio task spawned by the orchestrator
 binary via `spawn_analytics_export` — not a Restate service. Only one pod
 exports at a time: leadership is a Postgres session advisory lock held on a

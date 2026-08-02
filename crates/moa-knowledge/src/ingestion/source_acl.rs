@@ -35,7 +35,9 @@ where
         let provider_acl = &record.acl;
 
         // Entries are already keyed and the adapter removed the readable
-        // provider identities before returning this record.
+        // provider identities before returning this record. Normalization also
+        // turns an oversized canonical set into an incomplete, empty snapshot,
+        // so the persistence call below hides the object without unbounded DML.
         let snapshot = ProviderAclSnapshot::normalized(
             object.tenant_id,
             object.connection_uid,

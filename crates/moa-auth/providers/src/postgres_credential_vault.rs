@@ -372,23 +372,78 @@ impl CredentialVault for PostgresCredentialVault {
         self.open(&row).await
     }
 
-    async fn describe(
+    async fn describe_batch(
         &self,
-        reference: CredentialRef,
+        references: &[(Uuid, CredentialRef)],
         ctx: &CredentialContext,
-    ) -> Result<CredentialVersion, CredentialError> {
+    ) -> Result<Vec<(Uuid, CredentialVersion)>, CredentialError> {
         Self::authorize_principal(ctx)?;
-
-        // Status only: the row is read under the tenant's forced-RLS context and
-        // its ciphertext is never opened, so this cannot become a way to read
-        // material without the audited resolve path.
-        let mut conn = self.begin(ctx).await?;
-        let row = Self::load_version(&mut conn, reference).await?;
-        conn.commit().await.map_err(map_db_error)?;
-        if row.tenant_id != ctx.tenant_id.0 {
-            return Err(CredentialError::WrongTenant);
+        if references.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(Self::version_from_row(&row))
+
+        let connection_uids = references
+            .iter()
+            .map(|(connection_uid, _)| *connection_uid)
+            .collect::<Vec<_>>();
+        let credential_uids = references
+            .iter()
+            .map(|(_, reference)| reference.as_uuid())
+            .collect::<Vec<_>>();
+        let mut conn = self.begin(ctx).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT requested.connection_uid,
+                   stored.credential_uid,
+                   stored.tenant_id,
+                   stored.kind,
+                   stored.version,
+                   stored.active,
+                   stored.revoked,
+                   stored.created_at
+            FROM unnest($1::UUID[], $2::UUID[])
+                 AS requested(connection_uid, credential_uid)
+            JOIN tenant_credential_versions AS stored
+              ON stored.connection_uid = requested.connection_uid
+             AND stored.credential_uid = requested.credential_uid
+            WHERE stored.tenant_id = $3
+            ORDER BY requested.connection_uid, requested.credential_uid
+            "#,
+        )
+        .bind(&connection_uids)
+        .bind(&credential_uids)
+        .bind(ctx.tenant_id.0)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_db_error)?;
+
+        rows.into_iter()
+            .map(|row| {
+                let connection_uid: Uuid = row.try_get("connection_uid").map_err(map_sqlx_error)?;
+                let credential_uid: Uuid = row.try_get("credential_uid").map_err(map_sqlx_error)?;
+                let tenant_id: Uuid = row.try_get("tenant_id").map_err(map_sqlx_error)?;
+                let kind_name: String = row.try_get("kind").map_err(map_sqlx_error)?;
+                let kind = CredentialKind::from_str_exact(&kind_name).ok_or_else(|| {
+                    CredentialError::Storage("stored credential kind is not recognized".to_string())
+                })?;
+                Ok((
+                    connection_uid,
+                    CredentialVersion {
+                        reference: CredentialRef::from_uuid(credential_uid),
+                        identity: CredentialIdentity {
+                            tenant_id: TenantId::from(tenant_id),
+                            connection_uid,
+                            kind,
+                        },
+                        version: row.try_get("version").map_err(map_sqlx_error)?,
+                        active: row.try_get("active").map_err(map_sqlx_error)?,
+                        revoked: row.try_get("revoked").map_err(map_sqlx_error)?,
+                        created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     async fn rotate(

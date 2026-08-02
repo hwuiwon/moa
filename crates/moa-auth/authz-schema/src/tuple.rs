@@ -7,7 +7,9 @@ use uuid::Uuid;
 ///
 /// OpenFGA receives these as strings at the wire boundary, while Rust call
 /// sites use this enum to avoid ad hoc object-type literals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectType {
@@ -26,7 +28,9 @@ pub enum ObjectType {
 }
 
 /// Subject types on the subject side of an OpenFGA tuple.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum UserType {
@@ -50,7 +54,9 @@ pub enum UserType {
 /// object type. `moa-authz` enforces that at runtime; a fully type-safe
 /// per-object relation enum is deferred until relation drift becomes a real
 /// maintenance problem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Relation {
@@ -76,7 +82,7 @@ pub enum Relation {
 ///
 /// The tuple relates a subject (`user_type`, `user_id`) to an object
 /// (`object_type`, `object_id`) by a named relation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TupleKey {
     /// Subject type.
     pub user_type: UserType,
@@ -140,7 +146,7 @@ pub struct TupleKeyWire {
 }
 
 /// Tuple mutation operation for idempotency-key construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum TupleOp {
     /// Write a tuple.

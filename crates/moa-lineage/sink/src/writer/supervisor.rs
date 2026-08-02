@@ -5,7 +5,7 @@
 //! content. Neither is on any caller's critical path, because the durable API
 //! commits its own batch before returning.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use moa_lineage_core::LineageEvent;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -21,6 +21,22 @@ use super::retry::{FailureDisposition, classify_failure, write_dead_letter_in_tx
 use super::rows::PendingRow;
 use super::storage::write_pending_rows;
 use super::{SharedWriterState, WriterHandle, WriterState, WriterStats};
+
+/// Maximum cadence for exact queue depth/age scans.
+///
+/// Scans are intentionally decoupled from the claim loop so a downstream outage
+/// does not turn every replica into a queue scanner. Short readiness thresholds
+/// tighten this interval through [`backlog_refresh_interval`].
+const MAX_BACKLOG_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+fn backlog_refresh_interval(max_pending_age: Duration) -> Duration {
+    let half_threshold = max_pending_age / 2;
+    if half_threshold.is_zero() {
+        max_pending_age
+    } else {
+        half_threshold.min(MAX_BACKLOG_REFRESH_INTERVAL)
+    }
+}
 
 /// Spawns the lineage writer worker over a plain event channel.
 ///
@@ -100,6 +116,10 @@ async fn run_writer(
     let mut ingress = Vec::with_capacity(config.batch_size);
     let mut poll = tokio::time::interval(config.batch_max_age);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut backlog_poll = tokio::time::interval(backlog_refresh_interval(config.max_pending_age));
+    backlog_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    refresh_backlog(&journal, &shared).await;
+    backlog_poll.reset();
 
     loop {
         tokio::select! {
@@ -125,6 +145,9 @@ async fn run_writer(
             _ = poll.tick() => {
                 accept_ingress(&journal, &shared, &mut ingress).await;
                 drain_once(&journal, &shared, &config).await;
+            }
+            _ = backlog_poll.tick() => {
+                refresh_backlog(&journal, &shared).await;
             }
         }
     }
@@ -200,12 +223,10 @@ async fn drain_once(
         }
     };
     if claimed.is_empty() {
-        refresh_backlog(journal, shared).await;
         return false;
     }
 
     store_claimed(journal, shared, &claimed).await;
-    refresh_backlog(journal, shared).await;
     true
 }
 
@@ -390,5 +411,31 @@ async fn refresh_backlog(journal: &LineageJournal, shared: &SharedWriterState) {
             shared.set_queue_reachable(false);
             tracing::warn!(%error, "lineage backlog probe failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{MAX_BACKLOG_REFRESH_INTERVAL, backlog_refresh_interval};
+
+    #[test]
+    fn backlog_refresh_cadence_respects_readiness_threshold_and_scan_cap() {
+        // Pins: readiness cannot remain stale beyond half a short pending-age
+        // threshold, while the default threshold still scans at most every 30s.
+        assert_eq!(
+            backlog_refresh_interval(Duration::from_secs(1)),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            backlog_refresh_interval(Duration::from_secs(300)),
+            MAX_BACKLOG_REFRESH_INTERVAL
+        );
+        assert_eq!(
+            backlog_refresh_interval(Duration::from_nanos(1)),
+            Duration::from_nanos(1),
+            "every valid nonzero threshold must produce a nonzero Tokio interval"
+        );
     }
 }

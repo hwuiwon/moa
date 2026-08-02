@@ -4,6 +4,51 @@ use super::session_records::{agent_context_from_row, session_actor_id, session_a
 use super::*;
 use crate::archive::is_terminal_status;
 
+const EVENT_SEARCH_MAX_LIMIT: usize = 100;
+const EVENT_SEARCH_MAX_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(31);
+
+fn validate_event_search_filter(mut filter: EventFilter) -> Result<EventFilter> {
+    filter.limit = Some(
+        filter
+            .limit
+            .unwrap_or(EVENT_SEARCH_MAX_LIMIT)
+            .min(EVENT_SEARCH_MAX_LIMIT),
+    );
+
+    if filter.session_id.is_some() {
+        return Ok(filter);
+    }
+
+    if filter.tenant_id.is_none() {
+        return Err(MoaError::ValidationError(
+            "tenant-wide event search requires tenant_id".to_string(),
+        ));
+    }
+    let from_time = filter.from_time.ok_or_else(|| {
+        MoaError::ValidationError(
+            "tenant-wide event search requires from_time and to_time".to_string(),
+        )
+    })?;
+    let to_time = filter.to_time.ok_or_else(|| {
+        MoaError::ValidationError(
+            "tenant-wide event search requires from_time and to_time".to_string(),
+        )
+    })?;
+    let window = to_time.signed_duration_since(from_time);
+    if window < chrono::TimeDelta::zero() {
+        return Err(MoaError::ValidationError(
+            "tenant-wide event search requires from_time at or before to_time".to_string(),
+        ));
+    }
+    if window > EVENT_SEARCH_MAX_WINDOW {
+        return Err(MoaError::ValidationError(
+            "tenant-wide event search window cannot exceed 31 days".to_string(),
+        ));
+    }
+
+    Ok(filter)
+}
+
 #[async_trait]
 impl SessionStore for PostgresSessionStore {
     /// Creates a new session record.
@@ -382,12 +427,13 @@ impl SessionStore for PostgresSessionStore {
         Ok(())
     }
 
-    /// Searches events using `PostgreSQL` full-text search and optional session filters.
+    /// Searches one session or a bounded tenant window using `PostgreSQL` full-text search.
     async fn search_events(
         &self,
         query_text: &str,
         filter: EventFilter,
     ) -> Result<Vec<EventRecord>> {
+        let filter = validate_event_search_filter(filter)?;
         let normalized_query = normalize_event_search_query(query_text);
         if normalized_query.is_empty() {
             return Ok(Vec::new());
@@ -453,11 +499,20 @@ impl SessionStore for PostgresSessionStore {
             query.push_bind(limit as i64);
         }
 
-        let rows = query
-            .build()
-            .fetch_all(&self.pool)
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        // Fixed SQL is intentional: PostgreSQL does not parameterize `SET LOCAL`,
+        // and the transaction boundary prevents the timeout from leaking to the
+        // next request that checks out this pooled connection.
+        sqlx::query("SET LOCAL statement_timeout = '10s'")
+            .execute(&mut *transaction)
             .await
             .map_err(map_sqlx_error)?;
+        let rows = query
+            .build()
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        transaction.commit().await.map_err(map_sqlx_error)?;
         let mut events = Vec::with_capacity(rows.len());
         for row in &rows {
             events.push(self.event_record_from_row(row).await?);

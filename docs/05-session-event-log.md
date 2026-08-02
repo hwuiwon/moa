@@ -27,7 +27,12 @@ Postgres stores:
 
 ## Core Tables
 
-The session schema baseline lives in `crates/moa-migrations/migrations/postgres/V000001__session_baseline.sql`. Production and test-template staging databases use the same canonical `moa_migrations::run` refinery path. Session tests clone a fully migrated physical database with `CREATE DATABASE ... TEMPLATE` and use its `public` schema; they do not replay a curated migration subset into synthetic schemas. The important tables are:
+The `session_baseline` logical migration owns the session schema inside the
+central `crates/moa-migrations/migrations/postgres/` chain. Production and
+test-template staging databases use the same canonical `moa_migrations::run`
+refinery path. Session tests clone a fully migrated physical database with
+`CREATE DATABASE ... TEMPLATE` and use its `public` schema; they do not replay a
+curated migration subset into synthetic schemas. The important tables are:
 
 ```sql
 CREATE TABLE sessions (
@@ -137,12 +142,12 @@ Every committed session must have one `session_agent_context` row, one
 `tenant_id`, and either contact attribution or an admin/operator creator actor.
 `PostgresSessionStore::create_session` enforces this before insert, and the
 database also has a deferred constraint trigger so raw SQL or future transaction
-paths cannot commit a session without the agent sidecar. Existing valid
-sessions are backfilled to the built-in `agent://system-default` revision during
-the tenant-configurable agents migration; tenant-authored sessions should use an
-installed or explicitly selected agent revision instead.
+paths cannot commit a session without the agent sidecar. The schema includes the
+built-in `agent://system-default` revision for internal and fixture sessions;
+tenant-authored sessions should use an installed or explicitly selected agent
+revision instead.
 
-The event table is HASH-partitioned on `session_id` across 16 child tables to spread append contention, which is why the primary key is `(id, session_id)`. There is no stored `search_vector` `tsvector` column or GIN index: the rare, admin-only cross-session search computes `to_tsvector` on the fly instead of taxing every hot-path append. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
+The event table is HASH-partitioned on `session_id` across 16 child tables to spread append contention, which is why the primary key is `(id, session_id)`. Every row carries a required positive `turn_number`, assigned by the append path while it holds the session-row lock: it is one plus the count of earlier `BrainResponse` rows, so the response that closes a turn has that turn's ordinal and the following event starts the next ordinal. Dedupe hits never advance it. The column has no default or trigger fallback; raw administrative/test inserts must supply the authoritative value. There is no stored `search_vector` `tsvector` column or GIN index: the rare, admin-only cross-session search computes `to_tsvector` on the fly instead of taxing every hot-path append. The append transaction folds event-derived counters into `sessions` once per batch, while generated columns own pure row-local totals.
 
 Context compilation preserves event provenance in-memory when replaying session
 history. Compiled context messages can carry the source event id, event sequence
@@ -349,7 +354,8 @@ the guarantee too.
 
 Dedupe state lives in a separate `session_event_dedupe(session_id, dedupe_key,
 sequence_num, created_at)` table whose primary key doubles as the uniqueness
-guard (migration `V000318__session_event_dedupe.sql`). It is kept off the hot, trigger-heavy, append-only
+guard. The `session_event_dedupe` logical migration keeps it off the hot,
+trigger-heavy, append-only
 `events` table on purpose: adding a unique index to `events` would need a
 write-blocking, non-concurrent `CREATE UNIQUE INDEX` (refinery runs each
 migration in a transaction), which stalls writes during deploy. The dedupe path
@@ -494,7 +500,8 @@ out across all sixteen and cost more than leaving the data alone. The retention
 boundary selects *which sessions* are eligible; the delete is always keyed by
 session.
 
-`session_event_archives` (migration `V000364`) holds one row per archived
+`session_event_archives`, owned by the logical migration of the same name,
+holds one row per archived
 session: the full history serialized in sequence order exactly as the rows were
 stored, its BLAKE3 digest, the event count and sequence span, and the archival
 timestamp. The archive row and the deletion of the rows it replaces are written

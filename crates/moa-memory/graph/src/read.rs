@@ -40,13 +40,13 @@ impl PostgresGraphStore {
 
         for (index, sealed) in rows.iter().enumerate() {
             let Some(sealed) = sealed.as_ref() else {
-                return Err(Error::Backfill(
+                return Err(Error::InvalidSealedContent(
                     "decryption row slot was unexpectedly empty".to_string(),
                 ));
             };
             if !sealed.row.pii_class.is_sealed() {
                 if sealed.content_sealed.is_some() {
-                    return Err(Error::Backfill(format!(
+                    return Err(Error::InvalidSealedContent(format!(
                         "unsealed node {} unexpectedly carries sealed content",
                         sealed.row.uid
                     )));
@@ -54,19 +54,19 @@ impl PostgresGraphStore {
                 continue;
             }
             let tenant_id = sealed.tenant_id.ok_or_else(|| {
-                Error::Backfill(format!(
+                Error::InvalidSealedContent(format!(
                     "sealed node {} is missing tenant_id",
                     sealed.row.uid
                 ))
             })?;
             let data_subject_id = sealed.data_subject_id.ok_or_else(|| {
-                Error::Backfill(format!(
+                Error::InvalidSealedContent(format!(
                     "sealed node {} is missing data_subject_id",
                     sealed.row.uid
                 ))
             })?;
             let sealed_bytes = sealed.content_sealed.as_deref().ok_or_else(|| {
-                Error::Backfill(format!(
+                Error::InvalidSealedContent(format!(
                     "restricted node {} has not been sealed",
                     sealed.row.uid
                 ))
@@ -96,12 +96,12 @@ impl PostgresGraphStore {
             for ((index, _), plaintext) in requests.into_iter().zip(plaintexts) {
                 let content: SealedNodeContent = serde_json::from_slice(&plaintext)?;
                 if content.version != SEALED_CONTENT_VERSION || !content.properties.is_object() {
-                    return Err(Error::Backfill(format!(
+                    return Err(Error::InvalidSealedContent(format!(
                         "sealed node content at index {index} has an unsupported format"
                     )));
                 }
                 let Some(sealed) = rows[index].as_mut() else {
-                    return Err(Error::Backfill(format!(
+                    return Err(Error::InvalidSealedContent(format!(
                         "decryption row slot {index} was unexpectedly empty"
                     )));
                 };
@@ -114,7 +114,9 @@ impl PostgresGraphStore {
         rows.into_iter()
             .map(|sealed| {
                 sealed.map(|sealed| sealed.row).ok_or_else(|| {
-                    Error::Backfill("decryption row slot was unexpectedly empty".to_string())
+                    Error::InvalidSealedContent(
+                        "decryption row slot was unexpectedly empty".to_string(),
+                    )
                 })
             })
             .collect()
@@ -128,7 +130,9 @@ impl PostgresGraphStore {
         self.decrypt_sealed_rows(vec![sealed])
             .await?
             .pop()
-            .ok_or_else(|| Error::Backfill("single-row decrypt returned no row".to_string()))
+            .ok_or_else(|| {
+                Error::InvalidSealedContent("single-row decrypt returned no row".to_string())
+            })
     }
 }
 
@@ -158,12 +162,20 @@ impl GraphStore for PostgresGraphStore {
         crate::write::invalidate_node(self, uid, reason).await
     }
 
+    async fn bulk_invalidate_nodes(&self, uids: &[Uuid], reason: &str) -> Result<Vec<Uuid>, Error> {
+        crate::write::bulk_invalidate_nodes(self, uids, reason).await
+    }
+
     async fn hard_purge(&self, uid: Uuid, redaction_marker: &str) -> Result<(), Error> {
         crate::write::hard_purge(self, uid, redaction_marker).await
     }
 
     async fn create_edge(&self, intent: EdgeWriteIntent) -> Result<Uuid, Error> {
         crate::write::create_edge(self, intent).await
+    }
+
+    async fn bulk_create_edges(&self, intents: Vec<EdgeWriteIntent>) -> Result<Vec<Uuid>, Error> {
+        crate::write::bulk_create_edges(self, intents).await
     }
 
     async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>, Error> {

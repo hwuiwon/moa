@@ -262,6 +262,100 @@ async fn targeted_flush_never_revives_dead_letter_receipt_db() {
     assert_eq!(status, "dead_letter");
 }
 
+#[tokio::test]
+async fn targeted_flush_lookup_uses_object_ordered_index_db() {
+    // Pins: the synchronous visibility barrier constrains on one exact object
+    // and returns its receipts in id order without scanning or sorting the
+    // full authorization outbox.
+    let pool = test_pool().await;
+    let object = format!("session:{}", Uuid::new_v4());
+
+    sqlx::query(
+        r#"
+        INSERT INTO authz_outbox
+            (id, op, tuple_user, tuple_relation, tuple_object,
+             model_version, status)
+        SELECT gen_random_uuid(),
+               'write',
+               'operator:' || series::text,
+               'operator',
+               CASE WHEN series = 1 THEN $1 ELSE 'session:' || gen_random_uuid()::text END,
+               1,
+               'succeeded'
+        FROM generate_series(1, 20000) AS series
+        "#,
+    )
+    .bind(&object)
+    .execute(&pool)
+    .await
+    .expect("seed a production-sized authz outbox");
+    sqlx::query("ANALYZE authz_outbox")
+        .execute(&pool)
+        .await
+        .expect("refresh planner statistics for the outbox corpus");
+
+    let (first_key, second_key, predicate, valid, ready): (
+        String,
+        String,
+        Option<String>,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        r#"
+        SELECT pg_get_indexdef(indexrelid, 1, true),
+               pg_get_indexdef(indexrelid, 2, true),
+               pg_get_expr(indpred, indrelid),
+               indisvalid,
+               indisready
+        FROM pg_index
+        WHERE indexrelid = to_regclass('idx_authz_outbox_object_id')
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("object receipt index should exist");
+    assert_eq!(
+        (first_key.as_str(), second_key.as_str()),
+        ("tuple_object", "id")
+    );
+    assert_eq!(predicate, None, "every receipt status must be indexed");
+    assert!(valid && ready, "object receipt index must be usable");
+
+    let poller = poller(pool.clone(), 1);
+    let delivered = poller
+        .flush_object(&object)
+        .await
+        .expect("succeeded receipts should satisfy the visibility barrier");
+    assert_eq!(delivered, 1, "the exact-object receipt should be observed");
+
+    let plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (COSTS OFF)
+        SELECT id, generation, status
+        FROM authz_outbox
+        WHERE tuple_object = $1
+        ORDER BY id
+        "#,
+    )
+    .bind(&object)
+    .fetch_all(&pool)
+    .await
+    .expect("explain the targeted flush receipt lookup")
+    .join("\n");
+    assert!(
+        plan.contains("Index Scan using idx_authz_outbox_object_id"),
+        "targeted flush must use the object-leading index:\n{plan}"
+    );
+    assert!(
+        plan.contains("Index Cond: (tuple_object ="),
+        "targeted flush must constrain the index by object:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Sort"),
+        "targeted flush must read receipts in index order:\n{plan}"
+    );
+}
+
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());

@@ -139,9 +139,6 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Verify migration ownership
-        run: CARGO_TARGET_DIR=target/tools cargo run -p xtask --locked -- check-migrations
-
       # Offline lanes first: they need no database and they are what fails when a
       # scorecard, evaluator, or eligibility rule regresses.
       - name: Scorecard, evaluator, and eligibility offline lanes
@@ -173,7 +170,7 @@ jobs:
         run: >-
           cargo nextest run -p moa-migrations --locked
           --run-ignored ignored-only --test run_idempotency_db
-          -E 'test(/v000361/)'
+          -E 'test(/experiment_score_provenance_enforces_linkage_and_immutability_db/)'
 
       - name: Score provenance writer lane
         run: >-

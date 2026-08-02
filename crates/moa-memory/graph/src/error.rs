@@ -71,7 +71,7 @@ pub enum Error {
     /// error: the read path maps it to the redaction placeholder instead.
     #[error("crypto: {0}")]
     Crypto(#[from] moa_crypto::Error),
-    /// A resumable sealed-content backfill found an invalid historical row.
-    #[error("sealed-content backfill: {0}")]
-    Backfill(String),
+    /// A sealed graph-memory row violates the persisted content invariants.
+    #[error("invalid sealed content: {0}")]
+    InvalidSealedContent(String),
 }

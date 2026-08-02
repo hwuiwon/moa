@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moa_analytics::AnalyticsClickHouseClient;
-use moa_authz::FgaClient;
 use moa_config::MoaConfig;
 use moa_core::{
     traits::CredentialVault,
@@ -49,7 +48,6 @@ pub trait TenantPurge {
 #[derive(Clone)]
 pub struct TenantPurgeImpl {
     pool: sqlx::PgPool,
-    fga: Option<FgaClient>,
     credential_vault: Arc<dyn CredentialVault>,
     lineage_clickhouse: Option<Arc<ClickHouseStore>>,
     analytics_clickhouse: Option<Arc<AnalyticsClickHouseClient>>,
@@ -57,7 +55,7 @@ pub struct TenantPurgeImpl {
 }
 
 impl TenantPurgeImpl {
-    /// Builds the workflow from the runtime pool, OpenFGA client, and ClickHouse config.
+    /// Builds the workflow from the runtime pool, credential owner, and runtime config.
     ///
     /// `credential_vault` is the shared durable credential owner: credentials
     /// can outlive the connections that created them, so the vault — not any
@@ -65,13 +63,11 @@ impl TenantPurgeImpl {
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
-        fga: Option<FgaClient>,
         credential_vault: Arc<dyn CredentialVault>,
         config: &MoaConfig,
     ) -> Self {
         Self {
             pool,
-            fga,
             credential_vault,
             lineage_clickhouse: config
                 .clickhouse
@@ -145,16 +141,11 @@ impl TenantPurge for TenantPurgeImpl {
         }
 
         if status == TenantPurgeStatus::CredentialsPurged {
-            let Some(fga) = self.fga.clone() else {
-                status = TenantPurgeStatus::FailedTerminal;
-                ctx.set(K_STATUS, Json(status));
-                return Ok(Json(status_response(operation_id, status)));
-            };
             let pool = self.pool.clone();
             let relational_operation_id = operation_id.clone();
             let tenant_id = request.tenant_id.0;
             ctx.run(move || async move {
-                repository::purge_relational(&pool, &fga, tenant_id, &relational_operation_id)
+                repository::purge_relational(&pool, tenant_id, &relational_operation_id)
                     .await
                     .map(Json::from)
                     .map_err(|error| HandlerError::from(anyhow::anyhow!(error)))
@@ -343,15 +334,7 @@ async fn purge_external_vectors(
     tenant_id: TenantId,
     operation_id: &str,
 ) -> Result<(), String> {
-    moa_memory_pii::legal_hold::start_destruction(
-        pool,
-        tenant_id,
-        &[],
-        operation_id,
-        "tenant.purge",
-    )
-    .await
-    .map_err(|error| format!("start tenant destruction fence: {error}"))?;
+    repository::start_fenced_purge(pool, tenant_id.0, operation_id).await?;
     recheck_stage(pool, tenant_id, operation_id, "external vector").await?;
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     if !factory
@@ -562,11 +545,14 @@ mod tests {
             unreachable!("tenant purge never resolves credentials")
         }
 
-        async fn describe(
+        async fn describe_batch(
             &self,
-            _reference: moa_core::types::credentials::CredentialRef,
+            _references: &[(uuid::Uuid, moa_core::types::credentials::CredentialRef)],
             _ctx: &CredentialContext,
-        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
+        ) -> Result<
+            Vec<(uuid::Uuid, moa_core::types::credentials::CredentialVersion)>,
+            CredentialError,
+        > {
             unreachable!("tenant purge never describes credentials")
         }
 

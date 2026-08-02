@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use crate::signing::verify_audit_root_signature;
 use crate::{
-    AuditError, AuditRootSignaturePayload, AuditRootSigner, DsarBundle, DsarExporter, PiiVault,
-    Result, SigningKey, blake3_merkle_root,
+    AuditError, AuditRootSignaturePayload, AuditRootSigner, DsarBundle, DsarExporter, Result,
+    SigningKey, blake3_merkle_root,
 };
 use moa_lineage_core::chain::{HashChain, hash_from_slice};
 
@@ -329,20 +329,6 @@ pub async fn export_dsar_bundle(
             Vec::new(),
             bundle_path,
         )
-        .await
-}
-
-/// Marks a lineage PII-vault subject pseudonym as erased.
-pub async fn erase_subject_pseudonym(
-    pool: &PgPool,
-    storage_partition_id: &str,
-    subject_pseudonym: &[u8],
-    secret: Vec<u8>,
-    key_handle: &str,
-) -> Result<u64> {
-    let vault = PiiVault::with_pool(pool.clone(), secret, key_handle);
-    vault
-        .erase_subject(storage_partition_id, subject_pseudonym)
         .await
 }
 

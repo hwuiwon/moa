@@ -562,25 +562,47 @@ impl KnowledgeDiscoveryStore for PostgresKnowledgeDiscoveryStore {
         provider_account_id: &str,
     ) -> Result<ProviderAccountConnectionLookup> {
         let mut conn = self.begin().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-                   credential_ref, status, metadata, source_selection, information_barrier,
-                   created_at, updated_at, last_synced_at
-            FROM moa.knowledge_connections
-            WHERE provider = $1
-              AND ($2::TEXT IS NULL OR provider_config_key = $2)
-              AND provider_connection_id = $3
-            ORDER BY tenant_id ASC, connection_uid ASC
-            LIMIT 2
-            "#,
-        )
-        .bind(provider)
-        .bind(connector)
-        .bind(provider_account_id)
-        .fetch_all(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
+        let rows = if let Some(connector) = connector {
+            sqlx::query(
+                r#"
+                SELECT connection_uid, tenant_id, provider, connector,
+                       provider_connection_id, credential_ref, status, metadata,
+                       source_selection, information_barrier, created_at, updated_at,
+                       last_synced_at
+                FROM moa.knowledge_connections
+                WHERE provider = $1
+                  AND provider_config_key = $2
+                  AND provider_connection_id = $3
+                ORDER BY tenant_id ASC, connection_uid ASC
+                LIMIT 2
+                "#,
+            )
+            .bind(provider)
+            .bind(connector)
+            .bind(provider_account_id)
+            .fetch_all(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT connection_uid, tenant_id, provider, connector,
+                       provider_connection_id, credential_ref, status, metadata,
+                       source_selection, information_barrier, created_at, updated_at,
+                       last_synced_at
+                FROM moa.knowledge_connections
+                WHERE provider = $1
+                  AND provider_connection_id = $2
+                ORDER BY tenant_id ASC, connection_uid ASC
+                LIMIT 2
+                "#,
+            )
+            .bind(provider)
+            .bind(provider_account_id)
+            .fetch_all(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?
+        };
         conn.commit().await.map_err(map_moa_error)?;
         provider_account_lookup_from_rows(&rows)
     }

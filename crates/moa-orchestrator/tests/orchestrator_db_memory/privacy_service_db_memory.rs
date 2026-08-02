@@ -1,14 +1,17 @@
 //! Privacy service helper coverage.
 
-use std::{collections::BTreeMap, io::Read, sync::Arc};
+use std::{collections::BTreeMap, io::Read, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_artifacts::{
     document::ArtifactDocument,
-    registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile},
+    registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile, StoredArtifactRevision},
 };
+use moa_config::ComplianceConfig;
 use moa_core::types::action_policy::ActionRuleScope;
+use moa_core::types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID;
+use moa_core::types::identifiers::UserId;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
@@ -21,22 +24,21 @@ use moa_memory_pii::learning_erasure::{
 };
 use moa_memory_vector::PgvectorStore;
 use moa_orchestrator::services::dual_control::{self, DualControlError};
-use moa_orchestrator::services::privacy::repository::collect_privacy_export_data_sections;
+use moa_orchestrator::services::privacy::repository::{
+    begin_privacy_export_snapshot, collect_privacy_export_data_sections,
+};
 use moa_orchestrator::services::privacy::{
     ApprovalClaims, ApprovalTokenVerifier, DUAL_CONTROL_OPERATION_ERASE, Ed25519ManifestSigner,
     PrivacyEraseContext, PrivacyExportContext, PrivacySubject, PrivacySubjectProvenance,
-    ensure_jti_inserted, erase_operation_ref, finalize_archive_to_bytes, run_privacy_erase,
-    write_export_readme, write_manifest,
+    ensure_jti_inserted, erase_operation_ref, execute_privacy_export, finalize_archive_to_bytes,
+    run_privacy_erase, write_export_readme, write_manifest,
 };
 use moa_session::testing;
-use moa_wire::privacy::{ContactErasureScope, PrivacyEraseStatus};
+use moa_wire::privacy::{ContactErasureScope, PrivacyEraseStatus, PrivacyExportRequest};
 use serde_json::json;
 use sqlx::PgPool;
 use tempfile::tempdir;
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-static PRIVACY_ERASE_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn test_kms() -> Arc<dyn KeyManagementProvider> {
     static KMS: std::sync::OnceLock<Arc<dyn KeyManagementProvider>> = std::sync::OnceLock::new();
@@ -74,6 +76,28 @@ fn valid_claims_for_user_id(subject_user_id: &str, tenant_id: Uuid, op: &str) ->
         tenant_id: TenantId::from(tenant_id),
         role: None,
         roles: vec!["platform_admin".to_string()],
+    }
+}
+
+fn export_compliance_config() -> ComplianceConfig {
+    ComplianceConfig {
+        privacy_export_signing_key_hex: Some(hex::encode(signing_key().to_bytes())),
+        privacy_export_signing_key_id: "privacy-export-test-key".to_string(),
+        ..ComplianceConfig::default()
+    }
+}
+
+fn export_request(
+    tenant_id: Uuid,
+    subject_user_id: &str,
+    pgp_recipient: Option<String>,
+) -> PrivacyExportRequest {
+    PrivacyExportRequest {
+        tenant_id: TenantId::from(tenant_id),
+        subject_user_id: UserId::new(subject_user_id),
+        reason: "GDPR Article 15 test request".to_string(),
+        approval_token: "verified-before-executor".to_string(),
+        pgp_recipient,
     }
 }
 
@@ -254,6 +278,32 @@ async fn seed_merged_contact(
     .expect("seed merged contact");
 }
 
+async fn seed_merged_contacts(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    storage_partition_id: &str,
+    canonical_contact_id: Uuid,
+    merged_contact_ids: &[Uuid],
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO contacts (
+            id, tenant_id, storage_partition_id, contact_id, state,
+            canonical_contact_id, merged_at
+        )
+        SELECT linked_id, $1, $2, linked_id, 'merged', $3, now()
+        FROM unnest($4::uuid[]) AS linked(linked_id)
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(storage_partition_id)
+    .bind(canonical_contact_id)
+    .bind(merged_contact_ids)
+    .execute(pool)
+    .await
+    .expect("seed merged contact set");
+}
+
 async fn node_count(pool: &PgPool, uid: Uuid) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
         .bind(uid)
@@ -399,7 +449,6 @@ fn approval_jti_replay_blocked() {
 #[tokio::test]
 async fn privacy_erase_dry_run() {
     // Pins: dry-run erase enumerates candidates without hard-purging graph rows.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -451,7 +500,6 @@ async fn privacy_erase_dry_run() {
 #[tokio::test]
 async fn privacy_erase_basic() {
     // Pins: privacy erase hard-purges graph data and marks the PII vault subject key erased.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -528,7 +576,6 @@ async fn privacy_erase_blocked_by_subject_legal_hold_db_memory() {
     // and releasing the hold lets the same subject be erased. Mutation check:
     // forcing active_hold_for to return false makes this assert Completed with a
     // purged node instead of BlockedByLegalHold, so the test fails.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -611,7 +658,6 @@ async fn privacy_erase_blocked_by_subject_legal_hold_db_memory() {
 async fn privacy_erase_blocked_by_tenant_wide_legal_hold_db_memory() {
     // Pins: a tenant-wide legal hold (subject_id NULL) blocks erasure of any
     // subject in the tenant, not just one named subject.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -668,7 +714,6 @@ async fn privacy_erase_blocked_by_tenant_wide_legal_hold_db_memory() {
 #[tokio::test]
 async fn privacy_erase_idempotent() {
     // Pins: a second erase for an already-purged subject does not create extra graph erasure rows.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -735,7 +780,6 @@ async fn privacy_erase_same_request_replay_resumes_db_memory() {
     // parameters) resumes the durable job idempotently and returns the persisted
     // result, rather than failing as a spent-token replay and stranding the
     // erasure. This is the Restate re-execution path.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -811,7 +855,6 @@ async fn privacy_erase_deletes_digest_and_lineage_db_memory() {
     // Pins: the erase operation closes the digest and retrieval-lineage stores,
     // which graph-node purges never touch, so erased memory cannot survive in a
     // standing digest or as attributable retrieval provenance.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -859,6 +902,313 @@ async fn privacy_erase_deletes_digest_and_lineage_db_memory() {
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await
         .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_full_same_connection_closure_finishes_with_exact_residue_db_memory() {
+    // Pins: the complete subject-erasure closure runs under short timeouts
+    // while every protected mutation reuses its exclusive guard connection.
+    // Learning, vault, graph/vector, digest, and retrieval-lineage residue all
+    // disappear, and the applied learning disposition remains as exact audit.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let subject_user_id = subject.to_string();
+    let graph_uid = create_embedded_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject_user_id,
+        "complete same-connection erasure fact",
+    )
+    .await;
+    seed_pii_vault_subject(store.pool(), &storage_partition_id, &subject_user_id).await;
+    seed_digest_and_lineage(store.pool(), tenant_id, subject, &storage_partition_id).await;
+    let experience_id = seed_learning_experience(
+        store.pool(),
+        tenant_id,
+        &storage_partition_id,
+        &subject_user_id,
+    )
+    .await;
+    let claims = valid_claims_for(subject, tenant_id, "erase");
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject_user_id.clone(),
+        reason: "complete GDPR Art.17 request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims,
+        pii_vault_secret: Some(pii_vault_secret()),
+        require_dual_control: false,
+    };
+
+    let response = tokio::time::timeout(Duration::from_secs(10), run_privacy_erase(ctx))
+        .await
+        .expect("full privacy erase must not wait on a second database PID")
+        .expect("run full same-connection erasure");
+
+    assert!(matches!(response.status, PrivacyEraseStatus::Completed));
+    assert_eq!(response.candidate_count, 1);
+    assert_eq!(response.erased_count, 1);
+    assert_eq!(response.pii_vault_erased, 1);
+    assert_eq!(response.digest_deleted, 1);
+    assert_eq!(response.lineage_deleted, 1);
+    let residue: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM experience_records WHERE id = $1), \
+            (SELECT count(*) FROM moa.privacy_erasure_record_decision \
+             WHERE tenant_id = $2 AND subject_user_id = $3 \
+               AND record_kind = 'experience_record' AND record_id = $1::text \
+               AND disposition = 'erased' AND applied), \
+            (SELECT count(*) FROM moa.node_index WHERE uid = $4), \
+            (SELECT count(*) FROM moa.embeddings WHERE uid = $4), \
+            (SELECT count(*) FROM pii_vault.subject_keys \
+             WHERE storage_partition_id = $5 AND erased_at IS NOT NULL)",
+    )
+    .bind(experience_id)
+    .bind(tenant_id)
+    .bind(&subject_user_id)
+    .bind(graph_uid)
+    .bind(&storage_partition_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read exact full-erasure residue");
+    assert_eq!(residue, (0, 1, 0, 0, 1));
+    assert_eq!(
+        digest_row_count(store.pool(), &storage_partition_id).await,
+        0
+    );
+    assert_eq!(
+        lineage_row_count(store.pool(), &storage_partition_id).await,
+        0
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_vault_sql_failure_rolls_back_stage_and_retries_same_progress_db_memory() {
+    // Pins: an SQL error after the vault UPDATE still rolls that whole guard
+    // transaction back, leaves durable progress at `vault`, and permits the
+    // identical job replay to retry that stage without partial residue.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let subject_user_id = subject.to_string();
+    let graph_uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject_user_id,
+        "vault rollback erasure fact",
+    )
+    .await;
+    seed_pii_vault_subject(store.pool(), &storage_partition_id, &subject_user_id).await;
+    let claims = valid_claims_for(subject, tenant_id, "erase");
+    let make_ctx = || PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject_user_id.clone(),
+        reason: "vault rollback GDPR request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: claims.clone(),
+        pii_vault_secret: Some(pii_vault_secret()),
+        require_dual_control: false,
+    };
+    let suffix = subject.simple().to_string();
+    let function_name = format!("fail_privacy_vault_{suffix}");
+    let trigger_name = format!("fail_privacy_vault_update_{suffix}");
+    let mut injector = store
+        .pool()
+        .acquire()
+        .await
+        .expect("acquire failure-injection connection");
+    sqlx::query(&format!(
+        "CREATE FUNCTION pg_temp.{function_name}() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.storage_partition_id = '{storage_partition_id}' THEN \
+             RAISE EXCEPTION 'injected vault stage failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    ))
+    .execute(injector.as_mut())
+    .await
+    .expect("create scoped vault failure function");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {trigger_name} AFTER UPDATE ON pii_vault.subject_keys \
+         FOR EACH ROW EXECUTE FUNCTION pg_temp.{function_name}()"
+    ))
+    .execute(injector.as_mut())
+    .await
+    .expect("install scoped vault failure trigger");
+
+    let error = tokio::time::timeout(Duration::from_secs(10), run_privacy_erase(make_ctx()))
+        .await
+        .expect("failing vault stage must return rather than deadlock")
+        .expect_err("injected vault SQL error must fail the stage");
+    let rendered_error = format!("{error:?}");
+    assert!(
+        rendered_error.contains("injected vault stage failure"),
+        "unexpected injected-stage error: {rendered_error}"
+    );
+    let failed_state: (String, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT stage, pii_vault_erased, graph_erased, \
+            (SELECT count(*) FROM pii_vault.subject_keys \
+             WHERE storage_partition_id = $2 AND erased_at IS NOT NULL), \
+            (SELECT count(*) FROM moa.node_index WHERE uid = $3) \
+         FROM moa.erasure_jobs WHERE jti = $1",
+    )
+    .bind(&claims.jti)
+    .bind(&storage_partition_id)
+    .bind(graph_uid)
+    .fetch_one(store.pool())
+    .await
+    .expect("read failed-stage durable progress and residue");
+    assert_eq!(failed_state, ("vault".to_string(), 0, 0, 0, 1));
+
+    sqlx::query(&format!(
+        "DROP TRIGGER {trigger_name} ON pii_vault.subject_keys"
+    ))
+    .execute(injector.as_mut())
+    .await
+    .expect("remove scoped vault failure trigger");
+    let response = tokio::time::timeout(Duration::from_secs(10), run_privacy_erase(make_ctx()))
+        .await
+        .expect("vault-stage replay must not deadlock")
+        .expect("vault-stage replay succeeds after transient SQL failure");
+    assert!(matches!(response.status, PrivacyEraseStatus::Completed));
+    assert_eq!(response.pii_vault_erased, 1);
+    assert_eq!(response.erased_count, 1);
+    assert_eq!(node_count(store.pool(), graph_uid).await, 0);
+
+    drop(injector);
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+async fn seed_learning_experience(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    storage_partition_id: &str,
+    subject_user_id: &str,
+) -> Uuid {
+    let session_id = Uuid::now_v7();
+    let segment_id = Uuid::now_v7();
+    let experience_id = Uuid::now_v7();
+    let mut tx = pool.begin().await.expect("begin learning-erasure fixture");
+    sqlx::query(
+        "INSERT INTO sessions \
+            (id, storage_partition_id, user_id, tenant_id, model, status) \
+         VALUES ($1, $2, $3, $4, 'test-model', 'completed')",
+    )
+    .bind(session_id)
+    .bind(storage_partition_id)
+    .bind(subject_user_id)
+    .bind(tenant_id)
+    .execute(tx.as_mut())
+    .await
+    .expect("seed learning-erasure session");
+    sqlx::query(
+        "INSERT INTO session_agent_context \
+            (session_id, storage_partition_id, user_id, tenant_id, \
+             agent_definition_ref, agent_revision_uid, policy_hash, display_name, policy_snapshot) \
+         VALUES ($1, $2, $3, $4, 'agent://privacy-fixture', $5, \
+                 'privacy-fixture-hash', 'Privacy fixture', '{}'::JSONB)",
+    )
+    .bind(session_id)
+    .bind(storage_partition_id)
+    .bind(subject_user_id)
+    .bind(tenant_id)
+    .bind(SYSTEM_DEFAULT_AGENT_REVISION_UID)
+    .execute(tx.as_mut())
+    .await
+    .expect("seed learning-erasure session agent context");
+    sqlx::query(
+        "INSERT INTO task_segments \
+            (id, session_id, storage_partition_id, user_id, tenant_id, segment_index, \
+             started_at, ended_at, outcome, tools_used, skills_activated, turn_count, token_cost) \
+         VALUES ($1, $2, $3, $4, $3, 0, now(), now(), 'resolved', '{}', '{}', 1, 0)",
+    )
+    .bind(segment_id)
+    .bind(session_id)
+    .bind(storage_partition_id)
+    .bind(subject_user_id)
+    .execute(tx.as_mut())
+    .await
+    .expect("seed learning-erasure task segment");
+    sqlx::query(
+        "INSERT INTO experience_records \
+            (id, segment_id, session_id, storage_partition_id, user_id, tenant_id, \
+             task_summary, task_fingerprint, task_fingerprint_payload, task_facets, outcome, \
+             confidence, assessment_policy_version, extraction_policy_version) \
+         VALUES ($1, $2, $3, $4, $5, $4, 'redacted privacy fixture', $6, \
+                 '{}'::JSONB, '{}'::JSONB, 'resolved', 0.9, 'assessment-v1', 'extract-v1')",
+    )
+    .bind(experience_id)
+    .bind(segment_id)
+    .bind(session_id)
+    .bind(storage_partition_id)
+    .bind(subject_user_id)
+    .bind(format!("privacy-erasure-{experience_id}"))
+    .execute(tx.as_mut())
+    .await
+    .expect("seed subject learning experience");
+    tx.commit().await.expect("commit learning-erasure fixture");
+    experience_id
+}
+
+async fn create_privacy_skill_draft(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    name: &str,
+    description: &str,
+    body: &[u8],
+) -> StoredArtifactRevision {
+    let document: ArtifactDocument = serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "skill",
+        "metadata": { "name": name, "description": description },
+        "definition": {
+            "type": "skill",
+            "spec": { "instructions": { "path": "SKILL.md" } }
+        }
+    }))
+    .expect("valid privacy skill document");
+    let source = document.to_yaml().expect("serialize privacy skill");
+    registry
+        .create_draft(
+            scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &[NewArtifactFile::new("SKILL.md", body.to_vec())],
+            },
+        )
+        .await
+        .expect("create privacy skill revision")
 }
 
 async fn seed_digest_and_lineage(
@@ -920,12 +1270,23 @@ async fn lineage_row_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
     .expect("count lineage rows")
 }
 
+async fn privacy_export_audit_count(pool: &PgPool, tenant_id: Uuid, subject: Uuid) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.graph_changelog \
+         WHERE tenant_id = $1 AND op = 'export' AND target_kind = 'user' AND target_uid = $2",
+    )
+    .bind(tenant_id)
+    .bind(subject)
+    .fetch_one(pool)
+    .await
+    .expect("count privacy export audit rows")
+}
+
 #[tokio::test]
 async fn approval_jti_replay_blocked_through_erase_db_memory() {
     // Pins: reusing one approval JTI for a DIFFERENT erase request (a different
     // request fingerprint) is rejected, so a durable, resumable erasure job never
     // lets an approval token become generally reusable across requests.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -994,7 +1355,6 @@ async fn approval_jti_replay_blocked_through_erase_db_memory() {
 #[tokio::test]
 async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     // Pins: erase candidate enumeration stays scoped to the requested workspace.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1046,7 +1406,6 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
 #[tokio::test]
 async fn privacy_erase_contact_requires_explicit_scope() {
     // Pins: destructive contact erasure requires an explicit contact erasure boundary.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1099,7 +1458,6 @@ async fn privacy_erase_contact_requires_explicit_scope() {
 #[tokio::test]
 async fn privacy_erase_unverified_contact_only() {
     // Pins: specified-contact erasure deletes only the requested contact subject.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1171,7 +1529,6 @@ async fn privacy_erase_unverified_contact_only() {
 #[tokio::test]
 async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     // Pins: verified contact erasure includes linked unverified contacts only when explicitly requested.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1252,14 +1609,13 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
 #[tokio::test]
 async fn privacy_export_contact_data_sections_label_linked_provenance() {
     // Pins: contact subject-access export labels rows from linked contact memory.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
     let (tenant_id, storage_partition_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let linked_contact_id = Uuid::now_v7();
-    create_erase_test_node(
+    let contact_uid = create_embedded_erase_test_node(
         store.pool(),
         tenant_id,
         contact_id,
@@ -1268,7 +1624,7 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         "export primary fact",
     )
     .await;
-    create_erase_test_node(
+    let linked_uid = create_erase_test_node(
         store.pool(),
         tenant_id,
         linked_contact_id,
@@ -1277,10 +1633,37 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         "export linked fact",
     )
     .await;
-    let export_dir = tempdir().expect("tempdir");
     let subject_user_id = contact_user_id(contact_id);
+    let decoy_contact_id = Uuid::now_v7();
+    let decoy_uid = create_embedded_erase_test_node(
+        store.pool(),
+        tenant_id,
+        decoy_contact_id,
+        &storage_partition_id,
+        &contact_user_id(decoy_contact_id),
+        &format!("substring-only coincidence {subject_user_id}"),
+    )
+    .await;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.edge_index
+            (uid, label, start_uid, end_uid, tenant_id, storage_partition_id,
+             user_id, contact_id, properties)
+        VALUES ($1, 'RELATES_TO', $2, $3, $4, $5, NULL, NULL,
+                '{"typed_endpoint": true}'::jsonb)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(contact_uid)
+    .bind(linked_uid)
+    .bind(tenant_id)
+    .bind(&storage_partition_id)
+    .execute(store.pool())
+    .await
+    .expect("seed subject-owned endpoint edge");
+    let export_dir = tempdir().expect("tempdir");
     let ctx = PrivacyExportContext {
-        pool: store.pool().clone(),
+        audit_pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition: Some(storage_partition_id.clone()),
         subject_user: contact_id,
@@ -1297,9 +1680,32 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         claims: valid_claims_for_user_id(&subject_user_id, tenant_id, "export"),
     };
 
-    let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
+    let mut snapshot = begin_privacy_export_snapshot(store.pool())
+        .await
+        .expect("begin privacy export snapshot");
+    let snapshot_settings: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT current_user::text, current_setting('transaction_isolation'), \
+                current_setting('transaction_read_only'), \
+                current_setting('statement_timeout'), \
+                current_setting('idle_in_transaction_session_timeout')",
+    )
+    .fetch_one(snapshot.as_mut())
+    .await
+    .expect("read export snapshot settings");
+    assert_eq!(
+        snapshot_settings,
+        (
+            "moa_auditor".to_string(),
+            "repeatable read".to_string(),
+            "on".to_string(),
+            "30s".to_string(),
+            "30s".to_string(),
+        )
+    );
+    let counts = collect_privacy_export_data_sections(&ctx, snapshot.as_mut(), export_dir.path())
         .await
         .expect("collect export sections");
+    snapshot.commit().await.expect("commit export snapshot");
     let facts = tokio::fs::read_to_string(export_dir.path().join("facts.jsonl"))
         .await
         .expect("read facts export");
@@ -1307,8 +1713,27 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse fact row"))
         .collect::<Vec<_>>();
+    let relationships = tokio::fs::read_to_string(export_dir.path().join("relationships.jsonl"))
+        .await
+        .expect("read relationships export");
+    let embeddings = tokio::fs::read_to_string(export_dir.path().join("embeddings.jsonl"))
+        .await
+        .expect("read embeddings export");
+    let changelog = tokio::fs::read_to_string(export_dir.path().join("changelog.jsonl"))
+        .await
+        .expect("read changelog export");
 
     assert_eq!(counts["facts"], 2);
+    assert_eq!(counts["relationships"], 1);
+    assert_eq!(counts["embeddings"], 1);
+    assert_eq!(counts["changelog"], 2);
+    assert_eq!(relationships.lines().count(), 1);
+    assert_eq!(embeddings.lines().count(), 1);
+    assert_eq!(changelog.lines().count(), 2);
+    assert!(embeddings.contains(&contact_uid.to_string()));
+    assert!(!embeddings.contains(&decoy_uid.to_string()));
+    assert!(!facts.contains("substring-only coincidence"));
+    assert!(!changelog.contains("substring-only coincidence"));
     assert!(
         rows.iter()
             .any(|row| row["privacy_subject_provenance"] == "primary")
@@ -1325,11 +1750,252 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
 }
 
 #[tokio::test]
-async fn privacy_export_includes_archived_skill_bytes_db_memory() {
+async fn privacy_export_allows_exactly_1000_snapshot_subjects_db_memory() {
+    // Pins: the primary contact plus 999 verified links is accepted as the exact
+    // subject-expansion ceiling, and the manifest records every resolved subject
+    // in exact primary-then-linked order with exact provenance.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    seed_contact(
+        store.pool(),
+        tenant_id,
+        &storage_partition_id,
+        subject,
+        "verified",
+    )
+    .await;
+    let linked = (0..999).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    seed_merged_contacts(
+        store.pool(),
+        tenant_id,
+        &storage_partition_id,
+        subject,
+        &linked,
+    )
+    .await;
+    let subject_user_id = contact_user_id(subject);
+    let request = export_request(tenant_id, &subject_user_id, None);
+    let claims = valid_claims_for_user_id(&subject_user_id, tenant_id, "export");
+
+    let response = execute_privacy_export(
+        store.pool().clone(),
+        store.pool().clone(),
+        TenantId::from(tenant_id),
+        request,
+        claims,
+        export_compliance_config(),
+    )
+    .await
+    .expect("1000 resolved subjects must export");
+
+    let mut ordered_linked = linked.clone();
+    ordered_linked.sort_unstable();
+    let expected_subjects = std::iter::once(json!({
+        "user_id": subject_user_id,
+        "provenance": "primary",
+    }))
+    .chain(ordered_linked.into_iter().map(|contact_id| {
+        json!({
+            "user_id": contact_user_id(contact_id),
+            "provenance": "linked_contact",
+        })
+    }))
+    .collect::<Vec<_>>();
+    assert_eq!(response.manifest["subjects"], json!(expected_subjects));
+    assert_eq!(
+        privacy_export_audit_count(store.pool(), tenant_id, subject).await,
+        1
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_export_rejects_1001_snapshot_subjects_before_sections_db_memory() {
+    // Pins: primary plus 1000 linked contacts fails at the bounded snapshot
+    // relation before section reads and never writes a success audit.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    seed_contact(
+        store.pool(),
+        tenant_id,
+        &storage_partition_id,
+        subject,
+        "verified",
+    )
+    .await;
+    let linked = (0..1_000).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    seed_merged_contacts(
+        store.pool(),
+        tenant_id,
+        &storage_partition_id,
+        subject,
+        &linked,
+    )
+    .await;
+    let subject_user_id = contact_user_id(subject);
+    let request = export_request(tenant_id, &subject_user_id, None);
+    let claims = valid_claims_for_user_id(&subject_user_id, tenant_id, "export");
+
+    let error = execute_privacy_export(
+        store.pool().clone(),
+        store.pool().clone(),
+        TenantId::from(tenant_id),
+        request,
+        claims,
+        export_compliance_config(),
+    )
+    .await
+    .expect_err("1001 resolved subjects must fail closed");
+    assert!(
+        format!("{error:?}").contains("exceeds the 1000-subject limit"),
+        "unexpected subject-cap error: {error:?}"
+    );
+    assert_eq!(
+        privacy_export_audit_count(store.pool(), tenant_id, subject).await,
+        0
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_export_uses_background_reads_and_foreground_writes_across_databases_db_memory() {
+    // Pins: export data exists only in the background database, while approval
+    // consumption and the terminal success audit exist only in the foreground.
+    let (foreground, foreground_url, foreground_schema) = testing::create_isolated_test_store()
+        .await
+        .expect("create foreground test store");
+    let (background, background_url, background_schema) = testing::create_isolated_test_store()
+        .await
+        .expect("create background test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    create_erase_test_node(
+        background.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "background-only export fact",
+    )
+    .await;
+    let request = export_request(tenant_id, &subject.to_string(), None);
+    let claims = valid_claims(subject, tenant_id);
+    let approval_jti = claims.jti.clone();
+
+    let response = execute_privacy_export(
+        foreground.pool().clone(),
+        background.pool().clone(),
+        TenantId::from(tenant_id),
+        request,
+        claims,
+        export_compliance_config(),
+    )
+    .await
+    .expect("cross-database export succeeds");
+    assert_eq!(response.counts.get("facts"), Some(&1));
+    let foreground_jti: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM moa.audit_jti_used WHERE jti = $1")
+            .bind(&approval_jti)
+            .fetch_one(foreground.pool())
+            .await
+            .expect("count foreground approval JTI");
+    let background_jti: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM moa.audit_jti_used WHERE jti = $1")
+            .bind(&approval_jti)
+            .fetch_one(background.pool())
+            .await
+            .expect("count background approval JTI");
+    assert_eq!((foreground_jti, background_jti), (1, 0));
+    assert_eq!(
+        privacy_export_audit_count(foreground.pool(), tenant_id, subject).await,
+        1
+    );
+    assert_eq!(
+        privacy_export_audit_count(background.pool(), tenant_id, subject).await,
+        0
+    );
+
+    drop(foreground);
+    drop(background);
+    testing::cleanup_test_schema(&foreground_url, &foreground_schema)
+        .await
+        .expect("drop foreground schema");
+    testing::cleanup_test_schema(&background_url, &background_schema)
+        .await
+        .expect("drop background schema");
+}
+
+#[tokio::test]
+async fn privacy_export_post_snapshot_failure_writes_no_success_audit_db_memory() {
+    // Pins: archive/encryption failures happen after the snapshot commit, and a
+    // failed export never records the terminal success audit.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "post-snapshot failure fact",
+    )
+    .await;
+    let request = export_request(
+        tenant_id,
+        &subject.to_string(),
+        Some("not-an-armored-pgp-recipient".to_string()),
+    );
+    let claims = valid_claims(subject, tenant_id);
+
+    let error = execute_privacy_export(
+        store.pool().clone(),
+        store.pool().clone(),
+        TenantId::from(tenant_id),
+        request,
+        claims,
+        export_compliance_config(),
+    )
+    .await
+    .expect_err("invalid recipient must fail after snapshot collection");
+    assert!(
+        format!("{error:?}").contains("gpg encryption failed"),
+        "unexpected post-snapshot error: {error:?}"
+    );
+    assert_eq!(
+        privacy_export_audit_count(store.pool(), tenant_id, subject).await,
+        0
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_export_archived_skills_follow_recursive_typed_provenance_not_substrings_db_memory()
+{
     // Pins: artifact lifecycle state controls serving, not subject-access
-    // visibility. An archived revision whose bytes are still retained must be
-    // exported when those bytes contain the privacy subject identifier.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    // visibility. An archived revision remains exportable through normalized
+    // contribution provenance even when none of its retained bytes contains the
+    // privacy subject identifier.
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1339,46 +2005,125 @@ async fn privacy_export_includes_archived_skill_bytes_db_memory() {
     let subject_user_id = subject.to_string();
     let scope = ActionRuleScope::Tenant { tenant_id };
     let registry = ArtifactRegistry::new(store.pool().clone());
-    let document: ArtifactDocument = serde_json::from_value(json!({
-        "api_version": "moa.artifact/v1",
-        "kind": "skill",
-        "metadata": {
-            "name": format!("archived-privacy-skill-{}", Uuid::now_v7()),
-            "description": format!("retained subject {subject_user_id}")
-        },
-        "definition": {
-            "type": "skill",
-            "spec": {
-                "instructions": { "path": "SKILL.md" }
-            }
-        }
-    }))
-    .expect("valid privacy skill document");
-    let source = document.to_yaml().expect("serialize privacy skill");
-    let draft = registry
-        .create_draft(
-            &scope,
-            NewArtifactDraft {
-                document: &document,
-                source_format: "yaml",
-                source_text: source.as_bytes(),
-                files: &[NewArtifactFile::new(
-                    "SKILL.md",
-                    format!("# Retained\nSubject: {subject_user_id}\n").into_bytes(),
-                )],
-            },
-        )
+    let bridge = create_privacy_skill_draft(
+        &registry,
+        &scope,
+        &format!("privacy-bridge-{}", Uuid::now_v7()),
+        "typed bridge revision",
+        b"# Bridge\nTyped provenance only.\n",
+    )
+    .await;
+    let target = create_privacy_skill_draft(
+        &registry,
+        &scope,
+        &format!("privacy-target-{}", Uuid::now_v7()),
+        "typed target revision",
+        b"# Target\nTyped provenance only.\n",
+    )
+    .await;
+    let decoy_body = format!("# Decoy\nUnrelated text happens to contain {subject_user_id}.\n");
+    let decoy = create_privacy_skill_draft(
+        &registry,
+        &scope,
+        &format!("privacy-decoy-{}", Uuid::now_v7()),
+        &format!("substring-only coincidence {subject_user_id}"),
+        decoy_body.as_bytes(),
+    )
+    .await;
+    let revision_uids = [bridge.revision_uid, target.revision_uid, decoy.revision_uid];
+    sqlx::query(
+        "UPDATE moa.artifact_revision SET status = 'archived' WHERE revision_uid = ANY($1)",
+    )
+    .bind(revision_uids)
+    .execute(store.pool())
+    .await
+    .expect("archive retained and decoy revisions");
+
+    let experience_id = seed_learning_experience(
+        store.pool(),
+        tenant_id.0,
+        &storage_partition_id,
+        &subject_user_id,
+    )
+    .await;
+    let seed_candidate = Uuid::now_v7();
+    let promoted_candidate = Uuid::now_v7();
+    let revision_candidate = Uuid::now_v7();
+    let candidate_ids = [seed_candidate, promoted_candidate, revision_candidate];
+    let mut provenance_tx = store
+        .pool()
+        .begin()
         .await
-        .expect("create retained skill revision");
-    sqlx::query("UPDATE moa.artifact_revision SET status = 'archived' WHERE revision_uid = $1")
-        .bind(draft.revision_uid)
-        .execute(store.pool())
+        .expect("begin archived-skill provenance fixture");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_candidates
+            (id, tenant_id, storage_partition_id, user_id, candidate_type,
+             proposal_kind, status, payload, risk_class)
+        SELECT candidate_id, $2, $2, $3, 'skill', 'skill_draft',
+               'proposed', '{}'::jsonb, 'low'
+        FROM unnest($1::uuid[]) AS candidate(candidate_id)
+        "#,
+    )
+    .bind(candidate_ids)
+    .bind(&storage_partition_id)
+    .bind(&subject_user_id)
+    .execute(provenance_tx.as_mut())
+    .await
+    .expect("seed recursive learning candidates");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_candidate_source
+            (id, candidate_id, tenant_id, storage_partition_id, user_id, source_kind,
+             experience_id, promotion_candidate_id, artifact_revision_uid)
+        VALUES
+            ($1, $2, $9, $9, $10, 'experience', $3, NULL, NULL),
+            ($4, $5, $9, $9, $10, 'promotion_candidate', NULL, $2, NULL),
+            ($6, $7, $9, $9, $10, 'artifact_revision', NULL, NULL, $8)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(seed_candidate)
+    .bind(experience_id)
+    .bind(Uuid::now_v7())
+    .bind(promoted_candidate)
+    .bind(Uuid::now_v7())
+    .bind(revision_candidate)
+    .bind(bridge.revision_uid)
+    .bind(&storage_partition_id)
+    .bind(&subject_user_id)
+    .execute(provenance_tx.as_mut())
+    .await
+    .expect("seed promotion and revision reachability");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.artifact_revision_contribution
+            (contribution_uid, storage_partition_id, user_id, revision_uid,
+             candidate_id, tenant_id, contribution_kind)
+        VALUES
+            ($1, $2, $3, $4, $5, $2, 'generated_definition'),
+            ($6, $2, $3, $7, $8, $2, 'generated_definition')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(&storage_partition_id)
+    .bind(&subject_user_id)
+    .bind(bridge.revision_uid)
+    .bind(promoted_candidate)
+    .bind(Uuid::now_v7())
+    .bind(target.revision_uid)
+    .bind(revision_candidate)
+    .execute(provenance_tx.as_mut())
+    .await
+    .expect("seed recursive revision contributions");
+    provenance_tx
+        .commit()
         .await
-        .expect("archive retained revision");
+        .expect("commit archived-skill provenance fixture");
 
     let export_dir = tempdir().expect("tempdir");
     let ctx = PrivacyExportContext {
-        pool: store.pool().clone(),
+        audit_pool: store.pool().clone(),
         tenant_id,
         storage_partition: Some(storage_partition_id),
         subject_user: subject,
@@ -1387,9 +2132,13 @@ async fn privacy_export_includes_archived_skill_bytes_db_memory() {
         reason: "subject access request".to_string(),
         claims: valid_claims_for_user_id(&subject_user_id, tenant_id.0, "export"),
     };
-    let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
+    let mut snapshot = begin_privacy_export_snapshot(store.pool())
+        .await
+        .expect("begin privacy export snapshot");
+    let counts = collect_privacy_export_data_sections(&ctx, snapshot.as_mut(), export_dir.path())
         .await
         .expect("collect archived skill export");
+    snapshot.commit().await.expect("commit export snapshot");
     let rows = tokio::fs::read_to_string(export_dir.path().join("skills.jsonl"))
         .await
         .expect("read skill export")
@@ -1397,11 +2146,26 @@ async fn privacy_export_includes_archived_skill_bytes_db_memory() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse skill row"))
         .collect::<Vec<_>>();
 
-    assert_eq!(counts["skills"], 1);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["revision_uid"], draft.revision_uid.to_string());
-    assert_eq!(rows[0]["status"], "archived");
-    assert_eq!(rows[0]["files"].as_array().map(Vec::len), Some(1));
+    assert_eq!(counts["skills"], 2);
+    assert_eq!(counts["artifact_revision_contributions"], 2);
+    assert_eq!(rows.len(), 2);
+    let exported_revisions = rows
+        .iter()
+        .map(|row| {
+            Uuid::parse_str(row["revision_uid"].as_str().expect("exported revision uid"))
+                .expect("revision uid is UUID")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        exported_revisions,
+        std::collections::BTreeSet::from([bridge.revision_uid, target.revision_uid])
+    );
+    assert!(!exported_revisions.contains(&decoy.revision_uid));
+    assert!(rows.iter().all(|row| row["status"] == "archived"));
+    assert!(
+        rows.iter()
+            .all(|row| row["files"].as_array().map(Vec::len) == Some(1))
+    );
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)
@@ -1414,7 +2178,6 @@ async fn privacy_export_erasure_decisions_are_subject_scoped_and_attempt_complet
     // Pins: one subject's export cannot reveal another subject's erasure
     // decisions, and an earlier dry run cannot mask a later applied attempt for
     // the same record.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1486,7 +2249,7 @@ async fn privacy_export_erasure_decisions_are_subject_scoped_and_attempt_complet
 
     let export_dir = tempdir().expect("tempdir");
     let ctx = PrivacyExportContext {
-        pool: store.pool().clone(),
+        audit_pool: store.pool().clone(),
         tenant_id,
         storage_partition: Some(storage_partition_id),
         subject_user: subject,
@@ -1495,9 +2258,13 @@ async fn privacy_export_erasure_decisions_are_subject_scoped_and_attempt_complet
         reason: "subject access request".to_string(),
         claims: valid_claims_for_user_id(&subject_user_id, tenant_id.0, "export"),
     };
-    let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
+    let mut snapshot = begin_privacy_export_snapshot(store.pool())
+        .await
+        .expect("begin privacy export snapshot");
+    let counts = collect_privacy_export_data_sections(&ctx, snapshot.as_mut(), export_dir.path())
         .await
         .expect("collect subject-scoped export");
+    snapshot.commit().await.expect("commit export snapshot");
     let rows = tokio::fs::read_to_string(export_dir.path().join("erasure_decisions.jsonl"))
         .await
         .expect("read erasure decisions")
@@ -1533,7 +2300,6 @@ async fn privacy_export_erasure_decisions_are_subject_scoped_and_attempt_complet
 #[tokio::test]
 async fn privacy_erase_unknown_op_rejected() {
     // Pins: privacy erasure does not add unsupported crypto-shredding op variants.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1600,7 +2366,7 @@ async fn privacy_export_archive_round_trip() {
     let (tenant_id, storage_partition_id) = tenant_workspace();
     let claims = valid_claims_for(subject, tenant_id, "export");
     let ctx = PrivacyExportContext {
-        pool: PgPool::connect_lazy("postgres://unused").expect("lazy pool"),
+        audit_pool: PgPool::connect_lazy("postgres://unused").expect("lazy pool"),
         tenant_id: TenantId::from(tenant_id),
         storage_partition: Some(storage_partition_id),
         subject_user: subject,
@@ -1688,7 +2454,6 @@ async fn privacy_erase_executes_after_distinct_dual_control_approval_db_memory()
     // consumes the approval. Mutation check: dropping the consume step in
     // ensure_erase_dual_control would let the erase run without an approval, which
     // the fail-closed test below independently pins.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1767,7 +2532,6 @@ async fn dual_control_rejects_self_approval_segregation_of_duties_db_memory() {
     // Mutation check: removing the `approver == requested_by` guard in approve()
     // makes this return Ok (or a Storage error from the DB backstop constraint)
     // instead of SelfApproval, so the assertion fails.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1820,7 +2584,6 @@ async fn privacy_erase_fails_closed_without_dual_control_approval_db_memory() {
     // Pins: with the policy ON and no distinct approval available, erasure is
     // refused (fail closed, 403) before any destructive work — the subject's node
     // survives and no erase changelog row is written.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1878,7 +2641,6 @@ async fn privacy_erase_policy_off_needs_no_dual_control_db_memory() {
     // Pins: with the policy OFF (the default), erasure keeps its single-admin
     // behavior — it executes with no dual-control request or approval present at
     // all, so enabling the feature does not regress existing erasure.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
@@ -1932,7 +2694,6 @@ async fn privacy_dual_control_digest_and_cross_pool_consumption_are_race_safe_db
     // Pins: the stored operation reference contains no raw request fields;
     // same-consumer retries both succeed after serialization, while two distinct
     // consumers racing one approval produce exactly one success.
-    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");

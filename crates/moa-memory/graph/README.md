@@ -16,7 +16,6 @@ plain Postgres tables with bi-temporal validity, an SQL sidecar projection
 - `lexical` — lexical lookup over the `moa.node_index` sidecar.
 - `validity` — shared bitemporal validity predicates for graph-memory reads.
 - `changelog` — append-only graph changelog outbox writer.
-- `backfill` — resumable sealed-content backfill for graph memory.
 - `error` — error type for graph-memory operations.
 
 ## Place In The Memory Family

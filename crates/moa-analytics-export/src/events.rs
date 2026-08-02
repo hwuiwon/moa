@@ -1,11 +1,8 @@
 //! Events stream export: incremental `(timestamp, id)`-cursored pull of `events`
 //! into the `events_raw` append stream.
 //!
-//! Each exported event is stamped with `turn_number` — a stable pure function of
-//! the session prefix, `1 + count of BrainResponse events with lower
-//! sequence_num in the same session` — so ClickHouse-side aggregation never needs
-//! cross-row context. A BrainResponse counts itself (its `turn_number` is its
-//! ROW_NUMBER among the session's BrainResponses). The overlap window re-reads
+//! Each exported event carries the authoritative `turn_number` assigned under
+//! the session-row lock when the event was appended. The overlap window re-reads
 //! boundary rows; `events_raw`'s `ReplacingMergeTree` key absorbs them.
 
 use std::collections::HashSet;
@@ -20,14 +17,11 @@ use super::{AnalyticsExporter, ExportError, distinct_sessions, record_lag, recor
 
 /// SQL for one `events_raw` batch. `$1`/`$2` are the `(timestamp, id)` lower
 /// bound (`$2` NULL on the first batch of a pass), `$3` the batch size. The
-/// correlated `turn_number` count runs against the full session history via the
-/// `(session_id, event_type)` index, so it is correct regardless of where the
-/// cursor slices a session.
+/// stored `turn_number` remains correct regardless of where the cursor slices a
+/// session.
 const EVENTS_SQL: &str = "SELECT e.id AS event_id, e.session_id, s.tenant_id, \
         e.storage_partition_id, e.user_id, e.sequence_num, \
-        (1 + (SELECT COUNT(*) FROM events b \
-              WHERE b.session_id = e.session_id AND b.event_type = 'BrainResponse' \
-                AND b.sequence_num < e.sequence_num))::BIGINT AS turn_number, \
+        e.turn_number, \
         e.event_type, e.token_count, e.payload::text AS payload, e.timestamp AS ts \
      FROM events e \
      JOIN sessions s ON s.id = e.session_id \

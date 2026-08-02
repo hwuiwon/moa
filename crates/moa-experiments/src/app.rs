@@ -1343,8 +1343,8 @@ async fn experiment_run_scorecards(
             score_run_id: trial.score_run_id,
             experiment_run_uid: run.run_uid,
             // The trial row is the authority for which pinned plan revision it
-            // ran; V000361's composite foreign key already refuses provenance
-            // that disagrees, and this re-checks it on the read path.
+            // ran; the experiment score-provenance schema already refuses
+            // provenance that disagrees, and this re-checks it on the read path.
             plan_revision_uid: trial.plan_revision_uid,
             trial_uid: trial.trial_uid,
             target,

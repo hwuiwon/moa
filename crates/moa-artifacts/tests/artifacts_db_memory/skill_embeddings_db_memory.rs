@@ -107,8 +107,8 @@ async fn set_embedding(
 async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()> {
     // Pins: serving skills without an embedding are selected, a set clears
     // them, the tenant nearest-neighbor primitive ranks by ascending cosine
-    // distance and honors self-exclusion, and a re-activation restales the row until
-    // it is touched or re-embedded.
+    // distance and honors self-exclusion, and an unchanged reactivation retargets
+    // reusable embedding provenance before the row is visible to ranking again.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let registry = ArtifactRegistry::new(store.pool().clone());
@@ -199,47 +199,111 @@ async fn skill_embedding_lists_sets_ranks_and_restales_db_memory() -> Result<()>
         "the excluded artifact is dropped from the ranking",
     );
 
-    // A re-activation bumps artifact.updated_at past the embedding's updated_at, so
-    // the skill restales and is re-selected until touched.
-    serve_skill(&registry, &scope, tenant, &name_a, "first skill v2").await?;
-    let restale = registry
+    // An unchanged reactivation bumps artifact.updated_at and moves the serving
+    // pointer, so the embedding restales while retaining reusable vector bytes.
+    serve_skill(&registry, &scope, tenant, &name_a, "first skill").await?;
+    let stale_v2 = registry
         .list_skills_missing_embedding("mock-embedding-1024", 1, 10)
         .await?;
     assert_eq!(
-        restale
+        stale_v2
             .iter()
             .map(|row| row.artifact_uid)
             .collect::<Vec<_>>(),
         vec![row_a.artifact_uid],
         "the re-activationed skill restales; the untouched one stays embedded",
     );
-    let restaled_row = restale
+    let stale_v2_row = stale_v2
         .iter()
         .find(|row| row.artifact_uid == row_a.artifact_uid)
         .expect("re-activationed alpha listed");
 
-    // Touching with a stale observed timestamp is refused (the artifact moved on),
-    // so the guard cannot mask a concurrent identity change.
+    // Move the pointer again after selection. The v2 candidate must not retarget
+    // the row after its serving-revision and artifact-timestamp guards go stale.
+    serve_skill(&registry, &scope, tenant, &name_a, "first skill").await?;
     assert!(
         !registry
             .touch_skill_embedding(
-                row_a.artifact_uid,
-                row_a.revision_uid,
-                row_a.artifact_updated_at,
+                stale_v2_row.artifact_uid,
+                stale_v2_row.revision_uid,
+                stale_v2_row.artifact_updated_at,
             )
             .await?,
-        "a touch guarded on the pre-re-activation timestamp does not apply",
+        "a touch selected before the pointer moved again does not apply",
     );
-    // Touching with the freshly-observed timestamp advances updated_at.
+
+    let stale_v3 = registry
+        .list_skills_missing_embedding("mock-embedding-1024", 1, 10)
+        .await?;
+    assert_eq!(stale_v3.len(), 1, "only reactivated alpha is restaled");
+    let stale_v3_row = stale_v3
+        .first()
+        .expect("current alpha revision is selected");
+    assert_ne!(
+        stale_v3_row.revision_uid, stale_v2_row.revision_uid,
+        "the second reactivation moved the serving pointer",
+    );
+
+    let (stored_revision_before, stored_updated_at_before) =
+        sqlx::query_as::<_, (Uuid, chrono::DateTime<chrono::Utc>)>(
+            "SELECT revision_uid, updated_at FROM moa.skill_embedding WHERE artifact_uid = $1",
+        )
+        .bind(row_a.artifact_uid)
+        .fetch_one(registry.pool())
+        .await
+        .expect("alpha embedding exists before provenance retarget");
+    assert_eq!(
+        stored_revision_before, row_a.revision_uid,
+        "the reusable embedding still carries its original provenance before touch",
+    );
+    assert_eq!(
+        registry
+            .nearest_skill_embeddings(&storage_partition, &one_hot(0), 10, None)
+            .await?
+            .iter()
+            .map(|neighbor| neighbor.artifact_uid)
+            .collect::<Vec<_>>(),
+        vec![row_b.artifact_uid],
+        "ranking hides alpha while embedding provenance trails the serving pointer",
+    );
+
+    // Touching with the current guards retargets provenance and advances the
+    // timestamp in the same write; it does not replace the reusable vector.
     assert!(
         registry
             .touch_skill_embedding(
                 row_a.artifact_uid,
-                restaled_row.revision_uid,
-                restaled_row.artifact_updated_at,
+                stale_v3_row.revision_uid,
+                stale_v3_row.artifact_updated_at,
             )
             .await?,
-        "touch advances updated_at for an existing embedding",
+        "touch retargets the reusable embedding to the current revision",
+    );
+    let (stored_revision_after, stored_updated_at_after) =
+        sqlx::query_as::<_, (Uuid, chrono::DateTime<chrono::Utc>)>(
+            "SELECT revision_uid, updated_at FROM moa.skill_embedding WHERE artifact_uid = $1",
+        )
+        .bind(row_a.artifact_uid)
+        .fetch_one(registry.pool())
+        .await
+        .expect("alpha embedding exists after provenance retarget");
+    assert!(
+        stored_updated_at_after > stored_updated_at_before,
+        "touch advances the embedding timestamp",
+    );
+    assert_eq!(
+        registry
+            .nearest_skill_embeddings(&storage_partition, &one_hot(0), 10, None)
+            .await?
+            .iter()
+            .map(|neighbor| neighbor.artifact_uid)
+            .collect::<Vec<_>>(),
+        vec![row_a.artifact_uid, row_b.artifact_uid],
+        "retargeted alpha becomes visible and keeps its exact-match rank",
+    );
+    assert_eq!(
+        stored_revision_after, stale_v3_row.revision_uid,
+        "touch records exact current-revision provenance",
     );
     assert!(
         registry

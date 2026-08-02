@@ -6,7 +6,7 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 /// Result type returned by memory erasure helpers.
@@ -84,9 +84,12 @@ pub async fn enumerate_erase_candidates(
     Ok(rows)
 }
 
-/// Hard-purges selected graph-memory candidates and writes the summary erase changelog.
+/// Hard-purges graph-memory candidates on the caller's contact-scoped transaction.
+///
+/// The caller owns commit or rollback and must keep the exclusive destruction
+/// guard for the tenant and subject held for the transaction's full lifetime.
 pub async fn hard_purge_erase_candidates(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     audit: &GraphErasureAudit,
     _candidates: &[EraseCandidate],
 ) -> Result<usize> {
@@ -98,14 +101,12 @@ pub async fn hard_purge_erase_candidates(
             ),
         ));
     }
-    let mut tx = begin_app_scoped_tx(pool, audit.tenant_id, &audit.subject_user_id).await?;
     let result: Value = sqlx::query_scalar("SELECT moa.erase_memory_data_subject($1, $2, $3)")
         .bind(audit.tenant_id.0)
         .bind(subject_id)
         .bind(erase_audit_metadata(audit))
-        .fetch_one(tx.as_mut())
+        .fetch_one(&mut *conn)
         .await?;
-    tx.commit().await?;
     let erased = result
         .get("nodes_deleted")
         .and_then(Value::as_u64)
@@ -135,30 +136,13 @@ pub async fn hard_purge_erase_candidates(
 ///
 /// The KEK is keyed by `(tenant_id, subject_id)` exactly as the write path sealed
 /// it, where `subject_id` is the contact/data-subject UUID.
+/// The caller must hold the matching outer destruction guard across this call.
 pub async fn crypto_shred_erased_subject(
-    pool: &PgPool,
     kms: &dyn moa_crypto::KeyManagementProvider,
     tenant_id: TenantId,
     subject_id: Uuid,
-    operation_id: &str,
 ) -> Result<()> {
-    // The fence is rechecked immediately before the irreversible KMS call. The
-    // transaction advisory guard stays held until the provider confirms shred,
-    // so a concurrent hold cannot cross this boundary on another replica.
-    let guard = crate::legal_hold::begin_destruction_stage_guard(
-        pool,
-        tenant_id,
-        &[subject_id],
-        operation_id,
-    )
-    .await
-    .map_err(|error| {
-        ErasureError::Scope(moa_core::error::MoaError::StorageError(error.to_string()))
-    })?;
     moa_crypto::crypto_shred_subject(kms, tenant_id.0, subject_id).await?;
-    guard.finish().await.map_err(|error| {
-        ErasureError::Scope(moa_core::error::MoaError::StorageError(error.to_string()))
-    })?;
     Ok(())
 }
 
@@ -168,14 +152,14 @@ pub async fn crypto_shred_erased_subject(
 /// lifecycle rebuild never reaches that identity and its rendered digest text
 /// would otherwise survive and be re-injected into prompts. This closes the
 /// contact-scoped digest directly, mirroring the full-tenant purge.
+/// The caller owns the contact-scoped transaction and its destruction guard.
 pub async fn delete_subject_digests(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<u64> {
     let contact_id = contact_id_from_subject(subject_user_id)?;
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
-    let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
     let deleted = sqlx::query(
         r#"
         DELETE FROM moa.memory_digests
@@ -185,10 +169,9 @@ pub async fn delete_subject_digests(
     )
     .bind(storage_partition_id)
     .bind(contact_id.0)
-    .execute(tx.as_mut())
+    .execute(&mut *conn)
     .await?
     .rows_affected();
-    tx.commit().await?;
     Ok(deleted)
 }
 
@@ -197,14 +180,14 @@ pub async fn delete_subject_digests(
 /// Retrieval-lineage rows carry attributable subject/session/UID/rank/time
 /// provenance and their `uid` has no foreign key to `node_index`, so purging
 /// graph nodes never removes them. They belong in erasure closure.
+/// The caller owns the contact-scoped transaction and its destruction guard.
 pub async fn delete_subject_retrieval_lineage(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<u64> {
     let contact_id = contact_id_from_subject(subject_user_id)?;
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
-    let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
     let deleted = sqlx::query(
         r#"
         DELETE FROM moa.retrieval_lineage
@@ -214,10 +197,9 @@ pub async fn delete_subject_retrieval_lineage(
     )
     .bind(storage_partition_id)
     .bind(contact_id.0)
-    .execute(tx.as_mut())
+    .execute(&mut *conn)
     .await?
     .rows_affected();
-    tx.commit().await?;
     Ok(deleted)
 }
 

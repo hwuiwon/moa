@@ -139,58 +139,45 @@ where
             .map_err(map_graph_error)?;
         report.nodes_upserted = report.nodes_upserted.saturating_add(created);
 
-        let mut seen_edge_uids = HashSet::new();
+        let mut edge_intents = Vec::new();
         for edge in &delta.edges {
-            if !seen_edge_uids.insert(edge.uid) {
-                continue;
-            }
             let Some(start_uid) = key_to_uid.get(&edge.from_key).copied() else {
                 continue;
             };
             let Some(end_uid) = key_to_uid.get(&edge.to_key).copied() else {
                 continue;
             };
-            self.graph
-                .create_edge(edge_intent(
-                    edge,
-                    start_uid,
-                    end_uid,
-                    self.scope.tenant_id().0.to_string(),
-                    &self.actor_id,
-                )?)
-                .await
-                .map_err(map_graph_error)?;
-            report.edges_upserted = report.edges_upserted.saturating_add(1);
+            edge_intents.push(edge_intent(
+                edge,
+                start_uid,
+                end_uid,
+                self.scope.tenant_id().0.to_string(),
+                &self.actor_id,
+            )?);
         }
+        let inserted_edges = self
+            .graph
+            .bulk_create_edges(edge_intents)
+            .await
+            .map_err(map_graph_error)?;
+        report.edges_upserted = u64::try_from(inserted_edges.len()).unwrap_or(u64::MAX);
         Ok(report)
     }
 
     async fn invalidate_chunks(&self, graph_node_uids: &[Uuid]) -> Result<GraphWriteReport> {
-        let mut report = GraphWriteReport::default();
         if graph_node_uids.is_empty() {
-            return Ok(report);
+            return Ok(GraphWriteReport::default());
         }
-        // Resolve existence in one lookup rather than an N+1 `get_node` loop, then
-        // invalidate each existing node individually so the per-node changelog and
-        // already-invalidated error semantics are preserved.
-        let existing_uids = self
+        let invalidated = self
             .graph
-            .bulk_get_nodes(graph_node_uids)
+            .bulk_invalidate_nodes(graph_node_uids, "knowledge_chunk_orphaned")
             .await
-            .map_err(map_graph_error)?
-            .into_iter()
-            .map(|row| row.uid)
-            .collect::<HashSet<_>>();
-        for uid in graph_node_uids {
-            if existing_uids.contains(uid) {
-                self.graph
-                    .invalidate_node(*uid, "knowledge_chunk_orphaned")
-                    .await
-                    .map_err(map_graph_error)?;
-                report.vector_rows_deleted = report.vector_rows_deleted.saturating_add(1);
-            }
-        }
-        Ok(report)
+            .map_err(map_graph_error)?;
+        Ok(GraphWriteReport {
+            nodes_upserted: 0,
+            edges_upserted: 0,
+            vector_rows_deleted: u64::try_from(invalidated.len()).unwrap_or(u64::MAX),
+        })
     }
 }
 

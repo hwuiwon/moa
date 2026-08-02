@@ -1,10 +1,9 @@
 # Grafana unified-alerting provisioning for MOA retrieval/generation quality.
 #
-# These three rules replace the Prometheus alerts that read the deleted
-# per-tenant-labeled brain metrics (moa_grounding_verified_rate,
-# moa_zero_recall_count, moa_turn_count, moa_cost_micros_per_turn). They query the
-# analytics hypertable/continuous-aggregates directly, so per-tenant slicing lives
-# in SQL (storage_partition_id) instead of unbounded Prometheus label cardinality.
+# The retained rule replaces the Prometheus cost alert that read the deleted
+# per-tenant-labeled brain metric (moa_cost_micros_per_turn). It queries the
+# durable lineage table directly, so per-tenant slicing lives in SQL
+# (storage_partition_id) instead of unbounded Prometheus label cardinality.
 #
 # datasourceUid `moa-postgres` must point at a Grafana Postgres datasource wired
 # to the MOA analytics database. Each query returns one row per breached tenant
@@ -18,110 +17,6 @@ groups:
     folder: MOA Quality
     interval: 5m
     rules:
-      - uid: moa-grounding-rate-dropped
-        title: MOAGroundingRateDropped
-        condition: breached
-        for: 30m
-        labels:
-          severity: warning
-          domain: grounding
-        annotations:
-          summary: "Verified citation rate dropped for a tenant"
-          description: "1h verified-citation rate fell more than 2 sigma below the prior-day 24h baseline and under 0.7. Investigate retriever changes, embedder swaps, or model changes. Breached tenants (storage_partition_id) are in the alert instances."
-        data:
-          - refId: query
-            relativeTimeRange:
-              from: 172800
-              to: 0
-            datasourceUid: moa-postgres
-            model:
-              refId: query
-              format: table
-              rawSql: |
-                WITH cur AS (
-                  SELECT storage_partition_id,
-                         AVG(verified_rate) AS rate_1h
-                  FROM analytics.grounding_hourly
-                  WHERE bucket >= NOW() - INTERVAL '1 hour'
-                  GROUP BY storage_partition_id
-                ),
-                baseline AS (
-                  SELECT storage_partition_id,
-                         AVG(verified_rate) AS mean_24h,
-                         COALESCE(STDDEV_POP(verified_rate), 0) AS sd_24h
-                  FROM analytics.grounding_hourly
-                  WHERE bucket >= NOW() - INTERVAL '48 hours'
-                    AND bucket <  NOW() - INTERVAL '24 hours'
-                  GROUP BY storage_partition_id
-                )
-                SELECT cur.storage_partition_id AS metric,
-                       cur.rate_1h AS value
-                FROM cur
-                JOIN baseline USING (storage_partition_id)
-                WHERE cur.rate_1h < baseline.mean_24h - 2 * baseline.sd_24h
-                  AND cur.rate_1h < 0.7
-          - refId: reduced
-            datasourceUid: __expr__
-            model:
-              refId: reduced
-              type: reduce
-              expression: query
-              reducer: last
-          - refId: breached
-            datasourceUid: __expr__
-            model:
-              refId: breached
-              type: threshold
-              expression: reduced
-              conditions:
-                - evaluator:
-                    type: lt
-                    params: [0.7]
-
-      - uid: moa-zero-recall-spike
-        title: MOAZeroRecallSpike
-        condition: breached
-        for: 30m
-        labels:
-          severity: warning
-          domain: retrieval
-        annotations:
-          summary: "Zero-recall retrievals above 5 percent for a tenant"
-          description: "Retriever returned an empty top-K on more than 5 percent of turns in the last hour. Check the vector index, embedder API, and sidecar health. Breached tenants (storage_partition_id) are in the alert instances."
-        data:
-          - refId: query
-            relativeTimeRange:
-              from: 3600
-              to: 0
-            datasourceUid: moa-postgres
-            model:
-              refId: query
-              format: table
-              rawSql: |
-                SELECT storage_partition_id AS metric,
-                       SUM(zero_recall)::float8 / NULLIF(SUM(turns), 0) AS value
-                FROM analytics.turn_recall_hourly
-                WHERE bucket >= NOW() - INTERVAL '1 hour'
-                GROUP BY storage_partition_id
-                HAVING SUM(zero_recall)::float8 / NULLIF(SUM(turns), 0) > 0.05
-          - refId: reduced
-            datasourceUid: __expr__
-            model:
-              refId: reduced
-              type: reduce
-              expression: query
-              reducer: last
-          - refId: breached
-            datasourceUid: __expr__
-            model:
-              refId: breached
-              type: threshold
-              expression: reduced
-              conditions:
-                - evaluator:
-                    type: gt
-                    params: [0.05]
-
       - uid: moa-cost-per-turn-spike
         title: MOACostPerTurnSpike
         condition: breached

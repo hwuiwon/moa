@@ -15,13 +15,13 @@ pub const BUILTIN_DEV_DATABASE_URL: &str = "postgres://moa_owner:dev@localhost:1
 pub struct DatabaseConfig {
     /// Runtime Postgres connection URL.
     pub url: String,
-    /// Optional direct/admin database URL for migrations and other session-sensitive flows.
+    /// Optional direct/admin database URL for explicit migration and maintenance commands.
     pub admin_url: Option<String>,
     /// Optional already-provisioned Postgres schema for runtime queries.
     ///
-    /// When set, session-store construction binds to this schema and does not
-    /// run migrations. Automatic full-database migration is only used when this
-    /// value is `None`.
+    /// When set, session-store construction binds runtime queries to this
+    /// schema. Runtime construction never applies migrations; the orchestrator
+    /// migration command must provision the complete database history first.
     pub schema: Option<String>,
     /// Maximum pool size for the shared Postgres client.
     pub max_connections: u32,

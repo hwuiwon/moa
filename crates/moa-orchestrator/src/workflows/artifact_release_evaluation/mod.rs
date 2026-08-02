@@ -1,8 +1,9 @@
 //! Durable evaluation of an unpublished release candidate.
 //!
-//! `V000373` made a candidate immutable, gave it a lifecycle, a coalescing slot,
-//! an exact subject digest, and a single-use activation attestation. It did not
-//! make anything *run*: `submit_candidate` recorded a row and dispatched nothing,
+//! The release-control schema makes a candidate immutable, gives it a lifecycle,
+//! a coalescing slot, an exact subject digest, and a single-use activation
+//! attestation. It does not make anything *run*: `submit_candidate` recorded a
+//! row and dispatched nothing,
 //! so every attestation had to be minted from evidence nobody produced. This
 //! workflow is the missing half.
 //!

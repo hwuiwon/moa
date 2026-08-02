@@ -158,7 +158,7 @@ impl PostgresSessionStore {
         let dedupe = self.table_name("session_event_dedupe");
 
         let locked = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id, \
+            "SELECT event_count, turn_count, tenant_id, storage_partition_id, user_id, contact_id, \
                     events_archived_at \
              FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
@@ -169,6 +169,7 @@ impl PostgresSessionStore {
         .ok_or(MoaError::SessionNotFound(session_id))?;
         reject_append_to_archived_session(session_id, &locked)?;
         let sequence_num = locked.col::<i64>("event_count")? as u64;
+        let turn_number = locked.col::<i64>("turn_count")? + 1;
         let tenant_id = locked.col::<Uuid>("tenant_id")?;
         let storage_partition_id = locked.col::<String>("storage_partition_id")?;
         let actor_storage_key = locked.col::<String>("user_id")?;
@@ -193,8 +194,8 @@ impl PostgresSessionStore {
         sqlx::query(&format!(
             "INSERT INTO {events} \
              (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, \
-              sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NULL, $11, $12)"
+              sequence_num, turn_number, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, NULL, $12, $13)"
         ))
         .bind(Uuid::now_v7())
         .bind(session_id.0)
@@ -203,6 +204,7 @@ impl PostgresSessionStore {
         .bind(&storage_partition_id)
         .bind(&actor_storage_key)
         .bind(sequence_num as i64)
+        .bind(turn_number)
         .bind(&event_type)
         .bind(&payload_text)
         .bind(now)
@@ -494,7 +496,7 @@ impl PostgresSessionStore {
 
         let phase_started = Instant::now();
         let locked_session = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id, \
+            "SELECT event_count, turn_count, tenant_id, storage_partition_id, user_id, contact_id, \
                     events_archived_at \
              FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
@@ -507,6 +509,7 @@ impl PostgresSessionStore {
             .ok_or(MoaError::SessionNotFound(session_id))?;
         reject_append_to_archived_session(session_id, &locked_session)?;
         let base_sequence = locked_session.col::<i64>("event_count")? as u64;
+        let base_turn_count = locked_session.col::<i64>("turn_count")?;
         let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
         let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
         let actor_storage_key = locked_session.col::<String>("user_id")?;
@@ -594,16 +597,19 @@ impl PostgresSessionStore {
             let count = insert_entries.len();
             let mut ids = Vec::with_capacity(count);
             let mut sequence_nums = Vec::with_capacity(count);
+            let mut turn_numbers = Vec::with_capacity(count);
             let mut event_types = Vec::with_capacity(count);
             let mut payloads = Vec::with_capacity(count);
             let mut hand_ids: Vec<Option<String>> = Vec::with_capacity(count);
             let mut token_counts = Vec::with_capacity(count);
             let mut dedupe_rows: Vec<(String, i64)> = Vec::new();
             let mut delta = SessionAggregateDelta::default();
+            let mut next_turn_number = base_turn_count + 1;
             for &(index, sequence_num) in &insert_entries {
                 let entry = &prepared[index];
                 ids.push(entry.id);
                 sequence_nums.push(sequence_num as i64);
+                turn_numbers.push(next_turn_number);
                 event_types.push(entry.event_type.to_string());
                 payloads.push(serde_json::to_string(&entry.payload).map_err(|error| {
                     MoaError::SerializationError(format!("failed to encode event payload: {error}"))
@@ -614,6 +620,9 @@ impl PostgresSessionStore {
                     dedupe_rows.push((key, sequence_num as i64));
                 }
                 delta.add_event(&entry.event, sequence_num);
+                if matches!(&entry.event, Event::BrainResponse { .. }) {
+                    next_turn_number += 1;
+                }
             }
             record_append_phase(SessionEventAppendPhase::BuildInsertPayloads, phase_started);
 
@@ -621,11 +630,11 @@ impl PostgresSessionStore {
             let insert_result = sqlx::query(&format!(
                 "INSERT INTO {events} \
                  (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, \
-                  sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-                 SELECT u.id, $2, $3, $4, $5, $6, u.sequence_num, u.event_type, u.payload::jsonb, \
+                  sequence_num, turn_number, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+                 SELECT u.id, $2, $3, $4, $5, $6, u.sequence_num, u.turn_number, u.event_type, u.payload::jsonb, \
                         $7, NULL::uuid, u.hand_id, u.token_count \
-                 FROM UNNEST($1::uuid[], $8::bigint[], $9::text[], $10::text[], $11::text[], $12::int[]) \
-                      AS u(id, sequence_num, event_type, payload, hand_id, token_count)"
+                 FROM UNNEST($1::uuid[], $8::bigint[], $9::bigint[], $10::text[], $11::text[], $12::text[], $13::int[]) \
+                      AS u(id, sequence_num, turn_number, event_type, payload, hand_id, token_count)"
             ))
             .bind(&ids)
             .bind(session_id.0)
@@ -635,6 +644,7 @@ impl PostgresSessionStore {
             .bind(&actor_storage_key)
             .bind(now)
             .bind(&sequence_nums)
+            .bind(&turn_numbers)
             .bind(&event_types)
             .bind(&payloads)
             .bind(&hand_ids)

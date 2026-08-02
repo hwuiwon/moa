@@ -1,5 +1,7 @@
 //! pgvector-backed graph-memory vector store.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
@@ -237,6 +239,9 @@ impl PgvectorStore {
 /// `k * MRL_SHORTLIST_MULTIPLIER` truncated-prefix candidates before the exact rescore.
 const MRL_SHORTLIST_MULTIPLIER: i64 = 4;
 
+/// Maximum rows in one pgvector UPSERT statement.
+const UPSERT_CHUNK_SIZE: usize = 256;
+
 #[async_trait]
 impl VectorStore for PgvectorStore {
     fn backend(&self) -> &'static str {
@@ -248,6 +253,7 @@ impl VectorStore for PgvectorStore {
     }
 
     async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
+        validate_item_dimensions(items)?;
         let mut conn = self.begin().await?;
         let storage_partition_id = self.storage_partition_id();
         guard_storage_partition_embedder_for_write(conn.as_mut(), &storage_partition_id, items)
@@ -258,6 +264,7 @@ impl VectorStore for PgvectorStore {
     }
 
     async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+        validate_item_dimensions(items)?;
         let storage_partition_id = self.storage_partition_id();
         guard_storage_partition_embedder_for_write(conn, &storage_partition_id, items).await?;
         upsert_items(conn, &storage_partition_id, items).await
@@ -558,38 +565,57 @@ async fn upsert_items(
     storage_partition_id: &str,
     items: &[VectorItem],
 ) -> Result<()> {
-    for item in items {
-        validate_dimension(&item.embedding)?;
-        let halfvec = HalfVector::from_f32_slice(&item.embedding);
-        sqlx::query(
-            r#"
-            INSERT INTO moa.embeddings
-                (uid, storage_partition_id, user_id, label, pii_class, embedding,
-                 embedding_model, embedding_model_version, valid_to)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (storage_partition_id, uid) DO UPDATE
-                SET user_id = EXCLUDED.user_id,
-                    label = EXCLUDED.label,
-                    pii_class = EXCLUDED.pii_class,
-                    embedding = EXCLUDED.embedding,
-                    embedding_model = EXCLUDED.embedding_model,
-                    embedding_model_version = EXCLUDED.embedding_model_version,
-                    valid_to = EXCLUDED.valid_to
-            "#,
-        )
-        .bind(item.uid)
-        .bind(storage_partition_id)
-        .bind(item.user_id.as_deref())
-        .bind(&item.label)
-        .bind(item.pii_class.as_str())
-        .bind(halfvec)
-        .bind(&item.embedding_model)
-        .bind(item.embedding_model_version)
-        .bind(item.valid_to)
-        .execute(&mut *conn)
-        .await?;
+    let items = last_write_wins(items);
+    for chunk in items.chunks(UPSERT_CHUNK_SIZE) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO moa.embeddings \
+             (uid, storage_partition_id, user_id, label, pii_class, embedding, \
+              embedding_model, embedding_model_version, valid_to) ",
+        );
+        builder.push_values(chunk, |mut row, item| {
+            row.push_bind(item.uid)
+                .push_bind(storage_partition_id)
+                .push_bind(item.user_id.as_deref())
+                .push_bind(&item.label)
+                .push_bind(item.pii_class.as_str())
+                .push_bind(HalfVector::from_f32_slice(&item.embedding))
+                .push_bind(&item.embedding_model)
+                .push_bind(item.embedding_model_version)
+                .push_bind(item.valid_to);
+        });
+        builder.push(
+            " ON CONFLICT (storage_partition_id, uid) DO UPDATE \
+              SET user_id = EXCLUDED.user_id, \
+                  label = EXCLUDED.label, \
+                  pii_class = EXCLUDED.pii_class, \
+                  embedding = EXCLUDED.embedding, \
+                  embedding_model = EXCLUDED.embedding_model, \
+                  embedding_model_version = EXCLUDED.embedding_model_version, \
+                  valid_to = EXCLUDED.valid_to",
+        );
+        builder.build().execute(&mut *conn).await?;
     }
     Ok(())
+}
+
+fn validate_item_dimensions(items: &[VectorItem]) -> Result<()> {
+    for item in items {
+        validate_dimension(&item.embedding)?;
+    }
+    Ok(())
+}
+
+fn last_write_wins(items: &[VectorItem]) -> Vec<&VectorItem> {
+    let last_index_by_uid = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.uid, index))
+        .collect::<HashMap<_, _>>();
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| (last_index_by_uid[&item.uid] == index).then_some(item))
+        .collect()
 }
 
 async fn delete_items(

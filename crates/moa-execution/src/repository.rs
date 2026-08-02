@@ -239,7 +239,7 @@ pub struct ExecutionRunRecord {
     pub pinned_instruction_skills: Vec<PinnedInstructionSkill>,
     /// Skill-template or generated-plan provenance.
     pub source_provenance: ExecutionSourceProvenance,
-    /// Normalized source cohort persisted by V000337.
+    /// Normalized source cohort persisted by the execution-analytics schema.
     pub source_kind: ExecutionSourceKind,
     /// Exact pinned skill-template reference for template-backed runs.
     pub skill_template_ref: Option<String>,
@@ -1142,7 +1142,7 @@ impl ExecutionRepository {
         row.as_ref().map(planning_context_from_row).transpose()
     }
 
-    /// Inserts or exactly replays one normalized V000337 route-audit row.
+    /// Inserts or exactly replays one normalized route-audit row.
     pub async fn write_route_audit(
         &self,
         scope: ExecutionScope,
@@ -1259,7 +1259,7 @@ impl ExecutionRepository {
         Ok(outcome)
     }
 
-    /// Inserts or exactly replays one normalized V000337 planner-call audit row.
+    /// Inserts or exactly replays one normalized planner-call audit row.
     pub async fn write_planner_call_audit(
         &self,
         scope: ExecutionScope,
@@ -1361,7 +1361,7 @@ impl ExecutionRepository {
         Ok(outcome)
     }
 
-    /// Inserts or exactly replays one normalized V000337 compiler-audit row.
+    /// Inserts or exactly replays one normalized compiler-audit row.
     pub async fn write_compile_audit(
         &self,
         scope: ExecutionScope,
@@ -3502,6 +3502,17 @@ struct TaskCancellationWrite {
     budget_overrun: bool,
 }
 
+#[derive(Serialize)]
+struct TaskTerminalizationRow {
+    ordinal: i64,
+    task_id: Uuid,
+    generation: i64,
+    outcome: Value,
+    error: Option<Value>,
+    citations: Value,
+    audit: Value,
+}
+
 async fn terminalize_nonterminal_tasks(
     conn: &mut ScopedConn<'_>,
     run: &ExecutionRunRecord,
@@ -3509,8 +3520,8 @@ async fn terminalize_nonterminal_tasks(
     evidence: TaskCancellationEvidence<'_>,
 ) -> Result<TaskCancellationWrite> {
     let mut ledger = run.clone();
-    let mut terminalized = Vec::with_capacity(tasks.len());
-    for task in tasks {
+    let mut terminalization_rows = Vec::with_capacity(tasks.len());
+    for (ordinal, task) in tasks.iter().enumerate() {
         let outcome = cancelled_task_outcome(task, evidence.reason);
         let reconciliation =
             reconcile_outcome_usage(&ledger, task, &outcome, true).ok_or_else(|| {
@@ -3537,28 +3548,61 @@ async fn terminalize_nonterminal_tasks(
             "recorded_at": Utc::now(),
         });
         let (_, error, citations) = outcome_projection_fields(&outcome)?;
-        let row = sqlx::query(TERMINALIZE_CANCELLED_TASK_SQL)
-            .bind(task.run_uid)
-            .bind(task.task_id.as_uuid())
-            .bind(to_i64(task.generation, "expected task generation")?)
-            .bind(serde_json::to_value(&outcome)?)
-            .bind(error)
-            .bind(serde_json::to_value(citations)?)
-            .bind(audit)
-            .fetch_optional(conn.as_mut())
-            .await
-            .map_err(sqlx_error)?
-            .ok_or_else(|| Error::Storage {
-                message: format!(
-                    "{} cancellation lost locked task {}",
-                    evidence.kind, task.task_id
-                ),
-            })?;
-        terminalized.push(task_from_row(&row)?);
+        let ordinal = i64::try_from(ordinal).map_err(|_| Error::InvalidRepositoryData {
+            message: "task terminalization ordinal exceeds PostgreSQL BIGINT".to_string(),
+        })?;
+        terminalization_rows.push(TaskTerminalizationRow {
+            ordinal,
+            task_id: task.task_id.as_uuid(),
+            generation: to_i64(task.generation, "expected task generation")?,
+            outcome: serde_json::to_value(&outcome)?,
+            error,
+            citations: serde_json::to_value(citations)?,
+            audit,
+        });
         ledger.reserved = reconciliation.run_reserved;
         ledger.consumed = reconciliation.run_consumed;
         ledger.budget_overrun = reconciliation.budget_overrun;
     }
+    let terminalization_batch = serde_json::to_value(terminalization_rows)?;
+    let rows = sqlx::query(TERMINALIZE_CANCELLED_TASK_BATCH_SQL)
+        .bind(run.run_uid)
+        .bind(terminalization_batch)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+    if rows.len() != tasks.len() {
+        return Err(Error::InvalidRepositoryData {
+            message: format!(
+                "{} cancellation terminalized {} of {} locked tasks",
+                evidence.kind,
+                rows.len(),
+                tasks.len()
+            ),
+        });
+    }
+    let terminalized = rows
+        .iter()
+        .zip(tasks)
+        .map(|(row, expected)| {
+            let terminalized = task_from_row(row)?;
+            if terminalized.task_id != expected.task_id
+                || terminalized.generation != expected.generation
+            {
+                return Err(Error::InvalidRepositoryData {
+                    message: format!(
+                        "{} cancellation returned task {} generation {} instead of {} generation {}",
+                        evidence.kind,
+                        terminalized.task_id,
+                        terminalized.generation,
+                        expected.task_id,
+                        expected.generation
+                    ),
+                });
+            }
+            Ok(terminalized)
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(TaskCancellationWrite {
         tasks: terminalized,
         run_reserved: ledger.reserved,
@@ -4271,6 +4315,17 @@ impl ExecutionRepository {
                 message: "aggregate materialization tasks must share the marker node".to_string(),
             });
         }
+        let marker_fanout_items = marker
+            .as_ref()
+            .and_then(ExecutionNodeMaterialization::fanout_items)
+            .map(|value| to_i64(value, "map fanout items"))
+            .transpose()?;
+        let marker_reducer_depth = marker
+            .as_ref()
+            .and_then(ExecutionNodeMaterialization::reducer_depth)
+            .map(|value| to_i64(value, "reducer depth"))
+            .transpose()?;
+        let task_batch = prepare_task_materialization_batch(run_uid, plan_revision, &tasks)?;
         let mut conn = scope.begin(&self.pool).await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(run_uid)
@@ -4308,18 +4363,8 @@ impl ExecutionRepository {
                 .bind(plan_revision_db)
                 .bind(marker.node_id())
                 .bind(marker.kind_label())
-                .bind(
-                    marker
-                        .fanout_items()
-                        .map(|value| to_i64(value, "map fanout items"))
-                        .transpose()?,
-                )
-                .bind(
-                    marker
-                        .reducer_depth()
-                        .map(|value| to_i64(value, "reducer depth"))
-                        .transpose()?,
-                )
+                .bind(marker_fanout_items)
+                .bind(marker_reducer_depth)
                 .fetch_optional(conn.as_mut())
                 .await
                 .map_err(sqlx_error)?;
@@ -4353,64 +4398,53 @@ impl ExecutionRepository {
             false
         };
 
-        let mut records = Vec::with_capacity(tasks.len());
-        let mut inserted_task_ids = Vec::new();
-        let mut inserted_count = 0_u64;
-        for task in tasks {
-            validate_logical_task(run_uid, plan_revision, &task)?;
-            let requirement_ids = serde_json::to_value(&task.requirement_ids)?;
-            let kind = serde_json::to_value(&task.kind)?;
-            let retry = serde_json::to_value(&task.retry)?;
-            let generation = to_i64(task.generation, "task generation")?;
-            let estimate = DbEstimate::try_from(task.reservation)?;
-            let generation_history = json!([{
-                "kind": "initial",
-                "attempt": 1,
-                "generation": task.generation,
-            }]);
-            let inserted = sqlx::query(INSERT_TASK_SQL)
-                .bind(task.task_id.as_uuid())
-                .bind(run_uid)
-                .bind(run.tenant_id.0)
-                .bind(run.contact_id.map(|value| value.0))
-                .bind(&task.node_id)
-                .bind(&task.item_key)
-                .bind(requirement_ids)
-                .bind(plan_revision_db)
-                .bind(generation)
-                .bind(&task.input)
-                .bind(kind)
-                .bind(retry)
-                .bind(estimate.cost_microusd)
-                .bind(estimate.tokens)
-                .bind(estimate.tasks)
-                .bind(estimate.tool_calls)
-                .bind(estimate.retrieved_bytes)
-                .bind(generation_history)
-                .fetch_optional(conn.as_mut())
-                .await
-                .map_err(sqlx_error)?;
-
-            let record = if let Some(row) = inserted {
-                inserted_count = inserted_count.saturating_add(1);
-                let task = task_from_row(&row)?;
-                inserted_task_ids.push(task.task_id);
-                task
-            } else {
-                let row = sqlx::query(LOAD_TASK_BY_LOGICAL_KEY_SQL)
-                    .bind(run_uid)
-                    .bind(&task.node_id)
-                    .bind(&task.item_key)
-                    .fetch_one(conn.as_mut())
-                    .await
-                    .map_err(sqlx_error)?;
-                let existing = task_from_row(&row)?;
-                ensure_materialization_replay_matches(&existing, &task)?;
-                existing
-            };
-            records.push(record);
-        }
+        let inserted_rows = sqlx::query(INSERT_TASK_BATCH_SQL)
+            .bind(&task_batch)
+            .bind(run_uid)
+            .bind(run.tenant_id.0)
+            .bind(run.contact_id.map(|value| value.0))
+            .bind(plan_revision_db)
+            .fetch_all(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        let mut inserted_task_ids = inserted_rows
+            .iter()
+            .map(|row| {
+                row.try_get("task_id")
+                    .map(ExecutionTaskId::from_uuid)
+                    .map_err(row_error)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let inserted_count =
+            u64::try_from(inserted_task_ids.len()).map_err(|_| Error::InvalidRepositoryData {
+                message: "inserted task count does not fit in u64".to_string(),
+            })?;
         inserted_task_ids.sort();
+
+        let task_rows = sqlx::query(LOAD_TASK_BATCH_SQL)
+            .bind(&task_batch)
+            .bind(run_uid)
+            .fetch_all(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        if task_rows.len() != tasks.len() {
+            return Err(Error::InvalidRepositoryData {
+                message: format!(
+                    "task materialization reloaded {} of {} requested logical keys",
+                    task_rows.len(),
+                    tasks.len()
+                ),
+            });
+        }
+        let records = task_rows
+            .iter()
+            .zip(&tasks)
+            .map(|(row, requested)| {
+                let existing = task_from_row(row)?;
+                ensure_materialization_replay_matches(&existing, requested)?;
+                Ok(existing)
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         if inserted_count > 0 || marker_applied {
             sqlx::query(
@@ -4436,6 +4470,62 @@ impl ExecutionRepository {
             Ok(MaterializationOutcome::Replayed { tasks: records })
         }
     }
+}
+
+#[derive(Serialize)]
+struct TaskMaterializationRow<'a> {
+    ordinal: i64,
+    task_id: Uuid,
+    node_id: &'a str,
+    item_key: &'a str,
+    requirement_ids: &'a [String],
+    generation: i64,
+    input: &'a Value,
+    task_kind: &'a LogicalTaskKind,
+    retry_policy: &'a moa_artifacts::execution_plan::RetryPolicy,
+    estimate_cost_microusd: i64,
+    estimate_tokens: i64,
+    estimate_tasks: i64,
+    estimate_tool_calls: i64,
+    estimate_retrieved_bytes: i64,
+    generation_history: Value,
+}
+
+fn prepare_task_materialization_batch(
+    run_uid: Uuid,
+    plan_revision: u64,
+    tasks: &[LogicalTask],
+) -> Result<Value> {
+    let mut rows = Vec::with_capacity(tasks.len());
+    for (ordinal, task) in tasks.iter().enumerate() {
+        validate_logical_task(run_uid, plan_revision, task)?;
+        let ordinal = i64::try_from(ordinal).map_err(|_| Error::InvalidRepositoryInput {
+            message: "task materialization ordinal exceeds PostgreSQL BIGINT".to_string(),
+        })?;
+        let estimate = DbEstimate::try_from(task.reservation)?;
+        rows.push(TaskMaterializationRow {
+            ordinal,
+            task_id: task.task_id.as_uuid(),
+            node_id: &task.node_id,
+            item_key: &task.item_key,
+            requirement_ids: &task.requirement_ids,
+            generation: to_i64(task.generation, "task generation")?,
+            input: &task.input,
+            task_kind: &task.kind,
+            retry_policy: &task.retry,
+            estimate_cost_microusd: estimate.cost_microusd,
+            estimate_tokens: estimate.tokens,
+            estimate_tasks: estimate.tasks,
+            estimate_tool_calls: estimate.tool_calls,
+            estimate_retrieved_bytes: estimate.retrieved_bytes,
+            generation_history: json!([{
+                "kind": "initial",
+                "attempt": 1,
+                "generation": task.generation,
+            }]),
+        });
+    }
+    serde_json::to_value(rows).map_err(Into::into)
 }
 
 fn validate_logical_task(run_uid: Uuid, plan_revision: u64, task: &LogicalTask) -> Result<()> {
@@ -5536,47 +5626,78 @@ const LOAD_NODE_MATERIALIZATION_SQL: &str = r#"
     WHERE run_uid = $1 AND plan_revision = $2 AND node_id = $3
 "#;
 
-const INSERT_TASK_SQL: &str = r#"
+const INSERT_TASK_BATCH_SQL: &str = r#"
+    WITH input AS (
+        SELECT *
+        FROM jsonb_to_recordset($1::JSONB) AS row(
+            ordinal BIGINT,
+            task_id UUID,
+            node_id TEXT,
+            item_key TEXT,
+            requirement_ids JSONB,
+            generation BIGINT,
+            input JSONB,
+            task_kind JSONB,
+            retry_policy JSONB,
+            estimate_cost_microusd BIGINT,
+            estimate_tokens BIGINT,
+            estimate_tasks BIGINT,
+            estimate_tool_calls BIGINT,
+            estimate_retrieved_bytes BIGINT,
+            generation_history JSONB
+        )
+    )
     INSERT INTO moa.execution_task (
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
         input, task_kind, retry_policy,
         estimate_cost_microusd, estimate_tokens, estimate_tasks,
         estimate_tool_calls, estimate_retrieved_bytes, generation_history
-    ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 1, $9,
-        $10, $11, $12, $13, $14, $15, $16, $17, $18
     )
+    SELECT
+        input.task_id, $2, $3, $4, input.node_id, input.item_key,
+        input.requirement_ids, $5, 'pending', 1, input.generation,
+        input.input, input.task_kind, input.retry_policy,
+        input.estimate_cost_microusd, input.estimate_tokens,
+        input.estimate_tasks, input.estimate_tool_calls,
+        input.estimate_retrieved_bytes, input.generation_history
+    FROM input
+    ORDER BY input.ordinal
     ON CONFLICT (run_uid, node_id, item_key) DO NOTHING
-    RETURNING
-        task_id, run_uid, tenant_id, contact_id, node_id, item_key,
-        requirement_ids, plan_revision, status, attempt, generation,
-        input, resume_input_history, task_kind, retry_policy,
-        estimate_cost_microusd, estimate_tokens, estimate_tasks,
-        estimate_tool_calls, estimate_retrieved_bytes,
-        reserved_cost_microusd, reserved_tokens, reserved_tasks,
-        reserved_tool_calls, reserved_retrieved_bytes,
-        actual_cost_microusd, actual_tokens, actual_tasks,
-        actual_tool_calls, actual_retrieved_bytes,
-        current_outcome, output, error, citations, generation_history, outcome_audit,
-        created_at, updated_at, reserved_at, started_at, completed_at
+    RETURNING task_id
 "#;
 
-const LOAD_TASK_BY_LOGICAL_KEY_SQL: &str = r#"
+const LOAD_TASK_BATCH_SQL: &str = r#"
+    WITH input AS (
+        SELECT *
+        FROM jsonb_to_recordset($1::JSONB) AS row(
+            ordinal BIGINT,
+            task_id UUID,
+            node_id TEXT,
+            item_key TEXT
+        )
+    )
     SELECT
-        task_id, run_uid, tenant_id, contact_id, node_id, item_key,
-        requirement_ids, plan_revision, status, attempt, generation,
-        input, resume_input_history, task_kind, retry_policy,
-        estimate_cost_microusd, estimate_tokens, estimate_tasks,
-        estimate_tool_calls, estimate_retrieved_bytes,
-        reserved_cost_microusd, reserved_tokens, reserved_tasks,
-        reserved_tool_calls, reserved_retrieved_bytes,
-        actual_cost_microusd, actual_tokens, actual_tasks,
-        actual_tool_calls, actual_retrieved_bytes,
-        current_outcome, output, error, citations, generation_history, outcome_audit,
-        created_at, updated_at, reserved_at, started_at, completed_at
-    FROM moa.execution_task
-    WHERE run_uid = $1 AND node_id = $2 AND item_key = $3
+        task.task_id, task.run_uid, task.tenant_id, task.contact_id,
+        task.node_id, task.item_key, task.requirement_ids, task.plan_revision,
+        task.status, task.attempt, task.generation, task.input,
+        task.resume_input_history, task.task_kind, task.retry_policy,
+        task.estimate_cost_microusd, task.estimate_tokens, task.estimate_tasks,
+        task.estimate_tool_calls, task.estimate_retrieved_bytes,
+        task.reserved_cost_microusd, task.reserved_tokens, task.reserved_tasks,
+        task.reserved_tool_calls, task.reserved_retrieved_bytes,
+        task.actual_cost_microusd, task.actual_tokens, task.actual_tasks,
+        task.actual_tool_calls, task.actual_retrieved_bytes,
+        task.current_outcome, task.output, task.error, task.citations,
+        task.generation_history, task.outcome_audit, task.created_at,
+        task.updated_at, task.reserved_at, task.started_at, task.completed_at
+    FROM input
+    JOIN moa.execution_task AS task
+      ON task.run_uid = $2
+     AND task.task_id = input.task_id
+     AND task.node_id = input.node_id
+     AND task.item_key = input.item_key
+    ORDER BY input.ordinal
 "#;
 
 const LOAD_TASK_FOR_UPDATE_SQL: &str = r#"
@@ -5912,8 +6033,20 @@ const SUPERSEDE_REPLAN_TASK_SQL: &str = r#"
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
-const TERMINALIZE_CANCELLED_TASK_SQL: &str = r#"
-    UPDATE moa.execution_task
+const TERMINALIZE_CANCELLED_TASK_BATCH_SQL: &str = r#"
+    WITH input AS (
+        SELECT *
+        FROM jsonb_to_recordset($2::JSONB) AS row(
+            ordinal BIGINT,
+            task_id UUID,
+            generation BIGINT,
+            outcome JSONB,
+            error JSONB,
+            citations JSONB,
+            audit JSONB
+        )
+    ), updated AS (
+    UPDATE moa.execution_task AS task
     SET status = 'cancelled',
         reserved_cost_microusd = 0,
         reserved_tokens = 0,
@@ -5921,27 +6054,37 @@ const TERMINALIZE_CANCELLED_TASK_SQL: &str = r#"
         reserved_tool_calls = 0,
         reserved_retrieved_bytes = 0,
         actual_tasks = 1,
-        current_outcome = $4,
+        current_outcome = input.outcome,
         output = NULL,
-        error = $5,
-        citations = $6,
-        outcome_audit = outcome_audit || jsonb_build_array($7::JSONB),
+        error = input.error,
+        citations = input.citations,
+        outcome_audit = task.outcome_audit || jsonb_build_array(input.audit),
         completed_at = NOW(),
         updated_at = NOW()
-    WHERE run_uid = $1 AND task_id = $2 AND generation = $3
-      AND status IN ('pending', 'reserved', 'running', 'waiting_input', 'waiting_replan')
+    FROM input
+    WHERE task.run_uid = $1
+      AND task.task_id = input.task_id
+      AND task.generation = input.generation
+      AND task.status IN ('pending', 'reserved', 'running', 'waiting_input', 'waiting_replan')
     RETURNING
-        task_id, run_uid, tenant_id, contact_id, node_id, item_key,
-        requirement_ids, plan_revision, status, attempt, generation,
-        input, resume_input_history, task_kind, retry_policy,
-        estimate_cost_microusd, estimate_tokens, estimate_tasks,
-        estimate_tool_calls, estimate_retrieved_bytes,
-        reserved_cost_microusd, reserved_tokens, reserved_tasks,
-        reserved_tool_calls, reserved_retrieved_bytes,
-        actual_cost_microusd, actual_tokens, actual_tasks,
-        actual_tool_calls, actual_retrieved_bytes,
-        current_outcome, output, error, citations, generation_history, outcome_audit,
-        created_at, updated_at, reserved_at, started_at, completed_at
+        task.task_id, task.run_uid, task.tenant_id, task.contact_id,
+        task.node_id, task.item_key, task.requirement_ids, task.plan_revision,
+        task.status, task.attempt, task.generation, task.input,
+        task.resume_input_history, task.task_kind, task.retry_policy,
+        task.estimate_cost_microusd, task.estimate_tokens, task.estimate_tasks,
+        task.estimate_tool_calls, task.estimate_retrieved_bytes,
+        task.reserved_cost_microusd, task.reserved_tokens, task.reserved_tasks,
+        task.reserved_tool_calls, task.reserved_retrieved_bytes,
+        task.actual_cost_microusd, task.actual_tokens, task.actual_tasks,
+        task.actual_tool_calls, task.actual_retrieved_bytes,
+        task.current_outcome, task.output, task.error, task.citations,
+        task.generation_history, task.outcome_audit, task.created_at,
+        task.updated_at, task.reserved_at, task.started_at, task.completed_at
+    )
+    SELECT updated.*
+    FROM updated
+    JOIN input ON input.task_id = updated.task_id
+    ORDER BY input.ordinal
 "#;
 
 const FINALIZE_REPLAN_STOP_RUN_SQL: &str = r#"

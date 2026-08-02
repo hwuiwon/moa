@@ -153,9 +153,10 @@ impl PostgresSessionStore {
              JOIN {sessions} s ON s.id = b.session_id AND s.active_channel_binding_id = b.id \
              WHERE b.channel = $1 \
                AND b.ended_at IS NULL \
-               AND b.external_tenant_key IS NOT DISTINCT FROM $2 \
-               AND b.external_conversation_key IS NOT DISTINCT FROM $3 \
-               AND b.external_thread_key IS NOT DISTINCT FROM $4 \
+               AND b.external_conversation_key IS NOT NULL \
+               AND COALESCE(b.external_tenant_key, '') = COALESCE($2, '') \
+               AND COALESCE(b.external_conversation_key, '') = COALESCE($3, '') \
+               AND COALESCE(b.external_thread_key, '') = COALESCE($4, '') \
              ORDER BY b.last_used_at DESC, b.created_at DESC \
              LIMIT 2"
         ))

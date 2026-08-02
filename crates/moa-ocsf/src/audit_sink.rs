@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{PgExecutor, PgPool};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, mpsc};
@@ -260,13 +260,13 @@ async fn next_batch(
 }
 
 /// A signed row ready for a multi-row INSERT.
-struct SignedRow {
-    columns: EventColumns,
-    tenant_id: Uuid,
-    target_resource_uid: Option<String>,
-    event_jcs: Vec<u8>,
-    signature_hex: String,
-    signing_key_id: Uuid,
+pub(crate) struct SignedRow {
+    pub(crate) columns: EventColumns,
+    pub(crate) tenant_id: Uuid,
+    pub(crate) target_resource_uid: Option<String>,
+    pub(crate) event_jcs: Vec<u8>,
+    pub(crate) signature_hex: String,
+    pub(crate) signing_key_id: Uuid,
 }
 
 /// Sign every queued event and insert the batch in one statement. Signing or
@@ -304,31 +304,72 @@ async fn flush_batch(pool: &PgPool, batch: &mut Vec<QueuedAudit>, dropped_counte
     }
 }
 
-/// Insert a batch of signed rows in a single multi-row statement.
-async fn insert_rows(pool: &PgPool, rows: &[SignedRow]) -> Result<(), sqlx::Error> {
-    let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
-        "INSERT INTO security_events \
-         (id, tenant_id, class_uid, activity_id, category_uid, severity_id, \
-          type_uid, actor_user_uid, actor_session_uid, target_resource_uid, \
-          event_jcs, signature_hex, signing_key_id, occurred_at) ",
-    );
-    builder.push_values(rows, |mut row, signed| {
-        row.push_bind(signed.columns.id)
-            .push_bind(signed.tenant_id)
-            .push_bind(signed.columns.class_uid)
-            .push_bind(signed.columns.activity_id)
-            .push_bind(signed.columns.category_uid)
-            .push_bind(signed.columns.severity_id)
-            .push_bind(signed.columns.type_uid)
-            .push_bind(signed.columns.actor_user_uid.as_deref())
-            .push_bind(signed.columns.actor_session_uid.as_deref())
-            .push_bind(signed.target_resource_uid.as_deref())
-            .push_bind(signed.event_jcs.as_slice())
-            .push_bind(signed.signature_hex.as_str())
-            .push_bind(signed.signing_key_id)
-            .push_bind(signed.columns.occurred_at);
-    });
-    builder.build().execute(pool).await?;
+/// Insert signed rows with one bounded array/`UNNEST` statement.
+///
+/// This is the sole ordinary `security_events` insert path shared by
+/// transaction-scoped emitters and the background audit writer.
+pub(crate) async fn insert_rows<'e, E>(exec: E, rows: &[SignedRow]) -> Result<(), sqlx::Error>
+where
+    E: PgExecutor<'e>,
+{
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<_> = rows.iter().map(|row| row.columns.id).collect();
+    let tenant_ids: Vec<_> = rows.iter().map(|row| row.tenant_id).collect();
+    let class_uids: Vec<_> = rows.iter().map(|row| row.columns.class_uid).collect();
+    let activity_ids: Vec<_> = rows.iter().map(|row| row.columns.activity_id).collect();
+    let category_uids: Vec<_> = rows.iter().map(|row| row.columns.category_uid).collect();
+    let severity_ids: Vec<_> = rows.iter().map(|row| row.columns.severity_id).collect();
+    let type_uids: Vec<_> = rows.iter().map(|row| row.columns.type_uid).collect();
+    let actor_user_uids: Vec<_> = rows
+        .iter()
+        .map(|row| row.columns.actor_user_uid.as_deref())
+        .collect();
+    let actor_session_uids: Vec<_> = rows
+        .iter()
+        .map(|row| row.columns.actor_session_uid.as_deref())
+        .collect();
+    let target_resource_uids: Vec<_> = rows
+        .iter()
+        .map(|row| row.target_resource_uid.as_deref())
+        .collect();
+    let event_jcs: Vec<_> = rows.iter().map(|row| row.event_jcs.as_slice()).collect();
+    let signature_hexes: Vec<_> = rows.iter().map(|row| row.signature_hex.as_str()).collect();
+    let signing_key_ids: Vec<_> = rows.iter().map(|row| row.signing_key_id).collect();
+    let occurred_at: Vec<_> = rows.iter().map(|row| row.columns.occurred_at).collect();
+
+    sqlx::query(
+        r#"
+        INSERT INTO security_events
+            (id, tenant_id, class_uid, activity_id, category_uid, severity_id,
+             type_uid, actor_user_uid, actor_session_uid, target_resource_uid,
+             event_jcs, signature_hex, signing_key_id, occurred_at)
+        SELECT *
+        FROM UNNEST(
+            $1::uuid[], $2::uuid[], $3::integer[], $4::integer[],
+            $5::integer[], $6::integer[], $7::bigint[], $8::text[],
+            $9::text[], $10::text[], $11::bytea[], $12::text[],
+            $13::uuid[], $14::timestamptz[]
+        )
+        "#,
+    )
+    .bind(&ids)
+    .bind(&tenant_ids)
+    .bind(&class_uids)
+    .bind(&activity_ids)
+    .bind(&category_uids)
+    .bind(&severity_ids)
+    .bind(&type_uids)
+    .bind(&actor_user_uids)
+    .bind(&actor_session_uids)
+    .bind(&target_resource_uids)
+    .bind(&event_jcs)
+    .bind(&signature_hexes)
+    .bind(&signing_key_ids)
+    .bind(&occurred_at)
+    .execute(exec)
+    .await?;
     Ok(())
 }
 

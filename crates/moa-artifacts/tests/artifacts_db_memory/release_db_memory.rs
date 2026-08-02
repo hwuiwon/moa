@@ -4,7 +4,7 @@
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
     ArtifactRegistry, NewArtifactDraft, NewArtifactFile, RecordDecision, ReleaseRepository,
-    StoredArtifactRevision, SubmitCandidate,
+    RollbackApplication, StoredArtifactRevision, SubmitCandidate,
 };
 use moa_artifacts::release::{
     ActivationRequest, ActivationTarget, ActivationTargetClass, DeterministicVerdict, Digest32,
@@ -17,6 +17,7 @@ use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
     types::agent::AgentRevisionLock, types::identifiers::TenantId,
 };
+use moa_db::ScopedConn;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -473,6 +474,194 @@ async fn activation_predicates_fail_closed_db_memory() -> Result<()> {
             .load_serving(&scope, ArtifactKind::Skill, &rejected_name)
             .await?
             .is_none()
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn tenant_fence_rejects_restricted_activation_and_rollback_atomically_db_memory() -> Result<()>
+{
+    // Pins: artifact activation and rollback run under the restricted
+    // `moa_artifact_activator` owner. They succeed without a tenant fence, fail
+    // with SQLSTATE 55000 rather than a privilege error while fenced, and leave
+    // the serving pointer, audit, and attestation unchanged on refusal.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
+    let registry = ArtifactRegistry::new(pool.clone());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let release_scope = TenantScope::new(tenant_id);
+    let name = format!("fenced-release-{}", Uuid::now_v7());
+    let v1 = draft_skill(&registry, &scope, &name, "v1").await?;
+    let target = ActivationTarget::SkillVisibility {
+        artifact_uid: v1.artifact_uid,
+    };
+    let activated = activate_revision(&pool, release_scope, target, v1.revision_uid)
+        .await
+        .map_err(release_error)?;
+    assert_eq!(
+        activated.pointer_version, 1,
+        "unfenced activation must work"
+    );
+
+    let v2 = draft_skill(&registry, &scope, &name, "v2").await?;
+    let attested = moa_artifacts::test_fixtures::attest_revision(
+        &pool,
+        release_scope,
+        target,
+        v2.revision_uid,
+    )
+    .await
+    .map_err(release_error)?;
+    let (subject_digest, revision_version, revision_hash): (Vec<u8>, i32, Vec<u8>) =
+        sqlx::query_as(
+            "SELECT candidate.subject_digest, revision.version, revision.canonical_hash \
+             FROM moa.artifact_release_candidate AS candidate \
+             JOIN moa.artifact_revision AS revision \
+               ON revision.revision_uid = candidate.revision_uid \
+             WHERE candidate.revision_uid = $1",
+        )
+        .bind(v2.revision_uid)
+        .fetch_one(&pool)
+        .await
+        .map_err(storage_error)?;
+
+    sqlx::query(
+        "INSERT INTO moa.destruction_operation_fence \
+            (tenant_id, subject_id, operation_id, operation_kind) \
+         VALUES ($1, NULL, $2, 'tenant.purge')",
+    )
+    .bind(tenant_id)
+    .bind(format!("artifact-fence-{tenant_id}"))
+    .execute(&pool)
+    .await
+    .map_err(storage_error)?;
+
+    let before: (Uuid, i64, i64, bool) = sqlx::query_as(
+        "SELECT pointer.revision_uid, pointer.pointer_version, \
+                (SELECT count(*) FROM moa.artifact_activation_audit \
+                 WHERE artifact_uid = pointer.artifact_uid), \
+                (SELECT consumed_at IS NULL \
+                 FROM moa.artifact_activation_attestation WHERE attestation_uid = $2) \
+         FROM moa.artifact_serving_pointer AS pointer WHERE pointer.artifact_uid = $1",
+    )
+    .bind(v1.artifact_uid)
+    .bind(attested.attestation_uid)
+    .fetch_one(&pool)
+    .await
+    .map_err(storage_error)?;
+    assert_eq!(before, (v1.revision_uid, 1, 1, true));
+
+    let mut activation_tx = pool.begin().await.map_err(storage_error)?;
+    sqlx::query("SELECT set_config('moa.storage_partition_id', $1, true)")
+        .bind(release_scope.storage_partition_id().to_string())
+        .execute(&mut *activation_tx)
+        .await
+        .map_err(storage_error)?;
+    let activation_error = sqlx::query_scalar::<_, i64>(
+        "SELECT moa.apply_artifact_activation_transition( \
+            $1, $2, $3, 'skill', 'skill_visibility', NULL, $4, $5, $6, 1, \
+            $7, $8, $9, 2, 'fixture', 'fenced activation', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(release_scope.storage_partition_id().to_string())
+    .bind(v1.artifact_uid)
+    .bind(attested.attestation_uid)
+    .bind(subject_digest)
+    .bind(v1.revision_uid)
+    .bind(v2.revision_uid)
+    .bind(revision_version)
+    .bind(revision_hash)
+    .fetch_one(&mut *activation_tx)
+    .await
+    .expect_err("a tenant fence must reject restricted activation");
+    assert_eq!(
+        activation_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("55000"),
+        "fenced activation must be a policy refusal, not a table-permission error"
+    );
+    activation_tx.rollback().await.map_err(storage_error)?;
+
+    let mut rollback_tx = pool.begin().await.map_err(storage_error)?;
+    sqlx::query("SELECT set_config('moa.storage_partition_id', $1, true)")
+        .bind(release_scope.storage_partition_id().to_string())
+        .execute(&mut *rollback_tx)
+        .await
+        .map_err(storage_error)?;
+    let rollback_error = sqlx::query_scalar::<_, i64>(
+        "SELECT moa.apply_artifact_rollback_transition( \
+            $1, $2, $3, 'skill_visibility', $4, $5, 1, 2, \
+            'fixture', 'fenced rollback')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(release_scope.storage_partition_id().to_string())
+    .bind(v1.artifact_uid)
+    .bind(activated.audit_uid)
+    .bind(v1.revision_uid)
+    .fetch_one(&mut *rollback_tx)
+    .await
+    .expect_err("a tenant fence must reject restricted rollback audit insertion");
+    assert_eq!(
+        rollback_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("55000"),
+        "fenced rollback must be a policy refusal, not a table-permission error"
+    );
+    rollback_tx.rollback().await.map_err(storage_error)?;
+
+    let after_refusals: (Uuid, i64, i64, bool) = sqlx::query_as(
+        "SELECT pointer.revision_uid, pointer.pointer_version, \
+                (SELECT count(*) FROM moa.artifact_activation_audit \
+                 WHERE artifact_uid = pointer.artifact_uid), \
+                (SELECT consumed_at IS NULL \
+                 FROM moa.artifact_activation_attestation WHERE attestation_uid = $2) \
+         FROM moa.artifact_serving_pointer AS pointer WHERE pointer.artifact_uid = $1",
+    )
+    .bind(v1.artifact_uid)
+    .bind(attested.attestation_uid)
+    .fetch_one(&pool)
+    .await
+    .map_err(storage_error)?;
+    assert_eq!(
+        after_refusals, before,
+        "both fenced statements must be atomic"
+    );
+
+    sqlx::query(
+        "DELETE FROM moa.destruction_operation_fence \
+         WHERE tenant_id = $1 AND subject_id IS NULL",
+    )
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .map_err(storage_error)?;
+    let mut conn = ScopedConn::begin_tenant(&pool, tenant_id).await?;
+    let rollback = ArtifactRegistry::rollback_serving_revision_in_tx(
+        conn.as_mut(),
+        &release_scope,
+        v1.revision_uid,
+        activated.audit_uid,
+        activated.pointer_version,
+        "fixture",
+        Some("unfenced rollback"),
+    )
+    .await?;
+    conn.commit().await?;
+    assert_eq!(rollback, RollbackApplication::Applied);
+    assert!(
+        registry
+            .load_serving(&scope, ArtifactKind::Skill, &name)
+            .await?
+            .is_none(),
+        "ordinary rollback must stop the revision from serving"
     );
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await

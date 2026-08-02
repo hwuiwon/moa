@@ -15,6 +15,7 @@ use moa_memory_vector::{
 };
 use moa_session::testing;
 use moa_test_support::fixtures::stable_uuid_from_label;
+use pgvector::HalfVector;
 use sqlx::PgPool;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
@@ -243,6 +244,25 @@ async fn delete_node_index_rows(pool: &PgPool, uids: &[Uuid]) {
         .expect("delete node_index seed rows");
 }
 
+async fn vector_count_for_uids(pool: &PgPool, storage_partition_id: &str, uids: &[Uuid]) -> i64 {
+    let ctx = tenant_scope(storage_partition_id);
+    let mut conn = ScopedConn::begin(pool, &ctx)
+        .await
+        .expect("begin vector count transaction");
+    set_app_role(conn.as_mut()).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.embeddings \
+         WHERE storage_partition_id = $1 AND uid = ANY($2)",
+    )
+    .bind(storage_partition_id)
+    .bind(uids)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count vector rows");
+    conn.commit().await.expect("commit vector count");
+    count
+}
+
 #[tokio::test]
 async fn pgvector_round_trip_returns_identical_seed_first() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
@@ -291,6 +311,101 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
 
     store.delete(&uids).await.expect("delete vectors");
     delete_node_index_rows(session_store.pool(), &uids).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn pgvector_upsert_batches_256_rows_and_validates_complete_input_db_memory() {
+    // Pins: >256 vectors cross the fixed SQL chunk boundary, duplicate UIDs keep
+    // their final value, and one invalid dimension rejects the complete call
+    // before any valid sibling is written.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let partition = Uuid::now_v7().to_string();
+    let items = (0..513)
+        .map(|index| vector_item(Uuid::now_v7(), &partition, "Fact", basis_vector(index)))
+        .collect::<Vec<_>>();
+    let item_uids = items.iter().map(|item| item.uid).collect::<Vec<_>>();
+    insert_node_index_rows(session_store.pool(), &partition, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &partition, "test-model").await;
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(partition.clone()),
+    );
+
+    store
+        .upsert(&items)
+        .await
+        .expect("upsert 513 vectors across three chunks");
+    assert_eq!(
+        vector_count_for_uids(session_store.pool(), &partition, &item_uids).await,
+        513
+    );
+
+    let duplicate_uid = items[0].uid;
+    let first_value = VectorItem {
+        embedding: basis_vector(0),
+        ..items[0].clone()
+    };
+    let last_value = VectorItem {
+        embedding: basis_vector(700),
+        ..items[0].clone()
+    };
+    store
+        .upsert(&[first_value, last_value.clone()])
+        .await
+        .expect("duplicate UID upsert");
+    let mut conn = ScopedConn::begin(session_store.pool(), &tenant_scope(&partition))
+        .await
+        .expect("begin duplicate vector read");
+    set_app_role(conn.as_mut()).await;
+    let distance = sqlx::query_scalar::<_, f64>(
+        "SELECT embedding <=> $1 FROM moa.embeddings \
+         WHERE storage_partition_id = $2 AND uid = $3",
+    )
+    .bind(HalfVector::from_f32_slice(&last_value.embedding))
+    .bind(&partition)
+    .bind(duplicate_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read duplicate vector distance");
+    conn.commit().await.expect("commit duplicate vector read");
+    assert!(
+        distance.abs() < f64::EPSILON,
+        "last vector must win: {distance}"
+    );
+
+    let valid_sibling = vector_item(Uuid::now_v7(), &partition, "Fact", basis_vector(1));
+    let invalid_sibling = vector_item(Uuid::now_v7(), &partition, "Fact", vec![0.0; 3]);
+    insert_node_index_rows(
+        session_store.pool(),
+        &partition,
+        &[valid_sibling.clone(), invalid_sibling.clone()],
+    )
+    .await;
+    store
+        .upsert(&[valid_sibling.clone(), invalid_sibling.clone()])
+        .await
+        .expect_err("invalid dimension rejects complete vector batch");
+    assert_eq!(
+        vector_count_for_uids(
+            session_store.pool(),
+            &partition,
+            &[valid_sibling.uid, invalid_sibling.uid],
+        )
+        .await,
+        0,
+        "prevalidation must prevent partial vector writes"
+    );
+
+    let mut cleanup_uids = item_uids;
+    cleanup_uids.extend([valid_sibling.uid, invalid_sibling.uid]);
+    store.delete(&cleanup_uids).await.expect("delete vectors");
+    delete_node_index_rows(session_store.pool(), &cleanup_uids).await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

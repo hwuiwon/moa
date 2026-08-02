@@ -1,16 +1,13 @@
 //! Windowed fact export: `turn_fact` and `tool_call_fact` are computed in
-//! Postgres by reusing the exact `session_turn_metrics`
-//! (`V000307__tenant_runtime_boundaries.sql:515`) and `tool_call_analytics`
-//! (`V000001__session_baseline.sql:624`) SQL, scoped to the sessions touched by
+//! Postgres by reusing the exact `session_turn_metrics` and
+//! `tool_call_analytics` source-view SQL, scoped to the sessions touched by
 //! the current events batch, and upserted into ClickHouse `ReplacingMergeTree`
 //! tables with a fresh `export_version`. Late tool results re-emit the affected
 //! turn rows on a later pass — self-healing, and parity with the Postgres
 //! matviews holds by construction because the transform SQL is shared.
 //!
-//! `turn_number` is not a column of `tool_call_analytics`; each tool call is
-//! stamped with its enclosing turn using the same prefix function as the events
-//! stream (`1 + count of earlier BrainResponses`). `model_tier` is the constant
-//! `'main'` the view emits.
+//! `turn_number` is read from the authoritative ordinal persisted on each event.
+//! `model_tier` is the constant `'main'` the view emits.
 
 use chrono::{DateTime, Utc};
 use clickhouse::Row;
@@ -22,13 +19,33 @@ use super::{AnalyticsExporter, ExportError, FACT_SESSION_CHUNK, record_rows};
 
 /// `turn_fact` recompute: the `session_turn_metrics` CTE filtered to `$1`
 /// (session ids) with `$2` stamped as `export_version`.
-const TURN_FACT_SQL: &str = "WITH brain_turns AS ( \
+const TURN_FACT_SQL: &str = "WITH input_sessions AS ( \
+        SELECT DISTINCT input.session_id \
+        FROM UNNEST($1::uuid[]) AS input(session_id) \
+    ), \
+    brain_turns AS ( \
         SELECT e.session_id, e.sequence_num AS response_sequence_num, \
-            ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.sequence_num)::BIGINT AS turn_number, \
+            e.turn_number, \
             LAG(e.sequence_num, 1, -1) OVER (PARTITION BY e.session_id ORDER BY e.sequence_num)::BIGINT AS previous_response_sequence_num, \
             e.timestamp AS finished_at, e.payload -> 'data' AS response_data \
-        FROM events e \
-        WHERE e.event_type = 'BrainResponse' AND e.session_id = ANY($1) \
+        FROM input_sessions input \
+        JOIN events e ON e.session_id = input.session_id \
+        WHERE e.event_type = 'BrainResponse' \
+    ), \
+    tool_calls AS ( \
+        SELECT e.id, e.session_id, e.sequence_num, e.timestamp, e.payload \
+        FROM input_sessions input \
+        JOIN events e ON e.session_id = input.session_id \
+        WHERE e.event_type = 'ToolCall' \
+    ), \
+    terminal_events AS ( \
+        SELECT DISTINCT ON (e.session_id, e.event_type, e.payload -> 'data' ->> 'tool_id') \
+            e.id, e.session_id, e.event_type, e.payload, e.timestamp, \
+            e.payload -> 'data' ->> 'tool_id' AS tool_id \
+        FROM input_sessions input \
+        JOIN events e ON e.session_id = input.session_id \
+        WHERE e.event_type IN ('ToolResult', 'ToolError') \
+        ORDER BY e.session_id, e.event_type, e.payload -> 'data' ->> 'tool_id', e.sequence_num \
     ), \
     tool_metrics AS ( \
         SELECT bt.session_id, bt.turn_number, COUNT(tc.id)::BIGINT AS tool_call_count, \
@@ -37,20 +54,14 @@ const TURN_FACT_SQL: &str = "WITH brain_turns AS ( \
                 WHEN te.id IS NOT NULL THEN EXTRACT(EPOCH FROM (te.timestamp - tc.timestamp)) * 1000.0 \
                 ELSE 0.0 END), 0.0)::DOUBLE PRECISION AS tool_ms \
         FROM brain_turns bt \
-        LEFT JOIN events tc ON tc.session_id = bt.session_id AND tc.event_type = 'ToolCall' \
+        LEFT JOIN tool_calls tc ON tc.session_id = bt.session_id \
             AND tc.sequence_num > bt.previous_response_sequence_num AND tc.sequence_num < bt.response_sequence_num \
-        LEFT JOIN LATERAL ( \
-            SELECT e.id, e.payload, e.timestamp FROM events e \
-            WHERE e.session_id = tc.session_id AND e.event_type = 'ToolResult' \
-              AND (e.payload -> 'data' ->> 'tool_id') = (tc.payload -> 'data' ->> 'tool_id') \
-            ORDER BY e.sequence_num ASC LIMIT 1 \
-        ) tr ON TRUE \
-        LEFT JOIN LATERAL ( \
-            SELECT e.id, e.payload, e.timestamp FROM events e \
-            WHERE e.session_id = tc.session_id AND e.event_type = 'ToolError' \
-              AND (e.payload -> 'data' ->> 'tool_id') = (tc.payload -> 'data' ->> 'tool_id') \
-            ORDER BY e.sequence_num ASC LIMIT 1 \
-        ) te ON TRUE \
+        LEFT JOIN terminal_events tr ON tr.session_id = tc.session_id \
+            AND tr.event_type = 'ToolResult' \
+            AND tr.tool_id = (tc.payload -> 'data' ->> 'tool_id') \
+        LEFT JOIN terminal_events te ON te.session_id = tc.session_id \
+            AND te.event_type = 'ToolError' \
+            AND te.tool_id = (tc.payload -> 'data' ->> 'tool_id') \
         GROUP BY bt.session_id, bt.turn_number \
     ) \
     SELECT s.tenant_id, s.storage_partition_id, s.contact_id, s.user_id, bt.session_id, bt.turn_number, \
@@ -75,16 +86,30 @@ const TURN_FACT_SQL: &str = "WITH brain_turns AS ( \
 /// `tool_call_fact` recompute: the `tool_call_analytics` logic filtered to `$1`,
 /// enriched with tenant id and the enclosing `turn_number`, `$2` stamped as
 /// `export_version`.
-const TOOL_CALL_FACT_SQL: &str = "WITH tool_calls AS ( \
+const TOOL_CALL_FACT_SQL: &str = "WITH input_sessions AS ( \
+        SELECT DISTINCT input.session_id \
+        FROM UNNEST($1::uuid[]) AS input(session_id) \
+    ), \
+    tool_calls AS ( \
         SELECT s.tenant_id, s.storage_partition_id, s.user_id, e.session_id, \
-            e.sequence_num AS call_sequence_num, e.timestamp AS called_at, e.payload -> 'data' AS call_data \
-        FROM events e JOIN sessions s ON s.id = e.session_id \
-        WHERE e.event_type = 'ToolCall' AND e.session_id = ANY($1) \
+            e.sequence_num AS call_sequence_num, e.turn_number, e.timestamp AS called_at, \
+            e.payload -> 'data' AS call_data \
+        FROM input_sessions input \
+        JOIN events e ON e.session_id = input.session_id \
+        JOIN sessions s ON s.id = e.session_id \
+        WHERE e.event_type = 'ToolCall' \
+    ), \
+    terminal_events AS ( \
+        SELECT DISTINCT ON (e.session_id, e.event_type, e.payload -> 'data' ->> 'tool_id') \
+            e.id, e.session_id, e.event_type, e.payload, e.timestamp, \
+            e.payload -> 'data' ->> 'tool_id' AS tool_id \
+        FROM input_sessions input \
+        JOIN events e ON e.session_id = input.session_id \
+        WHERE e.event_type IN ('ToolResult', 'ToolError') \
+        ORDER BY e.session_id, e.event_type, e.payload -> 'data' ->> 'tool_id', e.sequence_num \
     ) \
     SELECT tc.tenant_id, tc.storage_partition_id, tc.user_id, tc.session_id, tc.call_sequence_num, \
-        (1 + (SELECT COUNT(*) FROM events b \
-              WHERE b.session_id = tc.session_id AND b.event_type = 'BrainResponse' \
-                AND b.sequence_num < tc.call_sequence_num))::BIGINT AS turn_number, \
+        tc.turn_number, \
         (tc.call_data ->> 'tool_id')::UUID AS tool_id, \
         COALESCE(tc.call_data ->> 'tool_name', '') AS tool_name, \
         CASE \
@@ -97,18 +122,12 @@ const TOOL_CALL_FACT_SQL: &str = "WITH tool_calls AS ( \
             ELSE NULL END AS duration_ms, \
         'main'::TEXT AS model_tier, tc.called_at AS ts, $2::timestamptz AS export_version \
     FROM tool_calls tc \
-    LEFT JOIN LATERAL ( \
-        SELECT e.id, e.payload, e.timestamp FROM events e \
-        WHERE e.session_id = tc.session_id AND e.event_type = 'ToolResult' \
-          AND (e.payload -> 'data' ->> 'tool_id') = (tc.call_data ->> 'tool_id') \
-        ORDER BY e.sequence_num ASC LIMIT 1 \
-    ) result_event ON TRUE \
-    LEFT JOIN LATERAL ( \
-        SELECT e.id, e.payload, e.timestamp FROM events e \
-        WHERE e.session_id = tc.session_id AND e.event_type = 'ToolError' \
-          AND (e.payload -> 'data' ->> 'tool_id') = (tc.call_data ->> 'tool_id') \
-        ORDER BY e.sequence_num ASC LIMIT 1 \
-    ) error_event ON TRUE";
+    LEFT JOIN terminal_events result_event ON result_event.session_id = tc.session_id \
+        AND result_event.event_type = 'ToolResult' \
+        AND result_event.tool_id = (tc.call_data ->> 'tool_id') \
+    LEFT JOIN terminal_events error_event ON error_event.session_id = tc.session_id \
+        AND error_event.event_type = 'ToolError' \
+        AND error_event.tool_id = (tc.call_data ->> 'tool_id')";
 
 impl AnalyticsExporter {
     /// Recomputes and upserts `turn_fact` / `tool_call_fact` for the given

@@ -82,38 +82,6 @@
       ],
       "title": "Account and API-key changes (OCSF 3001/3004)",
       "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-      "id": 6,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        {
-          "format": "time_series",
-          "rawSql": "SELECT bucket AS time, 'prompt_injection' AS metric, sum(checks) AS value FROM analytics.guardrail_hourly WHERE $__timeFilter(bucket) AND direction = 'input' AND passed = FALSE AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1 ORDER BY 1",
-          "refId": "A"
-        }
-      ],
-      "title": "Prompt-injection signal (input guardrail failures)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "id": 7,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        {
-          "format": "time_series",
-          "rawSql": "SELECT bucket AS time, direction || CASE WHEN passed THEN '_passed' ELSE '_failed' END AS metric, sum(checks) AS value FROM analytics.guardrail_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
-          "refId": "A"
-        }
-      ],
-      "title": "Guardrail checks by direction and outcome",
-      "type": "timeseries"
     }
   ],
   "refresh": "30s",

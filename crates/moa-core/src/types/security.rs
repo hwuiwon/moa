@@ -46,10 +46,10 @@ impl SensitivityClass {
     /// Restricted and PHI rows store envelope ciphertext, leaving only a
     /// placeholder in the indexed plaintext columns. Every path that decides
     /// whether content can be read, embedded, or reconstructed asks this one
-    /// question — the graph write path that refuses to embed sealed content,
-    /// the read path that opens it, and the index rebuild that must not
-    /// re-embed a placeholder as if it were the original text. A second copy of
-    /// the rule would let those paths disagree about what is sealed.
+    /// question — the graph write path that refuses to embed sealed content and
+    /// the read path that opens it. Any embedding caller must reject the
+    /// placeholder rather than treat it as source text. A second copy of the
+    /// rule would let those paths disagree about what is sealed.
     #[must_use]
     pub const fn is_sealed(self) -> bool {
         matches!(self, Self::Restricted | Self::Phi)

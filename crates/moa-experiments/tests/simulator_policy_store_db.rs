@@ -1,4 +1,4 @@
-//! Durable behavior of the simulator-policy registry (`V000375`).
+//! Durable behavior of the simulator-policy registry (`V000047`).
 //!
 //! These run against a real Postgres because every property under test is
 //! enforced by the schema or by a transaction: pinned-component immutability,

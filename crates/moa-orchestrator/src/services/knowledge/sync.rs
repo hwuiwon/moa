@@ -362,14 +362,21 @@ impl KnowledgeService {
             .repository(request.tenant_id)
             .list_connections(request.tenant_id, request.provider.as_deref())
             .await?;
+        let listed_connections = projections
+            .iter()
+            .map(|projection| &projection.connection)
+            .collect::<Vec<_>>();
+        let credential_statuses = self
+            .credentials
+            .credential_statuses(request.tenant_id, &listed_connections, caller)
+            .await?;
+        if credential_statuses.len() != projections.len() {
+            return Err(KnowledgeServiceError::Credential(
+                "credential batch returned a different number of statuses".to_string(),
+            ));
+        }
         let mut connections = Vec::with_capacity(projections.len());
-        for projection in projections {
-            // Status is read per connection through the exact reference this
-            // tenant already holds; there is no tenant-wide credential listing.
-            let credential_status = self
-                .credentials
-                .credential_status(request.tenant_id, &projection.connection, caller)
-                .await?;
+        for (projection, credential_status) in projections.into_iter().zip(credential_statuses) {
             connections.push(KnowledgeConnectionSummary {
                 credential_status,
                 connection_uid: projection.connection.connection_uid,

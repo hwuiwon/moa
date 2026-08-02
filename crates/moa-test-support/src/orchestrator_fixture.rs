@@ -248,14 +248,42 @@ impl OrchestratorTestFixture {
             bail!("fixture capabilities require the scripted-provider override");
         }
         let repo_root = repo_root();
-        ensure_postgres_image(&repo_root).await?;
-        let postgres = start_postgres_container().await?;
-        let postgres_port =
-            fixture_host_port_ipv4(&postgres, "postgres database", 5432.tcp()).await?;
-        let postgres_url = format!(
-            "postgres://{POSTGRES_USER}:{POSTGRES_PASSWORD}@127.0.0.1:{postgres_port}/{POSTGRES_DB}"
-        );
+        let postgres_url_override = match extra_env
+            .iter()
+            .position(|(key, _)| key == "MOA_DATABASE_URL")
+        {
+            Some(index) => {
+                if extra_env[index + 1..]
+                    .iter()
+                    .any(|(key, _)| key == "MOA_DATABASE_URL")
+                {
+                    bail!("orchestrator fixture received duplicate MOA_DATABASE_URL settings");
+                }
+                let (_, database_url) = extra_env.remove(index);
+                if database_url.trim().is_empty() {
+                    bail!("orchestrator fixture MOA_DATABASE_URL must not be empty");
+                }
+                Some(database_url)
+            }
+            None => None,
+        };
+        let (postgres_url, postgres) = match postgres_url_override {
+            Some(postgres_url) => (postgres_url, None),
+            None => {
+                ensure_postgres_image(&repo_root).await?;
+                let postgres = start_postgres_container().await?;
+                let postgres_port =
+                    fixture_host_port_ipv4(&postgres, "postgres database", 5432.tcp()).await?;
+                let postgres_url = format!(
+                    "postgres://{POSTGRES_USER}:{POSTGRES_PASSWORD}@127.0.0.1:{postgres_port}/{POSTGRES_DB}"
+                );
+                (postgres_url, Some(postgres))
+            }
+        };
         wait_for_postgres(&postgres_url).await?;
+        moa_migrations::run(&postgres_url)
+            .await
+            .context("apply migrations to orchestrator fixture Postgres")?;
 
         let (restate, ingress_port, admin_port) = start_restate_container().await?;
         let ingress_url = format!("http://127.0.0.1:{ingress_port}");
@@ -432,7 +460,7 @@ impl OrchestratorTestFixture {
             fga_client: Some(fga_client),
             test_prefix: format!("fixture-{}", Uuid::now_v7().simple()),
             _script_dir: script_dir,
-            _postgres: Some(postgres),
+            _postgres: postgres,
             _restate: Some(restate),
             _openfga: openfga_container,
             _redis: redis_container,

@@ -152,7 +152,7 @@ async fn planning_context_snapshot_is_immutable_and_exactly_replayed_db() -> Tes
 
 #[tokio::test]
 async fn normalized_planning_audits_return_first_measurements_and_conflict_db() -> TestResult {
-    // Pins: V337 audit rows retain only normalized routing evidence; the shared DB reader
+    // Pins: execution audit rows retain only normalized routing evidence; the shared DB reader
     // reconstructs that typed payload without persisting classifier rationale, exact retries
     // replay the first timing, and changed semantic payloads conflict without a second row.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
@@ -611,7 +611,7 @@ async fn originating_user_sequence_num_round_trips_to_execution_run_db() -> Test
 #[tokio::test]
 async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal_fields_db()
 -> TestResult {
-    // Pins: the repository writes V337's normalized execution dimensions and advances the
+    // Pins: the repository writes normalized execution dimensions and advances the
     // sequence-backed analytics cursor on later state changes without mining provenance JSON.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
@@ -2471,7 +2471,8 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
 
 #[tokio::test]
 async fn duplicate_task_materialization_is_exact_and_non_mutating_db() -> TestResult {
-    // Pins: logical identity replay returns the existing task and rejects semantic drift.
+    // Pins: a batch containing exact replay, new work, and semantic drift must
+    // reject atomically without retaining the new row or changing run progress.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
@@ -2497,17 +2498,229 @@ async fn duplicate_task_materialization_is_exact_and_non_mutating_db() -> TestRe
         .await?;
     assert_eq!(replay, first);
 
-    let mut drifted = task;
+    let new_task = logical_task(run.run_uid, "lookup", "GOOG", estimate(1));
+    let mut drifted = task.clone();
     drifted.input = json!({ "company": "MSFT" });
     repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![drifted])
+        .materialize_tasks(
+            scope,
+            run.run_uid,
+            1,
+            vec![task.clone(), new_task.clone(), drifted],
+        )
         .await
-        .expect_err("same identity with different input must reject");
+        .expect_err("mixed replay, insertion, and semantic drift must reject atomically");
+    assert_eq!(
+        repository
+            .load_task(scope, run.run_uid, new_task.task_id)
+            .await?,
+        None,
+        "the new row from the rejected batch must roll back"
+    );
+    assert_eq!(
+        repository
+            .load_task(scope, run.run_uid, task.task_id)
+            .await?,
+        Some(first[0].clone()),
+        "the first-write task must remain byte-exact after rejected drift"
+    );
     let loaded = repository
         .load_run(scope, run.run_uid)
         .await?
         .expect("run remains visible");
     assert_eq!(loaded.progress_total_tasks, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ten_thousand_tasks_materialize_cancel_and_replay_without_residual_reservations_db()
+-> TestResult {
+    // Pins: the configured maximum 10,000-task fanout applies and replays set-wise,
+    // then one cancellation terminalizes every generation, reconciles exact task
+    // counters, releases every reservation, and remains non-mutating on replay.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let run = create_run(
+        &repository,
+        scope,
+        new_run(
+            tenant_id,
+            None,
+            "ten-thousand-task-batch",
+            ExecutionRunStatus::Queued,
+            budget(10_000),
+        ),
+    )
+    .await?;
+    let tasks = (0..10_000_u64)
+        .map(|index| logical_task(run.run_uid, "fanout", &format!("{index:05}"), estimate(1)))
+        .collect::<Vec<_>>();
+
+    let first = repository
+        .materialize_tasks(scope, run.run_uid, 1, tasks.clone())
+        .await?;
+    assert_eq!(first.len(), 10_000);
+    assert_eq!(
+        first
+            .iter()
+            .map(|task| task.item_key.as_str())
+            .collect::<Vec<_>>(),
+        tasks
+            .iter()
+            .map(|task| task.item_key.as_str())
+            .collect::<Vec<_>>()
+    );
+    let first_run = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("10,000-task run remains visible after first materialization");
+    assert_eq!(first_run.progress_total_tasks, 10_000);
+
+    let replay = repository
+        .materialize_tasks(scope, run.run_uid, 1, tasks.clone())
+        .await?;
+    assert_eq!(replay, first);
+    assert_eq!(
+        repository
+            .load_run(scope, run.run_uid)
+            .await?
+            .expect("10,000-task run remains visible after replay"),
+        first_run,
+        "exact materialization replay must not mutate run progress or wake state"
+    );
+
+    let mut reservation_setup = pool.begin().await?;
+    let reserved_tasks = sqlx::query(
+        "UPDATE moa.execution_task \
+         SET status = 'reserved', \
+             reserved_cost_microusd = estimate_cost_microusd, \
+             reserved_tokens = estimate_tokens, \
+             reserved_tasks = estimate_tasks, \
+             reserved_tool_calls = estimate_tool_calls, \
+             reserved_retrieved_bytes = estimate_retrieved_bytes, \
+             reserved_at = NOW(), updated_at = NOW() \
+         WHERE task_id IN ( \
+             SELECT task_id FROM moa.execution_task \
+             WHERE run_uid = $1 AND status = 'pending' \
+             ORDER BY task_id LIMIT 100 \
+         )",
+    )
+    .bind(run.run_uid)
+    .execute(&mut *reservation_setup)
+    .await?;
+    assert_eq!(reserved_tasks.rows_affected(), 100);
+    assert_eq!(
+        sqlx::query(
+            "UPDATE moa.execution_run \
+             SET reserved_cost_microusd = 100, reserved_tokens = 100, \
+                 reserved_tasks = 100, reserved_tool_calls = 100, \
+                 reserved_retrieved_bytes = 100, updated_at = NOW() \
+             WHERE run_uid = $1"
+        )
+        .bind(run.run_uid)
+        .execute(&mut *reservation_setup)
+        .await?
+        .rows_affected(),
+        1
+    );
+    reservation_setup.commit().await?;
+    assert_eq!(
+        repository
+            .load_run(scope, run.run_uid)
+            .await?
+            .expect("10,000-task run remains visible after reservation setup")
+            .reserved,
+        ExecutionEstimate {
+            cost_microusd: 100,
+            tokens: 100,
+            tasks: 100,
+            tool_calls: 100,
+            retrieved_bytes: 100,
+        }
+    );
+
+    let reason = "cancel 10,000-task fanout".to_string();
+    let request = cancellation_request(&repository, scope, run.run_uid, reason.clone()).await?;
+    let CancellationOutcome::Cancelled {
+        commit: cancelled,
+        metrics,
+    } = repository.cancel_run(scope, run.run_uid, request).await?
+    else {
+        panic!("10,000-task cancellation must commit");
+    };
+    assert_eq!(cancelled.task_ids_to_release.len(), 10_000);
+    assert_eq!(metrics.tasks.len(), 10_000);
+    assert_eq!(
+        metrics
+            .tasks
+            .iter()
+            .filter(|transition| transition.prior_status == ExecutionTaskStatus::Reserved)
+            .count(),
+        100
+    );
+    assert_eq!(
+        metrics
+            .tasks
+            .iter()
+            .filter(|transition| transition.prior_status == ExecutionTaskStatus::Pending)
+            .count(),
+        9_900
+    );
+    assert!(
+        metrics
+            .tasks
+            .iter()
+            .all(|transition| transition.status == ExecutionTaskStatus::Cancelled)
+    );
+    assert_eq!(cancelled.run.progress_total_tasks, 10_000);
+    assert_eq!(cancelled.run.progress_cancelled_tasks, 10_000);
+    assert_eq!(cancelled.run.consumed.tasks, 10_000);
+    assert_eq!(cancelled.run.reserved, ExecutionEstimate::default());
+
+    let mut cursor = None;
+    let mut terminal_count = 0_usize;
+    loop {
+        let page = repository
+            .list_tasks(
+                scope,
+                run.run_uid,
+                ExecutionTaskPageRequest {
+                    limit: 1_000,
+                    cursor,
+                },
+            )
+            .await?;
+        terminal_count += page.tasks.len();
+        assert!(page.tasks.iter().all(|task| {
+            task.status == ExecutionTaskStatus::Cancelled
+                && task.reserved == ExecutionEstimate::default()
+                && task.actual_tasks == 1
+                && matches!(
+                    task.current_outcome.as_ref().map(|outcome| &outcome.result),
+                    Some(ExecutionTaskResult::Cancelled { reason: actual }) if actual == &reason
+                )
+        }));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(terminal_count, 10_000);
+
+    let cancelled_snapshot = cancelled.run.clone();
+    let cancelled_release_ids = cancelled.task_ids_to_release.clone();
+    let replay_request = cancellation_request(&repository, scope, run.run_uid, reason).await?;
+    let CancellationOutcome::Replayed(replayed) = repository
+        .cancel_run(scope, run.run_uid, replay_request)
+        .await?
+    else {
+        panic!("exact 10,000-task cancellation replay must recover the first commit");
+    };
+    assert_eq!(replayed.run, cancelled_snapshot);
+    assert_eq!(replayed.task_ids_to_release, cancelled_release_ids);
     Ok(())
 }
 

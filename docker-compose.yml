@@ -203,6 +203,23 @@ services:
       retries: 20
       start_period: 5s
 
+  moa-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MOA_ORCHESTRATOR_FEATURES: provider-overrides
+    image: moa/orchestrator:dev
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["migrate"]
+    environment:
+      MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
+      MOA_DATABASE_ADMIN_URL: postgres://moa_owner:dev@postgres:5432/moa
+      RUST_LOG: info
+
   moa-orchestrator:
     build:
       context: .
@@ -215,6 +232,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      moa-migrate:
+        condition: service_completed_successfully
       valkey:
         condition: service_healthy
       restate:

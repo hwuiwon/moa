@@ -89,31 +89,129 @@ async fn store_get_list_round_trip_db() {
 }
 
 #[tokio::test]
-async fn store_token_upsert_overwrites_existing_db() {
-    // Pins: re-storing the same (tenant, user, connection) rotates the token in
-    // place rather than inserting a duplicate.
-    let pool = migrated_pool("moa_token_vault_test").await;
-    let provider = encrypted_provider(Arc::new(pool));
+async fn store_token_global_conflict_target_preserves_tenant_owner_db() {
+    // Pins: the globally unique (user, connection) path is the sole upsert
+    // arbiter, so a same-tenant relink updates in place while a different tenant
+    // cannot take ownership or mutate the existing encrypted credential.
+    let pool = Arc::new(migrated_pool("moa_token_vault_test").await);
+    let provider = encrypted_provider(pool.clone());
     let tenant = TenantId::new();
     let user_id = Uuid::new_v4();
 
-    for secret in ["first-token", "second-token"] {
-        provider
-            .store_token(StoreTokenRequest {
-                tenant_id: tenant,
-                user_id,
-                connection_name: "google",
-                provider: "google",
-                external_account_id: None,
-                access_token: SecretString::new(secret.to_string().into_boxed_str()),
-                refresh_token: None,
-                token_type: Some("Bearer"),
-                expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
-                scopes: &["email".to_string()],
-            })
-            .await
-            .expect("store token");
-    }
+    provider
+        .store_token(StoreTokenRequest {
+            tenant_id: tenant,
+            user_id,
+            connection_name: "google",
+            provider: "google",
+            external_account_id: None,
+            access_token: SecretString::new("first-token".to_string().into_boxed_str()),
+            refresh_token: None,
+            token_type: Some("Bearer"),
+            expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
+            scopes: &["email".to_string()],
+        })
+        .await
+        .expect("first store must use the global unique index");
+
+    let first: (Uuid, Uuid, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT id, tenant_id, access_token_sealed, generation \
+         FROM token_vault_connections \
+         WHERE user_id = $1 AND connection_name = 'google'",
+    )
+    .bind(user_id)
+    .fetch_one(pool.as_ref())
+    .await
+    .expect("read first encrypted row");
+
+    provider
+        .store_token(StoreTokenRequest {
+            tenant_id: tenant,
+            user_id,
+            connection_name: "google",
+            provider: "google",
+            external_account_id: None,
+            access_token: SecretString::new("second-token".to_string().into_boxed_str()),
+            refresh_token: None,
+            token_type: Some("Bearer"),
+            expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
+            scopes: &["email".to_string()],
+        })
+        .await
+        .expect("same-tenant relink must update in place");
+
+    let relinked: (Uuid, Uuid, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT id, tenant_id, access_token_sealed, generation \
+         FROM token_vault_connections \
+         WHERE user_id = $1 AND connection_name = 'google'",
+    )
+    .bind(user_id)
+    .fetch_one(pool.as_ref())
+    .await
+    .expect("read relinked encrypted row");
+    assert_eq!(relinked.0, first.0, "relink must preserve row identity");
+    assert_eq!(
+        relinked.1, tenant.0,
+        "relink must preserve tenant ownership"
+    );
+    assert_ne!(
+        relinked.2, first.2,
+        "relink must replace the encrypted token"
+    );
+    assert_eq!(relinked.3, 2, "relink must advance generation exactly once");
+
+    let other_tenant = TenantId::new();
+    let cross_tenant = provider
+        .store_token(StoreTokenRequest {
+            tenant_id: other_tenant,
+            user_id,
+            connection_name: "google",
+            provider: "google",
+            external_account_id: None,
+            access_token: SecretString::new("attacker-token".to_string().into_boxed_str()),
+            refresh_token: None,
+            token_type: Some("Bearer"),
+            expires_at: None,
+            scopes: &["email".to_string()],
+        })
+        .await;
+    assert!(
+        matches!(cross_tenant, Err(TokenVaultError::Internal(_))),
+        "cross-tenant replay must fail closed, got {cross_tenant:?}"
+    );
+
+    let after_rejected_replay: (Uuid, Uuid, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT id, tenant_id, access_token_sealed, generation \
+         FROM token_vault_connections \
+         WHERE user_id = $1 AND connection_name = 'google'",
+    )
+    .bind(user_id)
+    .fetch_one(pool.as_ref())
+    .await
+    .expect("read row after rejected cross-tenant replay");
+    assert_eq!(
+        after_rejected_replay, relinked,
+        "rejected replay must not change tenant, ciphertext, generation, or row identity"
+    );
+
+    let obsolete_target_error = sqlx::query(
+        "INSERT INTO token_vault_connections (\
+             tenant_id, user_id, connection_name, provider, access_token_sealed\
+         ) VALUES ($1, $2, 'google', 'google', '\\x00'::BYTEA) \
+         ON CONFLICT (tenant_id, user_id, connection_name) DO NOTHING",
+    )
+    .bind(tenant.0)
+    .bind(user_id)
+    .execute(pool.as_ref())
+    .await
+    .expect_err("the removed three-column conflict target must have no arbiter");
+    assert_eq!(
+        obsolete_target_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("42P10")),
+        "obsolete conflict target must fail because its arbiter is absent"
+    );
 
     let token = provider
         .get_token(user_id, "google")

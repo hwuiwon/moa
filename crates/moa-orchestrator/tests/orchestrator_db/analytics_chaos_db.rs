@@ -59,32 +59,40 @@ async fn seed_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<
     Ok(())
 }
 
-async fn insert_event(
-    pool: &PgPool,
+struct EventFixture<'a> {
+    pool: &'a PgPool,
     tenant: Uuid,
     session: Uuid,
-    sequence_num: i64,
-    event_type: &str,
-    payload: serde_json::Value,
-    ts: DateTime<Utc>,
-) -> TestResult<()> {
-    sqlx::query(
-        "INSERT INTO events \
-             (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, event_type, \
-              payload, timestamp) \
-         VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(session)
-    .bind(tenant.to_string())
-    .bind(tenant)
-    .bind(sequence_num)
-    .bind(event_type)
-    .bind(payload)
-    .bind(ts)
-    .execute(pool)
-    .await?;
-    Ok(())
+}
+
+impl EventFixture<'_> {
+    async fn insert(
+        &self,
+        sequence_num: i64,
+        turn_number: i64,
+        event_type: &str,
+        payload: serde_json::Value,
+        timestamp: DateTime<Utc>,
+    ) -> TestResult<()> {
+        sqlx::query(
+            "INSERT INTO events \
+                 (id, session_id, storage_partition_id, user_id, tenant_id, sequence_num, turn_number, event_type, \
+                  payload, timestamp) \
+             VALUES ($1, $2, $3, 'user-1', $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(self.session)
+        .bind(self.tenant.to_string())
+        .bind(self.tenant)
+        .bind(sequence_num)
+        .bind(turn_number)
+        .bind(event_type)
+        .bind(payload)
+        .bind(timestamp)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 /// Seeds a two-turn session (six events) so the events pass has real rows.
@@ -93,8 +101,14 @@ async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> Te
     let base = moa_test_support::fixtures::pg_now() - ChronoDuration::days(1);
     let tool_a = Uuid::now_v7();
     let tool_b = Uuid::now_v7();
-    for (seq, event_type, payload, offset_ms) in [
+    let events = EventFixture {
+        pool,
+        tenant,
+        session,
+    };
+    for (seq, turn_number, event_type, payload, offset_ms) in [
         (
+            1,
             1,
             "ToolCall",
             json!({"data": {"tool_id": tool_a, "tool_name": "search"}}),
@@ -102,45 +116,49 @@ async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> Te
         ),
         (
             2,
+            1,
             "ToolResult",
             json!({"data": {"tool_id": tool_a, "success": true, "duration_ms": 42.0}}),
             50,
         ),
         (
             3,
+            1,
             "BrainResponse",
             json!({"data": {"model": "claude", "cost_cents": 5}}),
             100,
         ),
         (
             4,
+            2,
             "ToolCall",
             json!({"data": {"tool_id": tool_b, "tool_name": "fetch"}}),
             1000,
         ),
         (
             5,
+            2,
             "ToolResult",
             json!({"data": {"tool_id": tool_b, "success": false, "duration_ms": 10.0}}),
             1020,
         ),
         (
             6,
+            2,
             "BrainResponse",
             json!({"data": {"model": "claude", "cost_cents": 8}}),
             1100,
         ),
     ] {
-        insert_event(
-            pool,
-            tenant,
-            session,
-            seq,
-            event_type,
-            payload,
-            base + ChronoDuration::milliseconds(offset_ms),
-        )
-        .await?;
+        events
+            .insert(
+                seq,
+                turn_number,
+                event_type,
+                payload,
+                base + ChronoDuration::milliseconds(offset_ms),
+            )
+            .await?;
     }
     Ok(())
 }

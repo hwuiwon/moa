@@ -739,8 +739,8 @@ fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -
 ///
 /// `tenant_tool_enablement` deliberately reads the deployment's own pinned
 /// policy and lock. There is no tenant-owned MCP registration to consult:
-/// `V000367` removed that ownership model, and recreating it to have something
-/// to validate would reintroduce a second credential lifecycle.
+/// deployment-owned connectors are the sole credential lifecycle, so adding a
+/// tenant registration lookup here would create conflicting ownership.
 fn agent_deployment_tool_denial(
     session: &SessionMeta,
     request: &ToolCallRequest,
@@ -1456,8 +1456,8 @@ mod tests {
         // names a connector tool the activated snapshot no longer serves is not
         // the deployment that was evaluated, so the call fails closed and the
         // refusal names both the deployment and the exact snapshot it disagrees
-        // with. Nothing tenant-owned is consulted: `V000367` removed tenant MCP
-        // registration and this check reads only the deployment's own lock.
+        // with. Nothing tenant-owned is consulted because connector credentials
+        // are deployment-owned; this check reads only the deployment's own lock.
         let locked_reference = moa_hands::mcp_tool_reference("crm", "lookup");
         let mut agent_context = agent_context_with_allowlist(&[locked_reference.as_str()]);
         agent_context.tool_dependencies = vec![LockedToolRef {

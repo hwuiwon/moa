@@ -15,7 +15,7 @@ use moa_knowledge::{
         contact_group_member_contact_points,
         derive_contact_groups_from_object_with_resolved_members,
     },
-    domain::{ContactGroup, KnowledgeObject, ObjectStatus},
+    domain::{ContactGroup, ContactGroupMembership, KnowledgeObject, ObjectStatus},
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
 use moa_test_support::postgres;
@@ -93,6 +93,81 @@ fn object_with_member(
         source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
+}
+
+#[tokio::test]
+async fn membership_replace_bulk_deduplicates_last_wins_and_handles_empty_db_knowledge() {
+    // Pins: one set-based replacement preserves deterministic last-wins contact
+    // semantics, canonical evidence, multiple members, and the empty boundary.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo = repository(&db, tenant_id);
+    let group = ContactGroup {
+        group_uid: Uuid::now_v7(),
+        tenant_id,
+        group_key: format!("bulk-group-{}", Uuid::now_v7()),
+        display_name: "Bulk group".to_string(),
+        metadata: json!({}),
+    };
+    repo.upsert_contact_group(group.clone())
+        .await
+        .expect("insert bulk contact group");
+    let contact_a = ContactId(Uuid::from_u128(0x1001));
+    let contact_b = ContactId(Uuid::from_u128(0x1002));
+    let evidence_a = Uuid::from_u128(0x2001);
+    let evidence_b = Uuid::from_u128(0x2002);
+    let evidence_c = Uuid::from_u128(0x2003);
+
+    repo.replace_contact_group_memberships(
+        group.group_uid,
+        vec![
+            ContactGroupMembership {
+                group_uid: group.group_uid,
+                contact_id: contact_a,
+                evidence: vec![evidence_a],
+                metadata: json!({"revision": "discarded"}),
+            },
+            ContactGroupMembership {
+                group_uid: group.group_uid,
+                contact_id: contact_b,
+                evidence: vec![evidence_c, evidence_c],
+                metadata: json!({"revision": "b"}),
+            },
+            ContactGroupMembership {
+                group_uid: group.group_uid,
+                contact_id: contact_a,
+                evidence: vec![evidence_b, evidence_a, evidence_b],
+                metadata: json!({"revision": "last"}),
+            },
+        ],
+    )
+    .await
+    .expect("replace memberships in one bulk statement");
+
+    let target = repo
+        .contact_group_targets(tenant_id, &group.group_key)
+        .await
+        .expect("read bulk group")
+        .expect("bulk group should exist");
+    assert_eq!(target.members.len(), 2);
+    assert_eq!(target.members[0].contact_id, contact_a);
+    assert_eq!(target.members[0].evidence, vec![evidence_a, evidence_b]);
+    assert_eq!(target.members[0].metadata, json!({"revision": "last"}));
+    assert_eq!(target.members[1].contact_id, contact_b);
+    assert_eq!(target.members[1].evidence, vec![evidence_c]);
+
+    repo.replace_contact_group_memberships(group.group_uid, Vec::new())
+        .await
+        .expect("empty replacement deactivates every member");
+    let empty = repo
+        .contact_group_targets(tenant_id, &group.group_key)
+        .await
+        .expect("read emptied group")
+        .expect("group remains after membership replacement");
+    assert_eq!(empty.members, Vec::new());
+    assert_eq!(empty.active_graph_memberships, Vec::new());
 }
 
 #[tokio::test]

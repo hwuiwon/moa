@@ -19,6 +19,7 @@ use crate::{Result, WriterStats};
 /// generous; exceeding it means the database is not serving writes, which the
 /// caller must learn about rather than block on.
 const DURABLE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_BATCH_SIZE: usize = moa_config::LineageConfig::MAX_BATCH_SIZE;
 
 /// Configuration for the production mpsc lineage sink.
 #[derive(Clone, Debug)]
@@ -54,7 +55,8 @@ impl Default for MpscSinkConfig {
 }
 
 impl MpscSinkConfig {
-    /// Refuses values that would panic runtime primitives or disable progress.
+    /// Refuses values that would panic runtime primitives, allocate unbounded
+    /// batches, or disable progress.
     pub fn validate(&self) -> Result<()> {
         let invalid = [
             (self.channel_capacity == 0, "channel_capacity"),
@@ -71,6 +73,12 @@ impl MpscSinkConfig {
         match invalid {
             Some(field) => Err(crate::Error::Invalid(format!(
                 "lineage writer {field} must be greater than zero"
+            ))),
+            None if self.batch_size > MAX_BATCH_SIZE => Err(crate::Error::Invalid(format!(
+                "lineage writer batch_size must be at most {MAX_BATCH_SIZE}"
+            ))),
+            None if self.claim_batch_size > MAX_BATCH_SIZE => Err(crate::Error::Invalid(format!(
+                "lineage writer claim_batch_size must be at most {MAX_BATCH_SIZE}"
             ))),
             None => Ok(()),
         }
@@ -187,6 +195,7 @@ impl MpscSink {
         if events.is_empty() {
             return Ok(Vec::new());
         }
+        validate_durable_batch_size(events.len())?;
         let classes: Vec<&'static str> = events.iter().map(lineage_event_class).collect();
         let mut rows = Vec::with_capacity(events.len());
         for event in events {
@@ -214,6 +223,8 @@ impl MpscSink {
         if events_json.is_empty() {
             return Ok(());
         }
+        validate_durable_batch_size(events_json.len())
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
         let events = events_json
             .into_iter()
             .map(serde_json::from_value::<LineageEvent>)
@@ -242,6 +253,15 @@ impl MpscSink {
             }
         }
     }
+}
+
+fn validate_durable_batch_size(batch_size: usize) -> Result<()> {
+    if batch_size <= MAX_BATCH_SIZE {
+        return Ok(());
+    }
+    Err(crate::Error::Invalid(format!(
+        "lineage durable batch size {batch_size} exceeds the {MAX_BATCH_SIZE} event maximum"
+    )))
 }
 
 impl LineageSink for MpscSink {
@@ -370,5 +390,64 @@ fn emit_lineage_span_attributes(span: &tracing::Span, evt_json: &serde_json::Val
 impl From<&WriterHandle> for WriterStats {
     fn from(handle: &WriterHandle) -> Self {
         handle.stats()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_BATCH_SIZE, MpscSinkConfig, validate_durable_batch_size};
+
+    #[test]
+    fn direct_writer_config_rejects_batches_above_the_shared_maximum() {
+        // Pins: callers that construct `MpscSinkConfig` directly cannot bypass
+        // the deployment config's allocation and lock-array bound.
+        let mut config = MpscSinkConfig {
+            batch_size: MAX_BATCH_SIZE,
+            claim_batch_size: MAX_BATCH_SIZE,
+            ..MpscSinkConfig::default()
+        };
+        config
+            .validate()
+            .expect("the shared maximum should be accepted at the writer boundary");
+
+        config.batch_size += 1;
+        assert_eq!(
+            config
+                .validate()
+                .expect_err("oversized ingress batch must be rejected")
+                .to_string(),
+            format!(
+                "invalid lineage sink input: lineage writer batch_size must be at most {MAX_BATCH_SIZE}"
+            )
+        );
+
+        config.batch_size = MAX_BATCH_SIZE;
+        config.claim_batch_size += 1;
+        assert_eq!(
+            config
+                .validate()
+                .expect_err("oversized claim batch must be rejected")
+                .to_string(),
+            format!(
+                "invalid lineage sink input: lineage writer claim_batch_size must be at most {MAX_BATCH_SIZE}"
+            )
+        );
+    }
+
+    #[test]
+    fn durable_batch_input_is_bounded_before_allocating_rows() {
+        // Pins: the public durable-batch path cannot bypass configuration by
+        // presenting one arbitrarily large caller-owned vector.
+        validate_durable_batch_size(MAX_BATCH_SIZE)
+            .expect("the documented maximum should be accepted");
+        assert_eq!(
+            validate_durable_batch_size(MAX_BATCH_SIZE + 1)
+                .expect_err("an oversized durable batch must be rejected")
+                .to_string(),
+            format!(
+                "invalid lineage sink input: lineage durable batch size {} exceeds the {MAX_BATCH_SIZE} event maximum",
+                MAX_BATCH_SIZE + 1
+            )
+        );
     }
 }

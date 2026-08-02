@@ -17,16 +17,237 @@ mod embedded_for_cutover_proof {
 /// Default Docker Compose Postgres URL used by local MOA tests.
 const DEFAULT_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
-/// Destructive migration under focused PostgreSQL validation.
-const V000336_SQL: &str =
-    include_str!("../migrations/postgres/V000336__remove_legacy_procedure_runs.sql");
+/// Serializes cluster-global role DDL across throwaway databases and test processes.
+const CLUSTER_CATALOG_TEST_LOCK_ID: i64 = 0x4d4f_415f_5445_5354;
 
-/// Unified execute-routing analytics and audit cutover migration.
-const V000337_SQL: &str = include_str!("../migrations/postgres/V000337__execution_analytics.sql");
+const RETIRED_INDEXES: [&str; 10] = [
+    "public.idx_events_tenant_session",
+    "analytics.score_run_partition_identity_idx",
+    "moa.knowledge_source_acl_entries_lookup_idx",
+    "public.idx_task_segments_session",
+    "public.idx_experience_attributions_experience",
+    "public.idx_users_tenant_email_unique",
+    "moa.idx_hand_leases_session_worker",
+    "public.idx_token_vault_connections_expires",
+    "public.idx_token_vault_connections_refresh_lease",
+    "public.token_vault_connections_tenant_user_conn_key",
+];
 
-/// Tenant-owned MCP schema removal.
-const V000367_SQL: &str =
-    include_str!("../migrations/postgres/V000367__drop_tenant_mcp_connection_bindings.sql");
+const RETAINED_INDEXES: [&str; 10] = [
+    "public.events_session_id_sequence_num_key",
+    "analytics.score_run_id_partition_key",
+    "moa.knowledge_source_acl_entries_uniq",
+    "public.task_segments_session_id_segment_index_key",
+    "public.experience_attributions_experience_id_subject_type_subject__key",
+    "public.idx_users_tenant_email_lower_unique",
+    "moa.hand_leases_pkey",
+    "public.idx_token_vault_connections_user",
+    "public.idx_token_vault_connections_tenant",
+    "public.token_vault_connections_pkey",
+];
+
+const PRIVACY_AUDITOR_TABLES: [&str; 14] = [
+    "public.contacts",
+    "moa.edge_index",
+    "public.sessions",
+    "public.task_segments",
+    "public.experience_records",
+    "public.experience_attributions",
+    "public.learning_candidates",
+    "public.learning_candidate_source",
+    "public.learning_candidate_decision",
+    "public.learning_log",
+    "public.learning_log_source",
+    "moa.artifact_revision_contribution",
+    "moa.artifact_suite_contribution",
+    "moa.privacy_erasure_record_decision",
+];
+
+const FINAL_AUDITOR_GRANT_TABLES: [&str; 24] = [
+    "moa.artifact",
+    "moa.artifact_file",
+    "moa.artifact_revision",
+    "moa.artifact_revision_contribution",
+    "moa.artifact_suite_contribution",
+    "moa.audit_jti_used",
+    "moa.edge_index",
+    "moa.embeddings",
+    "moa.erasure_jobs",
+    "moa.graph_changelog",
+    "moa.node_index",
+    "moa.privacy_erasure_record_decision",
+    "moa.tenant_purge_catalog",
+    "moa.tenant_purge_operations",
+    "public.contacts",
+    "public.experience_attributions",
+    "public.experience_records",
+    "public.learning_candidate_decision",
+    "public.learning_candidate_source",
+    "public.learning_candidates",
+    "public.learning_log",
+    "public.learning_log_source",
+    "public.sessions",
+    "public.task_segments",
+];
+
+const FINAL_AUDITOR_POLICY_TABLES: [&str; 20] = [
+    "moa.artifact",
+    "moa.artifact_file",
+    "moa.artifact_revision",
+    "moa.artifact_revision_contribution",
+    "moa.artifact_suite_contribution",
+    "moa.edge_index",
+    "moa.embeddings",
+    "moa.graph_changelog",
+    "moa.node_index",
+    "moa.privacy_erasure_record_decision",
+    "public.contacts",
+    "public.experience_attributions",
+    "public.experience_records",
+    "public.learning_candidate_decision",
+    "public.learning_candidate_source",
+    "public.learning_candidates",
+    "public.learning_log",
+    "public.learning_log_source",
+    "public.sessions",
+    "public.task_segments",
+];
+
+const TENANT_PURGE_SCOPE_INDEXES: [(&str, &str, &str, &str, Option<&str>); 19] = [
+    (
+        "moa",
+        "tenant_purge_dual_control_request_idx",
+        "dual_control_request",
+        "tenant_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_knowledge_contact_group_memberships_idx",
+        "knowledge_contact_group_memberships",
+        "tenant_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_knowledge_source_acl_entries_idx",
+        "knowledge_source_acl_entries",
+        "tenant_id",
+        None,
+    ),
+    (
+        "public",
+        "tenant_purge_builtin_pending_approvals_idx",
+        "builtin_pending_approvals",
+        "tenant_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_execution_action_review_outbox_idx",
+        "execution_action_review_outbox",
+        "tenant_id",
+        None,
+    ),
+    (
+        "public",
+        "tenant_purge_contact_verification_challenges_idx",
+        "contact_verification_challenges",
+        "tenant_id",
+        None,
+    ),
+    (
+        "public",
+        "tenant_purge_password_reset_tokens_idx",
+        "password_reset_tokens",
+        "tenant_id",
+        None,
+    ),
+    (
+        "public",
+        "tenant_purge_user_session_tokens_idx",
+        "user_session_tokens",
+        "tenant_id",
+        None,
+    ),
+    (
+        "public",
+        "tenant_purge_auth0_user_map_idx",
+        "auth0_user_map",
+        "tenant_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_suite_contribution_idx",
+        "artifact_suite_contribution",
+        "storage_partition_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_revision_contribution_idx",
+        "artifact_revision_contribution",
+        "storage_partition_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_release_eval_overlay_idx",
+        "artifact_release_eval_overlay",
+        "storage_partition_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_release_case_pack_idx",
+        "artifact_release_case_pack",
+        "storage_partition_id",
+        Some("storage_partition_id IS NOT NULL"),
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_activation_attestation_idx",
+        "artifact_activation_attestation",
+        "storage_partition_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_release_policy_idx",
+        "artifact_release_policy",
+        "storage_partition_id",
+        Some("storage_partition_id IS NOT NULL"),
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_idx",
+        "artifact",
+        "storage_partition_id",
+        Some("storage_partition_id IS NOT NULL"),
+    ),
+    (
+        "moa",
+        "tenant_purge_artifact_revision_idx",
+        "artifact_revision",
+        "storage_partition_id",
+        Some("storage_partition_id IS NOT NULL"),
+    ),
+    (
+        "moa",
+        "tenant_purge_embeddings_idx",
+        "embeddings",
+        "tenant_id",
+        None,
+    ),
+    (
+        "moa",
+        "tenant_purge_legal_hold_idx",
+        "legal_hold",
+        "tenant_id",
+        Some("released_at IS NOT NULL"),
+    ),
+];
 
 /// Current migration ownership inventory.
 const MIGRATION_OWNERSHIP: &str = include_str!("../migration-ownership.toml");
@@ -35,162 +256,19 @@ fn removed_serialized_value(parts: &[&str]) -> String {
     parts.concat()
 }
 
-#[test]
-fn execution_analytics_source_contract_is_exact_offline() {
-    // Pins: V337 owns the decision-plus-strategy execution audit, materialization, fact,
-    // sequence/high-water, trace-context, and archive-cutover contracts without
-    // recreating any procedure-era compatibility surface.
-    for table in [
-        "CREATE TABLE moa.execution_route_audit",
-        "CREATE TABLE moa.execution_planner_call_audit",
-        "CREATE TABLE moa.execution_compile_audit",
-        "CREATE TABLE moa.execution_node_materialization",
-        "CREATE TABLE analytics.clickhouse_schema_upgrade_state",
-    ] {
-        assert!(V000337_SQL.contains(table), "missing V337 table: {table}");
-    }
-    for contract in [
-        "7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11",
-        "moa.execution.route-audit",
-        "'source','classifier_outcome','provider_model','prompt_version'",
-        "'objective_hash','response_hash','confidence_bps'",
-        "'missing_input_count','usage','cost_microusd','duration_micros'",
-        "'kind','stage','decision','strategy','provenance','accepted_at'",
-        "stage TEXT,\n    decision TEXT,\n    strategy TEXT,",
-        "decision = 'execute' AND strategy = 'inline'",
-        "decision = 'execute' AND strategy = 'durable'",
-        "IF route_valid IS NOT TRUE THEN",
-        "'respond','execute','needs_input'",
-        "'initial','durable_upgrade'",
-        "'low_confidence','context_forced_inline'",
-        "moa.execution.planner-audit",
-        "moa.execution.compile-audit",
-        "octet_length(candidate_json::TEXT) <= 1048576",
-        "octet_length(compiler_report::TEXT) <= 262144",
-        "octet_length(validation_report::TEXT) <= 262144",
-        "pg_advisory_xact_lock_shared(1297047877, 337)",
-        "CREATE SEQUENCE moa.execution_analytics_change_seq",
-        "CREATE TRIGGER execution_route_audit_immutable_guard",
-        "ADD COLUMN cursor_seq BIGINT",
-        "pass_high_water_seq",
-        "execution_dimensions",
-        "execution_planning_context_normalized_scope_key",
-        "execution_template_admission_run_normalized_scope_fkey",
-        "DROP MATERIALIZED VIEW analytics.execution_task_fact",
-        "DROP MATERIALIZED VIEW analytics.execution_run_fact",
-        "task_id AS task_id",
-        "sac.agent_id",
-        "traceparent",
-        "tracestate",
-    ] {
-        assert!(
-            V000337_SQL.contains(contract),
-            "missing V337 source contract: {contract}"
-        );
-    }
-    let task_fact_drop = V000337_SQL
-        .find("DROP MATERIALIZED VIEW analytics.execution_task_fact")
-        .expect("V337 drops the dependent task fact first");
-    let run_fact_drop = V000337_SQL
-        .find("DROP MATERIALIZED VIEW analytics.execution_run_fact")
-        .expect("V337 drops the run fact second");
-    let normalized_columns = V000337_SQL
-        .find("ADD COLUMN source_kind")
-        .expect("V337 adds normalized run columns");
-    let run_fact_create = V000337_SQL
-        .find("CREATE MATERIALIZED VIEW analytics.execution_run_fact")
-        .expect("V337 recreates the run fact");
-    let task_fact_create = V000337_SQL
-        .find("CREATE MATERIALIZED VIEW analytics.execution_task_fact")
-        .expect("V337 recreates the task fact");
-    assert!(
-        task_fact_drop < run_fact_drop
-            && run_fact_drop < normalized_columns
-            && normalized_columns < run_fact_create
-            && run_fact_create < task_fact_create,
-        "V337 fact rebuild order must remain dependency-safe"
-    );
-    for forbidden in [
-        "procedure_run_fact",
-        "procedure_node_run_fact",
-        "artifact_run",
-        "artifact_node_run",
-        "task_uid",
-        "source_ref",
-        "capability_ref",
-        "decision = 'routed'",
-        "route_rationale",
-        "execution_route_rationale_is_valid",
-    ] {
-        assert!(
-            !V000337_SQL.contains(forbidden),
-            "V337 must not recreate superseded surface `{forbidden}`"
-        );
-    }
-    for forbidden_parts in [
-        ["route_", "mode"].as_slice(),
-        ["act_", "escalation"].as_slice(),
-        ["context_forced_", "act"].as_slice(),
-        ["explicit_", "run"].as_slice(),
-    ] {
-        let forbidden = removed_serialized_value(forbidden_parts);
-        assert!(
-            !V000337_SQL.contains(&forbidden),
-            "V337 must not recreate superseded surface `{forbidden}`"
-        );
-    }
-    for ownership in [
-        "name = \"execution_route_audit\"\nschema = \"moa\"\nowner = \"moa-execution\"",
-        "name = \"execution_planner_call_audit\"\nschema = \"moa\"\nowner = \"moa-execution\"",
-        "name = \"execution_compile_audit\"\nschema = \"moa\"\nowner = \"moa-execution\"",
-        "name = \"execution_node_materialization\"\nschema = \"moa\"\nowner = \"moa-execution\"",
-        "name = \"clickhouse_schema_upgrade_state\"\nschema = \"analytics\"\nowner = \"moa-analytics\"",
-    ] {
-        assert!(
-            MIGRATION_OWNERSHIP.contains(ownership),
-            "missing V337 ownership row: {ownership}"
-        );
-    }
-}
-
-#[test]
-fn procedure_runtime_cutover_discards_history_without_compatibility_paths_offline() {
-    // Pins: V336 removes the procedure runtime without importing, translating,
-    // aliasing, or preserving procedure-era execution data.
-    let node_drop = V000336_SQL
-        .find("DROP TABLE moa.artifact_node_run;")
-        .expect("V000336 drops procedure child history");
-    let run_drop = V000336_SQL
-        .find("DROP TABLE moa.artifact_run;")
-        .expect("V000336 drops procedure parent history");
-    assert!(
-        node_drop < run_drop,
-        "procedure child table must drop first"
-    );
-    assert!(!V000336_SQL.contains("INSERT INTO moa.execution_run"));
-    assert!(!V000336_SQL.contains("INSERT INTO moa.execution_task"));
-    assert!(!V000336_SQL.contains("legacy_migration"));
-    assert!(V000336_SQL.contains("DELETE FROM moa.experiment_trial"));
-    assert!(V000336_SQL.contains("DELETE FROM moa.experiment_run"));
-    assert!(V000336_SQL.contains("DROP COLUMN procedure_run_uid"));
-    assert!(!V000336_SQL.contains("CREATE VIEW moa.artifact_run"));
-    assert!(!V000336_SQL.contains("CREATE VIEW moa.artifact_node_run"));
-}
-
 /// Returns the Postgres URL used by integration tests, mirroring the runtime
 /// `MOA_DATABASE_URL` setting and falling back to the compose default.
 fn test_database_url() -> String {
     std::env::var("MOA_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string())
 }
 
-/// Returns a process-and-time-unique throwaway database name.
+/// Returns a process-and-UUID-unique throwaway database name.
 fn unique_db_name() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    format!("moa_mig_idem_{}_{nanos}", std::process::id())
+    format!(
+        "moa_mig_idem_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// Rewrites the database name in a Postgres URL, preserving any query string.
@@ -225,25 +303,93 @@ async fn clean_apply_then_reapply(
         target.close().await;
     }
 
-    let first = moa_migrations::run_reporting_applied(target_url).await?;
-    let second = moa_migrations::run_reporting_applied(target_url).await?;
+    let first = run_reporting_applied_serialized(target_url).await?;
+    let second = run_reporting_applied_serialized(target_url).await?;
     Ok((first, second))
 }
 
-/// Applies a central migration prefix and reports only migrations applied by the call.
-async fn apply_through_version(
+/// Runs the public migration API while serializing cluster-global role DDL.
+async fn run_reporting_applied_serialized(
     target_url: &str,
-    version: i32,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let catalog_lock = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&test_database_url())
+        .await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(CLUSTER_CATALOG_TEST_LOCK_ID)
+        .execute(&catalog_lock)
+        .await?;
+    let result = moa_migrations::run_reporting_applied(target_url).await;
+    let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(CLUSTER_CATALOG_TEST_LOCK_ID)
+        .execute(&catalog_lock)
+        .await;
+    catalog_lock.close().await;
+    unlock_result?;
+    Ok(result?)
+}
+
+/// Returns the exact embedded migration labels in version order.
+fn expected_migration_labels() -> Vec<String> {
+    let mut migrations = embedded_for_cutover_proof::migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(|migration| (migration.version(), migration.to_string()))
+        .collect::<Vec<_>>();
+    migrations.sort_by_key(|(version, _)| *version);
+    migrations.into_iter().map(|(_, label)| label).collect()
+}
+
+/// Resolves an embedded migration by semantic name.
+fn migration_version(migration_name: &str) -> Result<i32, std::io::Error> {
+    embedded_for_cutover_proof::migrations::runner()
+        .get_migrations()
+        .iter()
+        .find(|migration| migration.name() == migration_name)
+        .map(|migration| migration.version())
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "embedded migration named {migration_name:?} does not exist"
+            ))
+        })
+}
+
+/// Applies a central migration prefix selected by its semantic migration name.
+async fn apply_through_migration(
+    target_url: &str,
+    migration_name: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let version = migration_version(migration_name)?;
+    let mut migrations = embedded_for_cutover_proof::migrations::runner()
+        .get_migrations()
+        .clone();
+    migrations.sort_by_key(refinery::Migration::version);
+    let runner = refinery::Runner::new(&migrations);
+    let catalog_lock = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&test_database_url())
+        .await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(CLUSTER_CATALOG_TEST_LOCK_ID)
+        .execute(&catalog_lock)
+        .await?;
     let (mut client, connection) =
         tokio_postgres::connect(target_url, tokio_postgres::NoTls).await?;
     let connection_task = tokio::spawn(connection);
-    let report = embedded_for_cutover_proof::migrations::runner()
+    let result = runner
         .set_target(refinery::Target::Version(version))
         .run_async(&mut client)
-        .await?;
+        .await;
     drop(client);
     connection_task.await??;
+    let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(CLUSTER_CATALOG_TEST_LOCK_ID)
+        .execute(&catalog_lock)
+        .await;
+    catalog_lock.close().await;
+    unlock_result?;
+    let report = result?;
     Ok(report
         .applied_migrations()
         .iter()
@@ -251,12 +397,144 @@ async fn apply_through_version(
         .collect())
 }
 
-/// Applies the complete Task 10 migration prefix and stops before V000337.
-async fn apply_through_v000336(
+/// Installs the extensions provided by the normal compose bootstrap.
+async fn install_required_extensions(
     target_url: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    apply_through_version(target_url, 336).await?;
+    let target = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(target_url)
+        .await?;
+    target
+        .execute(
+            "CREATE EXTENSION IF NOT EXISTS vector; \
+             CREATE EXTENSION IF NOT EXISTS pgaudit;",
+        )
+        .await?;
+    target.close().await;
     Ok(())
+}
+
+/// Installs a database-local event trigger that records every later DDL start.
+async fn install_ddl_sentinel(
+    target_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let target = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(target_url)
+        .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE SCHEMA migration_test_sentinel;
+        CREATE TABLE migration_test_sentinel.ddl_start (
+            ordinal BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            command_tag TEXT NOT NULL
+        );
+        CREATE FUNCTION migration_test_sentinel.record_ddl_start()
+        RETURNS event_trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            INSERT INTO migration_test_sentinel.ddl_start (command_tag)
+            VALUES (tg_tag);
+        END
+        $$;
+        CREATE EVENT TRIGGER migration_protocol_no_ddl
+            ON ddl_command_start
+            EXECUTE FUNCTION migration_test_sentinel.record_ddl_start();
+        "#,
+    )
+    .execute(&target)
+    .await?;
+    target
+        .execute("TRUNCATE migration_test_sentinel.ddl_start")
+        .await?;
+    target.close().await;
+    Ok(())
+}
+
+/// Captures a runner rejection and the amount of migration DDL it started.
+async fn reset_rejection_and_ddl_count(
+    target_url: &str,
+) -> Result<(String, i64), Box<dyn std::error::Error + Send + Sync>> {
+    install_ddl_sentinel(target_url).await?;
+    let error = match moa_migrations::run_reporting_applied(target_url).await {
+        Ok(applied) => {
+            return Err(std::io::Error::other(format!(
+                "invalid migration history unexpectedly applied {applied:?}"
+            ))
+            .into());
+        }
+        Err(error) => error,
+    };
+    let rendered = format!("{error:#}");
+
+    let target = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(target_url)
+        .await?;
+    let ddl_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM migration_test_sentinel.ddl_start")
+            .fetch_one(&target)
+            .await?;
+    target.close().await;
+    Ok((rendered, ddl_count))
+}
+
+/// Asserts the exact destructive-reset failure contract after cleanup.
+fn assert_destructive_reset_rejection(
+    rendered_error: &str,
+    ddl_count: i64,
+    expected_error_fragment: &str,
+) {
+    assert!(
+        rendered_error.contains(expected_error_fragment),
+        "migration rejection did not identify {expected_error_fragment:?}: {rendered_error}"
+    );
+    assert!(
+        rendered_error.contains("destructively rebuilt or reset"),
+        "migration rejection must prescribe the destructive reset boundary: {rendered_error}"
+    );
+    assert_eq!(
+        ddl_count, 0,
+        "the history guard must reject before any migration DDL starts"
+    );
+}
+
+/// Drops a throwaway database only after proving every test connection closed.
+async fn drop_database_with_zero_connections(admin: &PgPool, database: &str) {
+    let mut active_connections = i64::MAX;
+    for _ in 0..50 {
+        active_connections = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+        )
+        .bind(database)
+        .fetch_one(admin)
+        .await
+        .expect("inspect throwaway database connections before cleanup");
+        if active_connections == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        active_connections, 0,
+        "throwaway database {database} still has active test connections after close convergence"
+    );
+    admin
+        .execute(format!("DROP DATABASE \"{database}\"").as_str())
+        .await
+        .expect("drop disconnected throwaway migration database");
+    let still_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(database)
+            .fetch_one(admin)
+            .await
+            .expect("confirm throwaway migration database was dropped");
+    assert!(
+        !still_exists,
+        "throwaway database {database} survived cleanup"
+    );
 }
 
 /// One deliberately invalid execution-route audit matrix cell.
@@ -331,11 +609,10 @@ async fn assert_route_audit_insert_rejected(
 }
 
 #[tokio::test]
-async fn unsupported_index_rebuild_schema_is_absent_on_a_fresh_database_db() {
-    // Pins: the final schema must not advertise the unsupported generation-switch
-    // design. The normal DB lane applies the full migration chain, including
-    // V000351, and V000366 must remove every rebuild/rechunk relation and its
-    // write-fence column.
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn final_schema_omits_retired_relations_columns_and_indexes_db() {
+    // Pins: a pristine database never creates compatibility-only relations,
+    // columns, or redundant indexes retired by the contiguous epoch.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
     let admin = PgPoolOptions::new()
@@ -363,6 +640,9 @@ async fn unsupported_index_rebuild_schema_is_absent_on_a_fresh_database_db() {
                     "moa.knowledge_active_generation",
                     "moa.knowledge_rebuild_candidate_vector",
                     "moa.knowledge_rechunk_staging",
+                    "moa.artifact_run",
+                    "moa.artifact_node_run",
+                    "public.tenant_mcp_connection_bindings",
                 ])
                 .fetch_all(&target)
                 .await?;
@@ -373,16 +653,29 @@ async fn unsupported_index_rebuild_schema_is_absent_on_a_fresh_database_db() {
         )
         .fetch_optional(&target)
         .await?;
+        let event_mutation_privileges: (bool, bool, bool) = sqlx::query_as(
+            "SELECT \
+                has_table_privilege('moa_app', 'public.events', 'UPDATE'), \
+                has_table_privilege('moa_app', 'public.events', 'DELETE'), \
+                has_table_privilege('moa_app', 'public.events', 'TRUNCATE')",
+        )
+        .fetch_one(&target)
+        .await?;
+        let indexes = final_index_catalog(&target).await?;
         target.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((relations, reembed_column))
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            relations,
+            reembed_column,
+            event_mutation_privileges,
+            indexes,
+        ))
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
-    let (relations, reembed_column) = outcome.expect("removed schema assertions should complete");
+    let (relations, reembed_column, event_mutation_privileges, indexes) =
+        outcome.expect("final-schema retirement assertions should complete");
     assert!(
         relations.iter().all(Option::is_none),
         "rebuild relations remain: {relations:?}"
@@ -391,16 +684,45 @@ async fn unsupported_index_rebuild_schema_is_absent_on_a_fresh_database_db() {
         reembed_column.is_none(),
         "rebuild write-fence column remains"
     );
+    assert_eq!(
+        event_mutation_privileges,
+        (false, false, false),
+        "moa_app must not bypass append-only event storage through table privileges"
+    );
+    for retired in RETIRED_INDEXES {
+        assert!(
+            !indexes.contains_key(retired),
+            "retired index {retired} must never be created by the pristine epoch"
+        );
+    }
+    for retained in RETAINED_INDEXES {
+        let row = indexes
+            .get(retained)
+            .unwrap_or_else(|| panic!("required final index {retained} is absent"));
+        assert!(
+            row.is_valid && row.is_ready && row.is_live,
+            "required final index {retained} is not usable: {row:?}"
+        );
+    }
+    let attribution_identity = indexes
+        .get("public.experience_attributions_experience_id_subject_type_subject__key")
+        .expect("experience-attribution identity index must exist");
+    assert!(
+        attribution_identity.is_unique,
+        "experience-attribution identity must remain unique"
+    );
+    assert_eq!(
+        attribution_identity.definition,
+        "CREATE UNIQUE INDEX experience_attributions_experience_id_subject_type_subject__key ON public.experience_attributions USING btree (experience_id, subject_type, subject_id)",
+        "the retained identity index must cover WHERE experience_id plus the production ORDER BY subject_type, subject_id"
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn refinery_clean_apply_then_second_apply_reports_no_new_migrations_db() {
-    // Pins clean-apply + idempotency of the central migration runner on a pristine
-    // database: the first run applies the full embedded set, and a second run reports
-    // zero newly applied migrations. Refinery's schema-history bookkeeping is what
-    // makes the re-run a no-op; a migration rewritten to re-run unconditionally, or a
-    // non-clean-appliable migration set, would fail one of these assertions.
+async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
+    // Pins: a pristine database applies the exact contiguous V1..V49 epoch,
+    // validates as complete, and reports no work on a second public-runner call.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
 
@@ -415,23 +737,2315 @@ async fn refinery_clean_apply_then_second_apply_reports_no_new_migrations_db() {
         .expect("create throwaway migration database");
 
     let target_url = with_database(&admin_url, &db_name);
-    let outcome = clean_apply_then_reapply(&target_url).await;
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        moa_migrations::validate_complete_history(&target).await?;
+        let history: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT version, name FROM public.refinery_schema_history ORDER BY version",
+        )
+        .fetch_all(&target)
+        .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((first, second, history))
+    }
+    .await;
 
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    // Always prove the throwaway database is disconnected before cleanup.
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
-    let (first, second) =
+    let (first, second, history) =
         outcome.expect("central migration runs should complete on a fresh database");
-    assert!(
-        !first.is_empty(),
-        "a pristine database must apply migrations on the first run"
+    let expected_labels = expected_migration_labels();
+    assert_eq!(
+        expected_labels.len(),
+        49,
+        "the epoch must contain exactly 49 migrations"
+    );
+    assert_eq!(
+        first, expected_labels,
+        "the pristine apply must be exact and ordered"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        (1..=49).collect::<Vec<_>>(),
+        "refinery history must be exactly contiguous from V1 through V49"
     );
     assert!(
         second.is_empty(),
         "second apply must report no newly applied migrations, got {second:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn baseline_generated_identifiers_are_by_default_identity_db() {
+    // Pins: the two baseline-generated identifiers use modern BY DEFAULT
+    // identity columns, accept explicit import values, and still generate values
+    // when callers omit the identifier.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect identity-catalog maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create identity-catalog throwaway migration database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let identity_catalog: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT table_schema::TEXT || '.' || table_name::TEXT,
+                   column_name::TEXT,
+                   identity_generation::TEXT
+            FROM information_schema.columns
+            WHERE (table_schema, table_name, column_name) IN (
+                ('moa', 'graph_changelog', 'change_id'),
+                ('moa', 'ingest_dlq', 'dlq_id')
+            )
+              AND is_identity = 'YES'
+            ORDER BY table_schema, table_name, column_name
+            "#,
+        )
+        .fetch_all(&target)
+        .await?;
+        let sequences: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT pg_get_serial_sequence('moa.graph_changelog', 'change_id'), \
+                    pg_get_serial_sequence('moa.ingest_dlq', 'dlq_id')",
+        )
+        .fetch_one(&target)
+        .await?;
+
+        let tenant_id = uuid::Uuid::new_v4();
+        let explicit_graph_id = 9_000_001_i64;
+        let returned_explicit_graph_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO moa.graph_changelog (
+                change_id, tenant_id, storage_partition_id, actor_kind, op,
+                target_kind, target_label, target_uid, payload
+            )
+            VALUES ($1, $2, $3, 'system', 'create', 'node', 'Fact', $4, '{}'::JSONB)
+            RETURNING change_id
+            "#,
+        )
+        .bind(explicit_graph_id)
+        .bind(tenant_id)
+        .bind(tenant_id.to_string())
+        .bind(uuid::Uuid::new_v4())
+        .fetch_one(&target)
+        .await?;
+        let generated_graph_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO moa.graph_changelog (
+                tenant_id, storage_partition_id, actor_kind, op,
+                target_kind, target_label, target_uid, payload
+            )
+            VALUES ($1, $2, 'system', 'create', 'node', 'Fact', $3, '{}'::JSONB)
+            RETURNING change_id
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(tenant_id.to_string())
+        .bind(uuid::Uuid::new_v4())
+        .fetch_one(&target)
+        .await?;
+
+        let explicit_dlq_id = 9_000_002_i64;
+        let returned_explicit_dlq_id: i64 = sqlx::query_scalar(
+            "INSERT INTO moa.ingest_dlq \
+                (dlq_id, storage_partition_id, tenant_id, payload, error) \
+             VALUES ($1, $2, $3, '{}'::JSONB, 'explicit identity test') \
+             RETURNING dlq_id",
+        )
+        .bind(explicit_dlq_id)
+        .bind(tenant_id.to_string())
+        .bind(tenant_id)
+        .fetch_one(&target)
+        .await?;
+        let generated_dlq_id: i64 = sqlx::query_scalar(
+            "INSERT INTO moa.ingest_dlq \
+                (storage_partition_id, tenant_id, payload, error) \
+             VALUES ($1, $2, '{}'::JSONB, 'generated identity test') \
+             RETURNING dlq_id",
+        )
+        .bind(tenant_id.to_string())
+        .bind(tenant_id)
+        .fetch_one(&target)
+        .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            identity_catalog,
+            sequences,
+            returned_explicit_graph_id,
+            generated_graph_id,
+            returned_explicit_dlq_id,
+            generated_dlq_id,
+        ))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+    let (
+        identity_catalog,
+        sequences,
+        returned_explicit_graph_id,
+        generated_graph_id,
+        returned_explicit_dlq_id,
+        generated_dlq_id,
+    ) = outcome.expect("baseline identity assertions should complete");
+    assert_eq!(
+        identity_catalog,
+        vec![
+            (
+                "moa.graph_changelog".to_string(),
+                "change_id".to_string(),
+                "BY DEFAULT".to_string(),
+            ),
+            (
+                "moa.ingest_dlq".to_string(),
+                "dlq_id".to_string(),
+                "BY DEFAULT".to_string(),
+            ),
+        ],
+        "both baseline-generated identifiers must be BY DEFAULT identity columns"
+    );
+    assert_eq!(
+        sequences,
+        (
+            Some("moa.graph_changelog_change_id_seq".to_string()),
+            Some("moa.ingest_dlq_dlq_id_seq".to_string()),
+        ),
+        "identity columns must retain their stable owned sequence names"
+    );
+    assert_eq!(returned_explicit_graph_id, 9_000_001);
+    assert!(
+        generated_graph_id > 0 && generated_graph_id != returned_explicit_graph_id,
+        "graph changelog must generate a distinct positive identifier"
+    );
+    assert_eq!(returned_explicit_dlq_id, 9_000_002);
+    assert!(
+        generated_dlq_id > 0 && generated_dlq_id != returned_explicit_dlq_id,
+        "ingest DLQ must generate a distinct positive identifier"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_parallel_fresh_databases_retry_shared_role_catalog_races_db() {
+    // Pins: independent fresh databases in one Postgres cluster can migrate in
+    // parallel even though role DDL writes the cluster-global authorization
+    // catalog. The runner retries only PostgreSQL's exact concurrent-tuple error.
+    let admin_url = test_database_url();
+    let first_db = unique_db_name();
+    let second_db = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for parallel migration test");
+    for db_name in [&first_db, &second_db] {
+        admin
+            .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+            .await
+            .expect("create parallel-migration throwaway database");
+    }
+    let first_url = with_database(&admin_url, &first_db);
+    let second_url = with_database(&admin_url, &second_db);
+
+    let outcome = async {
+        install_required_extensions(&first_url).await?;
+        install_required_extensions(&second_url).await?;
+        let (first, second) = tokio::join!(
+            moa_migrations::run_reporting_applied(&first_url),
+            moa_migrations::run_reporting_applied(&second_url)
+        );
+        let first = first?;
+        let second = second?;
+        let expected = expected_migration_labels();
+        assert_eq!(
+            first, expected,
+            "first database must report the whole epoch"
+        );
+        assert_eq!(
+            second, expected,
+            "second database must report the whole epoch"
+        );
+        for target_url in [&first_url, &second_url] {
+            let target = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(target_url)
+                .await?;
+            moa_migrations::validate_complete_history(&target).await?;
+            target.close().await;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &first_db).await;
+    drop_database_with_zero_connections(&admin, &second_db).await;
+    admin.close().await;
+
+    outcome.expect("parallel fresh-database migrations must both complete");
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_exact_prefix_resumes_db() {
+    // Pins: a database with an exact new-epoch prefix resumes at the next
+    // semantic migration and becomes a complete V1..V49 history.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for prefix-resume test");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create prefix-resume throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        install_required_extensions(&target_url).await?;
+        let prefix = apply_through_migration(&target_url, "execution_analytics").await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let partial_error = moa_migrations::validate_complete_history(&target)
+            .await
+            .expect_err("an exact prefix is valid for resume but not complete")
+            .to_string();
+        target.close().await;
+
+        let resumed = run_reporting_applied_serialized(&target_url).await?;
+        let second = run_reporting_applied_serialized(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        moa_migrations::validate_complete_history(&target).await?;
+        let versions: Vec<i32> = sqlx::query_scalar(
+            "SELECT version FROM public.refinery_schema_history ORDER BY version",
+        )
+        .fetch_all(&target)
+        .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            prefix,
+            resumed,
+            second,
+            partial_error,
+            versions,
+        ))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (prefix, resumed, second, partial_error, versions) =
+        outcome.expect("exact contiguous prefix should resume successfully");
+    let expected = expected_migration_labels();
+    let prefix_len = usize::try_from(
+        migration_version("execution_analytics").expect("execution analytics must be embedded"),
+    )
+    .expect("migration version must be positive");
+    assert_eq!(prefix, expected[..prefix_len]);
+    assert_eq!(resumed, expected[prefix_len..]);
+    assert!(
+        second.is_empty(),
+        "completed history must not reapply: {second:?}"
+    );
+    assert!(
+        partial_error.contains("incomplete: found 28 of 49 expected rows"),
+        "complete-history validation must distinguish a valid prefix: {partial_error}"
+    );
+    assert_eq!(versions, (1..=49).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_legacy_sparse_rejects_before_ddl_db() {
+    // Pins: a sparse-epoch history cannot be adopted or partially rewritten.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for sparse-history guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create sparse-history throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE public.refinery_schema_history (\
+                 version INT4 PRIMARY KEY, name VARCHAR(255), \
+                 applied_on VARCHAR(255), checksum VARCHAR(255)); \
+             INSERT INTO public.refinery_schema_history VALUES \
+                 (101, 'auth_baseline', 'legacy', '0');",
+        )
+        .execute(&target)
+        .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect sparse-history rejection");
+    assert_destructive_reset_rejection(&error, ddl_count, "diverges at row 1");
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_legacy_v1_only_rejects_before_ddl_db() {
+    // Pins: the retired V1 session baseline must not masquerade as the new
+    // contiguous epoch marker that now owns version one.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for legacy-V1 guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create legacy-V1 throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE public.refinery_schema_history (\
+                 version INT4 PRIMARY KEY, name VARCHAR(255), \
+                 applied_on VARCHAR(255), checksum VARCHAR(255)); \
+             INSERT INTO public.refinery_schema_history VALUES \
+                 (1, 'session_baseline', 'legacy', '0');",
+        )
+        .execute(&target)
+        .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect legacy-V1 rejection");
+    assert_destructive_reset_rejection(&error, ddl_count, "diverges at row 1");
+    assert!(
+        error.contains("expected V000001__contiguous_history_epoch"),
+        "legacy V1 rejection must name the new epoch marker: {error}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_divergent_name_rejects_before_ddl_db() {
+    // Pins: matching versions alone cannot authorize a resume.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for name-divergence guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create name-divergence throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        apply_through_migration(&target_url, "contiguous_history_epoch").await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::query("UPDATE public.refinery_schema_history SET name = 'renamed_epoch'")
+            .execute(&target)
+            .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect name-divergence rejection");
+    assert_destructive_reset_rejection(&error, ddl_count, "diverges at row 1");
+    assert!(error.contains("V000001__renamed_epoch"));
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_divergent_checksum_rejects_before_ddl_db() {
+    // Pins: a rewritten migration cannot reuse an accepted version and name.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for checksum-divergence guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create checksum-divergence throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        apply_through_migration(&target_url, "contiguous_history_epoch").await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::query("UPDATE public.refinery_schema_history SET checksum = '0'")
+            .execute(&target)
+            .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect checksum-divergence rejection");
+    assert_destructive_reset_rejection(&error, ddl_count, "diverges at row 1");
+    assert!(error.contains("checksum 0"));
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_product_relations_without_history_reject_before_ddl_db() {
+    // Pins: an apparently untracked product database is never adopted as fresh.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for untracked-relation guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create untracked-relation throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        target
+            .execute("CREATE TABLE public.untracked_product_relation (id BIGINT PRIMARY KEY)")
+            .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect untracked-product rejection");
+    assert_destructive_reset_rejection(
+        &error,
+        ddl_count,
+        "product relations exist without contiguous central migration history",
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_pii_vault_relations_without_history_reject_before_ddl_db() {
+    // Pins: the privacy vault is product state, so an untracked vault-only
+    // database is never mistaken for a pristine migration target.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for untracked-vault guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create untracked-vault throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        target
+            .execute(
+                "CREATE SCHEMA pii_vault; \
+                 CREATE TABLE pii_vault.untracked_product_relation (id BIGINT PRIMARY KEY)",
+            )
+            .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect untracked-vault rejection");
+    assert_destructive_reset_rejection(
+        &error,
+        ddl_count,
+        "product relations exist without contiguous central migration history",
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_pii_vault_relations_with_empty_history_reject_before_ddl_db() {
+    // Pins: truncating refinery metadata cannot make an existing privacy vault
+    // look like a pristine database that is safe to adopt into the new epoch.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for empty-history vault guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create empty-history vault throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        apply_through_migration(&target_url, "contiguous_history_epoch").await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        target
+            .execute(
+                "TRUNCATE public.refinery_schema_history; \
+                 CREATE SCHEMA pii_vault; \
+                 CREATE TABLE pii_vault.untracked_product_relation (id BIGINT PRIMARY KEY)",
+            )
+            .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect empty-history vault rejection");
+    assert_destructive_reset_rejection(
+        &error,
+        ddl_count,
+        "product relations exist without contiguous central migration history",
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_empty_history_without_relations_recovers_db() {
+    // Pins: an empty history table with no product relations is equivalent to a
+    // pristine database and can safely receive the whole contiguous epoch.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for empty-history recovery");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create empty-history throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        apply_through_migration(&target_url, "contiguous_history_epoch").await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        target
+            .execute("TRUNCATE public.refinery_schema_history")
+            .await?;
+        target.close().await;
+        install_required_extensions(&target_url).await?;
+        let applied = run_reporting_applied_serialized(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        moa_migrations::validate_complete_history(&target).await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(applied)
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    assert_eq!(
+        outcome.expect("empty history should recover as pristine"),
+        expected_migration_labels()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn migration_protocol_malformed_history_rejects_before_ddl_db() {
+    // Pins: malformed history metadata fails closed rather than being parsed as
+    // a partial epoch or handed to refinery.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database for malformed-history guard");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create malformed-history throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE public.refinery_schema_history (\
+                 version TEXT, name TEXT, applied_on TEXT, checksum TEXT); \
+             INSERT INTO public.refinery_schema_history VALUES \
+                 ('not-a-version', 'contiguous_history_epoch', 'malformed', '0');",
+        )
+        .execute(&target)
+        .await?;
+        target.close().await;
+        reset_rejection_and_ddl_count(&target_url).await
+    }
+    .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (error, ddl_count) = outcome.expect("inspect malformed-history rejection");
+    assert_destructive_reset_rejection(&error, ddl_count, "malformed version");
+}
+
+async fn assert_tenant_purge_graph_scope_uses_typed_tenant(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let tenant_id = uuid::Uuid::new_v4();
+    let neighbor_tenant_id = uuid::Uuid::new_v4();
+    let operation_id = format!("tenant-purge-graph-{tenant_id}");
+    let opaque_partition = format!("opaque-graph-{tenant_id}");
+    let neighbor_partition = format!("opaque-graph-{neighbor_tenant_id}");
+    let first_node = uuid::Uuid::new_v4();
+    let second_node = uuid::Uuid::new_v4();
+    let edge_id = uuid::Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO tenants (id, slug, name) VALUES \
+         ($1, $2, 'bounded tenant purge opaque graph target'), \
+         ($3, $4, 'bounded tenant purge opaque graph neighbor')",
+    )
+    .bind(tenant_id)
+    .bind(format!("tenant-purge-opaque-target-{tenant_id}"))
+    .bind(neighbor_tenant_id)
+    .bind(format!("tenant-purge-opaque-neighbor-{neighbor_tenant_id}"))
+    .execute(pool)
+    .await?;
+
+    let mut graph_write = pool.begin().await?;
+    sqlx::query("SELECT set_config('moa.tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *graph_write)
+        .await?;
+    sqlx::query(
+        "INSERT INTO moa.node_index \
+            (uid, label, storage_partition_id, tenant_id, data_subject_id, name, pii_class) \
+         VALUES ($1, 'Fact', $2, $3, $3, 'opaque fact one', 'none'), \
+                ($4, 'Fact', $2, $3, $3, 'opaque fact two', 'none')",
+    )
+    .bind(first_node)
+    .bind(&opaque_partition)
+    .bind(tenant_id)
+    .bind(second_node)
+    .execute(&mut *graph_write)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.edge_index \
+            (uid, label, start_uid, end_uid, storage_partition_id, tenant_id) \
+         VALUES ($1, 'RELATES_TO', $2, $3, $4, $5)",
+    )
+    .bind(edge_id)
+    .bind(first_node)
+    .bind(second_node)
+    .bind(&opaque_partition)
+    .bind(tenant_id)
+    .execute(&mut *graph_write)
+    .await?;
+    let zero_embedding = format!("[{}]", vec!["0"; 1024].join(","));
+    sqlx::query(
+        "INSERT INTO moa.embeddings \
+            (uid, storage_partition_id, tenant_id, label, pii_class, embedding, \
+             embedding_model, embedding_model_version) \
+         VALUES ($1, $2, $3, 'Fact', 'none', $4::public.halfvec, 'test', 1)",
+    )
+    .bind(first_node)
+    .bind(&opaque_partition)
+    .bind(tenant_id)
+    .bind(&zero_embedding)
+    .execute(&mut *graph_write)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.graph_changelog \
+            (storage_partition_id, tenant_id, actor_id, actor_kind, op, \
+             target_kind, target_label, target_uid, payload) \
+         VALUES ($1, $2, 'tenant-purge-test', 'system', 'create', 'node', 'Fact', $3, '{}'::JSONB)",
+    )
+    .bind(&opaque_partition)
+    .bind(tenant_id)
+    .bind(first_node)
+    .execute(&mut *graph_write)
+    .await?;
+    graph_write.commit().await?;
+
+    let seeded_graph_rows: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM moa.embeddings WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.graph_changelog WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.edge_index WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.node_index WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.storage_partition_state WHERE tenant_id = $1)",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(seeded_graph_rows, (1, 1, 1, 2, 1));
+
+    let storage_only_error = sqlx::query(
+        "INSERT INTO moa.vector_sync_outbox (storage_partition_id, uid, op) \
+         VALUES ($1, $2, 'delete')",
+    )
+    .bind(format!("opaque-vector-{tenant_id}"))
+    .bind(uuid::Uuid::new_v4())
+    .execute(pool)
+    .await
+    .expect_err("true storage-only scope must fail closed for a non-UUID value");
+    let storage_only_sqlstate = storage_only_error
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.into_owned()));
+    assert_eq!(storage_only_sqlstate.as_deref(), Some("22P02"));
+
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(pool)
+        .await?;
+
+    let fenced_node = uuid::Uuid::new_v4();
+    let atomic_neighbor_node = uuid::Uuid::new_v4();
+    let fenced_insert_error = sqlx::query(
+        "INSERT INTO moa.node_index \
+            (uid, label, storage_partition_id, tenant_id, data_subject_id, name, pii_class) \
+         VALUES ($1, 'Fact', $2, $3, $3, 'must roll back', 'none'), \
+                ($4, 'Fact', $5, $6, $6, 'neighbor must roll back atomically', 'none')",
+    )
+    .bind(fenced_node)
+    .bind(&opaque_partition)
+    .bind(tenant_id)
+    .bind(atomic_neighbor_node)
+    .bind(&neighbor_partition)
+    .bind(neighbor_tenant_id)
+    .execute(pool)
+    .await
+    .expect_err("a typed fenced tenant in a multirow graph write must reject the statement");
+    let fenced_insert_sqlstate = fenced_insert_error
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.into_owned()));
+    assert_eq!(fenced_insert_sqlstate.as_deref(), Some("55000"));
+    let atomic_insert_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM moa.node_index WHERE uid = ANY($1)")
+            .bind(vec![fenced_node, atomic_neighbor_node])
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        atomic_insert_count, 0,
+        "the rejected statement must be atomic"
+    );
+
+    sqlx::query(
+        "INSERT INTO moa.node_index \
+            (uid, label, storage_partition_id, tenant_id, data_subject_id, name, pii_class) \
+         VALUES ($1, 'Fact', $2, $3, $3, 'writable neighbor', 'none')",
+    )
+    .bind(atomic_neighbor_node)
+    .bind(&neighbor_partition)
+    .bind(neighbor_tenant_id)
+    .execute(pool)
+    .await?;
+    let fenced_update_error = sqlx::query(
+        "UPDATE moa.node_index SET tenant_id = $1, name = 'must not move' WHERE uid = $2",
+    )
+    .bind(tenant_id)
+    .bind(atomic_neighbor_node)
+    .execute(pool)
+    .await
+    .expect_err("UPDATE must derive both old and new typed tenant identities");
+    let fenced_update_sqlstate = fenced_update_error
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.into_owned()));
+    assert_eq!(fenced_update_sqlstate.as_deref(), Some("55000"));
+    let neighbor_after_update: (uuid::Uuid, String) =
+        sqlx::query_as("SELECT tenant_id, name FROM moa.node_index WHERE uid = $1")
+            .bind(atomic_neighbor_node)
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        neighbor_after_update,
+        (neighbor_tenant_id, "writable neighbor".to_string())
+    );
+    sqlx::query("UPDATE moa.node_index SET name = 'neighbor updated' WHERE uid = $1")
+        .bind(atomic_neighbor_node)
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'moa.embeddings' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .execute(pool)
+    .await?;
+    let mut positive_batches = Vec::new();
+    for _ in 0..16 {
+        let batch: (String, String, i64) = sqlx::query_as(
+            "SELECT batch_state, stage, affected \
+             FROM moa.run_tenant_purge_batch($1, $2)",
+        )
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .fetch_one(pool)
+        .await?;
+        if batch.2 > 0 {
+            positive_batches.push((batch.1.clone(), batch.2));
+        }
+        if batch.1 == "public.session_event_dedupe" {
+            break;
+        }
+    }
+    assert_eq!(
+        positive_batches,
+        vec![
+            ("moa.embeddings".to_string(), 1),
+            ("moa.graph_changelog".to_string(), 1),
+            ("moa.edge_index".to_string(), 1),
+            ("moa.node_index".to_string(), 2),
+            ("moa.storage_partition_state".to_string(), 1),
+        ]
+    );
+    let graph_residue: (i64, i64, i64, i64, i64, i64, String) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM moa.embeddings WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.graph_changelog WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.edge_index WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.node_index WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.storage_partition_state WHERE tenant_id = $1), \
+            (SELECT count(*) FROM moa.node_index WHERE tenant_id = $2), \
+            (SELECT name FROM moa.node_index WHERE uid = $3)",
+    )
+    .bind(tenant_id)
+    .bind(neighbor_tenant_id)
+    .bind(atomic_neighbor_node)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        graph_residue,
+        (0, 0, 0, 0, 0, 1, "neighbor updated".to_string())
+    );
+
+    Ok(())
+}
+
+async fn assert_tenant_purge_purge_index_catalog(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Pins: every bounded candidate query has a valid, ready index whose first
+    // key is the purge scope; nullable scopes and retained legal holds stay narrow.
+    for (expected_schema, index, expected_table, expected_key, expected_predicate) in
+        TENANT_PURGE_SCOPE_INDEXES
+    {
+        let actual: (String, String, bool, bool, String, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT table_namespace.nspname,
+                   table_relation.relname,
+                   index_row.indisvalid,
+                   index_row.indisready,
+                   pg_get_indexdef(index_row.indexrelid, 1, TRUE),
+                   pg_get_expr(index_row.indpred, index_row.indrelid)
+            FROM pg_index AS index_row
+            JOIN pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
+            JOIN pg_namespace AS index_namespace
+              ON index_namespace.oid = index_relation.relnamespace
+            JOIN pg_class AS table_relation ON table_relation.oid = index_row.indrelid
+            JOIN pg_namespace AS table_namespace
+              ON table_namespace.oid = table_relation.relnamespace
+            WHERE index_namespace.nspname = $1
+              AND index_relation.relname = $2
+            "#,
+        )
+        .bind(expected_schema)
+        .bind(index)
+        .fetch_one(pool)
+        .await?;
+
+        if actual.0 != expected_schema
+            || actual.1 != expected_table
+            || !actual.2
+            || !actual.3
+            || actual.4 != expected_key
+        {
+            return Err(std::io::Error::other(format!(
+                "purge index {index} is not a ready leading {expected_schema}.{expected_table}({expected_key}) path: {actual:?}"
+            ))
+            .into());
+        }
+        match expected_predicate {
+            None if actual.5.is_some() => {
+                return Err(std::io::Error::other(format!(
+                    "purge index {index} unexpectedly has predicate {:?}",
+                    actual.5
+                ))
+                .into());
+            }
+            Some(fragment)
+                if !actual
+                    .5
+                    .as_deref()
+                    .is_some_and(|predicate| predicate.contains(fragment)) =>
+            {
+                return Err(std::io::Error::other(format!(
+                    "purge index {index} is missing predicate fragment {fragment}: {:?}",
+                    actual.5
+                ))
+                .into());
+            }
+            _ => {}
+        }
+        if index == "tenant_purge_legal_hold_idx"
+            && ![
+                "subject_id IS NOT NULL",
+                "reason <> '[REDACTED]'::text",
+                "placed_by <> '[REDACTED]'::text",
+                "released_by <> '[REDACTED]'::text",
+            ]
+            .iter()
+            .all(|fragment| {
+                actual
+                    .5
+                    .as_deref()
+                    .is_some_and(|predicate| predicate.contains(fragment))
+            })
+        {
+            return Err(std::io::Error::other(format!(
+                "legal-hold purge index is broader than the released/redactable candidate set: {:?}",
+                actual.5
+            ))
+            .into());
+        }
+    }
+
+    let embedding_children: (i64, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT count(*),
+               bool_and(child_index.indisvalid),
+               bool_and(child_index.indisready),
+               bool_and(pg_get_indexdef(child_index.indexrelid, 1, TRUE) = 'tenant_id')
+        FROM pg_class AS parent_relation
+        JOIN pg_namespace AS parent_namespace
+          ON parent_namespace.oid = parent_relation.relnamespace
+        JOIN pg_inherits AS attachment ON attachment.inhparent = parent_relation.oid
+        JOIN pg_index AS child_index ON child_index.indexrelid = attachment.inhrelid
+        WHERE parent_namespace.nspname = 'moa'
+          AND parent_relation.relname = 'tenant_purge_embeddings_idx'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    if embedding_children != (32, true, true, true) {
+        return Err(std::io::Error::other(format!(
+            "partitioned embeddings purge index must attach 32 valid ready tenant-leading child paths: {embedding_children:?}"
+        ))
+        .into());
+    }
+
+    let authz_index: (bool, bool, String, String, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT index_row.indisvalid,
+               index_row.indisready,
+               pg_get_indexdef(index_row.indexrelid, 1, TRUE),
+               pg_get_indexdef(index_row.indexrelid, 2, TRUE),
+               pg_get_expr(index_row.indpred, index_row.indrelid)
+        FROM pg_index AS index_row
+        JOIN pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
+        JOIN pg_namespace AS index_namespace
+          ON index_namespace.oid = index_relation.relnamespace
+        WHERE index_namespace.nspname = 'public'
+          AND index_relation.relname = 'idx_authz_outbox_tenant'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    if !authz_index.0
+        || !authz_index.1
+        || authz_index.2 != "tenant_id"
+        || authz_index.3 != "id"
+        || !authz_index
+            .4
+            .as_deref()
+            .is_some_and(|predicate| predicate.contains("tenant_id IS NOT NULL"))
+    {
+        return Err(std::io::Error::other(format!(
+            "authz purge index must be the valid ready partial (tenant_id, id) path: {authz_index:?}"
+        ))
+        .into());
+    }
+
+    let index_presence: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*) FILTER (
+                   WHERE relation.relname IN (
+                       'linked_connections_user_idx',
+                       'scim_group_members_user_idx',
+                       'scim_group_members_group_idx'
+                   )
+               ),
+               count(*) FILTER (
+                   WHERE relation.relname IN (
+                       'auth0_ciba_approvals_session_idx',
+                       'auth0_ciba_approvals_deciding_user_idx'
+                   )
+               )
+        FROM pg_class AS relation
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname IN ('public', 'moa')
+          AND relation.relkind IN ('i', 'I')
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    if index_presence != (0, 2) {
+        return Err(std::io::Error::other(format!(
+            "bounded tenant purge redundant/CIBA index presence is wrong: {index_presence:?}"
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+async fn assert_tenant_purge_function_arity_and_tenant_attribution(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Pins: bounded tenant purge is a hard two-argument API break with no callable legacy overload.
+    let function_arities: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT \
+            to_regprocedure('moa.invert_tenant_authz_batch(uuid,text)') IS NOT NULL, \
+            to_regprocedure('moa.invert_tenant_authz_batch(uuid,text,integer)') IS NOT NULL, \
+            to_regprocedure('moa.run_tenant_purge_batch(uuid,text)') IS NOT NULL, \
+            to_regprocedure('moa.run_tenant_purge_batch(uuid,text,integer)') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    if function_arities != (true, false, true, false) {
+        return Err(std::io::Error::other(format!(
+            "bounded tenant purge purge function arities are not an exact two-argument hard break: {function_arities:?}"
+        ))
+        .into());
+    }
+
+    // Pins: ON CONFLICT may never move an existing tuple identity between tenants.
+    let original_tenant = uuid::Uuid::new_v4();
+    let conflicting_tenant = uuid::Uuid::new_v4();
+    let tuple_user = format!("operator:{}", uuid::Uuid::new_v4());
+    let tuple_object = format!("tenant:{original_tenant}");
+    sqlx::query(
+        "INSERT INTO authz_outbox \
+            (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id) \
+         VALUES ('write', $1, 'operator', $2, 5, $3)",
+    )
+    .bind(&tuple_user)
+    .bind(&tuple_object)
+    .bind(original_tenant)
+    .execute(pool)
+    .await?;
+    let conflict = sqlx::query(
+        "INSERT INTO authz_outbox \
+            (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id) \
+         VALUES ('delete', $1, 'operator', $2, 5, $3) \
+         ON CONFLICT (tuple_user, tuple_relation, tuple_object, model_version) DO UPDATE \
+         SET tenant_id = EXCLUDED.tenant_id",
+    )
+    .bind(&tuple_user)
+    .bind(&tuple_object)
+    .bind(conflicting_tenant)
+    .execute(pool)
+    .await
+    .expect_err("cross-tenant ON CONFLICT attribution must fail closed");
+    let conflict_sqlstate = conflict
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.into_owned()));
+    if conflict_sqlstate.as_deref() != Some("55000") {
+        return Err(std::io::Error::other(format!(
+            "cross-tenant ON CONFLICT returned {conflict_sqlstate:?}, expected 55000"
+        ))
+        .into());
+    }
+    let unchanged: (uuid::Uuid, String, String, i64) = sqlx::query_as(
+        "SELECT tenant_id, op, status, generation \
+         FROM authz_outbox \
+         WHERE tuple_user = $1 AND tuple_relation = 'operator' \
+           AND tuple_object = $2 AND model_version = 5",
+    )
+    .bind(&tuple_user)
+    .bind(&tuple_object)
+    .fetch_one(pool)
+    .await?;
+    if unchanged
+        != (
+            original_tenant,
+            "write".to_string(),
+            "pending".to_string(),
+            1,
+        )
+    {
+        return Err(std::io::Error::other(format!(
+            "cross-tenant ON CONFLICT changed the original outbox row: {unchanged:?}"
+        ))
+        .into());
+    }
+    let trigger_source: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('moa.guard_authz_outbox_during_tenant_purge()'::REGPROCEDURE)",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !trigger_source.contains("NEW.tenant_id IS DISTINCT FROM OLD.tenant_id") {
+        return Err(std::io::Error::other(
+            "authz outbox trigger source no longer protects immutable tenant attribution",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+async fn seed_tenant_purge_release_policies(
+    pool: &PgPool,
+    tenant_id: uuid::Uuid,
+    count: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        WITH policies AS (
+            SELECT
+                gen_random_uuid() AS policy_uid,
+                $1::TEXT AS storage_partition_id,
+                format('tenant-purge-bounded-%s-%s', $1::TEXT, ordinal) AS name,
+                ordinal AS revision,
+                '[{"id":"target_completed","version":"v1"}]'::JSONB
+                    AS blocking_assertions,
+                '[{"metric":"target_completed"}]'::JSONB AS primary_gate_family,
+                3600::BIGINT AS attestation_ttl_secs,
+                digest(format('tenant-purge-resource-%s-%s', $1::TEXT, ordinal), 'sha256')
+                    AS resource_policy_hash
+            FROM generate_series(1, $2::INT) AS ordinal
+        )
+        INSERT INTO moa.artifact_release_policy (
+            policy_uid, storage_partition_id, user_id, name, revision, target_class,
+            blocking_assertions, primary_gate_family, attestation_ttl_secs,
+            resource_policy_hash, policy_hash, valid_to
+        )
+        SELECT
+            policy_uid, storage_partition_id, NULL, name, revision, 'skill_visibility',
+            blocking_assertions, primary_gate_family, attestation_ttl_secs,
+            resource_policy_hash,
+            moa.artifact_release_policy_content_hash(
+                name, revision, 'skill_visibility', blocking_assertions,
+                primary_gate_family, attestation_ttl_secs, resource_policy_hash
+            ),
+            now()
+        FROM policies
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_tenant_purge_activated_release_chain(
+    pool: &PgPool,
+    tenant_id: uuid::Uuid,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let artifact_uid = uuid::Uuid::new_v4();
+    let revision_uid = uuid::Uuid::new_v4();
+    let policy_uid = uuid::Uuid::new_v4();
+    let attestation_uid = uuid::Uuid::new_v4();
+    let audit_uid = uuid::Uuid::new_v4();
+    let revision_hash = vec![1_u8; 32];
+    let resource_policy_hash = vec![2_u8; 32];
+    let subject_digest = vec![3_u8; 32];
+    let partition = tenant_id.to_string();
+    let policy_name = format!("tenant-purge-active-{tenant_id}");
+
+    sqlx::query(
+        "INSERT INTO moa.artifact \
+            (artifact_uid, tenant_id, storage_partition_id, user_id, kind, name) \
+         VALUES ($1, $2, $2::TEXT, NULL, 'skill', $3)",
+    )
+    .bind(artifact_uid)
+    .bind(tenant_id)
+    .bind(format!("tenant-purge-activated-{tenant_id}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.artifact_revision (\
+            revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id, definition, \
+            canonical_hash, source_format, source_text, status, version\
+         ) VALUES ($1, $2, $3, $3::TEXT, NULL, '{}'::JSONB, $4, 'json', ''::BYTEA, 'ready', 1)",
+    )
+    .bind(revision_uid)
+    .bind(artifact_uid)
+    .bind(tenant_id)
+    .bind(&revision_hash)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE moa.artifact SET latest_revision_uid = $1 WHERE artifact_uid = $2")
+        .bind(revision_uid)
+        .bind(artifact_uid)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.artifact_release_policy (
+            policy_uid, storage_partition_id, user_id, name, revision, target_class,
+            blocking_assertions, primary_gate_family, attestation_ttl_secs,
+            resource_policy_hash, policy_hash
+        ) VALUES (
+            $1, $2, NULL, $3, 1, 'skill_visibility',
+            '[{"id":"target_completed","version":"v1"}]'::JSONB,
+            '[{"metric":"target_completed"}]'::JSONB,
+            3600, $4,
+            moa.artifact_release_policy_content_hash(
+                $3, 1, 'skill_visibility',
+                '[{"id":"target_completed","version":"v1"}]'::JSONB,
+                '[{"metric":"target_completed"}]'::JSONB,
+                3600, $4
+            )
+        )
+        "#,
+    )
+    .bind(policy_uid)
+    .bind(&partition)
+    .bind(&policy_name)
+    .bind(&resource_policy_hash)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.artifact_release_candidate (\
+            revision_uid, artifact_uid, storage_partition_id, user_id, activation_target, \
+            target_installation_uid, subject, subject_digest, candidate_revision_hash, \
+            policy_uid, policy_revision, policy_hash, slot, generation\
+         ) VALUES (\
+            $1, $2, $3, NULL, 'skill_visibility', NULL, '{}'::JSONB, $4, $5, \
+            $6, 1, moa.artifact_release_policy_content_hash(\
+                $7, 1, 'skill_visibility', \
+                '[{\"id\":\"target_completed\",\"version\":\"v1\"}]'::JSONB, \
+                '[{\"metric\":\"target_completed\"}]'::JSONB, 3600, $8\
+            ), 'released', 1\
+         )",
+    )
+    .bind(revision_uid)
+    .bind(artifact_uid)
+    .bind(&partition)
+    .bind(&subject_digest)
+    .bind(&revision_hash)
+    .bind(policy_uid)
+    .bind(&policy_name)
+    .bind(&resource_policy_hash)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.artifact_activation_attestation (\
+            attestation_uid, storage_partition_id, user_id, artifact_uid, \
+            candidate_revision_uid, activation_target, target_installation_uid, \
+            subject_digest, verdict, run_uid, trial_uids, evidence_ids, decision, \
+            policy_uid, policy_revision, policy_hash, decided_by, expires_at\
+         ) VALUES (\
+            $1, $2, NULL, $3, $4, 'skill_visibility', NULL, $5, 'pass', $6, \
+            ARRAY[$7]::UUID[], ARRAY[$8]::UUID[], '{}'::JSONB, $9, 1, \
+            moa.artifact_release_policy_content_hash(\
+                $10, 1, 'skill_visibility', \
+                '[{\"id\":\"target_completed\",\"version\":\"v1\"}]'::JSONB, \
+                '[{\"metric\":\"target_completed\"}]'::JSONB, 3600, $11\
+            ), 'tenant-purge-test', now() + interval '1 hour'\
+         )",
+    )
+    .bind(attestation_uid)
+    .bind(&partition)
+    .bind(artifact_uid)
+    .bind(revision_uid)
+    .bind(&subject_digest)
+    .bind(uuid::Uuid::new_v4())
+    .bind(uuid::Uuid::new_v4())
+    .bind(uuid::Uuid::new_v4())
+    .bind(policy_uid)
+    .bind(&policy_name)
+    .bind(&resource_policy_hash)
+    .execute(pool)
+    .await?;
+
+    let mut activation = pool.begin().await?;
+    sqlx::query("SELECT set_config('moa.storage_partition_id', $1, true)")
+        .bind(&partition)
+        .execute(&mut *activation)
+        .await?;
+    let affected: i64 = sqlx::query_scalar(
+        "SELECT moa.apply_artifact_activation_transition(\
+            $1, $2, $3, 'skill', 'skill_visibility', NULL, $4, $5, NULL, 0, \
+            $6, 1, $7, 1, 'tenant-purge-test', 'activated-chain proof', now()\
+         )",
+    )
+    .bind(audit_uid)
+    .bind(&partition)
+    .bind(artifact_uid)
+    .bind(attestation_uid)
+    .bind(&subject_digest)
+    .bind(revision_uid)
+    .bind(&revision_hash)
+    .fetch_one(&mut *activation)
+    .await?;
+    assert_eq!(
+        affected, 1,
+        "fixture activation must move one serving pointer"
+    );
+    activation.commit().await?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+struct FinalIndexCatalogRow {
+    qualified_name: String,
+    table_schema: String,
+    table_name: String,
+    is_unique: bool,
+    is_primary: bool,
+    is_valid: bool,
+    is_ready: bool,
+    is_live: bool,
+    definition: String,
+    parent_index: Option<String>,
+}
+
+async fn final_index_catalog(
+    pool: &PgPool,
+) -> Result<
+    std::collections::BTreeMap<String, FinalIndexCatalogRow>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let rows: Vec<FinalIndexCatalogRow> = sqlx::query_as(
+        r#"
+        SELECT
+            index_namespace.nspname || '.' || index_relation.relname AS qualified_name,
+            table_namespace.nspname AS table_schema,
+            table_relation.relname AS table_name,
+            index_row.indisunique AS is_unique,
+            index_row.indisprimary AS is_primary,
+            index_row.indisvalid AS is_valid,
+            index_row.indisready AS is_ready,
+            index_row.indislive AS is_live,
+            pg_get_indexdef(index_relation.oid) AS definition,
+            CASE WHEN parent_relation.oid IS NULL THEN NULL
+                 ELSE parent_namespace.nspname || '.' || parent_relation.relname
+            END AS parent_index
+        FROM pg_index AS index_row
+        JOIN pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
+        JOIN pg_namespace AS index_namespace ON index_namespace.oid = index_relation.relnamespace
+        JOIN pg_class AS table_relation ON table_relation.oid = index_row.indrelid
+        JOIN pg_namespace AS table_namespace ON table_namespace.oid = table_relation.relnamespace
+        LEFT JOIN pg_inherits AS attachment ON attachment.inhrelid = index_relation.oid
+        LEFT JOIN pg_class AS parent_relation ON parent_relation.oid = attachment.inhparent
+        LEFT JOIN pg_namespace AS parent_namespace ON parent_namespace.oid = parent_relation.relnamespace
+        WHERE index_namespace.nspname !~ '^pg_'
+          AND index_namespace.nspname <> 'information_schema'
+        ORDER BY qualified_name
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut catalog = std::collections::BTreeMap::new();
+    for row in rows {
+        if catalog.insert(row.qualified_name.clone(), row).is_some() {
+            return Err(std::io::Error::other("index catalog contained a duplicate name").into());
+        }
+    }
+    Ok(catalog)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PrivacyAuditorSecurityCatalog {
+    auditor_grants: std::collections::BTreeSet<String>,
+    policies: std::collections::BTreeSet<String>,
+}
+
+async fn privacy_auditor_security_catalog(
+    pool: &PgPool,
+) -> Result<PrivacyAuditorSecurityCatalog, Box<dyn std::error::Error + Send + Sync>> {
+    let auditor_grants = sqlx::query_scalar(
+        r#"
+        SELECT namespace.nspname || '.' || relation.relname
+               || '|' || acl.privilege_type
+               || '|' || acl.is_grantable::TEXT
+        FROM pg_class AS relation
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(relation.relacl, acldefault('r', relation.relowner))
+        ) AS acl
+        JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+        WHERE relation.relkind IN ('r', 'p')
+          AND grantee.rolname = 'moa_auditor'
+        ORDER BY 1
+        "#,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    let policies = sqlx::query_scalar(
+        r#"
+        SELECT schemaname || '.' || tablename
+               || '|' || policyname
+               || '|' || permissive
+               || '|' || roles::TEXT
+               || '|' || cmd
+               || '|' || COALESCE(qual, '')
+               || '|' || COALESCE(with_check, '')
+        FROM pg_policies
+        WHERE 'moa_auditor' = ANY(roles)
+        ORDER BY 1
+        "#,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(PrivacyAuditorSecurityCatalog {
+        auditor_grants,
+        policies,
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
+    // Pins: a pristine final schema persists exactly 129 purge stages, installs
+    // statement fences, and advances a real purge in fixed-size batches.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let tenant_id = uuid::Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect bounded tenant purge maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create bounded tenant purge throwaway migration database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(&target)
+        .await?;
+        assert_tenant_purge_purge_index_catalog(&target).await?;
+        assert_tenant_purge_function_arity_and_tenant_attribution(&target).await?;
+        assert_tenant_purge_graph_scope_uses_typed_tenant(&target).await?;
+        let migrated: (String, String, i64, i64, i64, bool, bool) = sqlx::query_as(
+            "SELECT status, current_stage, stage_deleted_count, total_deleted_count, \
+                    batch_count, started_at IS NOT NULL, updated_at IS NOT NULL \
+             FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&target)
+        .await?;
+        let catalog_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM moa.tenant_purge_catalog")
+                .fetch_one(&target)
+                .await?;
+        let trigger_kinds: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT trigger_name FROM information_schema.triggers \
+             WHERE trigger_name IN (\
+                'moa_tenant_purge_fence_insert', \
+                'moa_tenant_purge_fence_update'\
+             ) ORDER BY trigger_name",
+        )
+        .fetch_all(&target)
+        .await?;
+        let global_exemptions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.tenant_purge_catalog \
+             WHERE table_name IN (\
+                'simulator_certification_mandate', \
+                'simulator_certification_evidence_import'\
+             )",
+        )
+        .fetch_one(&target)
+        .await?;
+        let fence_helper_contract: (String, bool, Vec<String>, bool, bool, bool) = sqlx::query_as(
+            r#"
+                SELECT owner.rolname,
+                       function_row.prosecdef,
+                       COALESCE(function_row.proconfig, ARRAY[]::TEXT[]),
+                       NOT EXISTS (
+                           SELECT 1
+                           FROM aclexplode(COALESCE(
+                               function_row.proacl,
+                               acldefault('f', function_row.proowner)
+                           )) AS function_acl
+                           WHERE function_acl.grantee = 0
+                             AND function_acl.privilege_type = 'EXECUTE'
+                       ),
+                       (
+                           SELECT array_agg(grantee.rolname::TEXT ORDER BY grantee.rolname) = ARRAY[
+                               'moa_app',
+                               'moa_artifact_activator',
+                               'moa_privacy_eraser',
+                               'moa_promoter'
+                           ]::TEXT[]
+                           FROM aclexplode(COALESCE(
+                               function_row.proacl,
+                               acldefault('f', function_row.proowner)
+                           )) AS function_acl
+                           JOIN pg_roles grantee ON grantee.oid = function_acl.grantee
+                           WHERE function_acl.privilege_type = 'EXECUTE'
+                             AND grantee.rolname <> 'moa_owner'
+                       ),
+                       NOT guard_row.prosecdef
+                FROM pg_proc function_row
+                JOIN pg_namespace namespace
+                  ON namespace.oid = function_row.pronamespace
+                JOIN pg_roles owner ON owner.oid = function_row.proowner
+                JOIN pg_proc guard_row ON guard_row.oid =
+                    'moa.guard_tenant_write_statement()'::REGPROCEDURE
+                WHERE namespace.nspname = 'moa'
+                  AND function_row.oid = 'moa.tenant_write_fenced(uuid)'::REGPROCEDURE
+                "#,
+        )
+        .fetch_one(&target)
+        .await?;
+        let restricted_fence_select_grants: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM (VALUES
+                ('moa_artifact_activator'::NAME),
+                ('moa_privacy_eraser'::NAME)
+            ) AS restricted(role_name)
+            WHERE has_table_privilege(
+                restricted.role_name,
+                'moa.destruction_operation_fence',
+                'SELECT'
+            )
+               OR has_table_privilege(
+                    restricted.role_name,
+                    'moa.tenant_purge_operations',
+                    'SELECT'
+               )
+            "#,
+        )
+        .fetch_one(&target)
+        .await?;
+        let legacy_release_cleanup: (bool, i64, i64, bool, String) = sqlx::query_as(
+            r#"
+            WITH legacy_tables(table_name) AS (
+                VALUES
+                    ('artifact_release_eval_overlay'),
+                    ('artifact_release_attempt'),
+                    ('artifact_release_dispatch_outbox'),
+                    ('artifact_release_case_pack'),
+                    ('artifact_serving_pointer'),
+                    ('artifact_activation_audit'),
+                    ('artifact_activation_attestation'),
+                    ('artifact_release_candidate'),
+                    ('artifact_release_policy')
+            )
+            SELECT
+                to_regprocedure('moa.purge_artifact_release_partition(text)') IS NULL,
+                (
+                    SELECT count(*)
+                    FROM pg_policies AS policy
+                    JOIN legacy_tables AS legacy
+                      ON legacy.table_name = policy.tablename
+                    WHERE policy.schemaname = 'moa'
+                      AND policy.policyname IN (
+                          'artifact_release_partition_purge_read',
+                          'artifact_release_partition_purge'
+                      )
+                ),
+                (
+                    SELECT count(*)
+                    FROM legacy_tables AS legacy
+                    WHERE has_table_privilege(
+                              'moa_artifact_releaser',
+                              format('moa.%I', legacy.table_name),
+                              'SELECT'
+                          )
+                       OR has_table_privilege(
+                              'moa_artifact_releaser',
+                              format('moa.%I', legacy.table_name),
+                              'DELETE'
+                          )
+                ),
+                has_schema_privilege('moa_artifact_releaser', 'moa', 'USAGE'),
+                pg_get_functiondef('moa.artifact_activation_audit_guard()'::REGPROCEDURE)
+            "#,
+        )
+        .fetch_one(&target)
+        .await?;
+        let audit_guard_contract: (String, bool, Vec<String>, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT owner.rolname,
+                   function_row.prosecdef,
+                   COALESCE(function_row.proconfig, ARRAY[]::TEXT[]),
+                   NOT EXISTS (
+                       SELECT 1
+                       FROM aclexplode(COALESCE(
+                           function_row.proacl,
+                           acldefault('f', function_row.proowner)
+                       )) AS function_acl
+                       WHERE function_acl.grantee = 0
+                         AND function_acl.privilege_type = 'EXECUTE'
+                   ),
+                   NOT EXISTS (
+                       SELECT 1
+                       FROM aclexplode(COALESCE(
+                           function_row.proacl,
+                           acldefault('f', function_row.proowner)
+                       )) AS function_acl
+                       WHERE function_acl.grantee <> function_row.proowner
+                         AND function_acl.privilege_type = 'EXECUTE'
+                   )
+            FROM pg_proc AS function_row
+            JOIN pg_roles AS owner ON owner.oid = function_row.proowner
+            WHERE function_row.oid =
+                'moa.artifact_activation_audit_guard()'::REGPROCEDURE
+            "#,
+        )
+        .fetch_one(&target)
+        .await?;
+
+        let purge_tenant = uuid::Uuid::new_v4();
+        let neighbor_tenant = uuid::Uuid::new_v4();
+        let purge_operation = format!("tenant-purge-{purge_tenant}");
+        sqlx::query(
+            "INSERT INTO tenants (id, slug, name) VALUES \
+             ($1, $2, 'bounded tenant purge purge target'), ($3, $4, 'bounded tenant purge neighbor')",
+        )
+        .bind(purge_tenant)
+        .bind(format!("tenant-purge-target-{purge_tenant}"))
+        .bind(neighbor_tenant)
+        .bind(format!("tenant-purge-neighbor-{neighbor_tenant}"))
+        .execute(&target)
+        .await?;
+        seed_tenant_purge_release_policies(&target, purge_tenant, 1000).await?;
+        seed_tenant_purge_activated_release_chain(&target, purge_tenant).await?;
+        seed_tenant_purge_activated_release_chain(&target, neighbor_tenant).await?;
+        let ordinary_activation_delete = sqlx::query(
+            "DELETE FROM moa.artifact_activation_audit WHERE storage_partition_id = $1::TEXT",
+        )
+        .bind(purge_tenant)
+        .execute(&target)
+        .await
+        .expect_err("ordinary activation-audit deletion must remain append-only");
+        let ordinary_activation_delete_sqlstate = ordinary_activation_delete
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()));
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, active) \
+             SELECT gen_random_uuid(), $1, 'tenant-purge-' || ordinal || '@example.test', true \
+             FROM generate_series(1, 1001) AS ordinal",
+        )
+        .bind(purge_tenant)
+        .execute(&target)
+        .await?;
+        sqlx::query(
+            "INSERT INTO authz_outbox \
+                (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id) \
+             SELECT 'write', 'operator:' || gen_random_uuid(), 'operator', \
+                    'tenant:' || $1::TEXT, 5, $1 \
+             FROM generate_series(1, 1001)",
+        )
+        .bind(purge_tenant)
+        .execute(&target)
+        .await?;
+        sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+            .bind(purge_tenant)
+            .bind(&purge_operation)
+            .execute(&target)
+            .await?;
+
+        let subject_only_tenant = uuid::Uuid::new_v4();
+        let committed_tenant = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO moa.destruction_operation_fence \
+                (tenant_id, subject_id, operation_id, operation_kind) \
+             VALUES ($1, $2, 'subject-only-probe', 'privacy.erase')",
+        )
+        .bind(subject_only_tenant)
+        .bind(uuid::Uuid::new_v4())
+        .execute(&target)
+        .await?;
+        sqlx::query(
+            "INSERT INTO moa.destruction_operation_fence \
+                (tenant_id, subject_id, operation_id, operation_kind, status, committed_at) \
+             VALUES ($1, NULL, 'committed-probe', 'privacy.erase', 'committed', now())",
+        )
+        .bind(committed_tenant)
+        .execute(&target)
+        .await?;
+        let helper_scope_facts: (bool, bool, bool) = sqlx::query_as(
+            "SELECT moa.tenant_write_fenced($1), \
+                    moa.tenant_write_fenced($2), \
+                    moa.tenant_write_fenced($3)",
+        )
+        .bind(purge_tenant)
+        .bind(subject_only_tenant)
+        .bind(committed_tenant)
+        .fetch_one(&target)
+        .await?;
+        let mut activator = target.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_artifact_activator")
+            .execute(&mut *activator)
+            .await?;
+        let activator_fenced: bool = sqlx::query_scalar("SELECT moa.tenant_write_fenced($1)")
+            .bind(purge_tenant)
+            .fetch_one(&mut *activator)
+            .await?;
+        activator.rollback().await?;
+        let mut eraser = target.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_privacy_eraser")
+            .execute(&mut *eraser)
+            .await?;
+        let eraser_fenced: bool = sqlx::query_scalar("SELECT moa.tenant_write_fenced($1)")
+            .bind(purge_tenant)
+            .fetch_one(&mut *eraser)
+            .await?;
+        eraser.rollback().await?;
+
+        sqlx::raw_sql(
+            "GRANT INSERT, SELECT ON authz_outbox TO moa_app; \
+             GRANT SELECT ON moa.tenant_purge_operations TO moa_app; \
+             GRANT SELECT ON moa.destruction_operation_fence TO moa_app;",
+        )
+        .execute(&target)
+        .await?;
+        let mut spoof = target.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_app")
+            .execute(&mut *spoof)
+            .await?;
+        sqlx::query(
+            "SELECT set_config('moa.tenant_id', $1, true), \
+                    set_config('moa.tenant_purge_operation_id', $2, true)",
+        )
+        .bind(purge_tenant.to_string())
+        .bind(&purge_operation)
+        .execute(&mut *spoof)
+        .await?;
+        let spoof_error = sqlx::query(
+            "INSERT INTO authz_outbox \
+                (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id) \
+             VALUES ('write', $1, 'operator', $2, 5, $3)",
+        )
+        .bind(format!("operator:{}", uuid::Uuid::new_v4()))
+        .bind(format!("tenant:{purge_tenant}"))
+        .bind(purge_tenant)
+        .execute(&mut *spoof)
+        .await
+        .expect_err("a spoofed purge GUC must not authorize a desired write");
+        let spoof_sqlstate = spoof_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()));
+        spoof.rollback().await?;
+
+        let first_authz: (i32, i32, bool) = sqlx::query_as(
+            "SELECT scanned, inverted, exhausted \
+             FROM moa.invert_tenant_authz_batch($1, $2)",
+        )
+        .bind(purge_tenant)
+        .bind(&purge_operation)
+        .fetch_one(&target)
+        .await?;
+        let second_authz: (i32, i32, bool) = sqlx::query_as(
+            "SELECT scanned, inverted, exhausted \
+             FROM moa.invert_tenant_authz_batch($1, $2)",
+        )
+        .bind(purge_tenant)
+        .bind(&purge_operation)
+        .fetch_one(&target)
+        .await?;
+        let final_authz: (i32, i32, bool) = sqlx::query_as(
+            "SELECT scanned, inverted, exhausted \
+             FROM moa.invert_tenant_authz_batch($1, $2)",
+        )
+        .bind(purge_tenant)
+        .bind(&purge_operation)
+        .fetch_one(&target)
+        .await?;
+
+        let mut terminal = None;
+        let mut release_policy_batches = Vec::new();
+        for _ in 0..300 {
+            let batch: (String, String, i64) = sqlx::query_as(
+                "SELECT batch_state, stage, affected \
+                 FROM moa.run_tenant_purge_batch($1, $2)",
+            )
+            .bind(purge_tenant)
+            .bind(&purge_operation)
+            .fetch_one(&target)
+            .await?;
+            if batch.1 == "moa.artifact_release_policy" && batch.2 > 0 {
+                release_policy_batches.push(batch.2);
+            }
+            if batch.0 == "committed" || batch.0 == "already_committed" {
+                terminal = Some(batch);
+                break;
+            }
+        }
+        let bounded_facts: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM users WHERE tenant_id = $1), \
+                (SELECT count(*) FROM tenants WHERE id = $1), \
+                (SELECT count(*) FROM tenants WHERE id = $2), \
+                (SELECT count(*) FROM authz_outbox \
+                 WHERE tenant_id = $1 AND op = 'delete' AND status = 'pending'), \
+                (SELECT total_deleted_count FROM moa.tenant_purge_operations \
+                 WHERE tenant_id = $1 AND status = 'relationally_committed'), \
+                (SELECT count(*) FROM moa.artifact_release_policy \
+                 WHERE storage_partition_id = $1::TEXT), \
+                (SELECT count(*) FROM moa.artifact_release_policy \
+                 WHERE storage_partition_id = $2::TEXT)",
+        )
+        .bind(purge_tenant)
+        .bind(neighbor_tenant)
+        .fetch_one(&target)
+        .await?;
+        let activation_chain_facts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM moa.artifact_activation_audit \
+                 WHERE storage_partition_id = $1::TEXT), \
+                (SELECT count(*) FROM moa.artifact_activation_audit \
+                 WHERE storage_partition_id = $2::TEXT), \
+                (SELECT count(*) FROM moa.artifact_serving_pointer \
+                 WHERE storage_partition_id = $1::TEXT), \
+                (SELECT count(*) FROM moa.artifact_serving_pointer \
+                 WHERE storage_partition_id = $2::TEXT), \
+                (SELECT count(*) FROM moa.artifact \
+                 WHERE storage_partition_id = $1::TEXT), \
+                (SELECT count(*) FROM moa.artifact \
+                 WHERE storage_partition_id = $2::TEXT)",
+        )
+        .bind(purge_tenant)
+        .bind(neighbor_tenant)
+        .fetch_one(&target)
+        .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            first,
+            second,
+            migrated,
+            catalog_count,
+            trigger_kinds,
+            global_exemptions,
+            fence_helper_contract,
+            restricted_fence_select_grants,
+            legacy_release_cleanup,
+            audit_guard_contract,
+            helper_scope_facts,
+            activator_fenced,
+            eraser_fenced,
+            first_authz,
+            second_authz,
+            final_authz,
+            release_policy_batches,
+            terminal,
+            bounded_facts,
+            activation_chain_facts,
+            spoof_sqlstate,
+            ordinary_activation_delete_sqlstate,
+        ))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+    let (
+        first,
+        second,
+        migrated,
+        catalog_count,
+        trigger_kinds,
+        global_exemptions,
+        fence_helper_contract,
+        restricted_fence_select_grants,
+        legacy_release_cleanup,
+        audit_guard_contract,
+        helper_scope_facts,
+        activator_fenced,
+        eraser_fenced,
+        first_authz,
+        second_authz,
+        final_authz,
+        release_policy_batches,
+        terminal,
+        bounded_facts,
+        activation_chain_facts,
+        spoof_sqlstate,
+        ordinary_activation_delete_sqlstate,
+    ) = outcome.expect("bounded tenant-purge assertions should complete");
+    assert_eq!(first, expected_migration_labels());
+    assert!(
+        second.is_empty(),
+        "the final schema must not reapply: {second:?}"
+    );
+    assert_eq!(
+        migrated,
+        (
+            "in_progress".to_string(),
+            "authz".to_string(),
+            0,
+            0,
+            0,
+            true,
+            true,
+        )
+    );
+    assert_eq!(catalog_count, 129);
+    assert_eq!(
+        trigger_kinds,
+        vec![
+            "moa_tenant_purge_fence_insert".to_string(),
+            "moa_tenant_purge_fence_update".to_string(),
+        ]
+    );
+    assert_eq!(global_exemptions, 0);
+    assert_eq!(
+        fence_helper_contract,
+        (
+            "moa_owner".to_string(),
+            true,
+            vec!["search_path=pg_catalog, pg_temp".to_string()],
+            true,
+            true,
+            true,
+        ),
+        "the fence helper must remain owner-defined and least privilege while the statement guard remains invoker-rights"
+    );
+    assert_eq!(
+        restricted_fence_select_grants, 0,
+        "restricted definer roles must not read tenant purge control tables directly"
+    );
+    assert!(
+        legacy_release_cleanup.0,
+        "the legacy monolithic release purge function must be absent"
+    );
+    assert_eq!(
+        legacy_release_cleanup.1, 0,
+        "all legacy release read/delete policies must be absent"
+    );
+    assert_eq!(
+        legacy_release_cleanup.2, 0,
+        "the inert releaser role must retain no release-table privileges"
+    );
+    assert!(
+        !legacy_release_cleanup.3,
+        "the inert releaser role must retain no moa schema usage"
+    );
+    assert!(
+        legacy_release_cleanup
+            .4
+            .contains("moa.tenant_purge_bypass_valid")
+            && !legacy_release_cleanup.4.contains("moa_artifact_releaser")
+            && !legacy_release_cleanup
+                .4
+                .contains("artifact_release_purge_partition"),
+        "the audit guard must admit deletion only through the validated bounded purge: {}",
+        legacy_release_cleanup.4
+    );
+    assert_eq!(
+        audit_guard_contract,
+        (
+            "moa_owner".to_string(),
+            true,
+            vec!["search_path=pg_catalog, pg_temp".to_string()],
+            true,
+            true,
+        ),
+        "the activation-audit purge exception must run under a hardened owner-only trigger function with no direct non-owner execution"
+    );
+    assert_eq!(
+        helper_scope_facts,
+        (true, false, false),
+        "only an in-progress tenant-wide fence may trip the restricted-writer helper"
+    );
+    assert!(
+        activator_fenced,
+        "artifact activator must execute the helper"
+    );
+    assert!(eraser_fenced, "privacy eraser must execute the helper");
+    assert_eq!(first_authz, (1000, 1000, false));
+    assert_eq!(second_authz, (1, 1, false));
+    assert_eq!(final_authz, (0, 0, true));
+    assert_eq!(
+        release_policy_batches,
+        vec![1000, 1],
+        "the release-policy stage must cross the fixed 1,000-row boundary"
+    );
+    assert_eq!(
+        terminal,
+        Some(("committed".to_string(), "complete".to_string(), 0))
+    );
+    assert_eq!(
+        bounded_facts,
+        (0, 0, 1, 1001, 2010, 0, 1),
+        "the target release-policy set must be gone while the neighboring policy survives"
+    );
+    assert_eq!(
+        activation_chain_facts,
+        (0, 1, 0, 1, 0, 1),
+        "the target activation chain must be gone while the neighboring chain survives"
+    );
+    assert_eq!(spoof_sqlstate.as_deref(), Some("55000"));
+    assert_eq!(
+        ordinary_activation_delete_sqlstate.as_deref(),
+        Some("P0001"),
+        "ordinary callers must not bypass the activation audit's append-only guard"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn privacy_export_auditor_final_catalog_reads_typed_surface_db() {
+    // Pins: the final schema gives the dedicated auditor only the typed export
+    // read surface and exposes structured subject-access audit rows to that role.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let tenant_id = uuid::Uuid::new_v4();
+    let subject_user_id = uuid::Uuid::new_v4();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect privacy-export auditor maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create privacy-export auditor throwaway migration database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&target_url)
+            .await?;
+        let catalog = privacy_auditor_security_catalog(&target).await?;
+
+        let audit_payload = format!(
+            r#"{{"reason":"subject access request","subject_user_id":"{subject_user_id}","subjects":[{{"user_id":"{subject_user_id}","target_uid":"{subject_user_id}","provenance":"requested"}}],"storage_partition":"{tenant_id}","artifact_counts":{{"nodes":0}},"files":1}}"#
+        );
+        let audit_metadata = format!(
+            r#"{{"approval_token_jti":"privacy-export-jti-{subject_user_id}","approval_token_sub":"privacy-export-admin","subject_user_id":"{subject_user_id}","subjects":[{{"user_id":"{subject_user_id}","target_uid":"{subject_user_id}","provenance":"requested"}}],"op":"export"}}"#
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO moa.graph_changelog (
+                storage_partition_id, tenant_id, actor_id, actor_kind, op,
+                target_kind, target_label, target_uid, payload,
+                pii_class, audit_metadata
+            )
+            VALUES ($1, $2, 'privacy-export-admin', 'admin', 'export',
+                    'user', 'User', $3, $4::JSONB, 'phi', $5::JSONB)
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(tenant_id)
+        .bind(subject_user_id)
+        .bind(&audit_payload)
+        .bind(&audit_metadata)
+        .execute(&target)
+        .await?;
+
+        let mut auditor = target.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_auditor")
+            .execute(&mut *auditor)
+            .await?;
+        for table in PRIVACY_AUDITOR_TABLES {
+            sqlx::query(&format!("SELECT 1 FROM {table} LIMIT 0"))
+                .fetch_optional(&mut *auditor)
+                .await?;
+        }
+        let visible_audit: (String, String, uuid::Uuid, bool, bool) = sqlx::query_as(
+            "SELECT op, target_kind, target_uid, \
+                    payload = $2::JSONB, audit_metadata = $3::JSONB \
+                 FROM moa.graph_changelog \
+                 WHERE target_uid = $1 AND op = 'export'",
+        )
+        .bind(subject_user_id)
+        .bind(&audit_payload)
+        .bind(&audit_metadata)
+        .fetch_one(&mut *auditor)
+        .await?;
+        auditor.rollback().await?;
+        target.close().await;
+
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            catalog,
+            first,
+            second,
+            visible_audit,
+        ))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (catalog, first, second, visible_audit) =
+        outcome.expect("privacy-export auditor assertions should complete");
+    assert_eq!(first, expected_migration_labels());
+    assert!(
+        second.is_empty(),
+        "the migration runner must not reapply the final migration: {second:?}"
+    );
+
+    let expected_grants = FINAL_AUDITOR_GRANT_TABLES
+        .iter()
+        .map(|table| format!("{table}|SELECT|false"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        catalog.auditor_grants, expected_grants,
+        "moa_auditor must have exactly the typed non-grantable SELECT surface"
+    );
+    let expected_policies = FINAL_AUDITOR_POLICY_TABLES
+        .iter()
+        .map(|table| format!("{table}|rd_auditor|PERMISSIVE|{{moa_auditor}}|SELECT|true|"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        catalog.policies, expected_policies,
+        "moa_auditor must have exactly one typed SELECT policy per export relation"
+    );
+
+    assert_eq!(visible_audit.0, "export");
+    assert_eq!(visible_audit.1, "user");
+    assert_eq!(visible_audit.2, subject_user_id);
+    assert!(
+        visible_audit.3,
+        "the structured export payload must round-trip"
+    );
+    assert!(
+        visible_audit.4,
+        "the structured audit metadata must round-trip"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn graph_changelog_final_schema_installs_statement_transition_trigger_db() {
+    // Pins: the installed catalog, not only migration source text, owns one
+    // statement-level trigger with a named NEW transition relation.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        clean_apply_then_reapply(&target_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let (is_row_trigger, definition): (bool, String) = sqlx::query_as(
+            "SELECT (trigger_row.tgtype & 1) = 1, pg_get_triggerdef(trigger_row.oid) \
+             FROM pg_trigger AS trigger_row \
+             WHERE trigger_row.tgrelid = 'moa.graph_changelog'::REGCLASS \
+               AND trigger_row.tgname = 'graph_changelog_bump_storage_partition_state' \
+               AND NOT trigger_row.tgisinternal",
+        )
+        .fetch_one(&pool)
+        .await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((is_row_trigger, definition))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (is_row_trigger, definition) =
+        outcome.expect("graph changelog generation catalog probe should complete");
+    assert!(
+        !is_row_trigger,
+        "generation trigger must be statement-level"
+    );
+    assert!(
+        definition.contains("REFERENCING NEW TABLE AS inserted_graph_changelog_rows"),
+        "generation trigger must expose the graph changelog generation transition relation: {definition}"
     );
 }
 
@@ -465,7 +3079,7 @@ async fn artifact_release_activation_boundary_is_execute_only_db() {
                  CREATE EXTENSION IF NOT EXISTS pgaudit;",
             )
             .await?;
-        moa_migrations::run(&target_url).await?;
+        run_reporting_applied_serialized(&target_url).await?;
 
         let boundary_ok: bool = sqlx::query_scalar(
             r#"
@@ -515,9 +3129,7 @@ async fn artifact_release_activation_boundary_is_execute_only_db() {
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
     assert!(
         outcome.expect("artifact release boundary assertions should complete"),
@@ -527,233 +3139,8 @@ async fn artifact_release_activation_boundary_is_execute_only_db() {
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn artifact_release_purge_is_scope_bound_and_execute_only_db() {
-    // Pins: tenant erasure can remove release-control rows only through the
-    // exact-partition SECURITY DEFINER seam, and only when the application
-    // transaction is scoped to that same partition.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create artifact release purge database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = async {
-        clean_apply_then_reapply(&target_url).await?;
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        let tenant_id = uuid::Uuid::now_v7();
-        let partition = tenant_id.to_string();
-        let neighbor_partition = uuid::Uuid::now_v7().to_string();
-        let policy_uid = uuid::Uuid::now_v7();
-
-        sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, 'release purge')")
-            .bind(tenant_id)
-            .bind(format!("release-purge-{tenant_id}"))
-            .execute(&target)
-            .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO moa.artifact_release_policy (
-                policy_uid, storage_partition_id, user_id, name, revision,
-                target_class, blocking_assertions, primary_gate_family,
-                attestation_ttl_secs, resource_policy_hash, policy_hash
-            )
-            VALUES (
-                $1, $2, NULL, 'tenant-release-purge', 1, 'skill_visibility',
-                '[{"id":"safety"}]'::JSONB,
-                '[{"metric":"scenario_pass_rate"}]'::JSONB,
-                3600, $3,
-                moa.artifact_release_policy_content_hash(
-                    'tenant-release-purge', 1, 'skill_visibility',
-                    '[{"id":"safety"}]'::JSONB,
-                    '[{"metric":"scenario_pass_rate"}]'::JSONB,
-                    3600, $3
-                )
-            )
-            "#,
-        )
-        .bind(policy_uid)
-        .bind(&partition)
-        .bind(vec![1_u8; 32])
-        .execute(&target)
-        .await?;
-
-        let role_boundary_ok: bool = sqlx::query_scalar(
-            r#"
-            SELECT
-                NOT releaser.rolcanlogin
-                AND NOT releaser.rolinherit
-                AND NOT releaser.rolbypassrls
-                AND owner.rolname = 'moa_artifact_releaser'
-                AND 'search_path=pg_catalog, pg_temp' =
-                    ANY(COALESCE(function_row.proconfig, ARRAY[]::TEXT[]))
-                AND has_function_privilege('moa_app', function_row.oid, 'EXECUTE')
-                AND NOT has_function_privilege(
-                    'moa_promoter', function_row.oid, 'EXECUTE'
-                )
-                AND NOT has_function_privilege(
-                    'moa_auditor', function_row.oid, 'EXECUTE'
-                )
-            FROM pg_proc function_row
-            JOIN pg_roles owner ON owner.oid = function_row.proowner
-            JOIN pg_roles releaser ON releaser.rolname = 'moa_artifact_releaser'
-            JOIN pg_namespace namespace ON namespace.oid = function_row.pronamespace
-            WHERE namespace.nspname = 'moa'
-              AND function_row.proname = 'purge_artifact_release_partition'
-            "#,
-        )
-        .fetch_one(&target)
-        .await?;
-
-        let wrong_scope_code = {
-            let mut tx = target.begin().await?;
-            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
-                .bind(&neighbor_partition)
-                .execute(tx.as_mut())
-                .await?;
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(tx.as_mut())
-                .await?;
-            let result = sqlx::query("SELECT moa.purge_artifact_release_partition($1)")
-                .bind(&partition)
-                .execute(tx.as_mut())
-                .await;
-            let code = result
-                .as_ref()
-                .err()
-                .and_then(sqlx::Error::as_database_error)
-                .and_then(|error| error.code())
-                .map(|code| code.into_owned());
-            tx.rollback().await?;
-            code
-        };
-
-        let row_survived_wrong_scope: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM moa.artifact_release_policy WHERE policy_uid = $1)",
-        )
-        .bind(policy_uid)
-        .fetch_one(&target)
-        .await?;
-
-        let releaser_visible_rows = {
-            let mut tx = target.begin().await?;
-            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
-                .bind(&partition)
-                .execute(tx.as_mut())
-                .await?;
-            sqlx::query("SET LOCAL ROLE moa_artifact_releaser")
-                .execute(tx.as_mut())
-                .await?;
-            let count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM moa.artifact_release_policy WHERE storage_partition_id = $1",
-            )
-            .bind(&partition)
-            .fetch_one(tx.as_mut())
-            .await?;
-            tx.rollback().await?;
-            count
-        };
-
-        let blank_partition_code = {
-            let mut tx = target.begin().await?;
-            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
-                .bind(&partition)
-                .execute(tx.as_mut())
-                .await?;
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(tx.as_mut())
-                .await?;
-            let result = sqlx::query("SELECT moa.purge_artifact_release_partition('')")
-                .execute(tx.as_mut())
-                .await;
-            let code = result
-                .as_ref()
-                .err()
-                .and_then(sqlx::Error::as_database_error)
-                .and_then(|error| error.code())
-                .map(|code| code.into_owned());
-            tx.rollback().await?;
-            code
-        };
-
-        let deleted = {
-            let mut tx = target.begin().await?;
-            sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
-                .bind(&partition)
-                .execute(tx.as_mut())
-                .await?;
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(tx.as_mut())
-                .await?;
-            let deleted: i64 =
-                sqlx::query_scalar("SELECT moa.purge_artifact_release_partition($1)")
-                    .bind(&partition)
-                    .fetch_one(tx.as_mut())
-                    .await?;
-            tx.commit().await?;
-            deleted
-        };
-
-        let tenant_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM moa.artifact_release_policy WHERE storage_partition_id = $1",
-        )
-        .bind(&partition)
-        .fetch_one(&target)
-        .await?;
-        let platform_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM moa.artifact_release_policy WHERE storage_partition_id IS NULL",
-        )
-        .fetch_one(&target)
-        .await?;
-        target.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-            role_boundary_ok,
-            wrong_scope_code,
-            row_survived_wrong_scope,
-            releaser_visible_rows,
-            blank_partition_code,
-            deleted,
-            tenant_rows,
-            platform_rows,
-        ))
-    }
-    .await;
-
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-    let (
-        role_boundary_ok,
-        wrong_scope_code,
-        row_survived_wrong_scope,
-        releaser_visible_rows,
-        blank_partition_code,
-        deleted,
-        tenant_rows,
-        platform_rows,
-    ) = outcome.expect("artifact release purge assertions should complete");
-    assert!(role_boundary_ok, "release purge role or grants drifted");
-    assert_eq!(wrong_scope_code.as_deref(), Some("42501"));
-    assert!(row_survived_wrong_scope);
-    assert_eq!(releaser_visible_rows, 1);
-    assert_eq!(blank_partition_code.as_deref(), Some("22023"));
-    assert_eq!((deleted, tenant_rows, platform_rows), (1, 0, 3));
-}
-
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
-    // Pins: V337 starts normalized audit storage empty, installs every finite SQL matrix and
+    // Pins: execution analytics starts normalized audit storage empty, installs every finite SQL matrix and
     // immutable trace/high-water boundary, rebuilds execution-only facts, and applies once.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -765,25 +3152,11 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     admin
         .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
         .await
-        .expect("create V337 contract database");
+        .expect("create execution analytics contract database");
 
     let target_url = with_database(&admin_url, &db_name);
     let outcome = async {
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        target
-            .execute(
-                "CREATE EXTENSION IF NOT EXISTS vector; \
-                 CREATE EXTENSION IF NOT EXISTS pgaudit;",
-            )
-            .await?;
-        target.close().await;
-        apply_through_v000336(&target_url).await?;
-
-        let first = moa_migrations::run_reporting_applied(&target_url).await?;
-        let second = moa_migrations::run_reporting_applied(&target_url).await?;
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
         let target = PgPoolOptions::new()
             .max_connections(1)
             .connect(&target_url)
@@ -1641,9 +4014,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (
@@ -1675,22 +4046,14 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         database_identity_change_rejected,
         partial_table_identity_change_rejected,
         partial_pass_rejected,
-    ) = outcome.expect("V337 staged contract should execute on PostgreSQL");
+    ) = outcome.expect("execution analytics staged contract should execute on PostgreSQL");
 
-    // V337 must be the FIRST migration applied on top of the V336 baseline. The
-    // apply does not stop there — it runs the whole embedded set — so asserting a
-    // length of 1 here would have broken on every migration added after V337, and
-    // did. What this test pins is the V337 cutover contract asserted below, which
-    // only holds if V337 is what ran at this boundary.
-    assert!(
-        !first.is_empty(),
-        "a V336 baseline must apply at least V337, got {first:?}"
+    assert_eq!(
+        first,
+        expected_migration_labels(),
+        "execution analytics behavior must be exercised on the complete final schema"
     );
-    assert!(
-        first[0].contains("337") && first[0].contains("execution_analytics"),
-        "V337 must be the first migration applied over the V336 baseline, got {first:?}"
-    );
-    assert!(second.is_empty(), "second V337 apply must be empty");
+    assert!(second.is_empty(), "the complete schema must not reapply");
     assert_eq!(audit_counts, (0, 0, 0));
     assert_eq!(route_schema_contract, (true, true, true, true, true, true));
     assert_eq!(valid_route_cells, 7);
@@ -1722,240 +4085,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     assert!(database_identity_change_rejected);
     assert!(partial_table_identity_change_rejected);
     assert!(partial_pass_rejected);
-}
-
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn execution_analytics_preflight_abort_preserves_task10_state_db() {
-    // Pins: an invalid Task 10 source-provenance cohort aborts V337 before any
-    // normalized column/table survives, preserves the source JSON bytes, and
-    // leaves refinery history unchanged.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create V337 abort database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = async {
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        target
-            .execute(
-                "CREATE EXTENSION IF NOT EXISTS vector; \
-                 CREATE EXTENSION IF NOT EXISTS pgaudit;",
-            )
-            .await?;
-        target.close().await;
-        apply_through_v000336(&target_url).await?;
-
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        sqlx::raw_sql(
-            r#"
-            SET session_replication_role = replica;
-            INSERT INTO moa.execution_run (
-                run_uid,tenant_id,contact_id,session_id,
-                originating_user_sequence_num,planning_context_uid,
-                planning_context_hash,owner_user_id,goal_contract,
-                initial_plan,active_plan,initial_plan_hash,active_plan_hash,
-                capability_catalog,authorization_envelope,source_provenance,input,
-                status,queued_at
-            ) VALUES (
-                '00000000-0000-0000-0000-000000337900',
-                '00000000-0000-0000-0000-000000337901',NULL,
-                '00000000-0000-0000-0000-000000337902',0,
-                '00000000-0000-0000-0000-000000337903',repeat('1',64),
-                'owner','{}','{}','{}',repeat('2',64),repeat('3',64),
-                '{}','{}','{"kind":"generated_plan"}','{}','queued',NOW()
-            );
-            SET session_replication_role = origin;
-            "#,
-        )
-        .execute(&target)
-        .await?;
-        let before_bytes: String = sqlx::query_scalar(
-            "SELECT source_provenance::TEXT FROM moa.execution_run \
-             WHERE run_uid = '00000000-0000-0000-0000-000000337900'",
-        )
-        .fetch_one(&target)
-        .await?;
-        target.close().await;
-
-        let apply_error = moa_migrations::run_reporting_applied(&target_url)
-            .await
-            .expect_err("invalid provenance must abort V337");
-        let apply_error = format!("{apply_error:#}");
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        let source_kind_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (\
-                SELECT 1 FROM information_schema.columns \
-                WHERE table_schema = 'moa' AND table_name = 'execution_run' \
-                  AND column_name = 'source_kind'\
-             )",
-        )
-        .fetch_one(&target)
-        .await?;
-        let audit_table_exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('moa.execution_route_audit') IS NOT NULL")
-                .fetch_one(&target)
-                .await?;
-        let after_bytes: String = sqlx::query_scalar(
-            "SELECT source_provenance::TEXT FROM moa.execution_run \
-             WHERE run_uid = '00000000-0000-0000-0000-000000337900'",
-        )
-        .fetch_one(&target)
-        .await?;
-        let recorded_v337: bool = sqlx::query_scalar(
-            "SELECT EXISTS (\
-                SELECT 1 FROM refinery_schema_history WHERE version = 337\
-             )",
-        )
-        .fetch_one(&target)
-        .await?;
-        target.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-            apply_error,
-            before_bytes,
-            after_bytes,
-            source_kind_exists,
-            audit_table_exists,
-            recorded_v337,
-        ))
-    }
-    .await;
-
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-
-    let (error, before_bytes, after_bytes, source_kind_exists, audit_table_exists, recorded_v337) =
-        outcome.expect("inspect V337 unchanged-state abort");
-    assert!(
-        error.contains("00000000-0000-0000-0000-000000337900"),
-        "preflight error must report the complete offending run set: {error}"
-    );
-    assert_eq!(after_bytes, before_bytes);
-    assert!(!source_kind_exists);
-    assert!(!audit_table_exists);
-    assert!(!recorded_v337);
-}
-
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn procedure_runtime_cutover_discards_rows_without_execution_translation_db() {
-    // Pins: adopting V336 is a destructive reset boundary. Procedure-backed
-    // experiment state disappears and does not become an execution run.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create destructive cutover database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = async {
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        target
-            .execute(
-                "CREATE EXTENSION IF NOT EXISTS vector; \
-                 CREATE EXTENSION IF NOT EXISTS pgaudit;",
-            )
-            .await?;
-        target.close().await;
-        apply_through_version(&target_url, 335).await?;
-
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        sqlx::raw_sql(
-            r#"
-            INSERT INTO analytics.score_run (
-                run_id,storage_partition_id,user_id,source
-            ) VALUES (
-                '00000000-0000-0000-0000-000000033602',
-                '00000000-0000-0000-0000-000000003360',
-                '00000000-0000-0000-0000-000000003361',
-                'experiment_run'
-            );
-            INSERT INTO moa.experiment_run (
-                run_uid,storage_partition_id,user_id,name,target_kind,status,
-                target,variant,score_run_id,created_by_identity,resource_envelope
-            ) VALUES (
-                '00000000-0000-0000-0000-000000033603',
-                '00000000-0000-0000-0000-000000003360',
-                '00000000-0000-0000-0000-000000003361',
-                'discard proof','procedure','completed',
-                '{"kind":"procedure","procedure_ref":"skill://discard-proof"}',
-                '{}',
-                '00000000-0000-0000-0000-000000033602',
-                '{"kind":"operator","id":"cutover-proof"}',
-                '{"version": 1,
-                     "run_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
-                     "trial_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
-                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb
-            );
-            "#,
-        )
-        .execute(&target)
-        .await?;
-        target.close().await;
-
-        let applied = apply_through_version(&target_url, 336).await?;
-        let target = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        let state: (bool, i64, i64) = sqlx::query_as(
-            "SELECT \
-                 to_regclass('moa.artifact_run') IS NULL \
-                     AND to_regclass('moa.artifact_node_run') IS NULL, \
-                 (SELECT COUNT(*) FROM moa.experiment_run \
-                  WHERE run_uid = '00000000-0000-0000-0000-000000033603'), \
-                 (SELECT COUNT(*) FROM moa.execution_run)",
-        )
-        .fetch_one(&target)
-        .await?;
-        target.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((applied, state))
-    }
-    .await;
-
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-
-    let (applied, (procedure_tables_absent, experiment_rows, execution_rows)) =
-        outcome.expect("destructive V336 cutover should execute");
-    assert_eq!(applied.len(), 1, "targeted apply must contain only V336");
-    assert!(applied[0].contains("336"));
-    assert!(procedure_tables_absent);
-    assert_eq!(experiment_rows, 0);
-    assert_eq!(execution_rows, 0);
 }
 
 #[tokio::test]
@@ -1993,9 +4122,7 @@ async fn refinery_clean_apply_gives_agent_principals_generated_ids_db() {
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let default = outcome.expect("inspect clean agent migration");
@@ -2004,10 +4131,9 @@ async fn refinery_clean_apply_gives_agent_principals_generated_ids_db() {
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn full_database_runner_installs_post_cutover_schema_and_foreign_keys_db() {
-    // Pins: a pristine physical database reaches the complete post-V336/V337
-    // schema through the canonical runner, preserves the final experiment FKs,
-    // removes legacy procedure tables, and is idempotent on re-apply.
+async fn full_database_runner_installs_execution_schema_and_foreign_keys_db() {
+    // Pins: the canonical runner installs the final execution relations and
+    // experiment foreign keys without recreating procedure-era relations.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
     let admin = PgPoolOptions::new()
@@ -2027,9 +4153,9 @@ async fn full_database_runner_installs_post_cutover_schema_and_foreign_keys_db()
             .max_connections(2)
             .connect(&target_url)
             .await?;
-        let recorded_cutovers: Vec<(i32, String)> = sqlx::query_as(
-            "SELECT version, name FROM refinery_schema_history \
-             WHERE version IN (336, 337) ORDER BY version",
+        let recorded_cutovers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM refinery_schema_history \
+             WHERE name IN ('execution_runs', 'execution_analytics') ORDER BY version",
         )
         .fetch_all(&target)
         .await?;
@@ -2088,9 +4214,7 @@ async fn full_database_runner_installs_post_cutover_schema_and_foreign_keys_db()
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (
@@ -2106,16 +4230,12 @@ async fn full_database_runner_installs_post_cutover_schema_and_foreign_keys_db()
     assert_eq!(
         recorded_cutovers,
         vec![
-            (336, "remove_legacy_procedure_runs".to_string()),
-            (337, "execution_analytics".to_string()),
+            "execution_runs".to_string(),
+            "execution_analytics".to_string(),
         ],
-        "the final two cutovers must be recorded exactly once"
+        "the semantic final execution migrations must be recorded exactly once"
     );
-    assert!(
-        first.iter().any(|migration| migration.contains("336"))
-            && first.iter().any(|migration| migration.contains("337")),
-        "the pristine apply must include V336 and V337: {first:?}"
-    );
+    assert_eq!(first, expected_migration_labels());
     assert!(
         second.is_empty(),
         "the second canonical apply must be a no-op: {second:?}"
@@ -2237,8 +4357,8 @@ async fn knowledge_link_claim_schema_facts(
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn knowledge_link_claims_v000358_fresh_and_idempotent_db() {
-    // Pins: V000358 bootstraps the link claim table on a pristine database and
+async fn knowledge_link_claims_final_schema_is_strict_and_idempotent_db() {
+    // Pins: knowledge-link claims bootstraps the link claim table on a pristine database and
     // re-applies as a no-op, and installs the two properties the durable link
     // depends on — strict forced-RLS tenant isolation with no control-plane
     // branch, and a database-owned rule that a finalized claim always names the
@@ -2269,10 +4389,8 @@ async fn knowledge_link_claims_v000358_fresh_and_idempotent_db() {
     }
     .await;
 
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    // Always prove the throwaway database is disconnected before cleanup.
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (first, second, facts) =
@@ -2283,7 +4401,7 @@ async fn knowledge_link_claims_v000358_fresh_and_idempotent_db() {
         first
             .iter()
             .any(|applied| applied.contains("knowledge_link_claims")),
-        "a pristine database must apply V000358, got {first:?}"
+        "a pristine database must apply knowledge-link claims, got {first:?}"
     );
     assert!(
         second.is_empty(),
@@ -2310,8 +4428,8 @@ async fn knowledge_link_claims_v000358_fresh_and_idempotent_db() {
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn tenant_credential_vault_v000346_fresh_and_idempotent_db() {
-    // Pins: V000346 bootstraps the durable credential owner on a pristine
+async fn tenant_credential_vault_final_schema_is_strict_and_idempotent_db() {
+    // Pins: tenant credential vault bootstraps the durable credential owner on a pristine
     // database and re-applies as a no-op, and the schema it installs carries the
     // security properties the vault depends on — forced RLS on both tables, one
     // active version per series, and an audit table an ordinary role cannot
@@ -2342,10 +4460,8 @@ async fn tenant_credential_vault_v000346_fresh_and_idempotent_db() {
     }
     .await;
 
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    // Always prove the throwaway database is disconnected before cleanup.
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (first, second, facts) =
@@ -2357,7 +4473,7 @@ async fn tenant_credential_vault_v000346_fresh_and_idempotent_db() {
         first
             .iter()
             .any(|applied| applied.contains("tenant_credential_vault")),
-        "a pristine database must apply V000346, got {first:?}"
+        "a pristine database must apply tenant credential vault, got {first:?}"
     );
     assert!(
         second.is_empty(),
@@ -2391,458 +4507,6 @@ async fn tenant_credential_vault_v000346_fresh_and_idempotent_db() {
     );
 }
 
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn tenant_mcp_removal_v000367_deletes_dead_state_and_is_idempotent_db() {
-    // Pins: the hard break drops the unreachable binding table, deletes the
-    // retired MCP credential kind and its audit rows, narrows the database
-    // constraint, and can be executed twice.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create throwaway migration database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = async {
-        apply_through_version(&target_url, 366).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        let tenant_id = uuid::Uuid::new_v4();
-        let connection_uid = uuid::Uuid::new_v4();
-        let credential_uid = uuid::Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO public.tenant_credential_versions
-                (credential_uid, tenant_id, connection_uid, kind, version,
-                 material_sealed, kms_key_id)
-            VALUES ($1, $2, $3, 'mcp_bearer', 1, '\x01', 'test-key')
-            "#,
-        )
-        .bind(credential_uid)
-        .bind(tenant_id)
-        .bind(connection_uid)
-        .execute(&pool)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO public.tenant_credential_operations
-                (tenant_id, operation_id, request_hash, operation,
-                 credential_uid, connection_uid, kind, version,
-                 principal_kind, principal_id, outcome)
-            VALUES ($1, 'mcp-remove', 'hash', 'create', $2, $3,
-                    'mcp_bearer', 1, 'caller', $4, 'succeeded')
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(credential_uid)
-        .bind(connection_uid)
-        .bind(uuid::Uuid::new_v4())
-        .execute(&pool)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO public.tenant_mcp_connection_bindings
-                (tenant_id, connection_uid, server_name, credential_ref,
-                 status, allowed_operations)
-            VALUES ($1, $2, 'search', $3, 'active', ARRAY['search'])
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(connection_uid)
-        .bind(credential_uid)
-        .execute(&pool)
-        .await?;
-
-        sqlx::raw_sql(V000367_SQL).execute(&pool).await?;
-        sqlx::raw_sql(V000367_SQL).execute(&pool).await?;
-
-        let binding_exists: Option<String> =
-            sqlx::query_scalar("SELECT to_regclass('public.tenant_mcp_connection_bindings')::TEXT")
-                .fetch_one(&pool)
-                .await?;
-        let retired_versions: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM public.tenant_credential_versions WHERE kind = 'mcp_bearer'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        let retired_operations: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM public.tenant_credential_operations WHERE kind = 'mcp_bearer'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        pool.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-            binding_exists,
-            retired_versions,
-            retired_operations,
-        ))
-    }
-    .await;
-
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-
-    let (binding_exists, retired_versions, retired_operations) =
-        outcome.expect("V000367 should apply twice and remove tenant MCP state");
-    assert_eq!(binding_exists, None);
-    assert_eq!(retired_versions, 0);
-    assert_eq!(retired_operations, 0);
-}
-
-/// Legacy content-hash graph state seeded at V000346 so the V000347 backfill has
-/// real work to do.
-///
-/// The shape is the defect this migration exists to remove: two different
-/// documents whose identical paragraph collapsed onto ONE shared chunk node, plus
-/// a tombstoned occurrence of the same text under a superseded version, plus a
-/// chunk that never reached the graph at all.
-#[derive(Debug, Clone, Copy)]
-struct LegacyChunkGraph {
-    tenant_id: uuid::Uuid,
-    shared_chunk_node: uuid::Uuid,
-    document_node: uuid::Uuid,
-    entity_node: uuid::Uuid,
-    fact_node: uuid::Uuid,
-    alpha_version: uuid::Uuid,
-    alpha_chunk: uuid::Uuid,
-    alpha_unlinked_chunk: uuid::Uuid,
-    alpha_superseded_chunk: uuid::Uuid,
-    beta_chunk: uuid::Uuid,
-}
-
-impl LegacyChunkGraph {
-    fn new() -> Self {
-        Self {
-            tenant_id: uuid::Uuid::now_v7(),
-            shared_chunk_node: uuid::Uuid::now_v7(),
-            document_node: uuid::Uuid::now_v7(),
-            entity_node: uuid::Uuid::now_v7(),
-            fact_node: uuid::Uuid::now_v7(),
-            alpha_version: uuid::Uuid::now_v7(),
-            alpha_chunk: uuid::Uuid::now_v7(),
-            alpha_unlinked_chunk: uuid::Uuid::now_v7(),
-            alpha_superseded_chunk: uuid::Uuid::now_v7(),
-            beta_chunk: uuid::Uuid::now_v7(),
-        }
-    }
-
-    /// Returns every seeded chunk uid in a stable order.
-    fn chunk_uids(&self) -> Vec<uuid::Uuid> {
-        vec![
-            self.alpha_chunk,
-            self.alpha_unlinked_chunk,
-            self.alpha_superseded_chunk,
-            self.beta_chunk,
-        ]
-    }
-}
-
-/// Applies `SET LOCAL ROLE moa_app` plus the tenant RLS session variables that
-/// `ScopedConn` installs at runtime, so seeds and reads go through the same
-/// forced-RLS path production uses.
-async fn begin_as_app(
-    pool: &PgPool,
-    tenant_id: Option<uuid::Uuid>,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut tx = pool.begin().await?;
-    let tenant_text = tenant_id
-        .map(|tenant| tenant.to_string())
-        .unwrap_or_default();
-    sqlx::query(
-        "SELECT pg_catalog.set_config('moa.tenant_id', $1, true), \
-                pg_catalog.set_config('moa.storage_partition_id', $1, true), \
-                pg_catalog.set_config('moa.contact_id', '', true), \
-                pg_catalog.set_config('moa.control_plane', 'false', true)",
-    )
-    .bind(&tenant_text)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("SET LOCAL ROLE moa_app")
-        .execute(&mut *tx)
-        .await?;
-    Ok(tx)
-}
-
-/// Seeds the pre-V000347 shared-chunk-node world through forced RLS.
-async fn seed_legacy_shared_chunk_graph(
-    pool: &PgPool,
-) -> Result<LegacyChunkGraph, Box<dyn std::error::Error + Send + Sync>> {
-    let seed = LegacyChunkGraph::new();
-    let tenant_text = seed.tenant_id.to_string();
-    let connection_uid = uuid::Uuid::now_v7();
-    let alpha_object = uuid::Uuid::now_v7();
-    let beta_object = uuid::Uuid::now_v7();
-    let alpha_superseded_version = uuid::Uuid::now_v7();
-    let beta_version = uuid::Uuid::now_v7();
-    let mut tx = begin_as_app(pool, Some(seed.tenant_id)).await?;
-
-    // An external vector backend, so the outbox backfill has an addressee.
-    sqlx::query(
-        "INSERT INTO moa.storage_partition_state (storage_partition_id, vector_backend) \
-         VALUES ($1, 'turbopuffer')",
-    )
-    .bind(&tenant_text)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO moa.knowledge_connections ( \
-             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
-             provider_connection_id, connector, credential_ref, status, metadata) \
-         VALUES ($1, $2, $3, 'merge', 'occurrence-config', 'occurrence-account', 'drive', \
-                 'occurrence-credential', 'active', '{}'::JSONB)",
-    )
-    .bind(connection_uid)
-    .bind(seed.tenant_id)
-    .bind(&tenant_text)
-    .execute(&mut *tx)
-    .await?;
-
-    for (object_uid, external_id) in [(alpha_object, "doc-alpha"), (beta_object, "doc-beta")] {
-        sqlx::query(
-            "INSERT INTO moa.knowledge_objects ( \
-                 object_uid, tenant_id, storage_partition_id, connection_id, object_type, \
-                 external_object_id, title, change_token, source_uri, status, metadata) \
-             VALUES ($1, $2, $3, $4, 'document', $5, $5, 'etag-1', \
-                     'https://example.test/' || $5, 'active', '{}'::JSONB)",
-        )
-        .bind(object_uid)
-        .bind(seed.tenant_id)
-        .bind(&tenant_text)
-        .bind(connection_uid)
-        .bind(external_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    for (version_uid, object_uid, content_hash, age_seconds) in [
-        (
-            alpha_superseded_version,
-            alpha_object,
-            "hash-alpha-v0",
-            120_i32,
-        ),
-        (seed.alpha_version, alpha_object, "hash-alpha-v1", 60),
-        (beta_version, beta_object, "hash-beta-v1", 60),
-    ] {
-        sqlx::query(
-            "INSERT INTO moa.knowledge_document_versions ( \
-                 document_version_uid, tenant_id, storage_partition_id, object_id, \
-                 parser_provider, content_hash, metadata, created_at) \
-             VALUES ($1, $2, $3, $4, 'native', $5, '{}'::JSONB, \
-                     now() - make_interval(secs => $6))",
-        )
-        .bind(version_uid)
-        .bind(seed.tenant_id)
-        .bind(&tenant_text)
-        .bind(object_uid)
-        .bind(content_hash)
-        .bind(f64::from(age_seconds))
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    // Two documents' identical paragraph share one content-hash node; the
-    // superseded occurrence is tombstoned; one chunk never reached the graph.
-    for (chunk_uid, version_uid, graph_node_uid, chunk_hash, metadata) in [
-        (
-            seed.alpha_chunk,
-            seed.alpha_version,
-            Some(seed.shared_chunk_node),
-            "shared-content-hash",
-            "{}",
-        ),
-        (
-            seed.alpha_unlinked_chunk,
-            seed.alpha_version,
-            None,
-            "unlinked-content-hash",
-            r#"{"active": true}"#,
-        ),
-        (
-            seed.alpha_superseded_chunk,
-            alpha_superseded_version,
-            Some(seed.shared_chunk_node),
-            "shared-content-hash",
-            r#"{"active": false}"#,
-        ),
-        (
-            seed.beta_chunk,
-            beta_version,
-            Some(seed.shared_chunk_node),
-            "shared-content-hash",
-            r#"{"active": true}"#,
-        ),
-    ] {
-        sqlx::query(
-            "INSERT INTO moa.knowledge_chunks ( \
-                 chunk_uid, tenant_id, storage_partition_id, document_version_id, \
-                 graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal, \
-                 token_count, metadata) \
-             VALUES ($1, $2, $3, $4, $5, $6, ARRAY['block-1']::TEXT[], \
-                     ARRAY['Policies']::TEXT[], 'Reimbursement requires manager approval.', \
-                     0, 6, $7::JSONB)",
-        )
-        .bind(chunk_uid)
-        .bind(seed.tenant_id)
-        .bind(&tenant_text)
-        .bind(version_uid)
-        .bind(graph_node_uid)
-        .bind(chunk_hash)
-        .bind(metadata)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    for (uid, label, name) in [
-        (seed.shared_chunk_node, "Chunk", "shared-content-hash"),
-        (seed.document_node, "Document", "Alpha policy"),
-        (seed.entity_node, "Entity", "Manager approval"),
-        (
-            seed.fact_node,
-            "Fact",
-            "Reimbursement requires manager approval",
-        ),
-    ] {
-        sqlx::query(
-            "INSERT INTO moa.node_index ( \
-                 uid, label, storage_partition_id, tenant_id, name, pii_class, confidence, \
-                 properties_summary, data_subject_id) \
-             VALUES ($1, $2, $3, $4, $5, 'none', 0.95, \
-                     jsonb_build_object('chunk_hash', 'shared-content-hash'), $4)",
-        )
-        .bind(uid)
-        .bind(label)
-        .bind(&tenant_text)
-        .bind(seed.tenant_id)
-        .bind(name)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    for (start_uid, end_uid, label) in [
-        (seed.document_node, seed.shared_chunk_node, "CONTAINS"),
-        (seed.shared_chunk_node, seed.entity_node, "MENTIONED_IN"),
-        (seed.shared_chunk_node, seed.fact_node, "DERIVED_FROM"),
-    ] {
-        sqlx::query(
-            "INSERT INTO moa.edge_index ( \
-                 uid, label, start_uid, end_uid, storage_partition_id, tenant_id, properties) \
-             VALUES ($1, $2, $3, $4, $5, $6, '{}'::JSONB)",
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(label)
-        .bind(start_uid)
-        .bind(end_uid)
-        .bind(&tenant_text)
-        .bind(seed.tenant_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    sqlx::query(
-        "INSERT INTO moa.embeddings ( \
-             uid, storage_partition_id, tenant_id, label, pii_class, embedding, \
-             embedding_model, embedding_model_version) \
-         VALUES ($1, $2, $3, 'Chunk', 'none', \
-                 ('[' || array_to_string(array_fill(0.0125::REAL, ARRAY[1024]), ',') || ']')::public.halfvec(1024), \
-                 'embed-v4.0', 7)",
-    )
-    .bind(seed.shared_chunk_node)
-    .bind(&tenant_text)
-    .bind(seed.tenant_id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(seed)
-}
-
-/// Collects the occurrence facts the V000347 backfill must produce.
-#[allow(clippy::type_complexity)]
-async fn occurrence_backfill_facts(
-    pool: &PgPool,
-    seed: &LegacyChunkGraph,
-) -> Result<
-    (
-        Vec<(uuid::Uuid, uuid::Uuid, bool)>,
-        i64,
-        Vec<(uuid::Uuid, String)>,
-        Vec<(uuid::Uuid, String, i32)>,
-        Vec<(uuid::Uuid, String)>,
-        i64,
-    ),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    let mut tx = begin_as_app(pool, Some(seed.tenant_id)).await?;
-    // (chunk uid, persisted graph identity, occurrence is active in the graph)
-    let occurrences = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, bool)>(
-        "SELECT chunk.chunk_uid, chunk.graph_node_uid, occurrence.valid_to IS NULL \
-           FROM moa.knowledge_chunks AS chunk \
-           JOIN moa.node_index AS occurrence ON occurrence.uid = chunk.chunk_uid \
-          WHERE occurrence.label = 'Chunk' \
-            AND occurrence.storage_partition_id = chunk.storage_partition_id \
-            AND occurrence.tenant_id = chunk.tenant_id \
-          ORDER BY chunk.chunk_uid",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let surviving_shared_nodes =
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
-            .bind(seed.shared_chunk_node)
-            .fetch_one(&mut *tx)
-            .await?;
-    // Every edge now incident to an occurrence, as (occurrence uid, label).
-    let occurrence_edges = sqlx::query_as::<_, (uuid::Uuid, String)>(
-        "SELECT chunk.chunk_uid, edge.label \
-           FROM moa.knowledge_chunks AS chunk \
-           JOIN moa.edge_index AS edge \
-             ON edge.start_uid = chunk.chunk_uid OR edge.end_uid = chunk.chunk_uid \
-          ORDER BY chunk.chunk_uid, edge.label",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let occurrence_embeddings = sqlx::query_as::<_, (uuid::Uuid, String, i32)>(
-        "SELECT uid, embedding_model, embedding_model_version FROM moa.embeddings ORDER BY uid",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let queued_vector_sync = sqlx::query_as::<_, (uuid::Uuid, String)>(
-        "SELECT uid, op FROM moa.vector_sync_outbox WHERE processed_at IS NULL ORDER BY op, uid",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let shared_entities = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM moa.node_index WHERE label IN ('Entity', 'Fact', 'Document')",
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok((
-        occurrences,
-        surviving_shared_nodes,
-        occurrence_edges,
-        occurrence_embeddings,
-        queued_vector_sync,
-        shared_entities,
-    ))
-}
-
-/// Collects the schema facts the occurrence invariant depends on.
-///
-/// Returns `(graph_node_uid_not_null, equality_constraint, occurrence_unique_index,
-/// content_hash_unique_index_removed, chunks_force_rls)`.
 async fn knowledge_occurrence_schema_facts(
     pool: &PgPool,
 ) -> Result<(bool, bool, bool, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
@@ -2887,8 +4551,8 @@ async fn knowledge_occurrence_schema_facts(
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn knowledge_graph_occurrences_v000347_fresh_and_idempotent_db() {
-    // Pins: V000347 installs the occurrence invariant on a pristine database and
+async fn knowledge_graph_occurrences_final_schema_owns_identity_db() {
+    // Pins: knowledge occurrence identity installs the occurrence invariant on a pristine database and
     // re-applies as a no-op. The invariant is database-owned — `graph_node_uid` is
     // NOT NULL and constrained equal to `chunk_uid`, one graph uid can belong to
     // exactly one chunk row, and content-hash uniqueness no longer constrains how
@@ -2925,10 +4589,8 @@ async fn knowledge_graph_occurrences_v000347_fresh_and_idempotent_db() {
     }
     .await;
 
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    // Always prove the throwaway database is disconnected before cleanup.
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (first, second, facts, policies) =
@@ -2939,8 +4601,8 @@ async fn knowledge_graph_occurrences_v000347_fresh_and_idempotent_db() {
     assert!(
         first
             .iter()
-            .any(|applied| applied.contains("knowledge_graph_occurrences")),
-        "a pristine database must apply V000347, got {first:?}"
+            .any(|applied| applied.contains("tenant_knowledge_base")),
+        "the occurrence invariant must originate in the tenant knowledge baseline: {first:?}"
     );
     assert!(
         second.is_empty(),
@@ -2970,281 +4632,6 @@ async fn knowledge_graph_occurrences_v000347_fresh_and_idempotent_db() {
     );
 }
 
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn knowledge_graph_occurrence_backfill_v346_to_v347_db() {
-    // Pins: upgrading a V000346 database that already collapsed two documents onto
-    // one content-hash chunk node splits it into one occurrence per chunk row —
-    // including the tombstoned occurrence and the chunk that never reached the
-    // graph — clones the occurrence-specific edges and the current embedding,
-    // queues the external-vector upserts plus the retirement deletion, retires the
-    // shared node last, and leaves forced tenant RLS effective for `moa_app`.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create throwaway migration database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = async {
-        {
-            let bootstrap = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&target_url)
-                .await?;
-            bootstrap
-                .execute(
-                    "CREATE EXTENSION IF NOT EXISTS vector; \
-                     CREATE EXTENSION IF NOT EXISTS pgaudit;",
-                )
-                .await?;
-            bootstrap.close().await;
-        }
-        apply_through_version(&target_url, 346).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&target_url)
-            .await?;
-        let seed = seed_legacy_shared_chunk_graph(&pool).await?;
-        let applied = apply_through_version(&target_url, 347).await?;
-        let facts = occurrence_backfill_facts(&pool, &seed).await?;
-        let schema = knowledge_occurrence_schema_facts(&pool).await?;
-
-        // Correct, wrong, and missing tenant visibility of the backfilled rows.
-        let mut correct_tenant = begin_as_app(&pool, Some(seed.tenant_id)).await?;
-        let visible_for_tenant = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM moa.knowledge_chunks WHERE chunk_uid = ANY($1)",
-        )
-        .bind(seed.chunk_uids())
-        .fetch_one(&mut *correct_tenant)
-        .await?;
-        // The occurrence invariant is enforced against the application role, not
-        // just the migration role.
-        let rejected_identity = sqlx::query(
-            "INSERT INTO moa.knowledge_chunks ( \
-                 chunk_uid, tenant_id, storage_partition_id, document_version_id, \
-                 graph_node_uid, chunk_hash, text, ordinal, token_count, metadata) \
-             SELECT gen_random_uuid(), chunk.tenant_id, chunk.storage_partition_id, \
-                    chunk.document_version_id, gen_random_uuid(), 'forged', 'forged', \
-                    99, 1, '{}'::JSONB \
-               FROM moa.knowledge_chunks AS chunk WHERE chunk.chunk_uid = $1",
-        )
-        .bind(seed.alpha_chunk)
-        .execute(&mut *correct_tenant)
-        .await
-        .expect_err("a chunk row may not claim another graph identity")
-        .as_database_error()
-        .and_then(|error| error.code().map(|code| code.to_string()))
-        .unwrap_or_default();
-        correct_tenant.rollback().await?;
-
-        // Content identity no longer constrains occurrences: a document version may
-        // hold two occurrences of the same text.
-        let mut repeated = begin_as_app(&pool, Some(seed.tenant_id)).await?;
-        let repeated_occurrence = sqlx::query(
-            "INSERT INTO moa.knowledge_chunks ( \
-                 chunk_uid, tenant_id, storage_partition_id, document_version_id, \
-                 graph_node_uid, chunk_hash, text, ordinal, token_count, metadata) \
-             SELECT repeated.uid, chunk.tenant_id, chunk.storage_partition_id, \
-                    chunk.document_version_id, repeated.uid, chunk.chunk_hash, chunk.text, \
-                    42, chunk.token_count, '{}'::JSONB \
-               FROM moa.knowledge_chunks AS chunk \
-               CROSS JOIN (SELECT gen_random_uuid() AS uid) AS repeated \
-              WHERE chunk.chunk_uid = $1",
-        )
-        .bind(seed.alpha_chunk)
-        .execute(&mut *repeated)
-        .await
-        .map(|done| done.rows_affected());
-        repeated.rollback().await?;
-
-        let mut wrong_tenant = begin_as_app(&pool, Some(uuid::Uuid::now_v7())).await?;
-        let visible_for_wrong_tenant = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM moa.knowledge_chunks WHERE chunk_uid = ANY($1)",
-        )
-        .bind(seed.chunk_uids())
-        .fetch_one(&mut *wrong_tenant)
-        .await?;
-        wrong_tenant.rollback().await?;
-
-        let mut no_tenant = begin_as_app(&pool, None).await?;
-        let visible_without_tenant = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM moa.knowledge_chunks WHERE chunk_uid = ANY($1)",
-        )
-        .bind(seed.chunk_uids())
-        .fetch_one(&mut *no_tenant)
-        .await?;
-        no_tenant.rollback().await?;
-
-        // The remaining migrations still apply on top of the backfilled state.
-        let remainder = moa_migrations::run_reporting_applied(&target_url).await?;
-        pool.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-            seed,
-            applied,
-            facts,
-            schema,
-            visible_for_tenant,
-            rejected_identity,
-            repeated_occurrence,
-            visible_for_wrong_tenant,
-            visible_without_tenant,
-            remainder,
-        ))
-    }
-    .await;
-
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-
-    let (
-        seed,
-        applied,
-        facts,
-        schema,
-        visible_for_tenant,
-        rejected_identity,
-        repeated_occurrence,
-        visible_for_wrong_tenant,
-        visible_without_tenant,
-        remainder,
-    ) = outcome.expect("V000346 to V000347 upgrade should complete");
-    let (
-        occurrences,
-        surviving_shared_nodes,
-        occurrence_edges,
-        occurrence_embeddings,
-        queued_vector_sync,
-        shared_entities,
-    ) = facts;
-
-    assert!(
-        applied
-            .iter()
-            .any(|migration| migration.contains("knowledge_graph_occurrences")),
-        "the upgrade must apply V000347, got {applied:?}"
-    );
-
-    // One occurrence node per chunk row, identity equal to the chunk uid, and the
-    // tombstoned chunk's occurrence invalidated even though the shared node was
-    // alive for two other documents.
-    let mut expected_occurrences = vec![
-        (seed.alpha_chunk, seed.alpha_chunk, true),
-        (seed.alpha_unlinked_chunk, seed.alpha_unlinked_chunk, true),
-        (
-            seed.alpha_superseded_chunk,
-            seed.alpha_superseded_chunk,
-            false,
-        ),
-        (seed.beta_chunk, seed.beta_chunk, true),
-    ];
-    expected_occurrences.sort();
-    assert_eq!(
-        occurrences, expected_occurrences,
-        "every chunk row must own an occurrence node with its own identity and state"
-    );
-    assert_eq!(
-        surviving_shared_nodes, 0,
-        "the content-hash chunk node must be retired"
-    );
-    assert_eq!(
-        shared_entities, 3,
-        "document, entity, and fact nodes stay shared"
-    );
-
-    // Occurrence-specific edges are cloned per occurrence; the chunk that never
-    // reached the graph gains none, because there was nothing to clone.
-    let mut expected_edges = Vec::new();
-    for chunk_uid in [
-        seed.alpha_chunk,
-        seed.alpha_superseded_chunk,
-        seed.beta_chunk,
-    ] {
-        expected_edges.push((chunk_uid, "CONTAINS".to_string()));
-        expected_edges.push((chunk_uid, "DERIVED_FROM".to_string()));
-        expected_edges.push((chunk_uid, "MENTIONED_IN".to_string()));
-    }
-    expected_edges.sort();
-    assert_eq!(
-        occurrence_edges, expected_edges,
-        "containment, provenance, and evidence edges must be rewired per occurrence"
-    );
-
-    // The current embedding is cloned beneath every ACTIVE occurrence, model and
-    // version preserved. The tombstoned occurrence gets none (runtime
-    // invalidation deletes vectors), and neither does the never-embedded chunk.
-    let mut expected_embeddings = vec![
-        (seed.alpha_chunk, "embed-v4.0".to_string(), 7),
-        (seed.beta_chunk, "embed-v4.0".to_string(), 7),
-    ];
-    expected_embeddings.sort();
-    assert_eq!(
-        occurrence_embeddings, expected_embeddings,
-        "each active occurrence owns its own embedding row"
-    );
-
-    let mut expected_sync = vec![
-        (seed.shared_chunk_node, "delete".to_string()),
-        (seed.alpha_chunk, "upsert".to_string()),
-        (seed.beta_chunk, "upsert".to_string()),
-    ];
-    expected_sync.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
-    assert_eq!(
-        queued_vector_sync, expected_sync,
-        "external vector sync must gain the new occurrence upserts and the retirement delete"
-    );
-
-    let (not_null, equality_constraint, occurrence_unique, content_hash_unique_removed, force_rls) =
-        schema;
-    assert!(not_null && equality_constraint && occurrence_unique);
-    assert!(content_hash_unique_removed);
-    assert!(force_rls);
-
-    assert_eq!(
-        visible_for_tenant, 4,
-        "the owning tenant still reads its own occurrences"
-    );
-    assert_eq!(
-        rejected_identity, "23514",
-        "the application role cannot write a chunk whose graph identity is not its own uid"
-    );
-    assert_eq!(
-        repeated_occurrence.expect("a repeated paragraph is a legal second occurrence"),
-        1
-    );
-    assert_eq!(
-        visible_for_wrong_tenant, 0,
-        "another tenant must not see backfilled occurrences"
-    );
-    assert_eq!(
-        visible_without_tenant, 0,
-        "a missing tenant scope must fail closed after the backfill"
-    );
-    assert!(
-        !remainder
-            .iter()
-            .any(|migration| migration.contains("knowledge_graph_occurrences")),
-        "V000347 must not re-apply once recorded, got {remainder:?}"
-    );
-}
-
-/// Collects the schema facts the source-ACL admission boundary depends on.
-///
-/// Returns `(forced_rls, snapshot_policies, entry_policies, snapshot_update_granted,
-/// entry_update_granted, epoch_trigger_tables, redundant_acl_columns_absent,
-/// acl_state_not_null, current_acl_complete_constraint, restrictive_current_acl_fk,
-/// document_node_unique_index)`.
-#[allow(clippy::type_complexity)]
 async fn source_acl_schema_facts(
     pool: &PgPool,
 ) -> Result<
@@ -3254,7 +4641,15 @@ async fn source_acl_schema_facts(
         Vec<String>,
         bool,
         bool,
-        Vec<String>,
+        Vec<(
+            String,
+            String,
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+        )>,
         bool,
         bool,
         bool,
@@ -3302,12 +4697,39 @@ async fn source_acl_schema_facts(
     )
     .fetch_one(pool)
     .await?;
-    let epoch_trigger_tables: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT class.relname::TEXT FROM pg_trigger AS trigger_row \
+    let epoch_triggers = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT class.relname::TEXT, \
+                trigger_row.tgname::TEXT, \
+                proc.proname::TEXT, \
+                concat_ws(',', \
+                    CASE WHEN trigger_row.tgtype & 4 <> 0 THEN 'INSERT' END, \
+                    CASE WHEN trigger_row.tgtype & 8 <> 0 THEN 'DELETE' END, \
+                    CASE WHEN trigger_row.tgtype & 16 <> 0 THEN 'UPDATE' END \
+                ), \
+                trigger_row.tgtype & 1 = 0, \
+                trigger_row.tgoldtable::TEXT, \
+                trigger_row.tgnewtable::TEXT \
+           FROM pg_trigger AS trigger_row \
            JOIN pg_class AS class ON class.oid = trigger_row.tgrelid \
+           JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace \
            JOIN pg_proc AS proc ON proc.oid = trigger_row.tgfoid \
-          WHERE proc.proname = 'source_acl_epoch_trigger' \
-          ORDER BY 1",
+          WHERE namespace.nspname = 'moa' \
+            AND trigger_row.tgname IN ( \
+                'source_acl_epoch_insert', \
+                'source_acl_epoch_update', \
+                'source_acl_epoch_delete') \
+          ORDER BY class.relname, trigger_row.tgname",
     )
     .fetch_all(pool)
     .await?;
@@ -3351,7 +4773,7 @@ async fn source_acl_schema_facts(
         entry_policies,
         snapshot_update_granted,
         entry_update_granted,
-        epoch_trigger_tables,
+        epoch_triggers,
         redundant_acl_columns_absent,
         acl_state_not_null,
         current_acl_complete,
@@ -3362,8 +4784,8 @@ async fn source_acl_schema_facts(
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
-    // Pins: V000348 installs the source-ACL boundary on a pristine database and
+async fn knowledge_source_acl_final_schema_fails_closed_db() {
+    // Pins: knowledge source ACL installs the source-ACL boundary on a pristine database and
     // re-applies as a no-op. The properties asserted here are the ones admission
     // cannot be trusted without — forced RLS on every new table, snapshots and
     // their entries immutable (no UPDATE policy AND no UPDATE grant, so a
@@ -3397,10 +4819,8 @@ async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
     }
     .await;
 
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    // Always prove the throwaway database is disconnected before cleanup.
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (first, second, facts) =
@@ -3411,7 +4831,7 @@ async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
         entry_policies,
         snapshot_update_granted,
         entry_update_granted,
-        epoch_trigger_tables,
+        epoch_triggers,
         redundant_acl_columns_absent,
         acl_state_not_null,
         current_acl_complete,
@@ -3423,7 +4843,7 @@ async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
         first
             .iter()
             .any(|applied| applied.contains("knowledge_source_acl")),
-        "a pristine database must apply V000348, got {first:?}"
+        "a pristine database must apply knowledge source ACL, got {first:?}"
     );
     assert!(
         second.is_empty(),
@@ -3471,13 +4891,73 @@ async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
         "the app role must not be able to edit a stored ACL entry"
     );
     assert_eq!(
-        epoch_trigger_tables,
+        epoch_triggers,
         vec![
-            "knowledge_objects".to_string(),
-            "knowledge_source_principal_bindings".to_string(),
-            "knowledge_source_principal_group_bindings".to_string(),
+            (
+                "knowledge_objects".to_string(),
+                "source_acl_epoch_update".to_string(),
+                "source_acl_epoch_after_object_update".to_string(),
+                "UPDATE".to_string(),
+                true,
+                Some("source_acl_old_rows".to_string()),
+                Some("source_acl_new_rows".to_string()),
+            ),
+            (
+                "knowledge_source_principal_bindings".to_string(),
+                "source_acl_epoch_delete".to_string(),
+                "source_acl_epoch_after_delete".to_string(),
+                "DELETE".to_string(),
+                true,
+                Some("source_acl_old_rows".to_string()),
+                None,
+            ),
+            (
+                "knowledge_source_principal_bindings".to_string(),
+                "source_acl_epoch_insert".to_string(),
+                "source_acl_epoch_after_insert".to_string(),
+                "INSERT".to_string(),
+                true,
+                None,
+                Some("source_acl_new_rows".to_string()),
+            ),
+            (
+                "knowledge_source_principal_bindings".to_string(),
+                "source_acl_epoch_update".to_string(),
+                "source_acl_epoch_after_update".to_string(),
+                "UPDATE".to_string(),
+                true,
+                Some("source_acl_old_rows".to_string()),
+                Some("source_acl_new_rows".to_string()),
+            ),
+            (
+                "knowledge_source_principal_group_bindings".to_string(),
+                "source_acl_epoch_delete".to_string(),
+                "source_acl_epoch_after_delete".to_string(),
+                "DELETE".to_string(),
+                true,
+                Some("source_acl_old_rows".to_string()),
+                None,
+            ),
+            (
+                "knowledge_source_principal_group_bindings".to_string(),
+                "source_acl_epoch_insert".to_string(),
+                "source_acl_epoch_after_insert".to_string(),
+                "INSERT".to_string(),
+                true,
+                None,
+                Some("source_acl_new_rows".to_string()),
+            ),
+            (
+                "knowledge_source_principal_group_bindings".to_string(),
+                "source_acl_epoch_update".to_string(),
+                "source_acl_epoch_after_update".to_string(),
+                "UPDATE".to_string(),
+                true,
+                Some("source_acl_old_rows".to_string()),
+                Some("source_acl_new_rows".to_string()),
+            ),
         ],
-        "only visibility-changing object and principal writes must bump the source-ACL epoch"
+        "source-ACL invalidation must use operation-specific statement triggers with transition tables"
     );
     assert!(
         redundant_acl_columns_absent,
@@ -3501,606 +4981,7 @@ async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
     );
 }
 
-/// A tenant knowledge world seeded at V000347, before source ACLs existed.
-struct LegacySourceAclWorld {
-    tenant_id: uuid::Uuid,
-    other_tenant_id: uuid::Uuid,
-    connection_uid: uuid::Uuid,
-    object_uid: uuid::Uuid,
-    version_uid: uuid::Uuid,
-    chunk_uid: uuid::Uuid,
-    document_node: uuid::Uuid,
-}
-
-impl LegacySourceAclWorld {
-    fn new() -> Self {
-        Self {
-            tenant_id: uuid::Uuid::now_v7(),
-            other_tenant_id: uuid::Uuid::now_v7(),
-            connection_uid: uuid::Uuid::now_v7(),
-            object_uid: uuid::Uuid::now_v7(),
-            version_uid: uuid::Uuid::now_v7(),
-            chunk_uid: uuid::Uuid::now_v7(),
-            document_node: uuid::Uuid::now_v7(),
-        }
-    }
-}
-
-/// Seeds one permission-bearing connection with one document, one version, one
-/// chunk occurrence, and the graph nodes ingestion would have written — all at
-/// the V000347 schema, where nothing records who may read it.
-async fn seed_pre_source_acl_world(
-    pool: &PgPool,
-) -> Result<LegacySourceAclWorld, Box<dyn std::error::Error + Send + Sync>> {
-    let world = LegacySourceAclWorld::new();
-    let tenant_text = world.tenant_id.to_string();
-    let mut tx = begin_as_app(pool, Some(world.tenant_id)).await?;
-
-    sqlx::query(
-        "INSERT INTO moa.knowledge_connections ( \
-             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
-             provider_connection_id, connector, credential_ref, status, metadata) \
-         VALUES ($1, $2, $3, 'nango', 'acl-config', 'acl-account', 'google-drive', \
-                 'acl-credential', 'active', '{}'::JSONB)",
-    )
-    .bind(world.connection_uid)
-    .bind(world.tenant_id)
-    .bind(&tenant_text)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO moa.knowledge_objects ( \
-             object_uid, tenant_id, storage_partition_id, connection_id, object_type, \
-             external_object_id, title, change_token, source_uri, status, metadata) \
-         VALUES ($1, $2, $3, $4, 'document', 'acl-doc', 'Board compensation memo', 'etag-1', \
-                 'https://drive.example.test/acl-doc', 'active', '{}'::JSONB)",
-    )
-    .bind(world.object_uid)
-    .bind(world.tenant_id)
-    .bind(&tenant_text)
-    .bind(world.connection_uid)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO moa.knowledge_document_versions ( \
-             document_version_uid, tenant_id, storage_partition_id, object_id, \
-             parser_provider, content_hash, metadata) \
-         VALUES ($1, $2, $3, $4, 'native', 'acl-hash-v1', '{}'::JSONB)",
-    )
-    .bind(world.version_uid)
-    .bind(world.tenant_id)
-    .bind(&tenant_text)
-    .bind(world.object_uid)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO moa.knowledge_chunks ( \
-             chunk_uid, tenant_id, storage_partition_id, document_version_id, \
-             graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal, \
-             token_count, metadata) \
-         VALUES ($1, $2, $3, $4, $1, 'acl-chunk-hash', ARRAY['block-1']::TEXT[], \
-                 ARRAY['Compensation']::TEXT[], 'Executive bonuses are approved quarterly.', \
-                 0, 6, '{}'::JSONB)",
-    )
-    .bind(world.chunk_uid)
-    .bind(world.tenant_id)
-    .bind(&tenant_text)
-    .bind(world.version_uid)
-    .execute(&mut *tx)
-    .await?;
-
-    // The chunk occurrence node and the document node ingestion writes. The
-    // document node carries `version_uid` in its properties, which is the only
-    // link back to its governing object before V000348 stores it as a column.
-    sqlx::query(
-        "INSERT INTO moa.node_index ( \
-             uid, label, storage_partition_id, tenant_id, name, pii_class, confidence, \
-             properties_summary, data_subject_id) \
-         VALUES ($1, 'Chunk', $2, $3, 'acl-chunk-hash', 'none', 0.95, \
-                 jsonb_build_object('chunk_hash', 'acl-chunk-hash'), $3)",
-    )
-    .bind(world.chunk_uid)
-    .bind(&tenant_text)
-    .bind(world.tenant_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO moa.node_index ( \
-             uid, label, storage_partition_id, tenant_id, name, pii_class, confidence, \
-             properties_summary, data_subject_id) \
-         VALUES ($1, 'Document', $2, $3, 'Board compensation memo', 'none', 0.95, \
-                 jsonb_build_object('version_uid', $4::TEXT), $3)",
-    )
-    .bind(world.document_node)
-    .bind(&tenant_text)
-    .bind(world.tenant_id)
-    .bind(world.version_uid)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(world)
-}
-
-/// Runs the PRODUCTION source-ACL admission predicate over `candidates` through
-/// the app role at the given tenant scope, returning the admitted uids.
-async fn admitted_uids(
-    pool: &PgPool,
-    tenant_id: Option<uuid::Uuid>,
-    acl: &moa_core::types::memory::SourceAclContext,
-    candidates: &[uuid::Uuid],
-) -> Result<Vec<uuid::Uuid>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut tx = begin_as_app(pool, tenant_id).await?;
-    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT node.uid FROM moa.node_index AS node WHERE node.uid = ANY(",
-    );
-    builder.push_bind(candidates.to_vec());
-    builder.push(") AND ");
-    moa_db::push_source_acl_predicate(&mut builder, "node.uid", acl);
-    builder.push(" ORDER BY node.uid");
-    let admitted = builder
-        .build_query_scalar::<uuid::Uuid>()
-        .fetch_all(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(admitted)
-}
-
-/// Reads one tenant's source-ACL epoch through the app role.
-async fn source_acl_epoch(
-    pool: &PgPool,
-    tenant_id: uuid::Uuid,
-) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let mut tx = begin_as_app(pool, Some(tenant_id)).await?;
-    let epoch: i64 = sqlx::query_scalar(
-        "SELECT COALESCE( \
-             (SELECT epoch FROM moa.knowledge_source_acl_epochs WHERE tenant_id = $1), 0)",
-    )
-    .bind(tenant_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(epoch)
-}
-
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn knowledge_source_acl_v347_to_v348_hides_legacy_content_until_resync_db() {
-    // Pins: the whole V347-to-current upgrade contract through the PRODUCTION
-    // admission predicate, executed as the non-BYPASSRLS app role:
-    //
-    //   * every pre-existing object lands on `incomplete`, so content ingested
-    //     before ACLs existed is
-    //     invisible to everyone — including a caller who later turns out to be
-    //     authorized — until a resync captures real permissions;
-    //   * the document node's governing object is recovered, so a denied
-    //     document's title is not still retrievable through its graph node;
-    //   * once a complete, revision-matched snapshot exists, an allowed principal
-    //     is admitted, a wrong principal and an empty principal set are not, an
-    //     explicit deny beats the allow, and a revision drift denies again;
-    //   * the tenant epoch moves when visible ACL state changes, and tenant
-    //     scope stays a boundary: a missing or wrong `moa.tenant_id` sees
-    //     nothing at all;
-    //   * V365 revokes direct execution of the definer helper, rejects
-    //     cross-tenant composite identities, and avoids no-op epoch bumps.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create throwaway migration database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = source_acl_upgrade_probe(&target_url).await;
-
-    // Always force-drop the throwaway database, even if an assertion below fails.
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-
-    outcome.expect("source ACL upgrade probe should succeed");
-}
-
-#[allow(clippy::too_many_lines)]
-async fn source_acl_upgrade_probe(
-    target_url: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use moa_core::types::memory::{SourceAclContext, SourcePrincipalFingerprint};
-
-    {
-        let bootstrap = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(target_url)
-            .await?;
-        bootstrap
-            .execute(
-                "CREATE EXTENSION IF NOT EXISTS vector; \
-                 CREATE EXTENSION IF NOT EXISTS pgaudit;",
-            )
-            .await?;
-        bootstrap.close().await;
-    }
-
-    apply_through_version(target_url, 347).await?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(target_url)
-        .await?;
-    let world = seed_pre_source_acl_world(&pool).await?;
-    pool.close().await;
-
-    let remainder = moa_migrations::run_reporting_applied(target_url).await?;
-    assert!(
-        remainder
-            .iter()
-            .any(|applied| applied.contains("knowledge_source_acl")),
-        "the upgrade must apply V000348, got {remainder:?}"
-    );
-
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(target_url)
-        .await?;
-    let tenant_text = world.tenant_id.to_string();
-
-    // --- Backfill determinism -------------------------------------------------
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    let acl_state: String =
-        sqlx::query_scalar("SELECT acl_state FROM moa.knowledge_objects WHERE object_uid = $1")
-            .bind(world.object_uid)
-            .fetch_one(&mut *tx)
-            .await?;
-    let backfilled_document_node: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT graph_node_uid FROM moa.knowledge_document_versions WHERE document_version_uid = $1",
-    )
-    .bind(world.version_uid)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    assert_eq!(
-        acl_state, "incomplete",
-        "an object whose permissions were never captured must be incomplete"
-    );
-    assert_eq!(
-        backfilled_document_node,
-        Some(world.document_node),
-        "the document node must be tied back to its governing object"
-    );
-
-    // --- Forward hardening ---------------------------------------------------
-    let (app_can_bump_epoch, public_can_bump_epoch, app_can_run_trigger, public_can_run_trigger): (
-        bool,
-        bool,
-        bool,
-        bool,
-    ) = sqlx::query_as(
-        "SELECT \
-                 has_function_privilege('moa_app', 'moa.bump_source_acl_epoch(uuid)', 'EXECUTE'), \
-                 EXISTS ( \
-                     SELECT 1 \
-                     FROM pg_proc AS proc \
-                     CROSS JOIN LATERAL aclexplode(proc.proacl) AS acl \
-                     WHERE proc.oid = 'moa.bump_source_acl_epoch(uuid)'::regprocedure \
-                       AND acl.grantee = 0 \
-                       AND acl.privilege_type = 'EXECUTE' \
-                 ), \
-                 has_function_privilege('moa_app', 'moa.source_acl_epoch_trigger()', 'EXECUTE'), \
-                 EXISTS ( \
-                     SELECT 1 \
-                     FROM pg_proc AS proc \
-                     CROSS JOIN LATERAL aclexplode(proc.proacl) AS acl \
-                     WHERE proc.oid = 'moa.source_acl_epoch_trigger()'::regprocedure \
-                       AND acl.grantee = 0 \
-                       AND acl.privilege_type = 'EXECUTE' \
-                 )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(
-        !app_can_bump_epoch
-            && !public_can_bump_epoch
-            && !app_can_run_trigger
-            && !public_can_run_trigger,
-        "the SECURITY DEFINER epoch functions must be trigger-internal"
-    );
-
-    let other_connection_uid = uuid::Uuid::now_v7();
-    let other_object_uid = uuid::Uuid::now_v7();
-    let other_tenant_text = world.other_tenant_id.to_string();
-    let mut other_tx = begin_as_app(&pool, Some(world.other_tenant_id)).await?;
-    sqlx::query(
-        "INSERT INTO moa.knowledge_connections ( \
-             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
-             provider_connection_id, connector, credential_ref, status, metadata) \
-         VALUES ($1, $2, $3, 'nango', 'other-config', 'other-account', 'google-drive', \
-                 'other-credential', 'active', '{}'::JSONB)",
-    )
-    .bind(other_connection_uid)
-    .bind(world.other_tenant_id)
-    .bind(&other_tenant_text)
-    .execute(&mut *other_tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO moa.knowledge_objects ( \
-             object_uid, tenant_id, storage_partition_id, connection_id, object_type, \
-             external_object_id, status, metadata, acl_state) \
-         VALUES ($1, $2, $3, $4, 'document', 'other-object', 'active', \
-                 '{}'::JSONB, 'incomplete')",
-    )
-    .bind(other_object_uid)
-    .bind(world.other_tenant_id)
-    .bind(&other_tenant_text)
-    .bind(other_connection_uid)
-    .execute(&mut *other_tx)
-    .await?;
-    other_tx.commit().await?;
-
-    let mut tenant_tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    let cross_tenant_error = sqlx::query(
-        "INSERT INTO moa.knowledge_source_acl_snapshots ( \
-             snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id, \
-             provider_revision, snapshot_hash, complete, entry_count, captured_at) \
-         VALUES ($1, $2, $3, $4, $5, 'cross-tenant', 'cross-tenant', TRUE, 0, now())",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(world.tenant_id)
-    .bind(&tenant_text)
-    .bind(other_connection_uid)
-    .bind(other_object_uid)
-    .execute(&mut *tenant_tx)
-    .await
-    .expect_err("a source ACL snapshot cannot reference another tenant's parents");
-    assert_eq!(
-        cross_tenant_error
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23503"),
-        "tenant-bearing composite foreign keys must reject cross-tenant ACL identity"
-    );
-    tenant_tx.rollback().await?;
-
-    // --- Nothing is visible before a resync ----------------------------------
-    let candidates = vec![world.chunk_uid, world.document_node];
-    let allowed_principal = SourcePrincipalFingerprint::from_digest(1, [0xA1; 32]);
-    let denied_principal = SourcePrincipalFingerprint::from_digest(1, [0xD1; 32]);
-    let stranger_principal = SourcePrincipalFingerprint::from_digest(1, [0x5E; 32]);
-
-    let holder = SourceAclContext::new([allowed_principal.clone()], 0);
-    assert!(
-        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates)
-            .await?
-            .is_empty(),
-        "legacy content must stay hidden even from a principal who will later be allowed"
-    );
-
-    // --- A complete, revision-matched snapshot admits the allowed principal ---
-    let epoch_before = source_acl_epoch(&pool, world.tenant_id).await?;
-    let snapshot_uid = uuid::Uuid::now_v7();
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    sqlx::query(
-        "INSERT INTO moa.knowledge_source_acl_snapshots ( \
-             snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id, \
-             provider_revision, snapshot_hash, complete, entry_count, captured_at) \
-         VALUES ($1, $2, $3, $4, $5, 'rev-1', 'hash-1', TRUE, 2, now())",
-    )
-    .bind(snapshot_uid)
-    .bind(world.tenant_id)
-    .bind(&tenant_text)
-    .bind(world.connection_uid)
-    .bind(world.object_uid)
-    .execute(&mut *tx)
-    .await?;
-    for (kind, principal) in [
-        ("allow", &allowed_principal),
-        ("allow", &denied_principal),
-        ("deny", &denied_principal),
-    ] {
-        sqlx::query(
-            "INSERT INTO moa.knowledge_source_acl_entries ( \
-                 entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind, \
-                 principal_kind, principal_fingerprint, fingerprint_key_version) \
-             VALUES ($1, $2, $3, $4, $5, 'user', $6, 1)",
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(world.tenant_id)
-        .bind(&tenant_text)
-        .bind(snapshot_uid)
-        .bind(kind)
-        .bind(principal.as_bytes())
-        .execute(&mut *tx)
-        .await?;
-    }
-    sqlx::query(
-        "UPDATE moa.knowledge_objects \
-            SET acl_state = 'current', acl_revision = 'rev-1', current_acl_snapshot_id = $2 \
-          WHERE object_uid = $1",
-    )
-    .bind(world.object_uid)
-    .bind(snapshot_uid)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    let epoch_after = source_acl_epoch(&pool, world.tenant_id).await?;
-    assert!(
-        epoch_after > epoch_before,
-        "capturing an ACL must move the tenant epoch: {epoch_before} -> {epoch_after}"
-    );
-
-    assert_eq!(
-        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates).await?,
-        sorted(vec![world.chunk_uid, world.document_node]),
-        "an allowed principal must see both the chunk occurrence and its document node"
-    );
-    assert!(
-        admitted_uids(
-            &pool,
-            Some(world.tenant_id),
-            &SourceAclContext::new([denied_principal.clone()], epoch_after),
-            &candidates
-        )
-        .await?
-        .is_empty(),
-        "an explicit deny must beat the same principal's allow"
-    );
-    assert!(
-        admitted_uids(
-            &pool,
-            Some(world.tenant_id),
-            &SourceAclContext::new([allowed_principal.clone(), denied_principal], epoch_after),
-            &candidates
-        )
-        .await?
-        .is_empty(),
-        "a deny anywhere in the caller's principal set must deny"
-    );
-    assert!(
-        admitted_uids(
-            &pool,
-            Some(world.tenant_id),
-            &SourceAclContext::new([stranger_principal], epoch_after),
-            &candidates
-        )
-        .await?
-        .is_empty(),
-        "a principal absent from the snapshot must not be admitted"
-    );
-    assert!(
-        admitted_uids(
-            &pool,
-            Some(world.tenant_id),
-            &SourceAclContext::empty(epoch_after),
-            &candidates
-        )
-        .await?
-        .is_empty(),
-        "an empty principal set must never be admitted"
-    );
-
-    // --- Tenant scope stays a boundary ---------------------------------------
-    assert!(
-        admitted_uids(&pool, Some(world.other_tenant_id), &holder, &candidates)
-            .await?
-            .is_empty(),
-        "another tenant must not see this tenant's admitted content"
-    );
-    assert!(
-        admitted_uids(&pool, None, &holder, &candidates)
-            .await?
-            .is_empty(),
-        "a missing tenant scope must fail closed"
-    );
-
-    // --- A stale announcement hides content before the resync lands ----------
-    // The snapshot is still complete and still revision-matched; only the
-    // object's state changed. This is the window between "the provider told us
-    // permissions moved" and "we captured what they moved to", and content must
-    // be invisible for its whole duration.
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    sqlx::query("UPDATE moa.knowledge_objects SET acl_state = 'stale' WHERE object_uid = $1")
-        .bind(world.object_uid)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    assert!(
-        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates)
-            .await?
-            .is_empty(),
-        "a stale ACL must hide content even though its snapshot still matches"
-    );
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    sqlx::query("UPDATE moa.knowledge_objects SET acl_state = 'current' WHERE object_uid = $1")
-        .bind(world.object_uid)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    assert_eq!(
-        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates).await?,
-        sorted(vec![world.chunk_uid, world.document_node]),
-        "returning to `current` restores exactly what the snapshot allows"
-    );
-
-    let epoch_before_noop = source_acl_epoch(&pool, world.tenant_id).await?;
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    sqlx::query(
-        "UPDATE moa.knowledge_objects \
-            SET acl_state = acl_state, \
-                acl_revision = acl_revision, \
-                current_acl_snapshot_id = current_acl_snapshot_id \
-          WHERE object_uid = $1",
-    )
-    .bind(world.object_uid)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    assert_eq!(
-        source_acl_epoch(&pool, world.tenant_id).await?,
-        epoch_before_noop,
-        "an unchanged ACL update must not invalidate tenant retrieval caches"
-    );
-
-    // --- Revision drift denies without touching content ----------------------
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    sqlx::query("UPDATE moa.knowledge_objects SET acl_revision = 'rev-2' WHERE object_uid = $1")
-        .bind(world.object_uid)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    assert!(
-        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates)
-            .await?
-            .is_empty(),
-        "a snapshot for an older revision must not admit the current object"
-    );
-    let epoch_after_drift = source_acl_epoch(&pool, world.tenant_id).await?;
-    assert!(
-        epoch_after_drift > epoch_after,
-        "an object ACL change must move the epoch so warm caches cannot survive it"
-    );
-
-    // --- Stored snapshots are immutable --------------------------------------
-    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
-    let update_error = sqlx::query(
-        "UPDATE moa.knowledge_source_acl_entries SET entry_kind = 'allow' WHERE snapshot_id = $1",
-    )
-    .bind(snapshot_uid)
-    .execute(&mut *tx)
-    .await
-    .expect_err("editing a stored ACL entry must be refused");
-    let sql_state = update_error
-        .as_database_error()
-        .and_then(|database_error| database_error.code())
-        .map(|code| code.into_owned());
-    assert_eq!(
-        sql_state.as_deref(),
-        Some("42501"),
-        "a stored ACL entry must be un-editable by the app role: {update_error}"
-    );
-    drop(tx);
-
-    pool.close().await;
-    Ok(())
-}
-
-/// Returns a sorted copy so admitted-uid comparisons are order-independent.
-fn sorted(mut uids: Vec<uuid::Uuid>) -> Vec<uuid::Uuid> {
-    uids.sort();
-    uids
-}
-
-/// Facts V000359 must install on `moa.hand_leases` and `moa.tenant_sandbox_policy`.
+/// Facts hand-lease effective profile must install on `moa.hand_leases` and `moa.tenant_sandbox_policy`.
 struct HandLeaseProfileFacts {
     has_idle_expires_at: bool,
     idle_is_nullable: bool,
@@ -4317,8 +5198,8 @@ async fn insert_hand_lease(
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
-    // Pins: V000359 installs the sandbox policy contract on a pristine database
+async fn hand_lease_effective_profile_final_schema_is_strict_db() {
+    // Pins: hand-lease effective profile installs the sandbox policy contract on a pristine database
     // and re-applies as a no-op. The single renewable deadline becomes an idle
     // deadline plus an immutable hard one, the policy identity columns exist,
     // the reaper index replaces the old status/expiry index, and the database
@@ -4350,9 +5231,7 @@ async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (first, second, facts) =
@@ -4362,7 +5241,7 @@ async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
         first
             .iter()
             .any(|applied| applied.contains("hand_lease_effective_profile")),
-        "a pristine database must apply V000359, got {first:?}"
+        "a pristine database must apply hand-lease effective profile, got {first:?}"
     );
     assert!(
         second.is_empty(),
@@ -4442,133 +5321,32 @@ async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
     );
 }
 
-#[tokio::test]
-#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn hand_lease_v358_to_v359_makes_legacy_active_leases_cleanup_work_db() {
-    // Pins: a lease written before the policy contract existed is migrated to
-    // stale with an already-past hard deadline — cleanup work the reaper will
-    // destroy — rather than being handed invented permissive policy and left
-    // reusable. Inventing a profile here would mean inventing an unrestricted
-    // sandbox for every sandbox that predated the contract.
-    let admin_url = test_database_url();
-    let db_name = unique_db_name();
-
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .expect("connect maintenance database");
-    admin
-        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
-        .await
-        .expect("create throwaway migration database");
-
-    let target_url = with_database(&admin_url, &db_name);
-    let outcome = async {
-        {
-            let target = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&target_url)
-                .await?;
-            target
-                .execute(
-                    "CREATE EXTENSION IF NOT EXISTS vector; \
-                     CREATE EXTENSION IF NOT EXISTS pgaudit;",
-                )
-                .await?;
-            target.close().await;
-        }
-        apply_through_version(&target_url, 358).await?;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        // The pre-V000359 shape: one renewable expiry, no policy at all.
-        sqlx::query(
-            "INSERT INTO moa.hand_leases \
-             (session_id, worker_id, tenant_id, provider, tier, handle, status, generation, \
-              expires_at) \
-             VALUES (gen_random_uuid(), '', gen_random_uuid(), 'local', 'local', \
-                     '{\"handle\":{\"local\":{\"sandbox_dir\":\"/tmp/legacy\"}}}'::jsonb, \
-                     'active', 1, now() + interval '10 hours')",
-        )
-        .execute(&pool)
-        .await?;
-        pool.close().await;
-
-        let applied = apply_through_version(&target_url, 359).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&target_url)
-            .await?;
-        // `hard_expires_at <= now()` is evaluated in the database so this test
-        // needs no clock type of its own.
-        let row = sqlx::query_as::<_, (String, Option<bool>, Option<String>)>(
-            "SELECT status, hard_expires_at <= now(), profile_hash FROM moa.hand_leases",
-        )
-        .fetch_one(&pool)
-        .await?;
-        pool.close().await;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((applied, row))
-    }
-    .await;
-
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
-    admin.close().await;
-
-    let (applied, (status, hard_deadline_already_passed, profile_hash)) =
-        outcome.expect("V358 -> V359 upgrade should apply over a legacy lease");
-
-    assert!(
-        applied
-            .iter()
-            .any(|migration| migration.contains("hand_lease_effective_profile")),
-        "the upgrade must apply V000359, got {applied:?}"
-    );
-    assert_eq!(
-        status, "stale",
-        "a legacy active lease must become cleanup work, never stay reusable"
-    );
-    assert_eq!(
-        hard_deadline_already_passed,
-        Some(true),
-        "a legacy lease must be immediately destroyable rather than living out an invented lifetime"
-    );
-    assert_eq!(
-        profile_hash, None,
-        "no policy may be invented for a sandbox provisioned before the contract existed"
-    );
-}
-
 /// Typed Behavior Lab score provenance.
-const V000361_SQL: &str =
-    include_str!("../migrations/postgres/V000361__experiment_score_provenance.sql");
+const EXPERIMENT_SCORE_PROVENANCE_SQL: &str =
+    include_str!("../migrations/postgres/V000041__experiment_score_provenance.sql");
 
 #[test]
-fn v000361_registers_experiment_score_provenance_ownership_offline() {
+fn experiment_score_provenance_ownership_is_registered_offline() {
     // Pins: a tenant-scoped table with no ownership row is a table nothing is
     // accountable for, and the tenant-purge catalog scan would only notice it at
     // runtime against a live database.
     assert!(
         MIGRATION_OWNERSHIP.contains("name = \"experiment_score_provenance\""),
-        "V000361's table must be registered in migration-ownership.toml"
+        "experiment-score provenance's table must be registered in migration-ownership.toml"
     );
     // The trial foreign key must not cascade: the tenant purge carries an
     // explicit delete for this table, and a cascade would make that step
     // unfalsifiable because the trial delete would remove the same rows anyway.
     assert!(
-        !V000361_SQL.contains("ON DELETE CASCADE"),
+        !EXPERIMENT_SCORE_PROVENANCE_SQL.contains("ON DELETE CASCADE"),
         "no foreign key here may cascade over the explicit tenant-purge step"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn v000361_experiment_score_provenance_enforces_linkage_and_immutability_db() {
-    // Pins the V000361 guarantees the database owns rather than the writer:
+async fn experiment_score_provenance_enforces_linkage_and_immutability_db() {
+    // Pins the experiment-score provenance guarantees the database owns rather than the writer:
     // provenance cannot name a trial from another tenant, run, or pinned plan
     // revision; it cannot claim both targets or neither; and it cannot be
     // rewritten after the fact. An application that "checked first" would pass a
@@ -4696,16 +5474,14 @@ async fn v000361_experiment_score_provenance_enforces_linkage_and_immutability_d
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let outcome = outcome.expect("provenance assertions should complete on a fresh database");
 
     assert_eq!(
         outcome.second_apply_count, 0,
-        "V000361 must be idempotent: a second run applied {} migrations",
+        "experiment-score provenance must be idempotent: a second run applied {} migrations",
         outcome.second_apply_count
     );
     assert_eq!(
@@ -4909,7 +5685,7 @@ async fn seed_learning_candidate_fixture(
 /// Inserts one candidate of `kind` at `status`, returning whether the write was accepted.
 ///
 /// Candidate and source commit in ONE transaction, and that is not a convenience:
-/// V000360 installs a DEFERRED constraint trigger that refuses to let a
+/// learning privacy provenance installs a DEFERRED constraint trigger that refuses to let a
 /// transaction commit a candidate with no normalized source. Writing them as two
 /// autocommitted statements fails at the first commit — which is the trigger
 /// doing its job, and is why the production store writes them together too.
@@ -4958,12 +5734,12 @@ async fn try_insert_candidate(
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn v000360_rejects_forbidden_proposal_kind_status_pairs_and_transitions_db() {
+async fn learning_privacy_provenance_rejects_forbidden_transitions_db() {
     // Pins the two database-level guarantees the review contract rests on, on a
     // fresh database carrying the whole migration set:
     //
     //  1. An informational proposal kind cannot hold a reviewable status. Before
-    //     V000360, memory/policy/prompt/eval suggestions were written as
+    //     learning privacy provenance, memory/policy/prompt/eval suggestions were written as
     //     `Proposed` and sat on the review queue beside skill drafts that could
     //     actually be accepted, so a reviewer could press accept on something no
     //     code could apply.
@@ -4995,7 +5771,7 @@ async fn v000360_rejects_forbidden_proposal_kind_status_pairs_and_transitions_db
             .await?;
 
         let tenant = uuid::Uuid::now_v7().to_string();
-        let partition = format!("tenant_{}", tenant.replace('-', "_"));
+        let partition = tenant.clone();
         let contact_id = seed_learning_candidate_fixture(&pool, &partition, &tenant).await?;
 
         // Every reviewable status is refused for an advisory kind, and every
@@ -5126,9 +5902,7 @@ async fn v000360_rejects_forbidden_proposal_kind_status_pairs_and_transitions_db
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (
@@ -5173,32 +5947,20 @@ async fn v000360_rejects_forbidden_proposal_kind_status_pairs_and_transitions_db
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn v000362_refuses_a_learning_log_entry_committed_without_a_source_db() {
-    // Pins the guarantee V000362 adds: a learning-log entry must end its
-    // transaction attributable, exactly as a learning candidate must.
-    //
-    // V000360 normalized both provenance tables and dropped both legacy array
-    // columns, but installed the deferred completeness trigger on
-    // `learning_candidates` only. Nothing caught it, because the Rust writer
-    // refuses an empty source list — so the production path was closed while the
-    // database guarantee was not, and a second writer or a direct SQL insert
-    // could still land an entry no erasure could reach.
-    //
-    // The second half of this test matters as much as the first: an entry that
-    // DOES commit its source in the same transaction must still be accepted.
-    // A trigger that refused everything would also make the first assertion pass.
+async fn learning_log_final_schema_requires_normalized_source_db() {
+    // Pins: every committed learning-log row has normalized provenance, while a
+    // row and its source may still be committed atomically in one transaction.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
-
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&admin_url)
         .await
-        .expect("connect maintenance database");
+        .expect("connect maintenance database for learning-log provenance");
     admin
         .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
         .await
-        .expect("create throwaway migration database");
+        .expect("create learning-log provenance throwaway database");
     let target_url = with_database(&admin_url, &db_name);
 
     let outcome = async {
@@ -5209,7 +5971,7 @@ async fn v000362_refuses_a_learning_log_entry_committed_without_a_source_db() {
             .await?;
 
         let tenant = uuid::Uuid::now_v7().to_string();
-        let partition = format!("tenant_{}", tenant.replace('-', "_"));
+        let partition = tenant.clone();
         let contact_id = seed_learning_candidate_fixture(&pool, &partition, &tenant).await?;
         let (_, candidate_id) = try_insert_candidate(
             &pool,
@@ -5274,59 +6036,49 @@ async fn v000362_refuses_a_learning_log_entry_committed_without_a_source_db() {
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (sourceless_committed, attributed_committed) =
         outcome.expect("learning-log completeness probe should complete");
-
     assert!(
         !sourceless_committed,
-        "a learning-log entry with no normalized source must not be committable: it could never \
-         be erased or explained, and the candidate table has refused exactly this since V000360"
+        "a learning-log entry with no normalized source must not commit"
     );
     assert!(
         attributed_committed,
-        "an entry that commits its source in the same transaction must still be accepted; a \
-         trigger that refused every insert would satisfy the assertion above for the wrong reason"
+        "a learning-log row and normalized source must commit atomically"
     );
 }
 
 /// Durable lineage acceptance queue.
-const V000363_SQL: &str = include_str!("../migrations/postgres/V000363__lineage_journal.sql");
+const LINEAGE_JOURNAL_SQL: &str =
+    include_str!("../migrations/postgres/V000042__lineage_journal.sql");
 
 #[test]
-fn v000363_registers_the_lineage_journal_ownership_offline() {
+fn lineage_journal_ownership_is_registered_offline() {
     // Pins: the queue is tenant-scoped, so it needs an ownership row. Without one
     // the tenant-purge catalog scan only discovers it at runtime against a live
     // database, which is where the last six unregistered tables were found.
-    //
-    // This replaces an earlier drift test that compared V000363 against a second
-    // copy of the same DDL installed by `ensure_lineage_schema`. That copy was
-    // unreachable - every caller of that bootstrap runs the central migrations
-    // first - so it was deleted, and a test guarding agreement between one live
-    // definition and one dead one was deleted with it.
     assert!(
         MIGRATION_OWNERSHIP.contains("name = \"lineage_journal\""),
-        "V000363's table must be registered in migration-ownership.toml"
+        "lineage journal's table must be registered in migration-ownership.toml"
     );
     // Row-level security admits the control plane only. A tenant-scoped request
     // connection has no legitimate reason to read pending lineage payloads, and
     // the queue is deliberately cross-tenant so one drain can batch across
     // partitions.
     assert!(
-        V000363_SQL.contains("FORCE ROW LEVEL SECURITY")
-            && V000363_SQL.contains("moa.current_control_plane()"),
+        LINEAGE_JOURNAL_SQL.contains("FORCE ROW LEVEL SECURITY")
+            && LINEAGE_JOURNAL_SQL.contains("moa.current_control_plane()"),
         "the queue must be FORCE-RLS behind the control-plane predicate"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
-async fn lineage_journal_v000363_fresh_and_idempotent_db() {
-    // Pins: V000363 installs the durable acceptance queue on a pristine database
+async fn lineage_journal_final_schema_is_durable_and_idempotent_db() {
+    // Pins: lineage journal installs the durable acceptance queue on a pristine database
     // and re-applies as a no-op, and the database itself enforces the two
     // properties the writer's correctness rests on: claim eligibility is derived
     // from the lease pair (so it cannot drift into permanently unclaimable), and
@@ -5357,9 +6109,7 @@ async fn lineage_journal_v000363_fresh_and_idempotent_db() {
     }
     .await;
 
-    let _ = admin
-        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
-        .await;
+    drop_database_with_zero_connections(&admin, &db_name).await;
     admin.close().await;
 
     let (first, second, facts) =
@@ -5369,7 +6119,7 @@ async fn lineage_journal_v000363_fresh_and_idempotent_db() {
         first
             .iter()
             .any(|applied| applied.contains("lineage_journal")),
-        "a pristine database must apply V000363, got {first:?}"
+        "a pristine database must apply lineage journal, got {first:?}"
     );
     assert!(
         second.is_empty(),
@@ -5389,11 +6139,6 @@ async fn lineage_journal_v000363_fresh_and_idempotent_db() {
         vec!["lineage_journal_runtime_only".to_string()],
         "exactly one policy may exist, and it is the control-plane-only one"
     );
-    assert!(
-        facts.rejects_half_leased_row,
-        "a row with a lease owner and no expiry (or the reverse) must be refused by the database: \
-         a lease that cannot expire is an accepted record no replica can ever reclaim"
-    );
     assert_eq!(
         facts.unleased_claimable_at, facts.unleased_available_at,
         "an unleased row must be claimable at available_at"
@@ -5403,6 +6148,16 @@ async fn lineage_journal_v000363_fresh_and_idempotent_db() {
         "stamping a lease in the future must push claimable_at to the lease expiry, with no \
          separate column for a claimant to forget to update"
     );
+    assert_eq!(
+        facts.half_lease_sqlstate.as_deref(),
+        Some("23514"),
+        "a half-leased row must fail with a check-constraint violation"
+    );
+    assert_eq!(
+        facts.half_lease_constraint.as_deref(),
+        Some("lineage_journal_lease_pair_check"),
+        "the lease-pair constraint, not an unrelated tenant fence, must reject the row"
+    );
 }
 
 /// Observable facts about the installed lineage acceptance queue.
@@ -5410,7 +6165,8 @@ struct LineageJournalFacts {
     claim_index_exists: bool,
     forces_row_level_security: bool,
     policy_names: Vec<String>,
-    rejects_half_leased_row: bool,
+    half_lease_sqlstate: Option<String>,
+    half_lease_constraint: Option<String>,
     unleased_claimable_at: chrono::DateTime<chrono::Utc>,
     unleased_available_at: chrono::DateTime<chrono::Utc>,
     leased_claimable_at: chrono::DateTime<chrono::Utc>,
@@ -5439,13 +6195,15 @@ async fn lineage_journal_facts(
     .fetch_all(pool)
     .await?;
 
+    let facts_partition = uuid::Uuid::now_v7().to_string();
     let unleased_id = uuid::Uuid::now_v7();
     sqlx::query(
         "INSERT INTO analytics.lineage_journal \
          (journal_id, storage_partition_id, event_class, payload, available_at) \
-         VALUES ($1, 'facts-partition', 'lineage', '{}'::jsonb, now() + interval '30 seconds')",
+         VALUES ($1, $2, 'lineage', '{}'::jsonb, now() + interval '30 seconds')",
     )
     .bind(unleased_id)
+    .bind(&facts_partition)
     .execute(pool)
     .await?;
     let (unleased_claimable_at, unleased_available_at) = sqlx::query_as(
@@ -5470,20 +6228,28 @@ async fn lineage_journal_facts(
     .fetch_one(pool)
     .await?;
 
-    let rejects_half_leased_row = sqlx::query(
+    let half_lease_error = sqlx::query(
         "INSERT INTO analytics.lineage_journal \
          (journal_id, storage_partition_id, event_class, payload, lease_owner) \
-         VALUES (gen_random_uuid(), 'facts-partition', 'lineage', '{}'::jsonb, gen_random_uuid())",
+         VALUES (gen_random_uuid(), $1, 'lineage', '{}'::jsonb, gen_random_uuid())",
     )
+    .bind(&facts_partition)
     .execute(pool)
     .await
-    .is_err();
+    .expect_err("a half-leased lineage row must violate the lease-pair constraint");
+    let half_lease_sqlstate = half_lease_error
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.into_owned()));
+    let half_lease_constraint = half_lease_error
+        .as_database_error()
+        .and_then(|error| error.constraint().map(ToOwned::to_owned));
 
     Ok(LineageJournalFacts {
         claim_index_exists,
         forces_row_level_security,
         policy_names,
-        rejects_half_leased_row,
+        half_lease_sqlstate,
+        half_lease_constraint,
         unleased_claimable_at,
         unleased_available_at,
         leased_claimable_at,

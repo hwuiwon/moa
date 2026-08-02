@@ -1,11 +1,11 @@
 //! PostgreSQL-backed `PostgresSessionStore` integration coverage.
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::traits::{SessionChannelBindingUpdate, SessionChannelStore};
 use moa_core::{
     error::MoaError, events::Event, events::EventType, traits::SessionStore,
     types::agent::AgentContext, types::channel::ChannelRef, types::contact::ContactId,
-    types::contact::ContactRef, types::contact::SessionActorRef,
+    types::contact::ContactRef, types::contact::SessionActorRef, types::events_stream::EventFilter,
     types::experience::AttributionEffect, types::experience::AttributionKind,
     types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
     types::experience::ExperienceRecord, types::experience::LearningCandidate,
@@ -408,6 +408,162 @@ async fn postgres_shared_session_store_contract() {
 
 #[tokio::test]
 #[ignore]
+async fn tenant_event_search_rejects_invalid_bounds_before_sql_db() {
+    // Pins: a tenant-wide scan must have a tenant and a valid window no wider
+    // than 31 days, and those validation failures must not touch PostgreSQL.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = tenant_id("event-search-contract");
+    let now = Utc::now();
+    store.pool().close().await;
+
+    let cases = [
+        (
+            EventFilter::default(),
+            "tenant-wide event search requires tenant_id",
+        ),
+        (
+            EventFilter {
+                tenant_id: Some(tenant_id),
+                ..EventFilter::default()
+            },
+            "tenant-wide event search requires from_time and to_time",
+        ),
+        (
+            EventFilter {
+                tenant_id: Some(tenant_id),
+                from_time: Some(now),
+                ..EventFilter::default()
+            },
+            "tenant-wide event search requires from_time and to_time",
+        ),
+        (
+            EventFilter {
+                tenant_id: Some(tenant_id),
+                from_time: Some(now),
+                to_time: Some(now - ChronoDuration::seconds(1)),
+                ..EventFilter::default()
+            },
+            "tenant-wide event search requires from_time at or before to_time",
+        ),
+        (
+            EventFilter {
+                tenant_id: Some(tenant_id),
+                from_time: Some(now),
+                to_time: Some(now + ChronoDuration::days(31) + ChronoDuration::nanoseconds(1)),
+                ..EventFilter::default()
+            },
+            "tenant-wide event search window cannot exceed 31 days",
+        ),
+    ];
+
+    for (filter, expected_message) in cases {
+        let error = store
+            .search_events("boundedneedle", filter)
+            .await
+            .expect_err("invalid tenant-wide search must fail");
+        assert!(
+            matches!(error, MoaError::ValidationError(ref message) if message == expected_message),
+            "unexpected validation failure: {error}"
+        );
+    }
+
+    let exact_boundary_error = store
+        .search_events(
+            "boundedneedle",
+            EventFilter {
+                tenant_id: Some(tenant_id),
+                from_time: Some(now),
+                to_time: Some(now + ChronoDuration::days(31)),
+                ..EventFilter::default()
+            },
+        )
+        .await
+        .expect_err("an exact 31-day window should pass validation and reach SQL");
+    assert!(
+        matches!(exact_boundary_error, MoaError::StorageError(ref message) if message.contains("closed pool")),
+        "exact 31-day boundary should fail only because the pool is closed: {exact_boundary_error}"
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn event_search_uses_ten_second_transaction_local_timeout_db() {
+    // Pins: search overrides an aggressively small session timeout while it
+    // scans, then restores that setting when its transaction commits.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("event-search-timeout", "test-model"))
+        .await
+        .expect("create timeout test session");
+    store
+        .append_events(
+            session_id,
+            (0..5_000)
+                .map(|index| EventAppend {
+                    event: Event::UserMessage {
+                        text: format!("timeoutprobe {index} {}", "payload ".repeat(64)),
+                        attachments: vec![],
+                    },
+                    dedupe_key: None,
+                })
+                .collect(),
+        )
+        .await
+        .expect("seed enough event text to exceed one millisecond");
+
+    let mut connections = Vec::new();
+    for _ in 0..10 {
+        let mut connection = store
+            .pool()
+            .acquire()
+            .await
+            .expect("acquire pooled connection");
+        sqlx::query("SET statement_timeout = '1ms'")
+            .execute(&mut *connection)
+            .await
+            .expect("set mutation-sensitive session timeout");
+        connections.push(connection);
+    }
+    drop(connections);
+
+    let events = store
+        .search_events(
+            "timeoutprobe",
+            EventFilter {
+                session_id: Some(session_id),
+                limit: Some(1),
+                ..EventFilter::default()
+            },
+        )
+        .await
+        .expect("transaction-local ten-second timeout should allow the bounded scan");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].session_id, session_id);
+    assert_eq!(events[0].sequence_num, 4_999);
+
+    let mut connections = Vec::new();
+    for _ in 0..10 {
+        let mut connection = store
+            .pool()
+            .acquire()
+            .await
+            .expect("reacquire pooled connection");
+        let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *connection)
+            .await
+            .expect("read session timeout after search");
+        assert_eq!(statement_timeout, "1ms");
+        connections.push(connection);
+    }
+    drop(connections);
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn postgres_create_session_requires_creator_or_contact_and_agent_context() {
     with_test_store(|store| async move {
         let missing_creator = store
@@ -772,6 +928,62 @@ async fn postgres_direct_session_insert_requires_agent_context_sidecar() {
         database_error.message()
     );
 
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_session_agent_context_must_match_session_tenant() {
+    // Pins: a sidecar for another tenant cannot satisfy the deferred session invariant.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let sessions = qualified(&schema_name, "sessions");
+    let contexts = qualified(&schema_name, "session_agent_context");
+    let session_id = Uuid::now_v7();
+    let session_tenant_id = tenant_id("pg-session-agent-tenant");
+    let wrong_context_tenant_id = tenant_id("pg-session-agent-wrong-tenant");
+    let mut tx = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin fixture transaction");
+
+    sqlx::query(&format!(
+        "INSERT INTO {sessions} \
+         (id, tenant_id, storage_partition_id, user_id, status, channel, model) \
+         VALUES ($1, $2, $3, 'user', 'created', 'chat', 'test-model')"
+    ))
+    .bind(session_id)
+    .bind(session_tenant_id.0)
+    .bind(session_tenant_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .expect("insert session fixture");
+
+    let error = sqlx::query(&format!(
+        "INSERT INTO {contexts} \
+         (session_id, tenant_id, storage_partition_id, user_id, agent_definition_ref, \
+          agent_revision_uid, policy_hash, display_name, policy_snapshot) \
+         VALUES ($1, $2, $3, 'user', 'agent://system-default', \
+                 '00000000-0000-4000-8000-000000000a02', 'test-policy', \
+                 'Test agent', '{{}}'::jsonb)"
+    ))
+    .bind(session_id)
+    .bind(wrong_context_tenant_id.0)
+    .bind(session_tenant_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .expect_err("a cross-tenant session agent context must fail");
+    let database_error = error
+        .as_database_error()
+        .expect("expected database constraint error");
+    assert_eq!(database_error.code().as_deref(), Some("23503"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("session_agent_context_session_tenant_fkey")
+    );
+
+    tx.rollback().await.expect("roll back fixture transaction");
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
 }
@@ -2688,7 +2900,7 @@ async fn postgres_analytics_query_read_models_refresh() {
         1e-9
     ));
 
-    // Pins: V337's execution facts expose exact normalized values and bounded
+    // Pins: the execution-analytics schema exposes exact normalized values and bounded
     // failure metadata, without Task 9 aliases or raw error prose.
     let run_row = sqlx::query(
         "SELECT tenant_id, contact_id, session_id, initial_plan_hash, active_plan_hash, \
@@ -2807,6 +3019,82 @@ async fn postgres_analytics_query_read_models_refresh() {
     }
 
     pool.close().await;
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn append_event_in_tx_assigns_turns_from_locked_session_count_db() {
+    // Pins: caller-owned transactional appends use the locked sessions.turn_count
+    // and advance it only after a freshly inserted BrainResponse.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("tenant-in-tx-turn", "test-model"))
+        .await
+        .expect("create session");
+
+    let mut transaction = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin append transaction");
+    store
+        .append_event_in_tx(
+            &mut transaction,
+            session_id,
+            Event::UserMessage {
+                text: "first".into(),
+                attachments: vec![],
+            },
+            None,
+        )
+        .await
+        .expect("append first event in transaction");
+    store
+        .append_event_in_tx(
+            &mut transaction,
+            session_id,
+            Event::BrainResponse {
+                text: "response".into(),
+                thought_signature: None,
+                model: ModelId::new("test"),
+                model_tier: moa_core::types::provider::ModelTier::Main,
+                input_tokens_uncached: 0,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 0,
+                cost_cents: 0,
+                duration_ms: 1,
+                llm_ttft_ms: None,
+            },
+            None,
+        )
+        .await
+        .expect("append response in transaction");
+    store
+        .append_event_in_tx(
+            &mut transaction,
+            session_id,
+            Event::Warning {
+                message: "after response".into(),
+            },
+            None,
+        )
+        .await
+        .expect("append event after response in transaction");
+    transaction.commit().await.expect("commit appended events");
+
+    let ordinals: Vec<(i64, i64)> = sqlx::query_as(&format!(
+        "SELECT sequence_num, turn_number FROM {} WHERE session_id = $1 ORDER BY sequence_num",
+        qualified(&schema_name, "events")
+    ))
+    .bind(session_id.0)
+    .fetch_all(store.pool())
+    .await
+    .expect("load turn ordinals");
+    assert_eq!(ordinals, vec![(0, 1), (1, 1), (2, 2)]);
+
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
 }
@@ -2995,6 +3283,108 @@ async fn append_events_batches_inserts_aggregates_and_dedupe_db() {
         &same_batch_duplicate[1].event,
         Event::UserMessage { text, .. } if text == "first duplicate"
     ));
+
+    let boundary = store
+        .append_events(
+            session_id,
+            vec![
+                EventAppend {
+                    event: Event::BrainResponse {
+                        text: "second turn".into(),
+                        thought_signature: None,
+                        model: ModelId::new("test"),
+                        model_tier: moa_core::types::provider::ModelTier::Main,
+                        input_tokens_uncached: 0,
+                        input_tokens_cache_write: 0,
+                        input_tokens_cache_read: 0,
+                        output_tokens: 0,
+                        cost_cents: 0,
+                        duration_ms: 1,
+                        llm_ttft_ms: None,
+                    },
+                    dedupe_key: Some("same-batch-response".into()),
+                },
+                EventAppend {
+                    event: Event::BrainResponse {
+                        text: "duplicate response".into(),
+                        thought_signature: None,
+                        model: ModelId::new("test"),
+                        model_tier: moa_core::types::provider::ModelTier::Main,
+                        input_tokens_uncached: 99,
+                        input_tokens_cache_write: 0,
+                        input_tokens_cache_read: 0,
+                        output_tokens: 99,
+                        cost_cents: 99,
+                        duration_ms: 1,
+                        llm_ttft_ms: None,
+                    },
+                    dedupe_key: Some("same-batch-response".into()),
+                },
+                EventAppend {
+                    event: Event::UserMessage {
+                        text: "after second response".into(),
+                        attachments: vec![],
+                    },
+                    dedupe_key: None,
+                },
+            ],
+        )
+        .await
+        .expect("append batch across a turn boundary");
+    assert_eq!(boundary.len(), 3);
+    assert_eq!(boundary[0].sequence_num, 4);
+    assert_eq!(boundary[1].sequence_num, 4);
+    assert_eq!(boundary[0].id, boundary[1].id);
+    assert_eq!(boundary[2].sequence_num, 5);
+
+    let retried_response = store
+        .append_events(
+            session_id,
+            vec![EventAppend {
+                event: Event::BrainResponse {
+                    text: "retry must not advance the turn".into(),
+                    thought_signature: None,
+                    model: ModelId::new("test"),
+                    model_tier: moa_core::types::provider::ModelTier::Main,
+                    input_tokens_uncached: 1,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 1,
+                    cost_cents: 1,
+                    duration_ms: 1,
+                    llm_ttft_ms: None,
+                },
+                dedupe_key: Some("same-batch-response".into()),
+            }],
+        )
+        .await
+        .expect("retry response dedupe");
+    assert_eq!(retried_response[0].id, boundary[0].id);
+
+    store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: "after retry".into(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .expect("append after deduped response retry");
+
+    let ordinals: Vec<(i64, i64)> = sqlx::query_as(&format!(
+        "SELECT sequence_num, turn_number FROM {} WHERE session_id = $1 ORDER BY sequence_num",
+        qualified(&schema_name, "events")
+    ))
+    .bind(session_id.0)
+    .fetch_all(&pool)
+    .await
+    .expect("load persisted turn ordinals");
+    assert_eq!(
+        ordinals,
+        vec![(0, 1), (1, 1), (2, 2), (3, 2), (4, 2), (5, 3), (6, 3)],
+        "only freshly inserted BrainResponse events advance the next ordinal"
+    );
 
     pool.close().await;
     drop(store);

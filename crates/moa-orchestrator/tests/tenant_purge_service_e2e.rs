@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use moa_core::types::identifiers::TenantId;
-use moa_test_support::postgres::test_database_url;
+use moa_test_support::postgres::bootstrap_test_db;
 use moa_wire::tenants::{
     TenantPurgeRequest, TenantPurgeStatus, TenantPurgeStatusRequest, TenantPurgeStatusResponse,
 };
@@ -24,6 +24,7 @@ fn spawn_orchestrator(
     ports: OrchestratorPorts,
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
+    database_url: &str,
 ) -> Result<Child> {
     Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")
@@ -32,12 +33,35 @@ fn spawn_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
-        .env("MOA_DATABASE_URL", test_database_url())
+        .env("MOA_DATABASE_URL", database_url)
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env("MOA_SECURITY_PROFILE", "local")
         .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
+        .env(
+            "MOA_AUTHZ_OPENFGA_URL",
+            std::env::var("MOA_AUTHZ_OPENFGA_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:10030".to_string()),
+        )
+        .env(
+            "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
+            std::env::var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
+                .unwrap_or_else(|_| "localdev-preshared-key-do-not-use-in-prod".to_string()),
+        )
+        // Tenant purge no longer reads OpenFGA, but the complete orchestrator
+        // constructs the shared authz client at startup. Stable non-empty test
+        // identifiers satisfy that unrelated runtime dependency.
+        .env(
+            "MOA_AUTHZ_OPENFGA_STORE_ID",
+            std::env::var("MOA_AUTHZ_OPENFGA_STORE_ID")
+                .unwrap_or_else(|_| "tenant-purge-e2e-store".to_string()),
+        )
+        .env(
+            "MOA_AUTHZ_OPENFGA_MODEL_ID",
+            std::env::var("MOA_AUTHZ_OPENFGA_MODEL_ID")
+                .unwrap_or_else(|_| "tenant-purge-e2e-model".to_string()),
+        )
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
         .env(
             "MOA_RUNTIME_CACHE_REDIS_URL",
@@ -59,6 +83,10 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
     let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let test_db = bootstrap_test_db()
+        .await
+        .context("bootstrap isolated tenant purge e2e database")?;
+    let database_url = test_db.database_url().to_string();
     let ports = reserve_orchestrator_ports()?;
     let endpoint_url = deployment_endpoint_url(ports.restate);
     let ingress = restate_ingress_url();
@@ -67,13 +95,19 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
     let user_id = Uuid::new_v4();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &database_url)?;
+    let pool = match sqlx::PgPool::connect(&database_url).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            let _ = orchestrator.kill();
+            let _ = orchestrator.wait();
+            drop(test_db);
+            return Err(error).context("connect isolated tenant purge e2e database");
+        }
+    };
 
     let result = async {
         register_deployment(&restate_admin_url(), &endpoint_url).await?;
-        let pool = sqlx::PgPool::connect(&test_database_url())
-            .await
-            .context("connect tenant purge e2e database")?;
         sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, 'purge e2e')")
             .bind(tenant_id.0)
             .bind(format!("purge-{tenant_id}"))
@@ -85,6 +119,20 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
         .bind(user_id)
         .bind(tenant_id.0)
         .bind(format!("{user_id}@example.test"))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO authz_outbox \
+                (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id) \
+             VALUES \
+                ('write', $1, 'workspace', $2, 5, $3), \
+                ('write', $4, 'admin', $2, 5, $3), \
+                ('write', $4, 'operator', $2, 5, $3)",
+        )
+        .bind(format!("workspace:{}", moa_core::WORKSPACE_ID))
+        .bind(format!("tenant:{tenant_id}"))
+        .bind(tenant_id.0)
+        .bind(format!("operator:{user_id}"))
         .execute(&pool)
         .await?;
 
@@ -142,6 +190,8 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
 
     let _ = orchestrator.kill();
     let _ = orchestrator.wait();
+    pool.close().await;
+    drop(test_db);
     result
 }
 

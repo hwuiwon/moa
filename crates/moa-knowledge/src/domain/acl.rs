@@ -14,6 +14,8 @@
 //! * Principals are never stored in the clear. A [`CanonicalSourcePrincipal`] is
 //!   normalized and then reduced to a keyed [`SourcePrincipalFingerprint`].
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::SourcePrincipalFingerprint;
@@ -28,6 +30,13 @@ use crate::error::{Error, Result};
 /// subject, so two different principals can never canonicalize to the same
 /// string by splicing their parts together.
 const PRINCIPAL_FIELD_SEPARATOR: char = '\u{1f}';
+
+/// Maximum number of canonical entries persisted for one source ACL snapshot.
+///
+/// Provider snapshots above this bound are normalized to an incomplete snapshot
+/// with no entries. That preserves fail-closed visibility without letting one
+/// provider record drive an unbounded database write.
+pub const MAX_SOURCE_ACL_ENTRIES: usize = 4096;
 
 /// Freshness of one knowledge object's provider ACL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -342,6 +351,9 @@ impl ProviderAclSnapshot {
     /// Entries are sorted and deduplicated, and the canonical hash is derived
     /// from the result, so the adapter cannot influence identity by ordering.
     /// A snapshot with no allow entry is still legal and simply admits nobody.
+    /// A canonical entry set above [`MAX_SOURCE_ACL_ENTRIES`] is represented as
+    /// incomplete with zero entries, so it can be persisted to hide the object
+    /// without attempting an unbounded write.
     ///
     /// # Errors
     ///
@@ -364,9 +376,21 @@ impl ProviderAclSnapshot {
                 message: "provider ACL snapshot must carry a provider revision".to_string(),
             });
         }
-        let mut entries = entries;
-        entries.sort();
-        entries.dedup();
+        let mut canonical = BTreeSet::new();
+        let mut oversized = false;
+        for entry in entries {
+            canonical.insert(entry);
+            if canonical.len() > MAX_SOURCE_ACL_ENTRIES {
+                oversized = true;
+                break;
+            }
+        }
+        let complete = complete && !oversized;
+        let entries = if oversized {
+            Vec::new()
+        } else {
+            canonical.into_iter().collect()
+        };
         let snapshot_hash = Self::canonical_hash(&provider_revision, complete, &entries);
         let snapshot_uid = crate::graph_delta::stable_uid(&format!(
             "source-acl-snapshot:{object_uid}:{snapshot_hash}"
@@ -434,9 +458,8 @@ pub struct ObjectAcl {
 impl ObjectAcl {
     /// Returns the position every object starts in: no snapshot, nothing visible.
     ///
-    /// This is also the position the V000348 backfill puts every pre-existing
-    /// object into, so "never captured" and "captured before ACLs existed" are
-    /// the same state rather than two subtly different ones.
+    /// A new object remains in this fail-closed state until ingestion captures
+    /// a complete provider ACL snapshot.
     #[must_use]
     pub fn incomplete() -> Self {
         Self {
@@ -551,6 +574,16 @@ mod tests {
         }
     }
 
+    fn indexed_entry(index: usize) -> ProviderAclEntry {
+        let mut digest = [0_u8; 32];
+        digest[..8].copy_from_slice(&(index as u64).to_be_bytes());
+        ProviderAclEntry {
+            entry_kind: SourceAclEntryKind::Allow,
+            principal_kind: SourcePrincipalKind::User,
+            principal: SourcePrincipalFingerprint::from_digest(1, digest),
+        }
+    }
+
     #[test]
     fn principal_normalization_collapses_provider_formatting() {
         // Pins: the same identity spelled differently by two providers reaches
@@ -655,6 +688,59 @@ mod tests {
         )
         .expect("normalizes");
         assert_ne!(forward.snapshot_uid, changed_entries.snapshot_uid);
+    }
+
+    #[test]
+    fn snapshot_normalization_caps_the_canonical_entry_set_fail_closed() {
+        // Pins: the exact canonical limit remains complete, while one additional
+        // unique entry produces persistable incomplete evidence with no partial
+        // permission entries. Raw duplicates do not consume the canonical cap.
+        let tenant_id = TenantId::from(Uuid::from_u128(2));
+        let connection_uid = Uuid::from_u128(3);
+        let object_uid = Uuid::from_u128(4);
+        let captured_at = Utc::now();
+        let at_limit = ProviderAclSnapshot::normalized(
+            tenant_id,
+            connection_uid,
+            object_uid,
+            "rev-limit",
+            true,
+            (0..MAX_SOURCE_ACL_ENTRIES).map(indexed_entry).collect(),
+            captured_at,
+        )
+        .expect("the exact canonical limit normalizes");
+        assert!(at_limit.complete);
+        assert_eq!(at_limit.entries.len(), MAX_SOURCE_ACL_ENTRIES);
+
+        let oversized = ProviderAclSnapshot::normalized(
+            tenant_id,
+            connection_uid,
+            object_uid,
+            "rev-oversized",
+            true,
+            (0..=MAX_SOURCE_ACL_ENTRIES).map(indexed_entry).collect(),
+            captured_at,
+        )
+        .expect("oversized ACLs normalize to fail-closed evidence");
+        assert!(!oversized.complete);
+        assert_eq!(oversized.entries.len(), 0);
+        assert_eq!(
+            oversized.snapshot_hash,
+            ProviderAclSnapshot::canonical_hash("rev-oversized", false, &[])
+        );
+
+        let duplicate_heavy = ProviderAclSnapshot::normalized(
+            tenant_id,
+            connection_uid,
+            object_uid,
+            "rev-duplicates",
+            true,
+            vec![indexed_entry(7); MAX_SOURCE_ACL_ENTRIES + 1],
+            captured_at,
+        )
+        .expect("raw duplicates normalize before the cap is applied");
+        assert!(duplicate_heavy.complete);
+        assert_eq!(duplicate_heavy.entries, vec![indexed_entry(7)]);
     }
 
     #[test]

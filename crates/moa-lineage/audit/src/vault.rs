@@ -100,28 +100,27 @@ impl PiiVault {
     /// Marks a subject as erased and returns the number of subject-key rows touched.
     ///
     /// Production KMS key destruction happens behind the key handle represented
-    /// by the `erased_at` marker.
+    /// by the `erased_at` marker. The caller owns the connection and any
+    /// transaction or destruction guard that must cover this mutation.
     pub async fn erase_subject(
         &self,
+        conn: &mut sqlx::PgConnection,
         storage_partition_id: &str,
         subject_pseudonym: &[u8],
     ) -> Result<u64> {
-        if let Some(pool) = &self.pool {
-            let affected = sqlx::query(
-                r#"
-                UPDATE pii_vault.subject_keys
-                SET erased_at = now()
-                WHERE storage_partition_id = $1 AND subject_pseudonym = $2
-                "#,
-            )
-            .bind(storage_partition_id)
-            .bind(subject_pseudonym)
-            .execute(pool)
-            .await?
-            .rows_affected();
-            return Ok(affected);
-        }
-        Ok(0)
+        let affected = sqlx::query(
+            r#"
+            UPDATE pii_vault.subject_keys
+            SET erased_at = now()
+            WHERE storage_partition_id = $1 AND subject_pseudonym = $2
+            "#,
+        )
+        .bind(storage_partition_id)
+        .bind(subject_pseudonym)
+        .execute(conn)
+        .await?
+        .rows_affected();
+        Ok(affected)
     }
 
     /// Computes the deterministic subject pseudonym.

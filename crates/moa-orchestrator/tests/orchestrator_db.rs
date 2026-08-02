@@ -16,16 +16,16 @@ mod artifact_release_evaluation_db;
 mod authz_admin_db;
 #[path = "orchestrator_db/authz_challenges_db.rs"]
 mod authz_challenges_db;
-#[path = "orchestrator_db/backfill_cli_db.rs"]
-mod backfill_cli_db;
 #[path = "orchestrator_db/contacts_db.rs"]
 mod contacts_db;
 #[path = "orchestrator_db/execution_service_db.rs"]
 mod execution_service_db;
-#[path = "orchestrator_db/guardrail_hourly_db.rs"]
-mod guardrail_hourly_db;
+#[path = "orchestrator_db/fga_mock.rs"]
+mod fga_mock;
 #[path = "orchestrator_db/lineage_postgres_db.rs"]
 mod lineage_postgres_db;
+#[path = "orchestrator_db/scim_groups_db.rs"]
+mod scim_groups_db;
 #[path = "orchestrator_db/session_store_db.rs"]
 mod session_store_db;
 #[path = "support/simulator_policy.rs"]

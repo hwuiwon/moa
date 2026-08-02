@@ -10,6 +10,9 @@ use crate::{Error, Result, VectorItem, embedding_row::EmbeddingRow};
 /// Maximum outbox rows drained after a graph write commits.
 pub const VECTOR_SYNC_POST_COMMIT_LIMIT: i64 = 64;
 
+/// Hard ceiling for one vector-sync outbox claim batch.
+pub const VECTOR_SYNC_DRAIN_MAX_LIMIT: i64 = 4096;
+
 /// Transient-retry ceiling before a vector-sync row is quarantined (dead-lettered).
 pub const VECTOR_SYNC_MAX_ATTEMPTS: i32 = 10;
 
@@ -84,10 +87,19 @@ impl VectorSyncRemoteGuard {
         self.fenced
     }
 
+    /// Returns the lock-owning connection for durable claim settlement.
+    ///
+    /// PostgreSQL queues a new shared lock behind an already-waiting exclusive
+    /// locker. Settlement therefore must reuse this session: a different pooled
+    /// connection would wait behind purge while purge waits for this guard.
+    pub(crate) fn connection(&mut self) -> &mut PgConnection {
+        &mut self.conn
+    }
+
     /// Releases the session advisory lock after every claimed job has settled.
     pub(crate) async fn finish(mut self) -> Result<()> {
         sqlx::query(
-            "SELECT pg_advisory_unlock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+            "SELECT pg_advisory_unlock_shared(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
         )
         .bind(self.tenant_id)
         .execute(&mut *self.conn)
@@ -134,91 +146,181 @@ pub(crate) async fn claim_pending_vector_sync(
     storage_partition_id: Option<&str>,
     limit: i64,
 ) -> Result<Vec<VectorSyncJob>> {
-    if limit <= 0 {
-        return Ok(Vec::new());
+    if !(1..=VECTOR_SYNC_DRAIN_MAX_LIMIT).contains(&limit) {
+        return Err(Error::VectorSyncLimitOutOfRange {
+            limit,
+            max: VECTOR_SYNC_DRAIN_MAX_LIMIT,
+        });
     }
 
     let mut conn = ScopedConn::begin_control_plane(pool).await?;
-    let tenant_ids = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT DISTINCT partition.tenant_id
-          FROM moa.vector_sync_outbox AS outbox
-          JOIN moa.storage_partition_state AS partition
-            ON partition.storage_partition_id = outbox.storage_partition_id
-         WHERE outbox.processed_at IS NULL
-           AND outbox.dead_lettered_at IS NULL
-           AND outbox.available_at <= now()
-           AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
-           AND ($2::text IS NULL OR outbox.storage_partition_id = $2)
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM moa.destruction_operation_fence AS fence
-                WHERE fence.tenant_id = partition.tenant_id
-                  AND fence.subject_id IS NULL
-                  AND fence.status IN ('in_progress', 'committed')
-           )
-         ORDER BY partition.tenant_id
-         LIMIT $1
-        "#,
-    )
-    .bind(limit)
-    .bind(storage_partition_id)
-    .fetch_all(conn.as_mut())
-    .await?;
-
-    for tenant_id in &tenant_ids {
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    let tenant_ids = if let Some(storage_partition_id) = storage_partition_id {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            WITH candidates AS MATERIALIZED (
+                SELECT partition.tenant_id
+                  FROM moa.vector_sync_outbox AS outbox
+                  JOIN moa.storage_partition_state AS partition
+                    ON partition.storage_partition_id = outbox.storage_partition_id
+                 WHERE outbox.storage_partition_id = $2
+                   AND outbox.processed_at IS NULL
+                   AND outbox.dead_lettered_at IS NULL
+                   AND outbox.available_at <= now()
+                   AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM moa.destruction_operation_fence AS fence
+                        WHERE fence.tenant_id = partition.tenant_id
+                          AND fence.subject_id IS NULL
+                          AND fence.status IN ('in_progress', 'committed')
+                   )
+                 ORDER BY outbox.available_at, outbox.sync_id
+                 LIMIT $1
+            )
+            SELECT DISTINCT tenant_id
+              FROM candidates
+             ORDER BY tenant_id
+            "#,
         )
-        .bind(tenant_id)
+        .bind(limit)
+        .bind(storage_partition_id)
+        .fetch_all(conn.as_mut())
+        .await?
+    } else {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            WITH candidates AS MATERIALIZED (
+                SELECT partition.tenant_id
+                  FROM moa.vector_sync_outbox AS outbox
+                  JOIN moa.storage_partition_state AS partition
+                    ON partition.storage_partition_id = outbox.storage_partition_id
+                 WHERE outbox.processed_at IS NULL
+                   AND outbox.dead_lettered_at IS NULL
+                   AND outbox.available_at <= now()
+                   AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM moa.destruction_operation_fence AS fence
+                        WHERE fence.tenant_id = partition.tenant_id
+                          AND fence.subject_id IS NULL
+                          AND fence.status IN ('in_progress', 'committed')
+                   )
+                 ORDER BY outbox.available_at, outbox.sync_id
+                 LIMIT $1
+            )
+            SELECT DISTINCT tenant_id
+              FROM candidates
+             ORDER BY tenant_id
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(conn.as_mut())
+        .await?
+    };
+
+    if !tenant_ids.is_empty() {
+        sqlx::query(
+            r#"
+            WITH ordered_tenants AS MATERIALIZED (
+                SELECT tenant_id
+                  FROM unnest($1::uuid[]) AS candidate(tenant_id)
+                 ORDER BY tenant_id
+            )
+            SELECT pg_advisory_xact_lock_shared(
+                       hashtextextended('moa:destruction:tenant:' || tenant_id::text, 0)
+                   )
+              FROM ordered_tenants
+             ORDER BY tenant_id
+            "#,
+        )
+        .bind(&tenant_ids)
         .execute(conn.as_mut())
         .await?;
     }
 
-    let rows = sqlx::query(
-        r#"
-        WITH selected AS (
-            SELECT outbox.sync_id
-              FROM moa.vector_sync_outbox AS outbox
-              JOIN moa.storage_partition_state AS partition
-                ON partition.storage_partition_id = outbox.storage_partition_id
-             WHERE outbox.processed_at IS NULL
-               AND outbox.dead_lettered_at IS NULL
-               AND outbox.available_at <= now()
-               AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
-               AND ($2::text IS NULL OR outbox.storage_partition_id = $2)
-               AND partition.tenant_id = ANY($3::uuid[])
-               AND NOT EXISTS (
-                   SELECT 1
-                     FROM moa.destruction_operation_fence AS fence
-                    WHERE fence.tenant_id = partition.tenant_id
-                      AND fence.subject_id IS NULL
-                      AND fence.status IN ('in_progress', 'committed')
-               )
-             ORDER BY outbox.sync_id
-             LIMIT $1
-             FOR UPDATE OF outbox SKIP LOCKED
+    let rows = if let Some(storage_partition_id) = storage_partition_id {
+        sqlx::query(
+            r#"
+            WITH selected AS (
+                SELECT outbox.sync_id
+                  FROM moa.vector_sync_outbox AS outbox
+                  JOIN moa.storage_partition_state AS partition
+                    ON partition.storage_partition_id = outbox.storage_partition_id
+                 WHERE outbox.storage_partition_id = $2
+                   AND outbox.processed_at IS NULL
+                   AND outbox.dead_lettered_at IS NULL
+                   AND outbox.available_at <= now()
+                   AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
+                   AND partition.tenant_id = ANY($3::uuid[])
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM moa.destruction_operation_fence AS fence
+                        WHERE fence.tenant_id = partition.tenant_id
+                          AND fence.subject_id IS NULL
+                          AND fence.status IN ('in_progress', 'committed')
+                   )
+                 ORDER BY outbox.available_at, outbox.sync_id
+                 LIMIT $1
+                 FOR UPDATE OF outbox SKIP LOCKED
+            )
+            UPDATE moa.vector_sync_outbox AS outbox
+               SET attempts = outbox.attempts + 1,
+                   claim_token = gen_random_uuid(),
+                   claim_expires_at = now() + INTERVAL '5 minutes',
+                   processing_started_at = now(),
+                   updated_at = now()
+              FROM selected
+             WHERE outbox.sync_id = selected.sync_id
+            RETURNING outbox.sync_id, outbox.claim_token,
+                      outbox.storage_partition_id, outbox.uid, outbox.op
+            "#,
         )
-        UPDATE moa.vector_sync_outbox AS outbox
-           SET attempts = outbox.attempts + 1,
-               claim_token = gen_random_uuid(),
-               claim_expires_at = now() + INTERVAL '5 minutes',
-               processing_started_at = now(),
-               updated_at = now()
-          FROM selected
-         WHERE outbox.sync_id = selected.sync_id
-        RETURNING outbox.sync_id,
-                  outbox.claim_token,
-                  outbox.storage_partition_id,
-                  outbox.uid,
-                  outbox.op
-        "#,
-    )
-    .bind(limit)
-    .bind(storage_partition_id)
-    .bind(&tenant_ids)
-    .fetch_all(conn.as_mut())
-    .await?;
+        .bind(limit)
+        .bind(storage_partition_id)
+        .bind(&tenant_ids)
+        .fetch_all(conn.as_mut())
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            WITH selected AS (
+                SELECT outbox.sync_id
+                  FROM moa.vector_sync_outbox AS outbox
+                  JOIN moa.storage_partition_state AS partition
+                    ON partition.storage_partition_id = outbox.storage_partition_id
+                 WHERE outbox.processed_at IS NULL
+                   AND outbox.dead_lettered_at IS NULL
+                   AND outbox.available_at <= now()
+                   AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
+                   AND partition.tenant_id = ANY($2::uuid[])
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM moa.destruction_operation_fence AS fence
+                        WHERE fence.tenant_id = partition.tenant_id
+                          AND fence.subject_id IS NULL
+                          AND fence.status IN ('in_progress', 'committed')
+                   )
+                 ORDER BY outbox.available_at, outbox.sync_id
+                 LIMIT $1
+                 FOR UPDATE OF outbox SKIP LOCKED
+            )
+            UPDATE moa.vector_sync_outbox AS outbox
+               SET attempts = outbox.attempts + 1,
+                   claim_token = gen_random_uuid(),
+                   claim_expires_at = now() + INTERVAL '5 minutes',
+                   processing_started_at = now(),
+                   updated_at = now()
+              FROM selected
+             WHERE outbox.sync_id = selected.sync_id
+            RETURNING outbox.sync_id, outbox.claim_token,
+                      outbox.storage_partition_id, outbox.uid, outbox.op
+            "#,
+        )
+        .bind(limit)
+        .bind(&tenant_ids)
+        .fetch_all(conn.as_mut())
+        .await?
+    };
     conn.commit().await?;
 
     rows.into_iter()
@@ -269,7 +371,7 @@ pub(crate) async fn begin_vector_sync_remote_guard(
     };
 
     sqlx::query(
-        "SELECT pg_advisory_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+        "SELECT pg_advisory_lock_shared(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
     )
     .bind(tenant_id)
     .execute(&mut *conn)
@@ -341,6 +443,15 @@ pub(crate) async fn mark_vector_sync_processed_batch(
     pool: &PgPool,
     jobs: &[&VectorSyncJob],
 ) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    mark_vector_sync_processed_batch_on(&mut conn, jobs).await
+}
+
+/// Marks jobs processed on the connection that owns their remote-I/O guard.
+pub(crate) async fn mark_vector_sync_processed_batch_on(
+    conn: &mut PgConnection,
+    jobs: &[&VectorSyncJob],
+) -> Result<()> {
     if jobs.is_empty() {
         return Ok(());
     }
@@ -364,7 +475,7 @@ pub(crate) async fn mark_vector_sync_processed_batch(
     )
     .bind(sync_ids)
     .bind(claim_tokens)
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }
@@ -377,8 +488,9 @@ pub(crate) async fn mark_vector_sync_processed_batch(
 /// instead schedules the next attempt with exponential backoff derived from the
 /// row's `attempts`, capped at [`VECTOR_SYNC_BACKOFF_CAP_SECS`]. The returned
 /// count is the number of rows that transitioned to the dead-letter state.
-pub(crate) async fn mark_vector_sync_failed_batch(
-    pool: &PgPool,
+/// Marks jobs failed on the connection that owns their remote-I/O guard.
+pub(crate) async fn mark_vector_sync_failed_batch_on(
+    conn: &mut PgConnection,
     jobs: &[&VectorSyncJob],
     error: &Error,
     permanent: bool,
@@ -422,7 +534,7 @@ pub(crate) async fn mark_vector_sync_failed_batch(
     .bind(VECTOR_SYNC_MAX_ATTEMPTS)
     .bind(VECTOR_SYNC_BACKOFF_CAP_SECS)
     .bind(VECTOR_SYNC_BACKOFF_BASE_SECS)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await?;
 
     let dead_lettered = rows

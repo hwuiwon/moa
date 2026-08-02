@@ -64,6 +64,115 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
 }
 
 #[tokio::test]
+async fn list_connections_batches_mixed_credential_statuses_once() {
+    // Pins: listing many already-authorized connections performs exactly one
+    // credential metadata batch and preserves every status, including
+    // provider-native, missing, revoked, and superseded references.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let account = LinkedAccount {
+        provider: PROVIDER.to_string(),
+        connector: CONNECTOR.to_string(),
+        provider_account_id: "batch-account".to_string(),
+        credential_ref: "provider-ref".to_string(),
+        credential_material: Some("batch-secret".to_string()),
+        metadata: json!({}),
+    };
+
+    let mut present = fixture_connection(tenant_id);
+    present.provider_account_id = "present".to_string();
+    present.credential_ref = credentials
+        .store_linked_account(tenant_id, present.connection_uid, &caller, &account)
+        .await
+        .expect("store present credential");
+    repository
+        .insert_connection(present)
+        .expect("insert present connection");
+
+    let mut provider_native = fixture_connection(tenant_id);
+    provider_native.connection_uid = Uuid::now_v7();
+    provider_native.provider_account_id = "provider-native".to_string();
+    provider_native.credential_ref = "provider-owned-handle".to_string();
+    repository
+        .insert_connection(provider_native)
+        .expect("insert provider-native connection");
+
+    let mut missing = fixture_connection(tenant_id);
+    missing.connection_uid = Uuid::now_v7();
+    missing.provider_account_id = "missing".to_string();
+    missing.credential_ref = Uuid::now_v7().to_string();
+    repository
+        .insert_connection(missing)
+        .expect("insert missing connection");
+
+    let mut revoked = fixture_connection(tenant_id);
+    revoked.connection_uid = Uuid::now_v7();
+    revoked.provider_account_id = "revoked".to_string();
+    revoked.credential_ref = credentials
+        .store_linked_account(tenant_id, revoked.connection_uid, &caller, &account)
+        .await
+        .expect("store credential to revoke");
+    credentials
+        .revoke_credential(tenant_id, &revoked.credential_ref, &caller)
+        .await
+        .expect("revoke credential");
+    repository
+        .insert_connection(revoked)
+        .expect("insert revoked connection");
+
+    let mut superseded = fixture_connection(tenant_id);
+    superseded.connection_uid = Uuid::now_v7();
+    superseded.provider_account_id = "superseded".to_string();
+    superseded.credential_ref = credentials
+        .store_linked_account(tenant_id, superseded.connection_uid, &caller, &account)
+        .await
+        .expect("store old credential");
+    credentials
+        .store_linked_account(tenant_id, superseded.connection_uid, &caller, &account)
+        .await
+        .expect("store replacement credential");
+    repository
+        .insert_connection(superseded)
+        .expect("insert superseded connection");
+
+    let service = KnowledgeService::new(
+        repository.clone(),
+        repository,
+        Arc::new(StaticKnowledgeProviders::new()),
+        credentials.clone(),
+        fake_ingestion_runner(),
+        80,
+    );
+    let listed = service
+        .list_connections(
+            KnowledgeConnectionListRequest {
+                tenant_id,
+                provider: None,
+            },
+            &caller,
+        )
+        .await
+        .expect("list connections with one credential batch");
+
+    let statuses = listed
+        .connections
+        .into_iter()
+        .map(|connection| (connection.provider_account_id, connection.credential_status))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(credentials.status_batch_calls(), 1);
+    assert_eq!(statuses.get("present"), Some(&Some("present".to_string())));
+    assert_eq!(statuses.get("provider-native"), Some(&None));
+    assert_eq!(statuses.get("missing"), Some(&Some("missing".to_string())));
+    assert_eq!(statuses.get("revoked"), Some(&Some("revoked".to_string())));
+    assert_eq!(
+        statuses.get("superseded"),
+        Some(&Some("superseded".to_string()))
+    );
+}
+
+#[tokio::test]
 async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() {
     // Pins: connect UIs get every enabled provider's integrations, provider-tagged
     // and deterministically sorted, and an explicit provider filter narrows the list.

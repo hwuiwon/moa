@@ -3,6 +3,7 @@
 use chrono::Duration;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_db::ScopedConn;
 use moa_knowledge::{
     domain::{
         ConnectionStatus, DocumentVersion, IngestionStepStatus, KnowledgeBlock, KnowledgeChunk,
@@ -128,12 +129,12 @@ async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge(
     let repo_b = repository(&db, tenant_b);
     let mut connection_a = connection(tenant_a, "tenant-a");
     let mut connection_b = connection(tenant_b, "tenant-b");
-    connection_a.connector = "shared-connector".to_string();
-    connection_b.connector = "shared-connector".to_string();
+    connection_a.connector = "connector-a".to_string();
+    connection_b.connector = "connector-b".to_string();
     connection_a.provider_account_id = "shared-account".to_string();
     connection_b.provider_account_id = "shared-account".to_string();
     repo_a
-        .upsert_connection(connection_a)
+        .upsert_connection(connection_a.clone())
         .await
         .expect("insert tenant A connection");
     repo_b
@@ -144,26 +145,212 @@ async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge(
     let discovery = discovery(&db);
     assert_eq!(
         discovery
-            .lookup_connection_by_provider_account(
-                "nango",
-                Some("shared-connector"),
-                "missing-account",
-            )
+            .lookup_connection_by_provider_account("nango", Some("connector-a"), "missing-account",)
             .await
             .expect("missing provider lookup should complete"),
         ProviderAccountConnectionLookup::NotFound
     );
     assert_eq!(
         discovery
-            .lookup_connection_by_provider_account(
-                "nango",
-                Some("shared-connector"),
-                "shared-account",
-            )
+            .lookup_connection_by_provider_account("nango", Some("connector-a"), "shared-account",)
+            .await
+            .expect("connector-qualified provider lookup should complete"),
+        ProviderAccountConnectionLookup::Unique(connection_a.clone())
+    );
+    assert_eq!(
+        discovery
+            .lookup_connection_by_provider_account("nango", None, "shared-account",)
             .await
             .expect("ambiguous provider lookup should complete"),
         ProviderAccountConnectionLookup::Ambiguous { matches: 2 }
     );
+
+    let index_definitions = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT indexname, indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'moa'
+          AND indexname IN (
+              'knowledge_connections_provider_config_account_idx',
+              'knowledge_connections_provider_account_idx'
+          )
+        ORDER BY indexname
+        "#,
+    )
+    .fetch_all(db.store().pool())
+    .await
+    .expect("read provider-account discovery indexes");
+    assert_eq!(index_definitions.len(), 2);
+    assert!(index_definitions.iter().any(|(name, definition)| {
+        name == "knowledge_connections_provider_config_account_idx"
+            && definition.contains(
+                "(provider, provider_config_key, provider_connection_id, tenant_id, connection_uid)",
+            )
+    }));
+    assert!(index_definitions.iter().any(|(name, definition)| {
+        name == "knowledge_connections_provider_account_idx"
+            && definition.contains("(provider, provider_connection_id, tenant_id, connection_uid)")
+    }));
+}
+
+#[tokio::test]
+async fn bulk_visibility_changes_bump_each_partition_once_per_statement_db_knowledge() {
+    // Pins: bulk object and chunk visibility changes increment each affected
+    // partition exactly once; multiple rows and visibility-neutral updates do
+    // not create cache-generation storms.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_a = TenantId::from(Uuid::now_v7());
+    let tenant_b = TenantId::from(Uuid::now_v7());
+    let partition_a = tenant_a.to_string();
+    let partition_b = tenant_b.to_string();
+    let repo_a = repository(&db, tenant_a);
+    let repo_b = repository(&db, tenant_b);
+    let connection_a = connection(tenant_a, "visibility-a");
+    let connection_b = connection(tenant_b, "visibility-b");
+    repo_a
+        .upsert_connection(connection_a.clone())
+        .await
+        .expect("insert tenant A connection");
+    repo_b
+        .upsert_connection(connection_b.clone())
+        .await
+        .expect("insert tenant B connection");
+
+    let mut object_uids = Vec::new();
+    let mut chunk_uids = Vec::new();
+    for (repo, tenant_id, connection_uid, count) in [
+        (&repo_a, tenant_a, connection_a.connection_uid, 2_u32),
+        (&repo_b, tenant_b, connection_b.connection_uid, 1_u32),
+    ] {
+        for ordinal in 0..count {
+            let object = object(
+                tenant_id,
+                connection_uid,
+                &format!("visibility-{tenant_id}-{ordinal}"),
+            );
+            repo.upsert_object(object.clone())
+                .await
+                .expect("insert visibility object");
+            let version = DocumentVersion {
+                version_uid: Uuid::now_v7(),
+                object_uid: object.object_uid,
+                parser: "native".to_string(),
+                parser_job_id: None,
+                content_hash: format!("visibility-content-{tenant_id}-{ordinal}"),
+                metadata: json!({}),
+                created_at: moa_test_support::fixtures::pg_now(),
+            };
+            repo.insert_document_version(version.clone())
+                .await
+                .expect("insert visibility document version");
+            let chunk_uid = Uuid::now_v7();
+            repo.replace_chunks(
+                version.version_uid,
+                vec![KnowledgeChunk {
+                    chunk_uid,
+                    version_uid: version.version_uid,
+                    chunk_hash: format!("visibility-chunk-{tenant_id}-{ordinal}"),
+                    block_hashes: Vec::new(),
+                    text: "visibility test chunk".to_string(),
+                    heading_path: Vec::new(),
+                    ordinal: 0,
+                    token_count: 3,
+                    metadata: json!({}),
+                }],
+            )
+            .await
+            .expect("insert visibility chunk");
+            object_uids.push(object.object_uid);
+            chunk_uids.push(chunk_uid);
+        }
+    }
+
+    let mut conn = ScopedConn::begin_control_plane(db.store().pool())
+        .await
+        .expect("begin control-plane visibility transaction");
+    conn.assume_app_role()
+        .await
+        .expect("exercise visibility triggers as application role");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state (storage_partition_id, changelog_version)
+        VALUES ($1, 10), ($2, 20)
+        ON CONFLICT (storage_partition_id) DO UPDATE
+        SET changelog_version = EXCLUDED.changelog_version
+        "#,
+    )
+    .bind(&partition_a)
+    .bind(&partition_b)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed partition generations");
+
+    sqlx::query(
+        "UPDATE moa.knowledge_objects SET status = 'deleted' WHERE object_uid = ANY($1::UUID[])",
+    )
+    .bind(&object_uids)
+    .execute(conn.as_mut())
+    .await
+    .expect("bulk-hide objects");
+    let after_objects = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT storage_partition_id, changelog_version
+        FROM moa.storage_partition_state
+        WHERE storage_partition_id = ANY($1::TEXT[])
+        ORDER BY storage_partition_id
+        "#,
+    )
+    .bind(vec![partition_a.clone(), partition_b.clone()])
+    .fetch_all(conn.as_mut())
+    .await
+    .expect("read object visibility generations");
+    let after_objects = after_objects
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(after_objects.get(&partition_a), Some(&11));
+    assert_eq!(after_objects.get(&partition_b), Some(&21));
+
+    sqlx::query(
+        "UPDATE moa.knowledge_objects SET title = title WHERE object_uid = ANY($1::UUID[])",
+    )
+    .bind(&object_uids)
+    .execute(conn.as_mut())
+    .await
+    .expect("run visibility-neutral object update");
+    sqlx::query(
+        r#"
+        UPDATE moa.knowledge_chunks
+        SET metadata = jsonb_set(metadata, '{active}', 'false'::JSONB)
+        WHERE chunk_uid = ANY($1::UUID[])
+        "#,
+    )
+    .bind(&chunk_uids)
+    .execute(conn.as_mut())
+    .await
+    .expect("bulk-hide chunks");
+    let after_chunks = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT storage_partition_id, changelog_version
+        FROM moa.storage_partition_state
+        WHERE storage_partition_id = ANY($1::TEXT[])
+        ORDER BY storage_partition_id
+        "#,
+    )
+    .bind(vec![partition_a.clone(), partition_b.clone()])
+    .fetch_all(conn.as_mut())
+    .await
+    .expect("read chunk visibility generations");
+    let after_chunks = after_chunks
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(after_chunks.get(&partition_a), Some(&12));
+    assert_eq!(after_chunks.get(&partition_b), Some(&22));
+
+    conn.commit()
+        .await
+        .expect("commit visibility trigger assertions");
 }
 
 #[tokio::test]

@@ -482,12 +482,12 @@ fn mark_metadata_active(metadata: Value) -> Value {
 /// identically whether it ends a billing article or a DNS guide. Prepending
 /// the document title and heading path (contextual retrieval) disambiguates
 /// the vector without changing the stored chunk text, chunk hash, or the
-/// evidence excerpt shown to the model. Only newly embedded chunks pick this
-/// up — unchanged chunk hashes keep their cached vectors, so mixed corpora
-/// converge as content changes; a partition rebuild converts wholesale.
+/// evidence excerpt shown to the model. Unchanged chunk hashes keep their
+/// cached vectors, so a replacement partition must be re-ingested through this
+/// same path before it serves queries.
 ///
-/// The format itself lives in `moa_core` because the rebuild path must
-/// reproduce it exactly and neither crate can depend on the other.
+/// The format itself lives in `moa_core` so ingestion and vector backends share
+/// one exact representation without depending on each other.
 fn contextual_embedding_input(
     document_title: Option<&str>,
     chunk: &crate::domain::KnowledgeChunk,

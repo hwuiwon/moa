@@ -6,10 +6,24 @@ Restate handlers to the brain's turn engine. It also spawns non-Restate
 background work such as the ClickHouse analytics exporter
 (`moa-analytics-export`).
 
+Database migration is a separate process phase:
+
+```bash
+MOA_DATABASE_URL=postgres://runtime-role@... \
+MOA_DATABASE_ADMIN_URL=postgres://migration-role@... \
+  cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- migrate
+MOA_DATABASE_URL=postgres://runtime-role@... \
+  cargo run -p moa-orchestrator --bin moa-orchestrator-bin
+```
+
+The default runtime command validates the exact complete central migration
+history through `MOA_DATABASE_URL` before constructing runtime dependencies. It
+never reads `MOA_DATABASE_ADMIN_URL` or applies migration DDL.
+
 ## Structure
 
 - `services/` — Restate service modules (agents, skills, memory, execution,
-  experiments, privacy, SCIM, tool executor, eval, session store, and more).
+  experiments, privacy, SCIM, tool executor, session store, and more).
 - `workflows/` — Restate workflow modules (execution runs and tasks,
   experiment runs and trials, memory consolidation).
 - `objects/` — Restate virtual objects (session, worker, tenant, cron jobs).

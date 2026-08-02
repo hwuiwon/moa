@@ -21,14 +21,15 @@ use super::manifest::{
     write_manifest,
 };
 use super::repository::{
-    ContactLinkedSubjectPolicy, collect_changelog, collect_privacy_export_data_sections,
-    consume_approval_jti, resolve_privacy_subjects,
+    begin_privacy_export_snapshot, collect_privacy_export_data_sections, consume_approval_jti,
+    resolve_privacy_export_subjects,
 };
 use super::{handler_error, usize_to_u64};
 
 /// Executes a privacy export after handler-level authz and token verification.
-pub(super) async fn execute_privacy_export(
-    pool: PgPool,
+pub async fn execute_privacy_export(
+    foreground_pool: PgPool,
+    background_pool: PgPool,
     tenant_id: TenantId,
     request: PrivacyExportRequest,
     claims: ApprovalClaims,
@@ -37,14 +38,15 @@ pub(super) async fn execute_privacy_export(
     if request.reason.trim().is_empty() {
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
-    consume_approval_jti(&pool, tenant_id.0, &claims).await?;
+    let signer = Ed25519ManifestSigner::from_config(&config)?;
+    consume_approval_jti(&foreground_pool, tenant_id.0, &claims).await?;
     let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
-    let resolved = resolve_privacy_subjects(
-        &pool,
+    let mut snapshot = begin_privacy_export_snapshot(&background_pool).await?;
+    let resolved = resolve_privacy_export_subjects(
+        snapshot.as_mut(),
         tenant_id.0,
         Some(&storage_partition_id),
         &request.subject_user_id,
-        ContactLinkedSubjectPolicy::IncludeVerifiedLinks,
     )
     .await?;
     let subject_user = resolved
@@ -53,14 +55,13 @@ pub(super) async fn execute_privacy_export(
         .map(|subject| subject.target_uid)
         .ok_or_else(|| TerminalError::new("privacy subject resolution returned no subjects"))?;
     let storage_partition = resolved.effective_storage_partition.clone();
-    let signer = Ed25519ManifestSigner::from_config(&config)?;
     let base_dir = create_temp_dir("moa-privacy-export").await?;
     let export_dir = base_dir.join("export");
     tokio::fs::create_dir_all(&export_dir)
         .await
         .map_err(handler_error)?;
     let ctx = PrivacyExportContext {
-        pool,
+        audit_pool: foreground_pool,
         tenant_id,
         storage_partition,
         subject_user,
@@ -71,13 +72,14 @@ pub(super) async fn execute_privacy_export(
     };
 
     let result = async {
-        let mut counts = collect_privacy_export_data_sections(&ctx, &export_dir).await?;
+        let counts =
+            collect_privacy_export_data_sections(&ctx, snapshot.as_mut(), &export_dir).await?;
+        snapshot.commit().await.map_err(handler_error)?;
         write_export_readme(&ctx, &counts, &export_dir).await?;
-        emit_export_audit(&ctx, &counts).await?;
-        counts.insert("changelog", collect_changelog(&ctx, &export_dir).await?);
         let manifest = write_manifest(&export_dir, &signer, &ctx, &counts).await?;
         let archive =
             finalize_archive_to_bytes(&export_dir, request.pgp_recipient.as_deref()).await?;
+        emit_export_audit(&ctx, &counts).await?;
         Ok::<_, HandlerError>((counts, manifest, archive))
     }
     .await;
@@ -148,7 +150,7 @@ async fn emit_export_audit(
     ctx: &PrivacyExportContext,
     counts: &BTreeMap<&'static str, usize>,
 ) -> Result<(), HandlerError> {
-    let mut tx = ctx.pool.begin().await.map_err(handler_error)?;
+    let mut tx = ctx.audit_pool.begin().await.map_err(handler_error)?;
     let file_count = counts.len().saturating_add(4);
     write_and_bump(
         &mut tx,

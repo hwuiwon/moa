@@ -110,6 +110,22 @@ impl<'p> ScopedConn<'p> {
         Ok(())
     }
 
+    /// Replaces the current request scope with one contact-local scope and
+    /// assumes the `moa_app` role on the same transaction connection.
+    ///
+    /// The full RLS context is reinstalled, including tenant, storage
+    /// partition, contact, control-plane state, and information-barrier
+    /// clearances, so no value from an earlier scope survives the transition.
+    pub async fn assume_app_contact_scope(
+        &mut self,
+        tenant_id: TenantId,
+        contact_id: ContactId,
+    ) -> Result<()> {
+        let gucs = Self::scope_gucs(&RlsContext::contact(tenant_id, contact_id));
+        Self::apply_guc_values(&mut self.tx, &gucs).await?;
+        self.assume_app_role().await
+    }
+
     /// Begins a transaction and applies the provided GUC scope.
     async fn begin_with_gucs(pool: &'p PgPool, gucs: &DbScopeGucs) -> Result<Self> {
         let mut tx = pool.begin().await.map_err(map_sqlx_error)?;

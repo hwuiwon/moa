@@ -110,6 +110,134 @@ async fn credential_created_on_one_pool_resolves_through_an_independent_pool_db(
 }
 
 #[tokio::test]
+async fn credential_batch_describe_returns_only_exact_authorized_pairs_db() {
+    // Pins: an operator connection list resolves present, superseded, revoked,
+    // and missing metadata in one exact-pair batch without credential
+    // enumeration or plaintext resolution.
+    let database = TestDatabase::new("cred_batch_describe").await;
+    let vault = PostgresCredentialVault::new(database.pool(), kms());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let owner = Uuid::now_v7();
+    let active_connection = Uuid::now_v7();
+    let rotated_connection = Uuid::now_v7();
+    let revoked_connection = Uuid::now_v7();
+    let missing_connection = Uuid::now_v7();
+
+    let active = vault
+        .create(
+            identity(tenant_id, active_connection),
+            SecretString::from("active-material".to_string()),
+            &context(
+                tenant_id,
+                caller(owner),
+                CredentialOperation::Create,
+                "batch-create-active",
+                "batch-create-active-hash",
+            ),
+        )
+        .await
+        .expect("create active credential");
+    let superseded = vault
+        .create(
+            identity(tenant_id, rotated_connection),
+            SecretString::from("old-material".to_string()),
+            &context(
+                tenant_id,
+                caller(owner),
+                CredentialOperation::Create,
+                "batch-create-old",
+                "batch-create-old-hash",
+            ),
+        )
+        .await
+        .expect("create credential to supersede");
+    vault
+        .rotate(
+            superseded.reference,
+            SecretString::from("new-material".to_string()),
+            &context(
+                tenant_id,
+                caller(owner),
+                CredentialOperation::Rotate,
+                "batch-rotate",
+                "batch-rotate-hash",
+            ),
+        )
+        .await
+        .expect("supersede old credential");
+    let revoked = vault
+        .create(
+            identity(tenant_id, revoked_connection),
+            SecretString::from("revoked-material".to_string()),
+            &context(
+                tenant_id,
+                caller(owner),
+                CredentialOperation::Create,
+                "batch-create-revoked",
+                "batch-create-revoked-hash",
+            ),
+        )
+        .await
+        .expect("create credential to revoke");
+    vault
+        .revoke(
+            revoked.reference,
+            &context(
+                tenant_id,
+                caller(owner),
+                CredentialOperation::Revoke,
+                "batch-revoke",
+                "batch-revoke-hash",
+            ),
+        )
+        .await
+        .expect("revoke credential");
+
+    let described = vault
+        .describe_batch(
+            &[
+                (active_connection, active.reference),
+                (rotated_connection, superseded.reference),
+                (revoked_connection, revoked.reference),
+                (missing_connection, CredentialRef::from_uuid(Uuid::now_v7())),
+                (Uuid::now_v7(), active.reference),
+            ],
+            &context(
+                tenant_id,
+                caller(owner),
+                CredentialOperation::Resolve,
+                "batch-describe",
+                "batch-describe-hash",
+            ),
+        )
+        .await
+        .expect("batch describe exact credential pairs");
+
+    assert_eq!(
+        described.len(),
+        3,
+        "missing and mismatched pairs are omitted"
+    );
+    let described = described
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    let active = described
+        .get(&active_connection)
+        .expect("active exact pair should be returned");
+    assert!(active.active);
+    assert!(!active.revoked);
+    let superseded = described
+        .get(&rotated_connection)
+        .expect("superseded exact pair should be returned");
+    assert!(!superseded.active);
+    assert!(!superseded.revoked);
+    let revoked = described
+        .get(&revoked_connection)
+        .expect("revoked exact pair should be returned");
+    assert!(revoked.revoked);
+}
+
+#[tokio::test]
 async fn replayed_operation_id_returns_one_row_and_a_changed_hash_conflicts_db() {
     // Pins: replay safety. The same operation id with the same request hash
     // replays exactly one audit row and one credential version; the same id with

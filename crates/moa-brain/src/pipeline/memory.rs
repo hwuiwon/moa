@@ -1445,6 +1445,13 @@ mod tests {
             panic!("NoopGraphStore should not be called by runtime factory tests")
         }
 
+        async fn bulk_create_edges(
+            &self,
+            _intents: Vec<EdgeWriteIntent>,
+        ) -> moa_memory_graph::Result<Vec<Uuid>> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
         async fn get_node(&self, _uid: Uuid) -> moa_memory_graph::Result<Option<NodeIndexRow>> {
             panic!("NoopGraphStore should not be called by runtime factory tests")
         }

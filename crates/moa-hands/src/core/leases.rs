@@ -188,9 +188,9 @@ pub struct HandLease {
     pub hard_expires_at: Option<DateTime<Utc>>,
     /// Policy identity this generation was provisioned under.
     ///
-    /// `None` only for rows written before the policy contract existed, which
-    /// V000359 marked stale and immediately destroyable. A database constraint
-    /// keeps active and provisioning rows from ever reaching that state.
+    /// `None` represents an incomplete stale row that is immediately
+    /// destroyable. A database constraint keeps active and provisioning rows
+    /// from ever reaching that state.
     pub policy: Option<HandLeasePolicy>,
 }
 
@@ -583,8 +583,7 @@ pub(super) fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLea
     })
 }
 
-/// Decodes the policy identity columns, which are absent only on the legacy
-/// rows V000359 marked stale.
+/// Decodes the policy identity columns, treating an incomplete identity as stale.
 fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<HandLeasePolicy>> {
     let profile = row
         .try_get::<Option<Json<SandboxProfile>>, _>("profile")
@@ -604,9 +603,8 @@ fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<Hand
     let route = row
         .try_get::<Option<String>, _>("source_route_revision")
         .map_err(map_sqlx_error)?;
-    // Absent on rows written before V000372 introduced the origin layer. Those
-    // rows carry an incomplete policy identity, so the destructure below treats
-    // them exactly as V000359's legacy rows: stale, never reusable.
+    // An absent origin makes the policy identity incomplete, so the destructure
+    // below treats the row as stale and never reusable.
     let origin = row
         .try_get::<Option<String>, _>("source_origin_revision")
         .map_err(map_sqlx_error)?;

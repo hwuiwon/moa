@@ -330,17 +330,14 @@ window, and the external source-manifest digest. The initial mandate is
 unprovisioned and fails closed until a reviewed code-and-migration revision
 supplies real evidence authority; `moa_promoter` cannot rewrite or delete it.
 
-Migration `V000373` makes `published` unrepresentable for skill, action, and
-agent revisions. `published` survives only for kinds whose activation seam is
-owned elsewhere, including experiment plans and connector catalog snapshots.
-This migration deliberately does not backfill skill or action serving pointers.
-Formerly published skill and action revisions become historical `superseded`
-revisions and must pass the new release gate before serving again. Formerly
-published agent revisions also become historical, while existing agent
-installations retain their exact installation pointer; every later deployment
-transition is gated.
-Contact-scoped release artifacts are archived because the release subject is
-tenant-scoped. This is a hard break, not a compatibility migration.
+The artifact release-control schema makes `published` unrepresentable for
+skill, action, and agent revisions. `published` survives only for kinds whose
+activation seam is owned elsewhere, including experiment plans and connector
+catalog snapshots. Serving pointers are created only through the release gate;
+schema installation does not synthesize one. Agent installations retain their
+exact installation pointer, and every later deployment transition is gated.
+Contact-scoped release artifacts are unrepresentable because the release
+subject is tenant-scoped.
 
 Tenant knowledge-base rows are `moa.knowledge_connections`,
 `moa.knowledge_sync_runs`, `moa.knowledge_ingestion_steps`,
@@ -443,8 +440,8 @@ Core production bindings:
   `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
-- Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeIndexRebuild`,
-  `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
+- Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
+  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
   `SkillLearning`, `TenantPurge`, `TurnExecution`, `WorkerTurnExecution`
 
 
@@ -580,10 +577,11 @@ policy.
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
-The central migration inventory currently contains 157 `CREATE TABLE`
-statements covering 149 logical top-level table families. Every family has one
-owner in the `moa-migrations` ownership manifest, and
-`xtask check-migrations` rejects missing or stale ownership entries.
+The central PostgreSQL migration inventory is a fresh-install-only chain of
+exactly 49 files, `V000001..V000049`. It contains 139 logical table families
+across 142 `CREATE TABLE` declarations, and the ownership manifest contains one
+entry for each family. `xtask check-migrations` rejects gaps, extra files, and
+missing or stale ownership entries.
 
 ## Auth Layer
 

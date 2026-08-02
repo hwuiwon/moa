@@ -169,7 +169,7 @@ operator knob for it.
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_DATABASE_ADMIN_URL` | `database.admin_url` | _none_ | Optional direct/admin database URL for migrations and other session-sensitive flows |
+| `MOA_DATABASE_ADMIN_URL` | `database.admin_url` | _none_ | Direct/admin database URL used by explicit migration and maintenance commands such as `moa-orchestrator migrate`; normal runtime startup never reads it |
 | `MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS` | `database.background_max_connections` | 2 | Maximum pool size reserved for process-owned background workers, separate from the foreground Restate handler pool |
 | `MOA_DATABASE_CONNECT_TIMEOUT_SECONDS` | `database.connect_timeout_seconds` | 10 | Pool acquire timeout, in seconds |
 | `MOA_DATABASE_MAX_CONNECTIONS` | `database.max_connections` | 20 | Maximum pool size for the shared Postgres client |
@@ -181,7 +181,7 @@ operator knob for it.
 | `MOA_DATABASE_NEON_POOLED` | `database.neon.pooled` | true | Whether pooled connection URIs should be requested for checkpoint branches |
 | `MOA_DATABASE_NEON_PROJECT_ID` | `database.neon.project_id` | _empty_ | Neon project identifier used for branch management |
 | `MOA_DATABASE_NEON_SUSPEND_TIMEOUT_SECONDS` | `database.neon.suspend_timeout_seconds` | 300 | Auto-suspend timeout in seconds for checkpoint endpoints |
-| `MOA_DATABASE_SCHEMA` | `database.schema` | _none_ | Optional already-provisioned Postgres schema to bind runtime queries; setting it disables automatic migrations |
+| `MOA_DATABASE_SCHEMA` | `database.schema` | _none_ | Optional already-provisioned Postgres schema to bind runtime queries; runtime startup still validates the complete central history in `public` and never applies migrations |
 | `MOA_DATABASE_URL` | `database.url` | postgres://moa_owner:dev@localhost:10040/moa | Runtime Postgres connection URL |
 
 ### `memory`
@@ -415,8 +415,8 @@ operator knob for it.
 | `MOA_OBSERVABILITY_ENABLED` | `observability.enabled` | false | Whether OTLP export is enabled |
 | `MOA_OBSERVABILITY_ENVIRONMENT` | `observability.environment` | _none_ | Deployment environment resource attribute |
 | `MOA_OBSERVABILITY_LINEAGE_BATCH_MAX_AGE_SECS` | `observability.lineage.batch_max_age_secs` | 2 | Maximum age for a partial ingress batch, and the drain poll cadence |
-| `MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE` | `observability.lineage.batch_size` | 512 | Maximum ingress events committed to the acceptance queue per batch |
-| `MOA_OBSERVABILITY_LINEAGE_CLAIM_BATCH_SIZE` | `observability.lineage.claim_batch_size` | 512 | Maximum queue rows claimed by one drain |
+| `MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE` | `observability.lineage.batch_size` | 512 | Maximum ingress events committed to the acceptance queue per batch; valid range `1..=4096` |
+| `MOA_OBSERVABILITY_LINEAGE_CLAIM_BATCH_SIZE` | `observability.lineage.claim_batch_size` | 512 | Maximum queue rows claimed by one drain; valid range `1..=4096` |
 | `MOA_OBSERVABILITY_LINEAGE_DRAIN_TIMEOUT_SECS` | `observability.lineage.drain_timeout_secs` | 30 | Upper bound on the shutdown drain; exceeding it leaves committed rows for another replica |
 | `MOA_OBSERVABILITY_LINEAGE_LEASE_TTL_SECS` | `observability.lineage.lease_ttl_secs` | 60 | Claim lease lifetime, and so the worst-case recovery delay after an ungraceful pod termination |
 | `MOA_OBSERVABILITY_LINEAGE_MAX_PENDING_AGE_SECS` | `observability.lineage.max_pending_age_secs` | 300 | Oldest accepted-but-unstored row age tolerated before readiness fails |
@@ -430,8 +430,10 @@ operator knob for it.
 | `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical OpenTelemetry service name for traces and metrics |
 
 Every lineage channel, batch, lease, age, and drain value must be greater than
-zero. Durable lineage enablement is selected only by `MOA_LINEAGE_SINK`; there
-is no second observability enable flag.
+zero. Ingress and claim batch sizes are additionally capped at 4096 to bound
+writer allocations, acceptance statements, and destruction-lock arrays. Durable
+lineage enablement is selected only by `MOA_LINEAGE_SINK`; there is no second
+observability enable flag.
 
 ### `metrics`
 

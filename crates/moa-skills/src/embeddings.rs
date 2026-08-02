@@ -180,13 +180,13 @@ pub async fn backfill_experience_embeddings(
 /// whose artifact changed since it was embedded, or whose stored vector belongs
 /// to a different embedder than the active one. A candidate whose stored digest
 /// still matches its current identity AND is already in the active vector space
-/// (an unchanged reactivation on the same embedder) only has its `updated_at`
-/// advanced, avoiding a provider call; the rest are embedded in provider-sized
-/// calls and upserted. Each write is guarded on the artifact's observed
-/// `updated_at`, so an identity change racing the provider call leaves the row
-/// for the next tick instead of persisting a stale vector. Returns the number of
-/// skills embedded. A provider failure logs a warning and returns the count
-/// embedded so far.
+/// (an unchanged reactivation on the same embedder) atomically retargets the
+/// stored vector's serving-revision provenance and advances its `updated_at`,
+/// avoiding a provider call; the rest are embedded in provider-sized calls and
+/// upserted. Each write is guarded on the artifact's observed `updated_at`, so an
+/// identity change racing the provider call leaves the row for the next tick
+/// instead of persisting a stale vector. Returns the number of skills embedded.
+/// A provider failure logs a warning and returns the count embedded so far.
 pub async fn backfill_skill_embeddings(
     registry: &ArtifactRegistry,
     provider: &dyn EmbeddingProvider,
@@ -225,9 +225,10 @@ pub async fn backfill_skill_embeddings(
             to_embed.push((candidate, current_hash));
         } else {
             // Identity unchanged since the last embed (a reactivation that did not
-            // touch name/description/tags): advance updated_at so it stops
-            // re-selecting, without spending a provider call. Guarded on the
-            // observed timestamp so a concurrent identity change is not masked.
+            // touch name/description/tags): atomically retarget the stored vector's
+            // serving-revision provenance and advance updated_at so it stops
+            // re-selecting, without spending a provider call. The observed
+            // timestamp guard prevents masking a concurrent identity change.
             registry
                 .touch_skill_embedding(
                     candidate.artifact_uid,

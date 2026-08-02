@@ -15,6 +15,7 @@ secretGenerator:
     namespace: moa-system
     literals:
       - url=postgres://moa_owner:dev@postgres.moa-system.svc.cluster.local:5432/moa?sslmode=disable
+      - admin-url=postgres://moa_owner:dev@postgres.moa-system.svc.cluster.local:5432/moa?sslmode=disable
   - name: moa-runtime-cache
     namespace: moa-system
     literals:

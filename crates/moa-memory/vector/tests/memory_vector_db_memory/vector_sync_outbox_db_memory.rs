@@ -7,7 +7,8 @@ use moa_core::types::{identifiers::TenantId, memory::RlsContext, security::Sensi
 use moa_db::ScopedConn;
 use moa_memory_pii::legal_hold::start_destruction;
 use moa_memory_vector::{
-    VECTOR_DIMENSION, VectorItem, VectorStoreFactory, VectorSyncReport,
+    Error, VECTOR_DIMENSION, VECTOR_SYNC_DRAIN_MAX_LIMIT, VectorItem, VectorStoreFactory,
+    VectorSyncReport,
     sync::{has_active_vector_sync_claims, has_active_vector_sync_claims_in_tx},
 };
 use moa_session::testing;
@@ -417,6 +418,28 @@ async fn tenant_fence_keeps_expired_pre_fence_claim_from_reupserting_db_memory()
     .expect("simulate a pre-fence vector-sync claim");
     assert_eq!(claimed, (pre_fence_claim_token, true, 1));
 
+    // Validate fail-closed handling before installing the write fence. Once the
+    // fence exists, even this test may not spoof an ordinary claim update.
+    sqlx::query("UPDATE moa.vector_sync_outbox SET claim_expires_at = NULL WHERE uid = $1")
+        .bind(item.uid)
+        .execute(&pool)
+        .await
+        .expect("simulate malformed claim without an expiry before fencing");
+    assert!(
+        has_active_vector_sync_claims(&pool, &partition)
+            .await
+            .expect("check no-expiry claim through pool helper"),
+        "a claimed row without an expiry must fail closed as active"
+    );
+    sqlx::query(
+        "UPDATE moa.vector_sync_outbox \
+         SET claim_expires_at = now() + INTERVAL '2 seconds' WHERE uid = $1",
+    )
+    .bind(item.uid)
+    .execute(&pool)
+    .await
+    .expect("give the pre-fence claim a short real lease");
+
     let mut fence_conn = scoped_conn(&pool, &partition).await;
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
@@ -478,25 +501,7 @@ async fn tenant_fence_keeps_expired_pre_fence_claim_from_reupserting_db_memory()
         .await
         .expect("commit quiescence check");
 
-    sqlx::query("UPDATE moa.vector_sync_outbox SET claim_expires_at = NULL WHERE uid = $1")
-        .bind(item.uid)
-        .execute(&pool)
-        .await
-        .expect("simulate malformed claim without an expiry");
-    assert!(
-        has_active_vector_sync_claims(&pool, &partition)
-            .await
-            .expect("check no-expiry claim through pool helper"),
-        "a claimed row without an expiry must fail closed as active"
-    );
-
-    sqlx::query(
-        "UPDATE moa.vector_sync_outbox SET claim_expires_at = now() - INTERVAL '1 second' WHERE uid = $1",
-    )
-    .bind(item.uid)
-    .execute(&pool)
-    .await
-    .expect("expire pre-fence lease to simulate quiescence");
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
     assert!(
         !has_active_vector_sync_claims(&pool, &partition)
             .await
@@ -833,8 +838,15 @@ async fn setup_pending_upsert(
     pool: &PgPool,
     server_uri: String,
 ) -> (String, VectorItem, VectorStoreFactory) {
+    setup_pending_upsert_for_partition(pool, server_uri, Uuid::now_v7().to_string()).await
+}
+
+async fn setup_pending_upsert_for_partition(
+    pool: &PgPool,
+    server_uri: String,
+    partition: String,
+) -> (String, VectorItem, VectorStoreFactory) {
     let embedding_model = "test-embed";
-    let partition = Uuid::now_v7().to_string();
     let item = vector_item(Uuid::now_v7(), embedding_model);
     seed_storage_partition_state(pool, &partition, "turbopuffer", embedding_model).await;
     insert_node_index_row(pool, &partition, &item).await;
@@ -854,6 +866,34 @@ async fn setup_pending_upsert(
         .expect("queue external upsert");
     conn.commit().await.expect("commit source upsert");
     (partition, item, factory)
+}
+
+async fn wait_for_ordered_tenant_lock_wait(pool: &PgPool) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND state = 'active'
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%WITH ordered_tenants AS MATERIALIZED%'
+                )
+                "#,
+            )
+            .fetch_one(pool)
+            .await
+            .expect("inspect vector-sync advisory-lock wait");
+            if waiting {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("vector-sync claim should wait on the blocked higher tenant");
 }
 
 /// Returns `(attempts, dead_lettered, backed_off, has_error)` for one outbox row.
@@ -893,6 +933,298 @@ async fn make_available_now(pool: &PgPool, uid: Uuid) {
         .execute(pool)
         .await
         .expect("reset available_at");
+}
+
+#[tokio::test]
+async fn vector_sync_claims_earliest_available_rows_before_later_sync_ids_db_memory() {
+    // Pins: the drainer's bounded claim follows the pending indexes'
+    // (available_at, sync_id) order, and future work is not pulled forward.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .mount(&server)
+        .await;
+    let (partition, future_item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+    let earliest_item = vector_item(Uuid::now_v7(), "test-embed");
+    insert_node_index_row(&pool, &partition, &earliest_item).await;
+    let vector = factory
+        .transactional_graph_backend(pool.clone(), tenant_scope(&partition), true)
+        .vector_store();
+    let mut conn = scoped_conn(&pool, &partition).await;
+    vector
+        .upsert_in_tx(conn.as_mut(), std::slice::from_ref(&earliest_item))
+        .await
+        .expect("queue second external upsert");
+    conn.commit().await.expect("commit second external upsert");
+    sqlx::query(
+        r#"
+        UPDATE moa.vector_sync_outbox
+        SET available_at = CASE
+            WHEN uid = $1 THEN now() + INTERVAL '10 minutes'
+            WHEN uid = $2 THEN now() - INTERVAL '10 minutes'
+        END
+        WHERE uid IN ($1, $2)
+        "#,
+    )
+    .bind(future_item.uid)
+    .bind(earliest_item.uid)
+    .execute(&pool)
+    .await
+    .expect("set outbox eligibility order opposite sync-id order");
+
+    let first = factory
+        .drain_external_sync(&pool, 1)
+        .await
+        .expect("drain one earliest eligible row");
+    assert_eq!(first.attempted, 1);
+    let processed = sqlx::query_as::<_, (Uuid, bool)>(
+        "SELECT uid, processed_at IS NOT NULL FROM moa.vector_sync_outbox WHERE uid IN ($1, $2)",
+    )
+    .bind(future_item.uid)
+    .bind(earliest_item.uid)
+    .fetch_all(&pool)
+    .await
+    .expect("read ordered claim results")
+    .into_iter()
+    .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(processed.get(&earliest_item.uid), Some(&true));
+    assert_eq!(processed.get(&future_item.uid), Some(&false));
+
+    let before_available = factory
+        .drain_external_sync(&pool, 1)
+        .await
+        .expect("future row remains ineligible");
+    assert_eq!(before_available.attempted, 0);
+    make_available_now(&pool, future_item.uid).await;
+    let second = factory
+        .drain_external_sync(&pool, 1)
+        .await
+        .expect("future row becomes eligible after its deadline");
+    assert_eq!(second.attempted, 1);
+    assert_eq!(second.succeeded, 1);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn vector_sync_claim_locks_tenants_in_order_and_rechecks_new_fence_db_memory() {
+    // Pins: a global multi-tenant claim locks tenant destruction boundaries in
+    // UUID order even when row eligibility is ordered oppositely, then rechecks
+    // the durable fence after waiting so newly fenced work is never claimed.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let lower_partition = Uuid::from_u128(1).to_string();
+    let higher_partition = Uuid::from_u128(2).to_string();
+    let (_, lower_item, factory) =
+        setup_pending_upsert_for_partition(&pool, server.uri(), lower_partition.clone()).await;
+    let (_, higher_item, _) =
+        setup_pending_upsert_for_partition(&pool, server.uri(), higher_partition.clone()).await;
+    sqlx::query(
+        r#"
+        UPDATE moa.vector_sync_outbox
+           SET available_at = CASE storage_partition_id
+               WHEN $1 THEN now() - INTERVAL '1 minute'
+               WHEN $2 THEN now() - INTERVAL '2 minutes'
+           END
+         WHERE storage_partition_id IN ($1, $2)
+        "#,
+    )
+    .bind(&lower_partition)
+    .bind(&higher_partition)
+    .execute(&pool)
+    .await
+    .expect("order eligible rows opposite tenant UUID order");
+
+    let higher_tenant = Uuid::parse_str(&higher_partition).expect("higher tenant UUID");
+    let mut higher_fence = pool.begin().await.expect("begin higher-tenant fence");
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    )
+    .bind(higher_tenant)
+    .execute(&mut *higher_fence)
+    .await
+    .expect("block the higher tenant destruction boundary");
+
+    let drain_pool = pool.clone();
+    let drain_factory = factory.clone();
+    let drain_task =
+        tokio::spawn(async move { drain_factory.drain_external_sync(&drain_pool, 2).await });
+    wait_for_ordered_tenant_lock_wait(&pool).await;
+
+    let lower_tenant = Uuid::parse_str(&lower_partition).expect("lower tenant UUID");
+    let mut lower_fence = pool.begin().await.expect("begin lower-tenant fence probe");
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *lower_fence)
+        .await
+        .expect("bound lower-tenant fence probe");
+    let lock_error = sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    )
+    .bind(lower_tenant)
+    .execute(&mut *lower_fence)
+    .await
+    .expect_err("ordered claim must already hold the lower tenant shared lock");
+    match lock_error {
+        sqlx::Error::Database(error) => {
+            assert_eq!(error.code().as_deref(), Some("55P03"));
+        }
+        other => panic!("expected Postgres lock timeout, got {other}"),
+    }
+    drop(lower_fence);
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.destruction_operation_fence
+            (tenant_id, subject_id, operation_id, operation_kind)
+        VALUES ($1, NULL, $2, 'tenant.purge')
+        "#,
+    )
+    .bind(higher_tenant)
+    .bind(format!("ordered-vector-fence-{higher_tenant}"))
+    .execute(&mut *higher_fence)
+    .await
+    .expect("persist higher-tenant destruction fence while claim waits");
+    higher_fence
+        .commit()
+        .await
+        .expect("commit higher-tenant destruction fence");
+
+    let report = drain_task
+        .await
+        .expect("join ordered multi-tenant drain")
+        .expect("complete ordered multi-tenant drain");
+    assert_eq!(
+        report,
+        VectorSyncReport {
+            attempted: 1,
+            succeeded: 1,
+            skipped: 0,
+            failed: 0,
+            dead_lettered: 0,
+        }
+    );
+    let states = sqlx::query_as::<_, (String, i32, bool)>(
+        r#"
+        SELECT storage_partition_id, attempts, processed_at IS NOT NULL
+          FROM moa.vector_sync_outbox
+         WHERE storage_partition_id IN ($1, $2)
+         ORDER BY storage_partition_id
+        "#,
+    )
+    .bind(&lower_partition)
+    .bind(&higher_partition)
+    .fetch_all(&pool)
+    .await
+    .expect("read multi-tenant claim states");
+    assert_eq!(
+        states,
+        vec![
+            (lower_partition.clone(), 1, true),
+            (higher_partition.clone(), 0, false),
+        ]
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("read external vector requests");
+    assert_eq!(requests.len(), 1);
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(body.contains(&lower_item.uid.to_string()));
+    assert!(!body.contains(&higher_item.uid.to_string()));
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn vector_sync_drain_rejects_out_of_range_limits_before_claim_db_memory() {
+    // Pins: callers cannot create a zero-sized or oversized claim transaction;
+    // invalid limits leave the pending row unclaimed and perform no remote I/O.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .mount(&server)
+        .await;
+    let (_partition, item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+
+    for limit in [0, -1, VECTOR_SYNC_DRAIN_MAX_LIMIT + 1] {
+        let error = factory
+            .drain_external_sync(&pool, limit)
+            .await
+            .expect_err("out-of-range drain limit must fail closed");
+        assert!(matches!(
+            error,
+            Error::VectorSyncLimitOutOfRange {
+                limit: rejected,
+                max: VECTOR_SYNC_DRAIN_MAX_LIMIT,
+            } if rejected == limit
+        ));
+    }
+    let unchanged = sqlx::query_as::<_, (i32, bool, bool)>(
+        r#"
+        SELECT attempts, claim_token IS NULL, processed_at IS NULL
+          FROM moa.vector_sync_outbox
+         WHERE uid = $1
+        "#,
+    )
+    .bind(item.uid)
+    .fetch_one(&pool)
+    .await
+    .expect("read row after rejected drains");
+    assert_eq!(unchanged, (0, true, true));
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("read rejected-drain requests")
+            .len(),
+        0
+    );
+
+    let report = factory
+        .drain_external_sync(&pool, VECTOR_SYNC_DRAIN_MAX_LIMIT)
+        .await
+        .expect("hard maximum remains a valid bounded claim");
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.succeeded, 1);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
 }
 
 #[tokio::test]

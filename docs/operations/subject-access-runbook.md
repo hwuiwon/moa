@@ -18,11 +18,25 @@ The API exports only rows whose subject identifier is in the resolved subject
 set inside the authenticated tenant. Tenant scope alone is never sufficient to
 include a row.
 
+Subject resolution and every data-section read run in one background-pool
+`REPEATABLE READ READ ONLY` transaction under `moa_auditor`. The transaction
+has 30-second statement and idle-in-transaction timeouts. Resolution reads at
+most 1001 subjects and rejects the export before section queries when more than
+1000 subjects would be included. Approval-JTI consumption and the final success
+audit stay on the foreground write pool.
+
 For agent-facing contacts, set `subject_user_id` to either the contact UUID or
 `contact:<contact-uuid>`. Contact exports are resolved inside the authenticated
 tenant. Verified contact exports include linked unverified contact memory by
 default, and every exported JSONL row includes `privacy_subject_user_id` and
 `privacy_subject_provenance` so linked rows are visible in the archive.
+
+Export inclusion follows typed ownership and provenance only. Graph rows use
+subject, contact, user, or subject-owned endpoint columns; learning and artifact
+rows use their typed contribution relationships; changelog rows use typed actor,
+user, target, or structured audit-subject fields. A subject identifier that
+merely appears in arbitrary text, JSON, source, definition, or file bytes does
+not make that row exportable.
 
 ## Authorization
 
@@ -63,7 +77,13 @@ The tarball contains:
 - `entities.jsonl`
 - `relationships.jsonl`
 - `embeddings.jsonl`
+- `learning_candidates.jsonl`
+- `learning_entries.jsonl`
+- `learning_decisions.jsonl`
+- `artifact_revision_contributions.jsonl`
+- `artifact_suite_contributions.jsonl`
 - `skills.jsonl`
+- `erasure_decisions.jsonl`
 - `changelog.jsonl`
 - `README.md`
 - `manifest.json`
@@ -76,7 +96,11 @@ though the memory text is already redacted.
 
 Each successful export writes `op='export'` to `moa.graph_changelog` with the
 reason, subject user id, resolved subject list, artifact counts, approver id,
-and approval token JTI.
+and approval token JTI. This foreground audit write is intentionally last: it
+occurs only after the snapshot commits and the README, manifest, archive, and
+optional encryption have all succeeded, so it does not appear in the export it
+records. A failed post-snapshot artifact build therefore writes no success
+audit.
 M22 pgaudit captures the underlying reads and changelog insert in the Postgres
 audit log stream.
 

@@ -1,6 +1,6 @@
 //! Postgres-backed coverage for release-candidate evaluation dispatch.
 //!
-//! What is pinned here is the part `V000373` left open: a submission now carries a
+//! What is pinned here is the part `V000045` left open: a submission now carries a
 //! durable dispatch record, ten rapid submissions still coalesce to one open
 //! dispatch, a result for a superseded generation cannot make a revision ready, the
 //! evaluation overlay is unreachable from normal session resolution, and the hidden
@@ -25,8 +25,8 @@ use moa_orchestrator::workflows::artifact_release_evaluation::Error as ReleaseEv
 use moa_orchestrator::workflows::artifact_release_evaluation::dispatch::build_paired_run_request;
 use moa_orchestrator::workflows::artifact_release_evaluation::repository::ReleaseEvaluationRepository;
 use moa_orchestrator::workflows::artifact_release_evaluation::types::{
-    ArmRole, AttemptReviewState, DispatchStatus, PinnedDependency, dispatch_idempotency_key,
-    release_seed_material,
+    ArmRole, AttemptReviewState, DispatchStatus, MAX_PINNED_DEPENDENCIES, PinnedDependency,
+    dispatch_idempotency_key, release_seed_material,
 };
 use moa_test_support::postgres::bootstrap_test_db;
 use serde_json::json;
@@ -517,26 +517,112 @@ mod artifact_release_evaluation {
     }
 
     #[tokio::test]
+    async fn multi_pin_submission_is_canonical_and_provision_replay_is_stable_db() {
+        // Pins: unordered exact duplicate pins are stored once in canonical order,
+        // validated together, and replay into the same provisioned attempt.
+        let (_db, fixture) = fixture("multi-pin-canonical").await;
+        let first_dependency = draft_skill(
+            &fixture.registry,
+            &fixture.scope,
+            &format!("first-dependency-{}", Uuid::now_v7()),
+            "first pinned draft dependency",
+        )
+        .await;
+        let second_dependency = draft_skill(
+            &fixture.registry,
+            &fixture.scope,
+            &format!("second-dependency-{}", Uuid::now_v7()),
+            "second pinned draft dependency",
+        )
+        .await;
+        let first_pin = PinnedDependency {
+            artifact_uid: first_dependency.artifact_uid,
+            revision_uid: first_dependency.revision_uid,
+        };
+        let second_pin = PinnedDependency {
+            artifact_uid: second_dependency.artifact_uid,
+            revision_uid: second_dependency.revision_uid,
+        };
+        let mut expected = vec![first_pin, second_pin];
+        expected.sort_unstable_by_key(|pin| (pin.artifact_uid, pin.revision_uid));
+        let candidate = fixture.draft("candidate").await;
+        let submitted = fixture
+            .repository
+            .submit_with_dispatch(
+                fixture.submit(candidate.revision_uid, candidate.artifact_uid),
+                vec![second_pin, first_pin, second_pin],
+            )
+            .await
+            .expect("submit canonical multi-pin release");
+        let record = submitted.dispatch.expect("active release dispatches");
+        assert_eq!(
+            record.pinned_dependencies, expected,
+            "dispatch persistence must use the canonical pin set"
+        );
+
+        let claimed = fixture
+            .repository
+            .claim_dispatch(fixture.tenant_id, record.outbox_uid)
+            .await
+            .expect("claim canonical dispatch")
+            .expect("dispatch is claimable");
+        let tokens = [
+            (ArmRole::Candidate, "candidate-secret".to_string()),
+            (ArmRole::Baseline, "baseline-secret".to_string()),
+        ];
+        let provisioned = fixture
+            .repository
+            .provision_attempt(&claimed.record, &tokens)
+            .await
+            .expect("provision canonical pins");
+        let replayed = fixture
+            .repository
+            .provision_attempt(&claimed.record, &tokens)
+            .await
+            .expect("replay canonical pin provisioning");
+        assert_eq!(
+            replayed, provisioned,
+            "provision replay must preserve the canonical pinned dependency set"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unowned_pinned_dependency_is_refused_db() {
         // Pins: the evaluation overlay can only pin revisions the submitting tenant
         // owns, so a submitter cannot make evaluation resolve someone else's draft.
         let (_db, fixture) = fixture("pinned-dependency").await;
         let draft = fixture.draft("rev-1").await;
+        let mut invalid = vec![
+            PinnedDependency {
+                artifact_uid: Uuid::from_u128(0xeeee_0000_0000_0000_0000_0000_0000_0002),
+                revision_uid: Uuid::from_u128(0xffff_0000_0000_0000_0000_0000_0000_0002),
+            },
+            PinnedDependency {
+                artifact_uid: Uuid::from_u128(0xeeee_0000_0000_0000_0000_0000_0000_0001),
+                revision_uid: Uuid::from_u128(0xffff_0000_0000_0000_0000_0000_0000_0001),
+            },
+        ];
         let error = fixture
             .repository
             .submit_with_dispatch(
                 fixture.submit(draft.revision_uid, draft.artifact_uid),
-                vec![PinnedDependency {
-                    artifact_uid: Uuid::now_v7(),
-                    revision_uid: Uuid::now_v7(),
-                }],
+                invalid.clone(),
             )
             .await
             .expect_err("an unowned pin must be refused");
-        assert!(
-            matches!(error, ReleaseEvaluationError::PinnedDependencyInvalid(_)),
-            "unexpected error: {error}"
-        );
+        invalid.sort_unstable_by_key(|pin| (pin.artifact_uid, pin.revision_uid));
+        let expected_missing = invalid
+            .iter()
+            .map(|pin| format!("{}:{}", pin.artifact_uid, pin.revision_uid))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(matches!(
+            &error,
+            ReleaseEvaluationError::PinnedDependencyInvalid(detail)
+                if detail == &format!(
+                    "pinned dependencies are not live tenant-scoped artifact/revision pairs: [{expected_missing}]"
+                )
+        ));
         // The whole submission rolled back with it: there is no committed candidate
         // without a dispatch record and no dispatch record without a candidate.
         let candidates: i64 = sqlx::query_scalar(
@@ -547,6 +633,111 @@ mod artifact_release_evaluation {
         .await
         .expect("count candidates");
         assert_eq!(candidates, 0);
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_artifact_pins_are_refused_before_release_dml_db() {
+        // Pins: one artifact cannot resolve to two revisions based on caller order,
+        // and the shape error happens before candidate or dispatch persistence.
+        let (_db, fixture) = fixture("conflicting-pin").await;
+        let dependency_name = format!("conflicting-dependency-{}", Uuid::now_v7());
+        let first = draft_skill(
+            &fixture.registry,
+            &fixture.scope,
+            &dependency_name,
+            "first dependency revision",
+        )
+        .await;
+        let second = draft_skill(
+            &fixture.registry,
+            &fixture.scope,
+            &dependency_name,
+            "second dependency revision",
+        )
+        .await;
+        assert_eq!(first.artifact_uid, second.artifact_uid);
+        let candidate = fixture.draft("candidate").await;
+        let error = fixture
+            .repository
+            .submit_with_dispatch(
+                fixture.submit(candidate.revision_uid, candidate.artifact_uid),
+                vec![
+                    PinnedDependency {
+                        artifact_uid: first.artifact_uid,
+                        revision_uid: second.revision_uid,
+                    },
+                    PinnedDependency {
+                        artifact_uid: first.artifact_uid,
+                        revision_uid: first.revision_uid,
+                    },
+                ],
+            )
+            .await
+            .expect_err("conflicting artifact pins must be refused");
+        let mut revisions = [first.revision_uid, second.revision_uid];
+        revisions.sort_unstable();
+        let expected_conflict = format!(
+            "artifact {} is pinned to conflicting revisions {} and {}",
+            first.artifact_uid, revisions[0], revisions[1]
+        );
+        assert!(
+            matches!(&error, ReleaseEvaluationError::PinnedDependencyInvalid(detail) if detail == &expected_conflict),
+            "unexpected conflict error: {error}"
+        );
+        let release_rows: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT count(*) FROM moa.artifact_release_candidate WHERE revision_uid = $1),
+                (SELECT count(*) FROM moa.artifact_release_dispatch_outbox WHERE revision_uid = $1)
+            "#,
+        )
+        .bind(candidate.revision_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("count release rows after conflicting pins");
+        assert_eq!(release_rows, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn over_cap_pins_are_refused_before_release_dml_db() {
+        // Pins: the dispatch payload and validation relation never accept more
+        // than the documented maximum, even before ownership is considered.
+        let (_db, fixture) = fixture("over-cap-pin").await;
+        let candidate = fixture.draft("candidate").await;
+        let pins = (0..=MAX_PINNED_DEPENDENCIES)
+            .map(|_| PinnedDependency {
+                artifact_uid: Uuid::now_v7(),
+                revision_uid: Uuid::now_v7(),
+            })
+            .collect::<Vec<_>>();
+        let error = fixture
+            .repository
+            .submit_with_dispatch(
+                fixture.submit(candidate.revision_uid, candidate.artifact_uid),
+                pins,
+            )
+            .await
+            .expect_err("an over-cap pin collection must be refused");
+        assert!(matches!(
+            &error,
+            ReleaseEvaluationError::PinnedDependencyInvalid(detail)
+                if detail == &format!(
+                    "a release may pin at most {MAX_PINNED_DEPENDENCIES} dependencies; received {}",
+                    MAX_PINNED_DEPENDENCIES + 1
+                )
+        ));
+        let release_rows: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT count(*) FROM moa.artifact_release_candidate WHERE revision_uid = $1),
+                (SELECT count(*) FROM moa.artifact_release_dispatch_outbox WHERE revision_uid = $1)
+            "#,
+        )
+        .bind(candidate.revision_uid)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("count release rows after over-cap pins");
+        assert_eq!(release_rows, (0, 0));
     }
 
     #[tokio::test]

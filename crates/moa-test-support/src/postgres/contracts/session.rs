@@ -180,20 +180,35 @@ where
         .await
         .expect("emit hyphen event");
 
+    let session_filter = EventFilter {
+        session_id: Some(session_id),
+        ..EventFilter::default()
+    };
     let oauth = store
-        .search_events("OAuth refresh", EventFilter::default())
+        .search_events("OAuth refresh", session_filter.clone())
         .await
         .expect("search oauth");
-    assert!(!oauth.is_empty());
+    assert_eq!(oauth.len(), 1);
+    assert_eq!(oauth[0].session_id, session_id);
+    assert_eq!(oauth[0].sequence_num, 0);
 
     let hyphen = store
-        .search_events("refresh-token", EventFilter::default())
+        .search_events("refresh-token", session_filter)
         .await
         .expect("search hyphen");
-    assert!(hyphen.iter().any(|record| matches!(
-        &record.event,
-        Event::UserMessage { text, .. } if text.contains("refresh-token")
-    )));
+    assert_eq!(hyphen.len(), 2);
+    assert!(hyphen.iter().all(|record| record.session_id == session_id));
+    assert_eq!(
+        hyphen
+            .iter()
+            .map(|record| record.sequence_num)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    assert!(matches!(
+        &hyphen[0].event,
+        Event::UserMessage { text, .. } if text == "Debug the refresh-token rotation failure"
+    ));
 }
 
 /// Verifies persisted session status updates.
