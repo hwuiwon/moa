@@ -77,7 +77,7 @@ pub(super) async fn claim_sync_run(
             graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at,
             information_barrier, provider_trigger_completed_at
         )
-        VALUES (
+        SELECT
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             $14, $15, $16,
             CASE
@@ -85,7 +85,10 @@ pub(super) async fn claim_sync_run(
                 ELSE jsonb_build_object('code', $17::TEXT)
             END,
             $18, $19, $20, $21
-        )
+        FROM moa.connector_connections AS parent
+        WHERE parent.connection_uid = $4
+          AND parent.tenant_id = $2
+          AND parent.lifecycle_status = 'active'
         ON CONFLICT (tenant_id, connection_id)
         WHERE status IN (
             'queued',
@@ -162,11 +165,11 @@ pub(super) async fn claim_sync_run(
     .map_err(map_sqlx_error)?;
 
     conn.commit().await.map_err(map_moa_error)?;
-    let row = existing.ok_or_else(|| {
-        Error::Repository("active sync run claim did not return a visible run".to_string())
-    })?;
-    let run = sync_run_from_row(&row)?;
-    Ok(SyncRunClaim::AlreadyRunning(run))
+    if let Some(row) = existing {
+        return sync_run_from_row(&row).map(SyncRunClaim::AlreadyRunning);
+    }
+
+    Ok(SyncRunClaim::ParentInactive)
 }
 
 pub(super) async fn get_sync_run(

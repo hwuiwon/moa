@@ -30,7 +30,8 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
 
     service
         .exchange_public_token(
@@ -52,7 +53,7 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
         delegated_by: identity.acting_on_behalf_of,
     };
     assert_eq!(
-        credentials.principals_for_step("credential-create"),
+        credentials.principals_for_step("credential-stage"),
         vec![expected],
         "the linked credential must be created on the authorized caller's authority"
     );
@@ -64,10 +65,9 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
 }
 
 #[tokio::test]
-async fn list_connections_batches_mixed_credential_statuses_once() {
-    // Pins: listing many already-authorized connections performs exactly one
-    // credential metadata batch and preserves every status, including
-    // provider-native, missing, revoked, and superseded references.
+async fn list_connections_batches_closed_provider_credential_statuses_once() {
+    // Pins: Merge readiness is one identity-based batch, while Nango remains
+    // provider-native even when its non-secret handle is UUID-shaped.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let caller = test_caller(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
@@ -76,14 +76,14 @@ async fn list_connections_batches_mixed_credential_statuses_once() {
         provider: PROVIDER.to_string(),
         connector: CONNECTOR.to_string(),
         provider_account_id: "batch-account".to_string(),
-        credential_ref: "provider-ref".to_string(),
         credential_material: Some("batch-secret".to_string()),
         metadata: json!({}),
     };
 
     let mut present = fixture_connection(tenant_id);
+    present.provider = PROVIDER.to_string();
     present.provider_account_id = "present".to_string();
-    present.credential_ref = credentials
+    credentials
         .store_linked_account(tenant_id, present.connection_uid, &caller, &account)
         .await
         .expect("store present credential");
@@ -93,29 +93,30 @@ async fn list_connections_batches_mixed_credential_statuses_once() {
 
     let mut provider_native = fixture_connection(tenant_id);
     provider_native.connection_uid = Uuid::now_v7();
+    provider_native.provider = "nango".to_string();
     provider_native.provider_account_id = "provider-native".to_string();
-    provider_native.credential_ref = "provider-owned-handle".to_string();
     repository
         .insert_connection(provider_native)
         .expect("insert provider-native connection");
 
     let mut missing = fixture_connection(tenant_id);
+    missing.provider = PROVIDER.to_string();
     missing.connection_uid = Uuid::now_v7();
     missing.provider_account_id = "missing".to_string();
-    missing.credential_ref = Uuid::now_v7().to_string();
     repository
         .insert_connection(missing)
         .expect("insert missing connection");
 
     let mut revoked = fixture_connection(tenant_id);
+    revoked.provider = PROVIDER.to_string();
     revoked.connection_uid = Uuid::now_v7();
     revoked.provider_account_id = "revoked".to_string();
-    revoked.credential_ref = credentials
+    credentials
         .store_linked_account(tenant_id, revoked.connection_uid, &caller, &account)
         .await
         .expect("store credential to revoke");
     credentials
-        .revoke_credential(tenant_id, &revoked.credential_ref, &caller)
+        .revoke_linked_account(tenant_id, &revoked, &caller)
         .await
         .expect("revoke credential");
     repository
@@ -123,9 +124,10 @@ async fn list_connections_batches_mixed_credential_statuses_once() {
         .expect("insert revoked connection");
 
     let mut superseded = fixture_connection(tenant_id);
+    superseded.provider = PROVIDER.to_string();
     superseded.connection_uid = Uuid::now_v7();
     superseded.provider_account_id = "superseded".to_string();
-    superseded.credential_ref = credentials
+    credentials
         .store_linked_account(tenant_id, superseded.connection_uid, &caller, &account)
         .await
         .expect("store old credential");
@@ -144,7 +146,8 @@ async fn list_connections_batches_mixed_credential_statuses_once() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
     let listed = service
         .list_connections(
             KnowledgeConnectionListRequest {
@@ -165,10 +168,10 @@ async fn list_connections_batches_mixed_credential_statuses_once() {
     assert_eq!(statuses.get("present"), Some(&Some("present".to_string())));
     assert_eq!(statuses.get("provider-native"), Some(&None));
     assert_eq!(statuses.get("missing"), Some(&Some("missing".to_string())));
-    assert_eq!(statuses.get("revoked"), Some(&Some("revoked".to_string())));
+    assert_eq!(statuses.get("revoked"), Some(&Some("missing".to_string())));
     assert_eq!(
         statuses.get("superseded"),
-        Some(&Some("superseded".to_string()))
+        Some(&Some("present".to_string()))
     );
 }
 
@@ -211,7 +214,8 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
 
     let all = service
         .list_integrations(KnowledgeIntegrationListRequest {
@@ -286,13 +290,16 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
 }
 
 #[tokio::test]
-async fn exchange_stores_only_credential_reference_on_connection() {
-    // Pins: public-token exchange persists credential material through the credential store only.
+async fn exchange_stores_merge_credential_only_in_vault() {
+    // Pins: public-token exchange persists Merge credential material through
+    // the credential store, while the knowledge projection retains no
+    // credential handle or secret.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let caller = test_caller(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
@@ -300,7 +307,8 @@ async fn exchange_stores_only_credential_reference_on_connection() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connection_port(connector_connections);
     let information_barrier =
         InformationBarrierId::parse("finance-restricted").expect("valid barrier");
 
@@ -339,17 +347,18 @@ async fn exchange_stores_only_credential_reference_on_connection() {
         vec![json!({ "metadata": { "selected_folder_ids": ["folder-1"] } })]
     );
     assert_eq!(credentials.stored_account_count(), 1);
+    let vault_reference = credentials
+        .reference_for_connection(connection.connection_uid)
+        .expect("Merge credential should exist under the shared connection identity");
     assert_eq!(
-        Some(connection.credential_ref.clone()),
-        credentials.reference_for_connection(connection.connection_uid),
-        "the connection must carry the exact reference issued for it"
+        credentials.connection_for_reference(&vault_reference),
+        Some(connection.connection_uid)
     );
-    assert_ne!(connection.credential_ref, SECRET_TOKEN);
-    assert!(!connection.credential_ref.contains(SECRET_TOKEN));
-    // The persisted reference is an opaque identifier, not a parseable address a
-    // caller could edit to reach another tenant's credential.
-    assert!(Uuid::parse_str(&connection.credential_ref).is_ok());
-    assert!(!connection.credential_ref.contains("://"));
+    assert!(
+        !serde_json::to_string(&connection)
+            .expect("knowledge connection should serialize")
+            .contains(SECRET_TOKEN)
+    );
     assert_eq!(
         connection.source_selection,
         json!({ "metadata": { "selected_folder_ids": ["folder-1"] } })
@@ -390,11 +399,12 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let service = KnowledgeService::from_postgres_pool(
         pool.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connections(postgres_connector_service(pool.clone()));
 
     let exchange = service
         .exchange_public_token(
@@ -453,21 +463,24 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
 }
 
 #[tokio::test]
-async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
-    // Pins: disconnecting a linked knowledge connection revokes MOA-managed credential material.
+async fn disconnect_connection_revokes_vault_credential_and_deletes_parent() {
+    // Pins: disconnecting a linked knowledge connection revokes MOA-managed
+    // credential material and drives lifecycle state on the generic parent.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let caller = test_caller(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connection_port(connector_connections.clone());
     let exchange = service
         .exchange_public_token(
             KnowledgeExchangeTokenRequest {
@@ -508,17 +521,22 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
             &caller,
         )
         .await
-        .expect("disconnect should disable the connection and revoke credential material");
-    let connection = repository
-        .connection(exchange.connection_uid)
-        .expect("connection should still be stored for audit/history");
+        .expect("disconnect should delete the parent and revoke credential material");
 
     assert_eq!(response.connection_uid, exchange.connection_uid);
-    assert_eq!(response.status, "disabled");
+    assert_eq!(response.status, "deleted");
     assert!(response.credential_revoked);
-    assert_eq!(connection.status, ConnectionStatus::Disabled);
-    assert_eq!(credentials.stored_account_count(), 0);
-    assert_eq!(repository.op_count("disable_connection"), 1);
+    assert!(repository.connection(exchange.connection_uid).is_some());
+    assert_eq!(
+        connector_connections
+            .connection(ConnectorConnectionId(exchange.connection_uid))
+            .expect("generic parent should remain as a deleted lifecycle record")
+            .status,
+        ParentConnectionStatus::Deleted
+    );
+    assert_eq!(credentials.stored_account_count(), 1);
+    assert_eq!(credentials.revoked_references().len(), 1);
+    assert_eq!(provider.remote_revoke_count(), 1);
 
     let listed_after = service
         .list_connections(
@@ -538,22 +556,102 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
 }
 
 #[tokio::test]
-async fn disconnect_connection_leaves_external_credential_ref_and_disables_connection() {
-    // Pins: disconnecting a connection with provider-owned credential refs does not invent vault deletes.
+async fn disconnect_transport_loss_is_unknown_and_replay_never_resends() {
+    // Pins: once the remote send boundary is crossed, transport loss is sticky.
+    // Local credentials/child stay usable only for explicit reconciliation,
+    // while the parent fence blocks new work and replay never sends again.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let provider = Arc::new(FakeLinkedIntegrationProvider::with_remote_revoke_error(
+        "transport lost after send",
+    ));
+    let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
+    let service = KnowledgeService::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
+        credentials.clone(),
+        fake_ingestion_runner(),
+        80,
+    )
+    .with_connector_connection_port(connector_connections.clone());
+    let exchange = service
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: PROVIDER.to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: None,
+            },
+            &caller,
+        )
+        .await
+        .expect("token exchange should persist a linked connection");
+    let request = KnowledgeDisconnectConnectionRequest {
+        tenant_id,
+        connection_uid: exchange.connection_uid,
+    };
+
+    service
+        .disconnect_connection(request.clone(), &caller)
+        .await
+        .expect_err("transport loss must persist an unknown outcome");
+    assert_eq!(provider.remote_revoke_count(), 1);
+    assert_eq!(
+        repository
+            .disconnect_progress(exchange.connection_uid)
+            .expect("disconnect progress should be durable")
+            .state,
+        KnowledgeDisconnectState::UnknownOutcome
+    );
+    assert_eq!(
+        connector_connections
+            .connection(ConnectorConnectionId(exchange.connection_uid))
+            .expect("generic parent should remain")
+            .status,
+        ParentConnectionStatus::Disconnecting
+    );
+    assert!(repository.connection(exchange.connection_uid).is_some());
+    assert!(credentials.revoked_references().is_empty());
+
+    let replay = service
+        .disconnect_connection(request, &caller)
+        .await
+        .expect_err("unknown outcome requires explicit reconciliation");
+    assert!(replay.to_string().contains("outcome is unknown"));
+    assert_eq!(provider.remote_revoke_count(), 1);
+}
+
+#[tokio::test]
+async fn disconnect_nango_connection_deletes_parent_without_vault_revocation() {
+    // Pins: disconnecting a Nango connection does not invent a vault delete;
+    // lifecycle state remains owned by the generic connector parent.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let caller = test_caller(tenant_id);
     let mut connection = fixture_connection(tenant_id);
-    connection.credential_ref = "provider-owned-credential-ref".to_string();
+    connection.provider = "nango".to_string();
     let connection_uid = connection.connection_uid;
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
         .insert_connection(connection)
         .expect("fixture connection should be inserted");
-    let service = fixture_service(
+    let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
+    let service = KnowledgeService::new(
         repository.clone(),
-        Arc::new(FakeLinkedIntegrationProvider::default()),
+        repository.clone(),
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_provider("nango", Arc::new(FakeLinkedIntegrationProvider::default())),
+        ),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
         80,
-    );
+    )
+    .with_connector_connection_port(connector_connections.clone());
 
     let response = service
         .disconnect_connection(
@@ -564,16 +662,19 @@ async fn disconnect_connection_leaves_external_credential_ref_and_disables_conne
             &caller,
         )
         .await
-        .expect("disconnect should still disable an external-ref connection");
-    let connection = repository
-        .connection(connection_uid)
-        .expect("connection should still be stored for audit/history");
+        .expect("disconnect should delete the Nango parent");
 
     assert_eq!(response.connection_uid, connection_uid);
-    assert_eq!(response.status, "disabled");
+    assert_eq!(response.status, "deleted");
     assert!(!response.credential_revoked);
-    assert_eq!(connection.status, ConnectionStatus::Disabled);
-    assert_eq!(repository.op_count("disable_connection"), 1);
+    assert!(repository.connection(connection_uid).is_some());
+    assert_eq!(
+        connector_connections
+            .connection(ConnectorConnectionId(connection_uid))
+            .expect("generic parent should remain as a deleted lifecycle record")
+            .status,
+        ParentConnectionStatus::Deleted
+    );
 }
 
 #[tokio::test]

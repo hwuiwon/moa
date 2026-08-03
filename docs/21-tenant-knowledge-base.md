@@ -5,8 +5,9 @@ _Linked connector ingestion, parsing, graph writes, retrieval policy, and inspec
 ## Purpose
 
 Tenant knowledge base is tenant-owned source knowledge synced from external
-systems such as file stores, knowledge bases, CRM, ticketing, chat, and custom
-records. It is separate from contact memory and session memory:
+systems such as file stores, knowledge bases, CRM, ticketing, and chat through
+the supported Nango and Merge providers. It is separate from contact memory and
+session memory:
 
 - Tenant knowledge is synced through `moa-knowledge`, parsed into blocks and
   chunks, and written into tenant-scoped graph/vector memory.
@@ -23,6 +24,7 @@ the default retrieval path uses tenant knowledge only.
 
 | Concern | Owner |
 |---|---|
+| Generic connector parent lifecycle/health/generation and Nango/Merge managed-parent claims | `moa-connectors` |
 | Linked-account domain, provider sync, parser abstraction, normalization, block/chunk identity, sync-run inspection | `moa-knowledge` |
 | Restate service and workflow binding | `moa-orchestrator` |
 | Public HTTP route translation | `moa-edge` |
@@ -31,16 +33,24 @@ the default retrieval path uses tenant knowledge only.
 | Privacy classification and redaction | `moa-memory-pii` |
 | Retrieval fusion and admission | `moa-retrieval` |
 | Context assembly | `moa-brain` |
-| Credential references and secret retrieval | `moa-auth-providers` through the `CredentialVault` trait, injected once by the orchestrator |
+| Versioned credential series and audited secret retrieval | `moa-auth-providers` through the `CredentialVault` trait, injected once by the orchestrator |
 | Query-time citations, lineage, and audit sinks | `moa-lineage-*` |
 
 `moa-memory-*` never imports Nango, Merge, LlamaParse, Unstructured, or Reducto.
-Those providers stay behind `moa-knowledge` abstractions.
+Those providers stay behind `moa-knowledge` abstractions. `moa-knowledge`
+imports neither `moa-connectors` nor `moa-artifacts`; the orchestrator composes
+the provider workflow with the code-owned managed-parent lifecycle.
 
 ## Linked Connector Flow
 
-`KnowledgeConnection` is one linked external account for one tenant. The
-provider-backed flow is:
+`KnowledgeConnection` is the knowledge-owned capability projection for one
+linked Nango or Merge account. Its `connection_uid` is exactly the generic
+`ConnectorConnectionId`, and V52 enforces the same-tenant composite parent
+foreign key with `ON DELETE RESTRICT`.
+
+The code-owned linked-provider parents are `knowledge:nango@1` and
+`knowledge:merge@1`. They expose knowledge only and never invent an action
+binding. The provider-backed flow is:
 
 1. Tenant admin/operator requests a link token.
 2. `moa-edge` forwards the request to the `Knowledge` Restate service.
@@ -49,23 +59,32 @@ provider-backed flow is:
    Merge.
 5. The frontend completes the provider link flow and returns a public token.
 6. `moa-knowledge` exchanges that token for provider account identity.
-7. Provider credentials, API keys, and account tokens are stored through the
-   credential vault. Knowledge rows store only credential references.
+7. Nango retains its provider-native non-secret account handle and uses the
+   deployment Nango API key. Merge writes the tenant account token through the
+   shared connection's `primary` vault slot. The knowledge row stores no
+   credential locator or lifecycle status for either provider.
 
 The whole link is one operation-fenced claim in `moa.knowledge_link_claims`,
 keyed by `(tenant, operation_id)` and advanced by compare-and-swap through
-`reserved -> credential_written -> finalized`, with
-`compensating -> compensated` as the terminal failure path. The claim resolves
-the owning `connection_uid` *before* any credential is written — a re-link keeps
-the connection the upsert conflict target resolves to — and records the exact
-previous-active and candidate references so compensation revokes only what this
-operation wrote and restores only what it superseded.
+`reserved -> parent_claimed -> credential_written -> finalized`, with
+`compensating -> compensated` as the terminal failure path. A connector-owned
+managed-parent claim ledger atomically records the request hash, parent, and
+whether this exact operation created it; replay never infers ownership from
+parent existence. The link claim persists the exact parent generation before
+any credential write and records only the credential owner plus exact vault
+activation receipts when Merge owns a tenant credential. Compensation revokes
+only what this operation wrote, restores only the exact predecessor it
+superseded, and deletes a newly created parent only when no current capability
+or nonterminal claim depends on it.
 
 A queued sync run is not evidence that the provider was called.
 `moa.knowledge_sync_runs.provider_trigger_completed_at` is a separate write-once
 boundary set after a successful dispatch and never rewritten by status updates.
 A link may finalize only on a run it owns whose boundary is durable; a crash
 between claiming the run and dispatching replays the exact idempotent trigger.
+The generic parent must be active to claim a new run. Suspending it refuses new
+claims while allowing an already-claimed run to finish and advance its sync
+watermark without reopening the parent lifecycle.
 That is why the initial link uses a different provider call than an operator
 re-sync: Nango's naturally idempotent `/sync/start` rather than the one-off
 `/sync/trigger`, and for Merge a read-only, category-correct sync-status
@@ -84,6 +103,22 @@ Provider credentials and account tokens must never be stored in request
 metadata, tracing fields, graph node properties, graph edge properties,
 knowledge metadata, or query trace rows.
 
+Normal disconnect first fences the generic parent to `disconnecting`, then uses
+the durable provider-revoke ledger:
+
+```text
+reserved -> transmitting -> deleted | already_absent | unknown_outcome
+reserved -> failed_before_send
+```
+
+Nango and Merge do not provide an idempotency key for remote deletion. A replay
+of `transmitting` or `unknown_outcome` therefore never blindly resends. The
+parent remains `disconnecting` until an exact provider read can reconcile the
+outcome or an operator resolves it. Only after remote success does the workflow
+revoke local credential history and mark the generic parent deleted. The
+knowledge projection remains as provider-specific historical state and derives
+its visible lifecycle from that parent.
+
 Signed Nango and Merge webhooks are provider CDC/sync signals, not raw data
 ingestion payloads. After signature verification, MOA binds the provider event
 to a tenant `KnowledgeConnection` by signed tenant/connection identifiers or by
@@ -98,10 +133,15 @@ The provider abstraction is:
 ```rust
 #[async_trait]
 pub trait LinkedIntegrationProvider {
+    async fn list_integrations(&self) -> Result<Vec<ProviderIntegration>>;
     async fn create_link_token(&self, req: CreateLinkTokenRequest) -> Result<LinkToken, Error>;
     async fn exchange_public_token(&self, req: ExchangePublicTokenRequest) -> Result<LinkedAccount, Error>;
     async fn trigger_sync(&self, req: TriggerSyncRequest) -> Result<TriggeredSync, Error>;
+    async fn start_initial_sync(&self, req: StartInitialSyncRequest) -> Result<InitialSyncStarted, Error>;
+    async fn revoke_remote_connection(&self, req: RemoteRevokeRequest) -> Result<(), Error>;
+    async fn apply_source_selection(&self, req: ApplySourceSelectionRequest) -> Result<(), Error>;
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage, Error>;
+    async fn fetch_record_content(&self, req: FetchRecordContentRequest) -> Result<Option<FetchedRecordContent>, Error>;
     async fn verify_webhook(&self, headers: HeaderMap, body: Bytes) -> Result<WebhookEvent, Error>;
 }
 ```
@@ -244,9 +284,11 @@ context.
 
 ## Visibility And Access Control
 
-Every connector must capture a complete source ACL snapshot for every record.
-There is no connection-level bypass, capability declaration, or operator
-override.
+Every permission-bearing Nango/Merge source must capture a complete source ACL
+snapshot for every record. A provider may emit an explicit tenant-wide grant
+only through its reviewed normalization contract; ingestion materializes that
+choice as a complete tenant-wide source grant rather than bypassing the ACL
+system. There is no connection-level or operator read bypass.
 Admission requires all of:
 
 - the object's ACL state is `current`;

@@ -7,7 +7,13 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::mcp::{MCPClient, McpDiscoveredToolRegistration};
 use crate::tools::{memory, session_search, tool_result};
+use moa_artifacts::connector::connection_action_tool_reference;
 use moa_config::ToolBudgetConfig;
+use moa_connectors::catalog::InstalledConnectorAction;
+use moa_connectors::domain::{
+    ConnectionDefinitionRef, ConnectionGeneration, InstalledActionBindingId, OperationContractHash,
+};
+use moa_connectors::executor::{ConnectorActionRuntime, InstalledConnectorActionPin};
 use moa_core::{
     error::{MoaError, Result},
     traits::BuiltInTool,
@@ -17,6 +23,7 @@ use moa_core::{
     types::hands::BuiltinPolicyRevision,
     types::hands::SandboxPolicySnapshot,
     types::hands::SandboxTier,
+    types::identifiers::ConnectorConnectionId,
     types::security::ToolCapabilityId,
     types::tools::IdempotencyClass,
     types::tools::ToolDefinition,
@@ -26,6 +33,7 @@ use moa_core::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::tools::sandbox_descriptor::{
     SandboxToolDescriptor, default_sandbox_tool_descriptors, sandbox_tool_descriptors,
@@ -92,6 +100,31 @@ pub enum ToolExecution {
         /// of invoking the changed tool.
         schema_hash: String,
     },
+    /// Routed through one generation- and revision-pinned tenant connection.
+    InstalledConnectorAction {
+        /// Canonical logical connector reference selected by the agent policy.
+        connector_ref: String,
+        /// Exact tenant connection selected for the logical connector.
+        connection_id: ConnectorConnectionId,
+        /// Exact immutable installed binding row.
+        binding_id: InstalledActionBindingId,
+        /// Positive connection generation that compiled the binding.
+        connection_generation: ConnectionGeneration,
+        /// Connector artifact family selected by the agent policy.
+        definition_artifact_uid: Uuid,
+        /// Exact published connector artifact revision.
+        definition_revision_uid: Uuid,
+        /// Definition-local canonical action identifier.
+        action_id: String,
+        /// Canonical normalized operation-contract hash.
+        contract_hash: OperationContractHash,
+        /// Governed action revision persisted with the binding.
+        governed_contract_revision: String,
+        /// Intrinsic action-policy floor that persisted rules cannot lower.
+        minimum_effect: ActionPolicyEffect,
+        /// Secret-isolated runtime for the selected connection action.
+        runtime: Arc<dyn ConnectorActionRuntime>,
+    },
 }
 
 impl ToolExecution {
@@ -112,6 +145,50 @@ impl ToolExecution {
                 remote_tool_name,
                 ..
             } => ToolCapabilityId::mcp(server_name, remote_tool_name),
+            Self::InstalledConnectorAction {
+                connection_id,
+                action_id,
+                ..
+            } => ToolCapabilityId::installed_connector_action(*connection_id, action_id),
+        }
+    }
+
+    /// Returns the connector binding's unliftable minimum effect, when present.
+    #[must_use]
+    pub const fn installed_connector_minimum_effect(&self) -> Option<ActionPolicyEffect> {
+        match self {
+            Self::InstalledConnectorAction { minimum_effect, .. } => Some(*minimum_effect),
+            Self::BuiltIn(_) | Self::Hand { .. } | Self::Mcp { .. } => None,
+        }
+    }
+
+    /// Reconstructs the exact secret-free T3 runtime pin for an installed action.
+    #[must_use]
+    pub fn installed_connector_pin(&self) -> Option<InstalledConnectorActionPin> {
+        match self {
+            Self::InstalledConnectorAction {
+                connection_id,
+                binding_id,
+                connection_generation,
+                definition_artifact_uid,
+                definition_revision_uid,
+                action_id,
+                contract_hash,
+                governed_contract_revision,
+                ..
+            } => Some(InstalledConnectorActionPin {
+                connection_id: *connection_id,
+                connection_generation: *connection_generation,
+                definition: ConnectionDefinitionRef::Artifact {
+                    artifact_uid: *definition_artifact_uid,
+                    revision_uid: *definition_revision_uid,
+                },
+                binding_id: *binding_id,
+                action_id: action_id.clone(),
+                contract_hash: *contract_hash,
+                governed_contract_revision: governed_contract_revision.clone(),
+            }),
+            Self::BuiltIn(_) | Self::Hand { .. } | Self::Mcp { .. } => None,
         }
     }
 }
@@ -137,6 +214,31 @@ pub fn governed_tool_contract_revision(
             "server": server_name,
             "remote_tool": remote_tool_name,
             "schema_revision": schema_hash,
+        }),
+        ToolExecution::InstalledConnectorAction {
+            connector_ref,
+            connection_id,
+            binding_id,
+            connection_generation,
+            definition_artifact_uid,
+            definition_revision_uid,
+            action_id,
+            contract_hash,
+            governed_contract_revision,
+            minimum_effect,
+            ..
+        } => serde_json::json!({
+            "kind": "installed_connector_action",
+            "connector_ref": connector_ref,
+            "connection_id": connection_id,
+            "binding_id": binding_id,
+            "connection_generation": connection_generation,
+            "definition_artifact_uid": definition_artifact_uid,
+            "definition_revision_uid": definition_revision_uid,
+            "action_id": action_id,
+            "contract_hash": contract_hash,
+            "governed_contract_revision": governed_contract_revision,
+            "minimum_effect": minimum_effect,
         }),
     };
     let contract = serde_json::json!({
@@ -457,6 +559,81 @@ impl ToolRegistry {
         Ok(name)
     }
 
+    /// Registers one authorized installed action under its connection-qualified name.
+    ///
+    /// The executable route is built only from typed catalog provenance. The
+    /// generated name is a model-facing lookup key and is never parsed back
+    /// into connection authority.
+    pub(super) fn register_installed_connector_action(
+        &mut self,
+        connector_ref: &str,
+        action: &InstalledConnectorAction,
+        runtime: Arc<dyn ConnectorActionRuntime>,
+    ) -> Result<String> {
+        let binding = action.binding();
+        binding.validate().map_err(|error| {
+            MoaError::ValidationError(format!("invalid installed connector binding: {error}"))
+        })?;
+        let name = connection_action_tool_reference(action.connection_id(), &binding.action_id)
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        if self.tools.contains_key(&name) {
+            return Err(MoaError::ValidationError(format!(
+                "installed connector action collides with registered tool `{name}`"
+            )));
+        }
+        let ConnectionDefinitionRef::Artifact {
+            artifact_uid,
+            revision_uid,
+        } = action.definition()
+        else {
+            return Err(MoaError::ValidationError(format!(
+                "agent connector binding `{connector_ref}` selected a non-artifact definition"
+            )));
+        };
+        let operation_policy = binding.compiled_contract.operation.policy();
+        let definition = ToolDefinition {
+            name: name.clone(),
+            description: format!(
+                "Connector action `{}` using the selected connection \"{}\".",
+                binding.action_id,
+                action.connection_display_name()
+            ),
+            schema: operation_policy.input_schema.clone(),
+            policy: ToolPolicySpec {
+                risk_level: operation_policy.risk_level,
+                default_effect: binding.minimum_effect,
+                action_class: operation_policy.action_class,
+                input_shape: ToolInputShape::Json,
+                diff_strategy: ToolDiffStrategy::None,
+            },
+            idempotency_class: operation_policy.idempotency,
+            max_output_tokens: default_budget_for_tool(&name),
+        };
+        let execution = ToolExecution::InstalledConnectorAction {
+            connector_ref: connector_ref.to_string(),
+            connection_id: action.connection_id(),
+            binding_id: binding.binding_id,
+            connection_generation: binding.connection_generation,
+            definition_artifact_uid: *artifact_uid,
+            definition_revision_uid: *revision_uid,
+            action_id: binding.action_id.clone(),
+            contract_hash: binding.contract_hash,
+            governed_contract_revision: binding.governed_contract_revision.clone(),
+            minimum_effect: binding.minimum_effect,
+            runtime,
+        };
+        self.tools.insert(
+            name.clone(),
+            RegisteredTool {
+                definition,
+                execution,
+                mcp_client_route: None,
+            },
+        );
+        self.default_loadout.push(name.clone());
+        Ok(name)
+    }
+
     /// Removes every tool currently registered for one MCP server.
     ///
     /// Used by a catalog refresh to replace a connector's tools as a unit: a
@@ -470,7 +647,9 @@ impl ToolRegistry {
                 ToolExecution::Mcp {
                     server_name: owner, ..
                 } => owner == server_name,
-                ToolExecution::BuiltIn(_) | ToolExecution::Hand { .. } => false,
+                ToolExecution::BuiltIn(_)
+                | ToolExecution::Hand { .. }
+                | ToolExecution::InstalledConnectorAction { .. } => false,
             })
             .map(|(name, _)| name.clone())
             .collect::<HashSet<_>>();

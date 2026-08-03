@@ -1059,12 +1059,30 @@ async fn seed_knowledge_chunk_with_text(
     let storage_partition_id = tenant_id.to_string();
     sqlx::query(
         r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, 'tenant-contact-test', 'knowledge:merge', 1,
+                jsonb_build_object(
+                    'provider_config_key', 'test-config',
+                    'provider_connection_id', $3,
+                    'connector', 'drive'),
+                'active', 'ready')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(format!("acct-tenant-contact-{external_id}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, metadata
+            provider_connection_id, connector, metadata
         )
-        VALUES ($1, $2, $3, 'merge', 'test-config', $4, 'drive',
-                'vault://tenant-contact-test', 'active', '{}'::jsonb)
+        VALUES ($1, $2, $3, 'merge', 'test-config', $4, 'drive', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)

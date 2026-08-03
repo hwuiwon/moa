@@ -16,7 +16,7 @@ Runtime boundary
 Brain and execution
   TurnExecution -> Respond | Execute | NeedsInput
   Context pipeline -> provider router -> LLM
-  Tool router -> built-ins / hands / MCP
+  Tool router -> built-ins / hands / operator MCP / tenant connector actions
   Execute Inline delegation -> Restate Worker virtual objects
   Execute Durable planning/compiler -> Restate ExecutionRun / ExecutionTask workflows
         |
@@ -26,7 +26,8 @@ Product data in Postgres / Neon
   task_segments, experience_records, experience_attributions,
   learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, configured vector records
-  knowledge connections, sync runs, document versions, chunks
+  connector connections, HTTP action bindings, invocation ledgers
+  knowledge projections, sync runs, document versions, chunks
   execution runs, execution tasks, plan history, budgets, completion checks
   learning_log
   analytics.turn_lineage, analytics.score_run, analytics.scores,
@@ -49,7 +50,10 @@ not be used as an authoritative Kubernetes store. Graph memory is the canonical
 memory source, with sidecar and vector indexes maintained by graph writes.
 Tenant knowledge-base ingestion is a separate product surface owned by
 `moa-knowledge`; it writes tenant knowledge into the same graph/vector substrate
-without turning connector sync into session memory ingestion.
+without turning Nango/Merge provider sync into session memory ingestion.
+`moa-connectors` owns the generic tenant connection parent and exact-generation
+HTTP action bindings; `KnowledgeConnection` remains the knowledge-owned
+Nango/Merge capability projection beneath its code-owned managed parent.
 
 ## Agent Building Blocks
 
@@ -95,6 +99,9 @@ rationale, or classifier response text.
 Agents, skills, connectors, actions, and behavior-lab experiment plans are
 canonical artifacts. `moa-artifacts` owns their persisted document model,
 structural plan types, stable references, revision history, and registry.
+For connectors, the artifact is the immutable reviewed definition;
+`moa-connectors` separately owns tenant connection lifecycle, health,
+generation, installed bindings, discovery revisions, and invocation ledgers.
 `moa-skills` owns skill package parsing, ranking, distillation, improvement,
 review, and artifact-backed package helpers. Generic graph execution does not
 live in `moa-skills`. The pure `moa-execution` core is the source of truth for
@@ -116,6 +123,9 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 | `ExecutionRepository` | `moa-execution` | Owns scoped run/task persistence, idempotent materialization, atomic budget accounting, generation-fenced outcomes, amendment history, and cancellation. It depends only on shared database/core types, never on Restate or runtime owners. |
 | `ExecutionRun` | `moa-orchestrator` Restate workflow | Drives one durable plan from persisted state, including amendment, cancellation, progress, and terminal completion. |
 | `ExecutionTask` | `moa-orchestrator` Restate workflow | Executes one stable logical node or map-item instance and records one typed outcome. |
+| Connector definition | `moa-artifacts` | Owns immutable reviewed HTTP transport, schema, credential-slot, policy-floor, and action contracts. |
+| Connector connection | `moa-connectors` | Owns tenant lifecycle/health/generation, HTTP action bindings, and durable send outcomes. |
+| Knowledge connection | `moa-knowledge` | Owns Nango/Merge provider records, cursor/deletion behavior, ACL capture, parsing, and ingestion beneath code-owned managed parents. |
 
 Every run starts with an immutable `ExecutionGoalContract` containing
 `objective`, individually identified `requirements`, `deliverables`, `coverage`,
@@ -437,7 +447,8 @@ Core production bindings:
   scheduling index for the action reviews their own turns raise.
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
-  `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
+  `ConnectorConnections`, `Contacts`, `Execution`, `Experiments`,
+  `GraphMemoryMaint`, `Knowledge`,
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
 - Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
@@ -457,8 +468,9 @@ stores instead of going through Restate.
 resource at `/mcp`. It is a transport adapter over those same direct read
 models and typed Restate handlers: MCP does not own domain state, accept raw
 SQL, or choose a tenant from tool input. This inbound operator surface is
-separate from the outbound agent-tool MCP clients and credential proxy in
-`moa-hands`.
+separate from the outbound operator-owned agent-tool MCP clients in
+`moa-hands`. Outbound MCP is immutable deployment configuration; tenant
+connector connections do not host MCP servers or MCP actions.
 
 The binary composition root constructs `RuntimeDeps` and passes concrete
 dependencies through implementation constructors before `build_endpoint`
@@ -562,7 +574,8 @@ policy.
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, `learning_candidate_source` (typed provenance), `learning_candidate_decision` (durable review history), task-conditioned strategy rates |
 | Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
-| Tenant knowledge base | Postgres | `moa-knowledge` owns linked connections, sync runs, ingestion steps, document versions, blocks, chunks, and provider event state; `moa-memory-*` owns the resulting graph/vector storage |
+| Connector connections | Postgres | `moa-connectors` owns tenant-RLS connection, direct-use, reviewed HTTP action binding, invocation, and Nango/Merge managed-parent state; credentials remain in the vault owner |
+| Tenant knowledge base | Postgres | `moa-knowledge` owns Nango/Merge projections beneath code-owned managed parents, sync runs, ingestion steps, document versions, blocks, chunks, ACLs, and provider event state; `moa-memory-*` owns the resulting graph/vector storage |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres or configured vector backend | pgvector embeddings or Turbopuffer namespaces for graph retrieval; graph storage remains relational Postgres |
 | Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
@@ -578,10 +591,9 @@ policy.
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
 The central PostgreSQL migration inventory is a fresh-install-only chain of
-exactly 49 files, `V000001..V000049`. It contains 139 logical table families
-across 142 `CREATE TABLE` declarations, and the ownership manifest contains one
-entry for each family. `xtask check-migrations` rejects gaps, extra files, and
-missing or stale ownership entries.
+exactly 52 files, `V000001..V000052`. The ownership manifest contains one entry
+for every logical table family. `xtask check-migrations` rejects gaps, extra
+files, and missing or stale ownership entries.
 
 ## Auth Layer
 
@@ -770,7 +782,7 @@ skill unserved; it never restores a predecessor, because selecting a replacement
 requires a separate reviewed activation. `dismiss` is the only decision an
 informational candidate admits; nothing on this surface can promote one.
 
-Future MCP support is a transport adapter over product/default services such as
+Inbound MCP is a transport adapter over product/default services such as
 `Experiments`, direct edge analytics/lineage reads, `Skills`, and other typed
 surfaces. Regression eval is never exposed through MCP: MCP must not publish
 `/v1/evals/*` semantics, own experiment, eval, analytics, learning, or lineage

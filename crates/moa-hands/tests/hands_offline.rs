@@ -2,6 +2,8 @@
 
 #[path = "hands_offline/call_origin_offline.rs"]
 mod call_origin_offline;
+#[path = "hands_offline/connector_router.rs"]
+mod connector_router;
 #[path = "hands_offline/local_tools_offline.rs"]
 mod local_tools_offline;
 #[path = "hands_offline/mcp_router.rs"]

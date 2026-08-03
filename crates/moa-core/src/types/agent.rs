@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::guardrails::AgentGuardrailPolicy;
 use super::hands::{BuiltinPolicyRevision, SandboxPolicySnapshot, SandboxProfile};
+use super::identifiers::ConnectorConnectionId;
 use super::memory::{InformationBarrierClearances, InformationBarrierId};
 
 /// Built-in global default agent revision identifier.
@@ -210,6 +211,26 @@ pub struct AgentActionPolicy {
     /// Actions that require administrator review.
     #[serde(default)]
     pub require_admin_review: Vec<String>,
+    /// Exact installed connector connections selected for logical connector references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connector_bindings: Vec<AgentConnectorBinding>,
+}
+
+/// Runtime binding from one logical connector reference to an installed connection.
+///
+/// The artifact and revision identifiers pin the exact published connector
+/// contract the resolver selected. Connection existence and delegated
+/// authorization are checked at later runtime boundaries.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentConnectorBinding {
+    /// Canonical logical connector reference, such as `connector://billing`.
+    pub connector_ref: String,
+    /// Tenant-installed connection selected for the connector.
+    pub connection_id: ConnectorConnectionId,
+    /// Stable connector artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Exact published connector revision selected by the agent resolver.
+    pub revision_uid: Uuid,
 }
 
 /// Tool filtering mode resolved from an agent definition.
@@ -457,5 +478,68 @@ impl AgentContext {
             }
         }
         declared
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{AgentActionPolicy, AgentConnectorBinding};
+    use crate::types::identifiers::ConnectorConnectionId;
+
+    #[test]
+    fn empty_connector_bindings_preserve_pre_binding_action_policy_json() {
+        // Pins: adding connection-aware actions does not change canonical policy
+        // bytes or revision locks for agents that declare no connector binding.
+        let policy = AgentActionPolicy {
+            allowed: vec!["action://legacy".to_string()],
+            require_admin_review: vec!["action://legacy".to_string()],
+            connector_bindings: Vec::new(),
+        };
+
+        let legacy_json = json!({
+            "allowed": ["action://legacy"],
+            "require_admin_review": ["action://legacy"]
+        });
+
+        assert_eq!(
+            serde_json::to_value(&policy).expect("runtime action policy should serialize"),
+            legacy_json
+        );
+        let decoded: AgentActionPolicy = serde_json::from_value(legacy_json)
+            .expect("pre-binding runtime action policy should deserialize");
+        assert_eq!(decoded, policy);
+    }
+
+    #[test]
+    fn connector_binding_serializes_only_non_secret_revision_identity() {
+        // Pins: runtime agent snapshots bind one connection and exact connector
+        // revision without carrying credential material or endpoint details.
+        let binding = AgentConnectorBinding {
+            connector_ref: "connector://billing".to_string(),
+            connection_id: ConnectorConnectionId(Uuid::from_u128(0x0c01_1ec7)),
+            artifact_uid: Uuid::from_u128(0xa471_fac7),
+            revision_uid: Uuid::from_u128(0x2e71_5100),
+        };
+        let policy = AgentActionPolicy {
+            connector_bindings: vec![binding],
+            ..AgentActionPolicy::default()
+        };
+
+        assert_eq!(
+            serde_json::to_value(policy).expect("bound runtime action policy should serialize"),
+            json!({
+                "allowed": [],
+                "require_admin_review": [],
+                "connector_bindings": [{
+                    "connector_ref": "connector://billing",
+                    "connection_id": Uuid::from_u128(0x0c01_1ec7),
+                    "artifact_uid": Uuid::from_u128(0xa471_fac7),
+                    "revision_uid": Uuid::from_u128(0x2e71_5100)
+                }]
+            })
+        );
     }
 }

@@ -5,9 +5,8 @@ use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
     domain::{
-        ConnectionStatus, DocumentVersion, IngestionStepStatus, KnowledgeConnection,
-        KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun,
-        ObjectStatus, SyncRunStatus,
+        DocumentVersion, IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep,
+        KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
     },
     repository::{
         DocumentVersionIngestionClaim, KnowledgeDiscoveryStore, KnowledgeRepository,
@@ -37,8 +36,6 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
         provider: "merge".to_string(),
         connector: format!("crm-{label}"),
         provider_account_id: format!("linked-account-{label}"),
-        credential_ref: format!("vault://tenant/{label}/merge"),
-        status: ConnectionStatus::Active,
         metadata: json!({ "safe_label": label }),
         source_selection: json!({}),
         information_barrier: None,
@@ -46,6 +43,49 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
         updated_at: now,
         last_synced_at: None,
     }
+}
+
+async fn insert_connector_parent(
+    db: &postgres::TestDb,
+    connection: &KnowledgeConnection,
+    lifecycle_status: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, $3, 'knowledge:merge', 1, '{}'::JSONB, $4, 'ready')
+        "#,
+    )
+    .bind(connection.connection_uid)
+    .bind(connection.tenant_id.0)
+    .bind(&connection.connector)
+    .bind(lifecycle_status)
+    .execute(db.store().pool())
+    .await
+    .expect("insert generic connector parent for knowledge fixture");
+}
+
+async fn set_connector_parent_lifecycle(
+    db: &postgres::TestDb,
+    connection_uid: Uuid,
+    lifecycle_status: &str,
+) {
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.connector_connections
+        SET lifecycle_status = $2, updated_at = now()
+        WHERE connection_uid = $1
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(lifecycle_status)
+    .execute(db.store().pool())
+    .await
+    .expect("update generic connector parent lifecycle");
+    assert_eq!(result.rows_affected(), 1);
 }
 
 fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
@@ -132,6 +172,7 @@ async fn active_sync_run_claim_allows_one_runner_per_connection_db_knowledge() {
     let repo_b = repository(&db, tenant_id);
 
     let connection = connection(tenant_id, "active-claim");
+    insert_connector_parent(&db, &connection, "active").await;
     repo_a
         .upsert_connection(connection.clone())
         .await
@@ -178,6 +219,118 @@ async fn active_sync_run_claim_allows_one_runner_per_connection_db_knowledge() {
 }
 
 #[tokio::test]
+async fn inactive_parent_atomically_refuses_new_sync_claim_db_knowledge() {
+    // Pins: the insert itself joins the same-tenant generic parent in `active`,
+    // so a suspended connection cannot create even a transient queued run.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap inactive parent sync claim DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo = repository(&db, tenant_id);
+    let connection = connection(tenant_id, "inactive-parent");
+    insert_connector_parent(&db, &connection, "suspended").await;
+    repo.upsert_connection(connection.clone())
+        .await
+        .expect("insert knowledge sync projection");
+
+    assert_eq!(
+        repo.claim_sync_run(sync_run(tenant_id, connection.connection_uid))
+            .await
+            .expect("inactive parent should return a typed refusal"),
+        SyncRunClaim::ParentInactive
+    );
+    assert_eq!(
+        active_sync_run_count(db.store().pool(), tenant_id, connection.connection_uid).await,
+        0,
+        "the parent fence must prevent the run row from being inserted"
+    );
+}
+
+#[tokio::test]
+async fn cross_tenant_parent_never_authorizes_sync_claim_db_knowledge() {
+    // Pins: matching the connection UUID alone is insufficient; a parent owned
+    // by another tenant cannot authorize a sync-run insert for this repository.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap cross-tenant parent sync claim DB");
+    let owner_tenant = TenantId::from(Uuid::now_v7());
+    let caller_tenant = TenantId::from(Uuid::now_v7());
+    let parent = connection(owner_tenant, "cross-tenant-parent");
+    insert_connector_parent(&db, &parent, "active").await;
+    let repo = repository(&db, caller_tenant);
+
+    assert_eq!(
+        repo.claim_sync_run(sync_run(caller_tenant, parent.connection_uid))
+            .await
+            .expect("cross-tenant parent should return a typed refusal"),
+        SyncRunClaim::ParentInactive
+    );
+    assert_eq!(
+        active_sync_run_count(db.store().pool(), caller_tenant, parent.connection_uid).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn already_claimed_sync_can_finish_after_parent_suspension_db_knowledge() {
+    // Pins: lifecycle fences only new work. Once one run owns the active slot,
+    // replays still observe that exact run after suspension, and terminal status
+    // updates can finish it without reopening the parent.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap already-running parent fence DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo = repository(&db, tenant_id);
+    let connection = connection(tenant_id, "already-running-parent");
+    insert_connector_parent(&db, &connection, "active").await;
+    repo.upsert_connection(connection.clone())
+        .await
+        .expect("insert knowledge sync projection");
+
+    let run = sync_run(tenant_id, connection.connection_uid);
+    assert_eq!(
+        repo.claim_sync_run(run.clone())
+            .await
+            .expect("active parent should admit the initial run"),
+        SyncRunClaim::Claimed(run.clone())
+    );
+    set_connector_parent_lifecycle(&db, connection.connection_uid, "suspended").await;
+
+    let replay = sync_run(tenant_id, connection.connection_uid);
+    assert_eq!(
+        repo.claim_sync_run(replay)
+            .await
+            .expect("existing run should remain visible after suspension"),
+        SyncRunClaim::AlreadyRunning(run.clone())
+    );
+
+    let mut completed = run;
+    completed.status = SyncRunStatus::Completed;
+    let completed_at = moa_test_support::fixtures::pg_now();
+    completed.finished_at = Some(completed_at);
+    repo.update_sync_run(completed)
+        .await
+        .expect("already-claimed run should finish after suspension");
+    repo.mark_connection_synced(connection.connection_uid, completed_at)
+        .await
+        .expect("already-claimed run should advance its watermark after suspension");
+    assert_eq!(
+        repo.get_connection(connection.connection_uid)
+            .await
+            .expect("read completed connection")
+            .expect("completed connection should remain visible")
+            .last_synced_at,
+        Some(completed_at)
+    );
+    assert_eq!(
+        repo.claim_sync_run(sync_run(tenant_id, connection.connection_uid))
+            .await
+            .expect("suspended parent should refuse the next run"),
+        SyncRunClaim::ParentInactive
+    );
+}
+
+#[tokio::test]
 async fn discovery_resolves_tenant_then_scoped_repository_enforces_run_visibility_db_knowledge() {
     // Pins: pre-scope discovery returns only the owner tenant and never bypasses scoped run reads.
     let db = postgres::bootstrap_test_db()
@@ -188,6 +341,7 @@ async fn discovery_resolves_tenant_then_scoped_repository_enforces_run_visibilit
     let repo_a = repository(&db, tenant_a);
     let repo_b = repository(&db, tenant_b);
     let connection_b = connection(tenant_b, "tenant-b");
+    insert_connector_parent(&db, &connection_b, "active").await;
     repo_b
         .upsert_connection(connection_b.clone())
         .await
@@ -239,6 +393,7 @@ async fn document_version_claim_reclaims_stale_row_and_fences_old_token_db_knowl
     let repo = repository(&db, tenant_id);
 
     let connection = connection(tenant_id, "stale-version-claim");
+    insert_connector_parent(&db, &connection, "active").await;
     repo.upsert_connection(connection.clone())
         .await
         .expect("insert connection");
@@ -349,6 +504,8 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
 
     let connection_a = connection(tenant_a, "tenant-a");
     let connection_b = connection(tenant_b, "tenant-b");
+    insert_connector_parent(&db, &connection_a, "active").await;
+    insert_connector_parent(&db, &connection_b, "active").await;
     repo_a
         .upsert_connection(connection_a.clone())
         .await

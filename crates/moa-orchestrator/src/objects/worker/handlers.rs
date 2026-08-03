@@ -11,6 +11,12 @@ use moa_core::types::worker::commands::ClearWorkerInputTargetsInput;
 use moa_security::{canary_system_message, new_canary_token};
 use moa_wire::turn::{RunWorkerTurnRequest, TurnOutcomeKind};
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct JournaledWorkerToolCatalog {
+    tool_schemas: Vec<serde_json::Value>,
+    tool_catalog_pin: ToolCatalogPin,
+}
+
 impl Worker for WorkerImpl {
     #[tracing::instrument(skip(self, ctx, msg))]
     async fn post_message(
@@ -278,15 +284,39 @@ impl Worker for WorkerImpl {
     ) -> Result<Json<WorkerTurnPreparation>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "prepare_turn");
-        let tool_catalog = self.tool_router.activated_catalog();
-        let tool_schemas = tool_catalog.tool_schema_snapshot();
-        let tool_catalog_pin = tool_catalog.pin().map_err(moa_error_to_handler_error)?;
+        let state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        let identity = state
+            .identity
+            .clone()
+            .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
+        let parent_session = required_parent_session(&state)?;
+        let session_store = self.session_store.clone();
+        let connector_catalogs = self.connector_catalogs.clone();
+        let tool_catalog = ctx
+            .run(|| async move {
+                let session = session_store
+                    .get_session(parent_session)
+                    .await
+                    .map_err(moa_error_to_handler_error)?;
+                let catalog = connector_catalogs
+                    .for_session(&identity, &session)
+                    .await
+                    .map_err(|error| moa_error_to_handler_error(error.into_moa_error()))?;
+                Ok::<_, HandlerError>(Json::from(JournaledWorkerToolCatalog {
+                    tool_schemas: catalog.schemas().as_ref().clone(),
+                    tool_catalog_pin: catalog.pin().clone(),
+                }))
+            })
+            .name(format!("worker_prepare_turn_catalog:{parent_session}"))
+            .await?
+            .into_inner();
         Ok(Json::from(
             prepare_turn_inner(
                 &mut ctx,
+                state,
                 &self.providers,
-                tool_schemas.as_ref(),
-                tool_catalog_pin,
+                &tool_catalog.tool_schemas,
+                tool_catalog.tool_catalog_pin,
                 &self.session_store,
             )
             .await?,
@@ -1200,12 +1230,12 @@ fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
 
 async fn prepare_turn_inner(
     ctx: &mut ObjectContext<'_>,
+    mut state: Tracked<WorkerVoState>,
     providers: &ProviderRegistry,
     tool_schemas: &[serde_json::Value],
     tool_catalog_pin: ToolCatalogPin,
     session_store: &Arc<dyn SessionStore>,
 ) -> Result<WorkerTurnPreparation, HandlerError> {
-    let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if state.cancel_reason.is_some() {
         state.apply_turn_outcome(TurnOutcome::Cancelled);
         state.persist(ctx);
@@ -1739,8 +1769,8 @@ fn activate_worker_security_owner(
 #[cfg(test)]
 mod tests {
     use super::{
-        CleanupDecision, activate_worker_security_owner, decide_cleanup,
-        release_worker_hands_request,
+        CleanupDecision, JournaledWorkerToolCatalog, activate_worker_security_owner,
+        decide_cleanup, release_worker_hands_request,
     };
     use crate::action_reviews::scheduling::QueuedActionReviewContinuation;
     use crate::objects::worker::WorkerVoState;
@@ -1751,6 +1781,29 @@ mod tests {
     use moa_core::types::security::SecurityCircuitOwner;
     use moa_core::types::worker::state::WorkerState;
     use uuid::Uuid;
+
+    #[test]
+    fn worker_tool_catalog_journal_payload_round_trips() {
+        // Pins: the external session/authz catalog read journals only stable,
+        // secret-free schemas and the exact execution pin used by the turn.
+        let payload = JournaledWorkerToolCatalog {
+            tool_schemas: vec![serde_json::json!({
+                "name": "connector_action",
+                "input_schema": {"type": "object"}
+            })],
+            tool_catalog_pin: moa_hands::ToolCatalogPin {
+                contract_hash: "catalog-contract".to_string(),
+                mcp_catalog_revision: "connector-revision".to_string(),
+                tools: Vec::new(),
+            },
+        };
+
+        let encoded = serde_json::to_value(&payload).expect("serialize worker catalog journal");
+        let decoded: JournaledWorkerToolCatalog =
+            serde_json::from_value(encoded).expect("deserialize worker catalog journal");
+
+        assert_eq!(decoded, payload);
+    }
 
     #[test]
     fn worker_turn_admission_installs_the_security_owner() {

@@ -73,6 +73,23 @@ governance, and retrieval boundaries without crate-local aliases or re-exports.
 The `Reranker` trait retrieval consumes lives in `moa-providers`. Shared wire
 DTOs for the public HTTP edge and orchestrator HTTP surface live in `moa-wire`.
 
+### Connectors and knowledge
+
+| Crate | Owns |
+|---|---|
+| `moa-artifacts` | Immutable connector definition, reviewed HTTP action contract, schemas, named credential requirements, and policy floors |
+| `moa-connectors` | Generic tenant connection lifecycle/health/generation, repositories, constrained HTTP execution, installed action bindings, invocation ledgers, and Nango/Merge managed-parent claims |
+| `moa-security` | Production outbound destination admission and one-attempt DNS-pinned client construction |
+| `moa-hands` | Operator-owned deployment MCP catalog and ephemeral governed tool projection |
+| `moa-knowledge` | Nango/Merge knowledge projections, provider records, cursors/deletions, ACL capture, parsing, and ingestion |
+| `moa-orchestrator` | Authentication/authorization context, Restate durability boundaries, runtime composition, and Nango/Merge provider workflow binding |
+
+`moa-connectors` does not depend on `moa-hands`, `moa-knowledge`, `moa-wire`,
+`moa-edge`, or `moa-orchestrator`. `moa-knowledge` imports neither
+`moa-connectors` nor `moa-artifacts`; the orchestrator composes the independently
+owned connection and linked-provider services. See
+[Connectors And Connections](24-connectors-and-connections.md).
+
 ### Placement Rules
 
 | Type kind | Crate |
@@ -88,6 +105,9 @@ DTOs for the public HTTP edge and orchestrator HTTP surface live in `moa-wire`.
 | Ingestion pipeline DTO | `moa-memory/ingest` |
 | Retrieval type | `moa-retrieval` |
 | Context pipeline type | `moa-brain` |
+| Immutable connector definition and reviewed HTTP action contract | `moa-artifacts` |
+| Connector lifecycle, binding, catalog-revision, or invocation type | `moa-connectors` |
+| Knowledge provider record, ACL, cursor, or ingestion type | `moa-knowledge` |
 | Wire DTO for the HTTP surface | `moa-wire` |
 
 Anti-patterns:
@@ -96,8 +116,8 @@ Anti-patterns:
 - putting graph-specific types in `moa-core` because another crate might need
   them later;
 - adding compatibility aliases for superseded memory APIs;
-- adding empty connector traits or clients before connector work is actively
-  scheduled.
+- defining connector lifecycle, binding, or invocation lookalikes outside
+  `moa-connectors` instead of importing the canonical owner.
 
 ## Modular Monolith Boundary Policy
 
@@ -333,3 +353,52 @@ Consequences:
 Revisit if the sanitized-evidence type outgrows `moa-skills` — if a crate that
 should not depend on skill distillation needs to construct learning evidence,
 the type belongs in a smaller owner and these edges shrink accordingly.
+
+### ADR 0005 - Connector Connection Domain Owner
+
+Status: Accepted.
+Date: 2026-08-02.
+
+Action-capable connections need tenant lifecycle, authorization, credential
+generation fencing, reviewed HTTP operation bindings, and durable send
+outcomes. Those rules belong neither to the tool router nor to the knowledge
+ingestion domain. Keeping them in `moa-orchestrator` would also violate the
+modular-monolith composition boundary. Nango/Merge reuse the generic parent
+lifecycle through closed code-owned managed-parent definitions, while their
+knowledge behavior stays in `moa-knowledge`.
+
+Decisions:
+
+1. Add **`moa-connectors`** as the canonical owner of generic connection
+   lifecycle/health/generation, repositories, installed HTTP action bindings,
+   constrained HTTP execution, action invocation ledgers, and closed
+   Nango/Merge managed-parent claims.
+2. Keep immutable reviewed HTTP connector definitions in `moa-artifacts`,
+   outbound destination admission in `moa-security`, operator MCP routing in
+   `moa-hands`, and Nango/Merge records/ACL/ingestion in `moa-knowledge`.
+3. `moa-connectors` must not depend on hands, knowledge, wire, edge, or
+   orchestrator crates. `moa-knowledge` imports neither connectors nor
+   artifacts. `moa-orchestrator` composes their independently owned service
+   boundaries without moving linked-provider policy into `moa-connectors`.
+4. The workspace ratchet is now **52 packages** and **49 default members**.
+   `moa-connectors` is the one intentional category-owner split since ADR 0003;
+   the architecture checker records the new exact counts. This decision does
+   not rewrite ADR 0003's historical 51/48 snapshot.
+5. Because `moa-connectors` consumes the shared identity and error contracts in
+   `moa-core`, that crate's reverse-dependency ratchet is now **44 direct** and
+   **47 transitive**. This is the exact post-split fan-in, not spare capacity.
+
+Consequences:
+
+- Reviewed HTTP actions use connection, credential, destination, generation,
+  and durable send boundaries. Nango/Merge knowledge connections reuse only the
+  code-owned managed-parent lifecycle required for shared connection identity.
+- The deployment tool catalog remains immutable. Tenant connector actions use
+  request-scoped overlays; knowledge sync never becomes a model-visible action.
+- The new package/default-member and `moa-core` reverse-dependency counts are
+  ratchets, not spare capacity. Any further increase requires another accepted
+  decision record and checker update.
+
+Revisit if the generic connection domain becomes a separately deployed service
+or if a new capability cannot use these boundaries without importing tool or
+knowledge policy into `moa-connectors`.

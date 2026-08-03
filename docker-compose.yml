@@ -294,6 +294,10 @@ services:
       # an empty MOA_AUTH_CONTACT_TOKENS_* value counts as "section
       # configured" and hard-fails config loading, so they must not be
       # passed through unconditionally here.
+    expose:
+      # Private credential ingress. Only service-to-service traffic on the
+      # Compose network may reach this listener; it is never host-published.
+      - "10023"
     ports:
       # Restate handler port 9080 is internal-only. Use moa-edge on 8080.
       - "10021:9081"
@@ -320,6 +324,9 @@ services:
     environment:
       MOA_EDGE_BIND: 0.0.0.0:8080
       MOA_EDGE_UPSTREAM: http://restate:8080
+      MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM: http://moa-orchestrator:10023
+      # Local development opts into the staged connector-management surface.
+      MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED: "true"
       MOA_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
       # Without OpenFGA settings the edge has no authz engine and fails every
       # protected direct read (dashboard, analytics, MCP) closed with 503.

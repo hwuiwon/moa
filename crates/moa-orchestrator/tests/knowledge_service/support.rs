@@ -15,16 +15,32 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use moa_core::types::credentials::{CredentialPrincipal, RedactedSecret};
+use moa_connectors::{
+    domain::{
+        ConnectionGeneration, ConnectionHealth, ConnectionStatus as ParentConnectionStatus,
+        ConnectorConnection, ManagedParentClaim, ManagedParentDefinition,
+        ManagedParentDeleteOutcome,
+    },
+    repository::{ConnectionRepository, PostgresConnectionRepository},
+    service::{
+        ConnectorService, CredentialGenerationFenceRequest, CredentialSlotReadiness,
+        CredentialSlotVerifier, ManagedParentActivationRequest, ManagedParentClaimRequest,
+        ManagedParentDeleteRequest, RequiredCredentialSlot,
+    },
+};
+use moa_core::types::credentials::{
+    CredentialIdentity, CredentialKind, CredentialPrincipal, CredentialRef, CredentialSlotName,
+    CredentialStagingToken, RedactedSecret,
+};
 use moa_core::types::memory::{InformationBarrierId, RlsContext};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     traits::{EmbeddingProvider, Identity, IdentityType},
     types::contact::ContactId,
-    types::identifiers::SessionId,
     types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
     types::identifiers::UserId,
+    types::identifiers::{ConnectorConnectionId, SessionId},
 };
 use moa_db::ScopedConn;
 use moa_knowledge::{
@@ -32,17 +48,19 @@ use moa_knowledge::{
     chunking::ChunkingConfig,
     contact_groups::derive_contact_groups_from_object_with_resolved_members,
     domain::{
-        ApplySourceSelectionRequest, ConnectionStatus, ContactGroup, ContactGroupMembership,
-        ContactGroupTarget, CreateLinkTokenRequest, DocumentElement, DocumentElementKind,
-        DocumentVersion, ElementLayout, ExchangePublicTokenRequest, InitialSyncStarted,
-        KnowledgeBlock, KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection,
+        ApplySourceSelectionRequest, ContactGroup, ContactGroupMembership, ContactGroupTarget,
+        CreateLinkTokenRequest, DocumentElement, DocumentElementKind, DocumentVersion,
+        ElementLayout, ExchangePublicTokenRequest, InitialSyncStarted, KnowledgeBlock,
+        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionDisconnectProgress,
+        KnowledgeConnectionProjection, KnowledgeCredentialOwnership,
+        KnowledgeDisconnectReservation, KnowledgeDisconnectState, KnowledgeDisconnectTransition,
         KnowledgeIngestionStep, KnowledgeObject, KnowledgeObjectInspection,
         KnowledgeObjectProjection, KnowledgeProviderEventRecord, KnowledgeSyncCounters,
         KnowledgeSyncRun, LinkClaim, LinkClaimReservation, LinkClaimState, LinkClaimTransition,
-        LinkToken, LinkedAccount, ListChangedRecordsRequest, NewLinkClaim, ObjectStatus,
-        ParseInput, ParsedDocument, ProviderIntegration, ProviderRecord, ProviderRecordAcl,
-        RecordPage, StartInitialSyncRequest, SyncRunStatus, TriggerSyncRequest, TriggeredSync,
-        WebhookEvent,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, NewKnowledgeConnectionDisconnect,
+        NewLinkClaim, ObjectStatus, ParseInput, ParsedDocument, ProviderIntegration,
+        ProviderRecord, ProviderRecordAcl, RecordPage, RemoteRevokeRequest,
+        StartInitialSyncRequest, SyncRunStatus, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     ingestion::{
         KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
@@ -63,9 +81,9 @@ use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStor
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
-    KnowledgeCaller, KnowledgeCredentialStore, KnowledgeIngestionRunner, KnowledgeService,
-    KnowledgeServiceError, KnowledgeWebhookVerifier, ParserWebhookVerifier,
-    StaticKnowledgeProviders,
+    KnowledgeCaller, KnowledgeConnectorConnections, KnowledgeCredentialStore,
+    KnowledgeIngestionRunner, KnowledgeService, KnowledgeServiceError, KnowledgeWebhookVerifier,
+    ParserWebhookVerifier, StagedKnowledgeCredential, StaticKnowledgeProviders,
 };
 use moa_orchestrator::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestionRequest, KnowledgeSyncIngestionSteps, KnowledgeSyncPageApplication,
@@ -85,7 +103,7 @@ use sha2::Sha256;
 use tokio_util::bytes::Bytes;
 use uuid::Uuid;
 
-const PROVIDER: &str = "fake";
+const PROVIDER: &str = "merge";
 const CONNECTOR: &str = "drive";
 const SECRET_TOKEN: &str = "provider-secret-token-123";
 const SECRET_BEARER: &str = "Bearer provider-secret-token-456";
@@ -104,14 +122,18 @@ fn fixture_service(
     provider: Arc<dyn LinkedIntegrationProvider>,
     max_preview_chars: usize,
 ) -> KnowledgeService {
+    let providers = StaticKnowledgeProviders::new()
+        .with_provider(PROVIDER, provider.clone())
+        .with_provider("nango", provider);
     KnowledgeService::new(
         repository.clone(),
         repository,
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
+        Arc::new(providers),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         max_preview_chars,
     )
+    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()))
 }
 
 fn fixture_webhook_service(
@@ -130,6 +152,7 @@ fn fixture_webhook_service(
         fake_ingestion_runner(),
         max_preview_chars,
     )
+    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()))
 }
 
 /// Mirrors the service's provider-completion classification for fake providers.
@@ -142,6 +165,65 @@ fn provider_status_is_completed(status: &str) -> bool {
 
 fn fake_ingestion_runner() -> Arc<dyn KnowledgeIngestionRunner> {
     Arc::new(FakeKnowledgeIngestionRunner::default())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReadyConnectorCredentialSlots;
+
+#[async_trait]
+impl CredentialSlotVerifier for ReadyConnectorCredentialSlots {
+    async fn credential_slot_readiness(
+        &self,
+        _tenant_id: TenantId,
+        _connection_id: ConnectorConnectionId,
+        slots: &[RequiredCredentialSlot],
+    ) -> moa_connectors::Result<Vec<CredentialSlotReadiness>> {
+        Ok(slots
+            .iter()
+            .map(|slot| CredentialSlotReadiness {
+                slot: slot.slot.clone(),
+                kind: slot.kind,
+                ready: true,
+            })
+            .collect())
+    }
+}
+
+fn postgres_connector_service(pool: sqlx::PgPool) -> ConnectorService {
+    let repository: Arc<dyn ConnectionRepository> =
+        Arc::new(PostgresConnectionRepository::new(pool));
+    ConnectorService::new(repository, Arc::new(ReadyConnectorCredentialSlots))
+}
+
+async fn seed_managed_connector_parent(pool: &sqlx::PgPool, connection: &KnowledgeConnection) {
+    let service = postgres_connector_service(pool.clone());
+    let definition = ManagedParentDefinition::for_knowledge_provider(&connection.provider)
+        .expect("fixture provider should have a managed connector definition");
+    let connection_id = ConnectorConnectionId(connection.connection_uid);
+    let claim = service
+        .claim_managed_parent(ManagedParentClaimRequest {
+            tenant_id: connection.tenant_id,
+            operation_id: format!("seed-managed-parent:{}", connection.connection_uid),
+            request_hash: format!("{:064x}", connection.connection_uid.as_u128()),
+            connection_id,
+            definition,
+            display_name: format!("{} {}", connection.provider, connection.connector),
+            provider_config_key: connection.connector.clone(),
+            provider_connection_id: connection.provider_account_id.clone(),
+            connector: connection.connector.clone(),
+            owner_identity_id: Some(Uuid::now_v7()),
+        })
+        .await
+        .expect("seed managed connector parent");
+    service
+        .activate_managed_knowledge_parent(ManagedParentActivationRequest {
+            tenant_id: connection.tenant_id,
+            connection_id,
+            expected_generation: claim.connection.generation,
+            definition,
+        })
+        .await
+        .expect("activate managed connector parent");
 }
 
 /// Builds an authorized caller context with a per-call unique operation root.
@@ -195,9 +277,9 @@ impl FakeKnowledgeSyncIngestionSteps {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeListPageCall {
     cursor: Option<String>,
+    seen_cursors: Vec<String>,
     limit: u32,
     page_index: u32,
-    credential_ref: String,
     modified_after: Option<DateTime<Utc>>,
 }
 
@@ -248,12 +330,13 @@ impl KnowledgeSyncIngestionSteps for FakeKnowledgeSyncIngestionSteps {
         cursor: Option<String>,
         limit: u32,
         page_index: u32,
+        seen_cursors: Vec<String>,
     ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
         self.list_calls.push(FakeListPageCall {
             cursor,
+            seen_cursors,
             limit,
             page_index,
-            credential_ref: prepared.connection.credential_ref.clone(),
             modified_after: prepared.connection.last_synced_at,
         });
         let page = if self.pages.is_empty() {
@@ -374,8 +457,6 @@ fn fake_prepared_sync_run(
             provider: PROVIDER.to_string(),
             connector: CONNECTOR.to_string(),
             provider_account_id: "provider-account-1".to_string(),
-            credential_ref: "resolved-provider-token".to_string(),
-            status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
@@ -491,6 +572,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
         cursor: Option<String>,
         limit: u32,
         _page_index: u32,
+        _seen_cursors: Vec<String>,
     ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
         let page = self
             .provider
@@ -502,7 +584,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
                 connection: prepared.connection.clone(),
                 // The workflow body under test owns paging, not resolution; the
                 // durable steps resolve through the shared owner instead.
-                credential: RedactedSecret::new(prepared.connection.credential_ref.clone()),
+                credential: Some(RedactedSecret::new("resolved-provider-token".to_string())),
                 cursor,
                 modified_after: prepared.connection.last_synced_at,
                 limit: Some(limit),
@@ -777,11 +859,9 @@ fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
-        provider: PROVIDER.to_string(),
+        provider: "nango".to_string(),
         connector: CONNECTOR.to_string(),
         provider_account_id: "provider-account-1".to_string(),
-        credential_ref: "vault://existing".to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({ "safe": "connection" }),
         source_selection: json!({}),
         information_barrier: None,
@@ -1244,8 +1324,8 @@ impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
             provider: self.provider.to_string(),
             connector: self.connector.to_string(),
             provider_account_id: format!("{}-task14-account", self.provider),
-            credential_ref: format!("{}-account-token", self.provider),
-            credential_material: Some(format!("{}-raw-token-should-enter-vault", self.provider)),
+            credential_material: (self.provider == "merge")
+                .then(|| format!("{}-raw-token-should-enter-vault", self.provider)),
             metadata: json!({
                 "provider": self.provider,
                 "access_token": format!("{}-secret", self.provider),
@@ -1286,6 +1366,13 @@ impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
             completed: false,
             metadata: json!({ "initial_sync": "started" }),
         })
+    }
+
+    async fn revoke_remote_connection(
+        &self,
+        _req: RemoteRevokeRequest,
+    ) -> moa_knowledge::Result<()> {
+        Ok(())
     }
 
     async fn list_changed_records(
@@ -1690,6 +1777,9 @@ struct FakeLinkedIntegrationProvider {
     integrations: Vec<ProviderIntegration>,
     integrations_error: Option<String>,
     initial_sync_error: Option<String>,
+    remote_revoke_error: Option<String>,
+    provider: &'static str,
+    credential_material: Option<String>,
 }
 
 impl Default for FakeLinkedIntegrationProvider {
@@ -1700,6 +1790,9 @@ impl Default for FakeLinkedIntegrationProvider {
             integrations: Vec::new(),
             integrations_error: None,
             initial_sync_error: None,
+            remote_revoke_error: None,
+            provider: PROVIDER,
+            credential_material: Some(SECRET_TOKEN.to_string()),
         }
     }
 }
@@ -1734,6 +1827,22 @@ impl FakeLinkedIntegrationProvider {
         }
     }
 
+    fn with_remote_revoke_error(message: impl Into<String>) -> Self {
+        Self {
+            remote_revoke_error: Some(message.into()),
+            ..Self::default()
+        }
+    }
+
+    fn nango_with_initial_sync_error(message: impl Into<String>) -> Self {
+        Self {
+            provider: "nango",
+            credential_material: None,
+            initial_sync_error: Some(message.into()),
+            ..Self::default()
+        }
+    }
+
     fn trigger_sync_count(&self) -> usize {
         self.calls().trigger_sync
     }
@@ -1752,6 +1861,10 @@ impl FakeLinkedIntegrationProvider {
 
     fn apply_source_selection_count(&self) -> usize {
         self.calls().apply_source_selection
+    }
+
+    fn remote_revoke_count(&self) -> usize {
+        self.calls().remote_revoke
     }
 
     fn applied_source_selections(&self) -> Vec<Value> {
@@ -1774,6 +1887,7 @@ struct FakeProviderCalls {
     start_initial_sync: usize,
     list_changed_records: usize,
     verify_webhook: usize,
+    remote_revoke: usize,
     list_changed_record_requests: Vec<FakeListChangedRecordsRequest>,
     source_selection_requests: Vec<Value>,
 }
@@ -1856,7 +1970,7 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
     async fn list_integrations(&self) -> moa_knowledge::Result<Vec<ProviderIntegration>> {
         if let Some(message) = &self.integrations_error {
             return Err(KnowledgeError::Provider {
-                provider: PROVIDER.to_string(),
+                provider: self.provider.to_string(),
                 message: message.clone(),
             });
         }
@@ -1868,7 +1982,7 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
         _req: CreateLinkTokenRequest,
     ) -> moa_knowledge::Result<LinkToken> {
         Ok(LinkToken {
-            provider: PROVIDER.to_string(),
+            provider: self.provider.to_string(),
             token: "link-token".to_string(),
             link_url: Some("https://provider.example/link".to_string()),
             expires_at: None,
@@ -1884,11 +1998,10 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
             .expect("fake provider call log should not be poisoned")
             .exchange_public_token += 1;
         Ok(LinkedAccount {
-            provider: PROVIDER.to_string(),
+            provider: self.provider.to_string(),
             connector: CONNECTOR.to_string(),
             provider_account_id: "provider-account-1".to_string(),
-            credential_ref: "provider-account-token".to_string(),
-            credential_material: Some(SECRET_TOKEN.to_string()),
+            credential_material: self.credential_material.clone(),
             metadata: json!({
                 "safe": "account",
                 "access_token": SECRET_TOKEN
@@ -1902,7 +2015,7 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
             .expect("fake provider call log should not be poisoned")
             .trigger_sync += 1;
         Ok(TriggeredSync {
-            provider: PROVIDER.to_string(),
+            provider: self.provider.to_string(),
             provider_sync_id: Some(format!("sync-{}", req.connection.connection_uid)),
             status: self.trigger_status.clone(),
             metadata: json!({ "status": self.trigger_status.clone() }),
@@ -1919,14 +2032,28 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
             .expect("fake provider call log should not be poisoned");
         calls.start_initial_sync += 1;
         if let Some(message) = self.initial_sync_error.clone() {
-            return Err(KnowledgeError::provider(PROVIDER, message));
+            return Err(KnowledgeError::provider(self.provider, message));
         }
         Ok(InitialSyncStarted {
-            provider: PROVIDER.to_string(),
+            provider: self.provider.to_string(),
             provider_sync_id: Some(format!("initial-{}", req.connection.connection_uid)),
             completed: provider_status_is_completed(&self.trigger_status),
             metadata: json!({ "status": self.trigger_status.clone() }),
         })
+    }
+
+    async fn revoke_remote_connection(
+        &self,
+        _req: RemoteRevokeRequest,
+    ) -> moa_knowledge::Result<()> {
+        self.calls
+            .lock()
+            .expect("fake provider call log should not be poisoned")
+            .remote_revoke += 1;
+        if let Some(message) = &self.remote_revoke_error {
+            return Err(KnowledgeError::provider(self.provider, message));
+        }
+        Ok(())
     }
 
     async fn apply_source_selection(
@@ -1968,13 +2095,350 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
             .expect("fake provider call log should not be poisoned")
             .verify_webhook += 1;
         let value: Value = serde_json::from_slice(&body)
-            .map_err(|error| KnowledgeError::provider(PROVIDER, error.to_string()))?;
+            .map_err(|error| KnowledgeError::provider(self.provider, error.to_string()))?;
         Ok(WebhookEvent {
-            provider: PROVIDER.to_string(),
+            provider: self.provider.to_string(),
             event_id: required_string(&value, "event_id")?,
             event_type: required_string(&value, "event_type")?,
             metadata: value,
         })
+    }
+}
+
+/// In-memory generic-connector lifecycle used by knowledge service tests.
+type FakeManagedParentClaims = HashMap<(TenantId, String), (String, ConnectorConnectionId, bool)>;
+
+#[derive(Clone, Debug, Default)]
+struct FakeKnowledgeConnectorConnections {
+    connections: Arc<Mutex<HashMap<ConnectorConnectionId, ConnectorConnection>>>,
+    claims: Arc<Mutex<FakeManagedParentClaims>>,
+}
+
+impl FakeKnowledgeConnectorConnections {
+    fn connection(&self, connection_id: ConnectorConnectionId) -> Option<ConnectorConnection> {
+        self.connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned")
+            .get(&connection_id)
+            .cloned()
+    }
+
+    fn connection_for_claim(request: &ManagedParentClaimRequest) -> ConnectorConnection {
+        let now = moa_test_support::fixtures::pg_now();
+        ConnectorConnection {
+            connection_id: request.connection_id,
+            tenant_id: request.tenant_id,
+            display_name: request.display_name.clone(),
+            definition: request.definition.definition_ref(),
+            non_secret_config: json!({
+                "provider_config_key": request.provider_config_key,
+                "provider_connection_id": request.provider_connection_id,
+                "connector": request.connector,
+            }),
+            generation: ConnectionGeneration::new(1)
+                .expect("fixture generation should be positive"),
+            status: ParentConnectionStatus::PendingAuth,
+            health: ConnectionHealth::Pending,
+            health_reason: None,
+            created_by_identity_id: request.owner_identity_id,
+            owner_identity_id: request.owner_identity_id,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn invalid(message: &str) -> moa_connectors::Error {
+        moa_connectors::Error::InvalidContract {
+            message: message.to_string(),
+        }
+    }
+
+    fn legacy_active(
+        tenant_id: TenantId,
+        connection_id: ConnectorConnectionId,
+    ) -> ConnectorConnection {
+        let now = moa_test_support::fixtures::pg_now();
+        ConnectorConnection {
+            connection_id,
+            tenant_id,
+            display_name: "fixture knowledge connection".to_string(),
+            definition: ManagedParentDefinition::for_knowledge_provider(PROVIDER)
+                .expect("fixture provider should have a managed definition")
+                .definition_ref(),
+            non_secret_config: json!({}),
+            generation: ConnectionGeneration::new(1)
+                .expect("fixture generation should be positive"),
+            status: ParentConnectionStatus::Active,
+            health: ConnectionHealth::Ready,
+            health_reason: None,
+            created_by_identity_id: None,
+            owner_identity_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+#[async_trait]
+impl KnowledgeConnectorConnections for FakeKnowledgeConnectorConnections {
+    async fn claim_managed_parent(
+        &self,
+        request: ManagedParentClaimRequest,
+    ) -> moa_connectors::Result<ManagedParentClaim> {
+        let claim_key = (request.tenant_id, request.operation_id.clone());
+        if let Some((request_hash, connection_id, parent_created_by_claim)) = self
+            .claims
+            .lock()
+            .expect("fake connector claim state should not be poisoned")
+            .get(&claim_key)
+            .cloned()
+        {
+            if request_hash != request.request_hash || connection_id != request.connection_id {
+                return Err(moa_connectors::Error::ManagedParentClaimConflict {
+                    connection_id: request.connection_id,
+                });
+            }
+            let connection = self
+                .connections
+                .lock()
+                .expect("fake connector connection state should not be poisoned")
+                .get(&connection_id)
+                .cloned()
+                .ok_or(moa_connectors::Error::ConnectionNotFound { connection_id })?;
+            return Ok(ManagedParentClaim {
+                connection,
+                parent_created_by_claim,
+            });
+        }
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        if let Some(connection) = connections.get(&request.connection_id) {
+            if connection.tenant_id != request.tenant_id
+                || connection.definition != request.definition.definition_ref()
+            {
+                return Err(moa_connectors::Error::ManagedParentMismatch {
+                    connection_id: request.connection_id,
+                    field: "identity",
+                });
+            }
+            let claim = ManagedParentClaim {
+                connection: connection.clone(),
+                parent_created_by_claim: false,
+            };
+            self.claims
+                .lock()
+                .expect("fake connector claim state should not be poisoned")
+                .insert(
+                    claim_key,
+                    (request.request_hash, request.connection_id, false),
+                );
+            return Ok(claim);
+        }
+        if request.owner_identity_id.is_none() {
+            return Err(moa_connectors::Error::ManagedParentOwnerRequired {
+                connection_id: request.connection_id,
+            });
+        }
+        let connection = Self::connection_for_claim(&request);
+        connections.insert(request.connection_id, connection.clone());
+        self.claims
+            .lock()
+            .expect("fake connector claim state should not be poisoned")
+            .insert(
+                claim_key,
+                (request.request_hash, request.connection_id, true),
+            );
+        Ok(ManagedParentClaim {
+            connection,
+            parent_created_by_claim: true,
+        })
+    }
+
+    async fn activate_managed_knowledge_parent(
+        &self,
+        request: ManagedParentActivationRequest,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        let connection = connections.get_mut(&request.connection_id).ok_or(
+            moa_connectors::Error::ConnectionNotFound {
+                connection_id: request.connection_id,
+            },
+        )?;
+        if connection.tenant_id != request.tenant_id
+            || connection.definition != request.definition.definition_ref()
+        {
+            return Err(Self::invalid("fake managed-parent identity mismatch"));
+        }
+        if connection.generation != request.expected_generation {
+            return Err(moa_connectors::Error::GenerationConflict {
+                expected: request.expected_generation,
+                actual: connection.generation,
+            });
+        }
+        if matches!(
+            connection.status,
+            ParentConnectionStatus::Disconnecting | ParentConnectionStatus::Deleted
+        ) {
+            return Err(Self::invalid("fake managed parent is in teardown"));
+        }
+        connection.status = ParentConnectionStatus::Active;
+        connection.updated_at = moa_test_support::fixtures::pg_now();
+        Ok(connection.clone())
+    }
+
+    async fn advance_credential_generation(
+        &self,
+        request: CredentialGenerationFenceRequest,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        let connection = connections.get_mut(&request.connection_id).ok_or(
+            moa_connectors::Error::ConnectionNotFound {
+                connection_id: request.connection_id,
+            },
+        )?;
+        if connection.tenant_id != request.tenant_id {
+            return Err(Self::invalid("fake managed-parent tenant mismatch"));
+        }
+        if connection.generation != request.expected_generation {
+            return Err(moa_connectors::Error::GenerationConflict {
+                expected: request.expected_generation,
+                actual: connection.generation,
+            });
+        }
+        connection.generation = connection.generation.next()?;
+        connection.updated_at = moa_test_support::fixtures::pg_now();
+        Ok(connection.clone())
+    }
+
+    async fn get(
+        &self,
+        tenant_id: TenantId,
+        connection_id: ConnectorConnectionId,
+    ) -> moa_connectors::Result<Option<ConnectorConnection>> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        if let Some(connection) = connections.get(&connection_id) {
+            return Ok((connection.tenant_id == tenant_id).then(|| connection.clone()));
+        }
+        let connection = Self::legacy_active(tenant_id, connection_id);
+        connections.insert(connection_id, connection.clone());
+        Ok(Some(connection))
+    }
+
+    async fn disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_id: ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        let connection = connections
+            .get_mut(&connection_id)
+            .ok_or(moa_connectors::Error::ConnectionNotFound { connection_id })?;
+        if connection.tenant_id != tenant_id {
+            return Err(moa_connectors::Error::ConnectionNotFound { connection_id });
+        }
+        if connection.generation != expected_generation {
+            return Err(moa_connectors::Error::GenerationConflict {
+                expected: expected_generation,
+                actual: connection.generation,
+            });
+        }
+        if connection.status != ParentConnectionStatus::Disconnecting {
+            connection.status = connection
+                .status
+                .transition(ParentConnectionStatus::Disconnecting)?;
+        }
+        connection.updated_at = moa_test_support::fixtures::pg_now();
+        Ok(connection.clone())
+    }
+
+    async fn delete(
+        &self,
+        tenant_id: TenantId,
+        connection_id: ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        let connection = connections
+            .get_mut(&connection_id)
+            .ok_or(moa_connectors::Error::ConnectionNotFound { connection_id })?;
+        if connection.tenant_id != tenant_id || connection.generation != expected_generation {
+            return Err(Self::invalid("fake managed-parent delete fence mismatch"));
+        }
+        if connection.status != ParentConnectionStatus::Deleted {
+            connection.status = connection
+                .status
+                .transition(ParentConnectionStatus::Deleted)?;
+        }
+        connection.updated_at = moa_test_support::fixtures::pg_now();
+        Ok(connection.clone())
+    }
+
+    async fn delete_managed_parent_if_unused(
+        &self,
+        request: ManagedParentDeleteRequest,
+    ) -> moa_connectors::Result<ManagedParentDeleteOutcome> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        let connection = connections.get_mut(&request.connection_id).ok_or(
+            moa_connectors::Error::ConnectionNotFound {
+                connection_id: request.connection_id,
+            },
+        )?;
+        if connection.tenant_id != request.tenant_id {
+            return Err(Self::invalid("fake managed-parent tenant mismatch"));
+        }
+        if connection.status == ParentConnectionStatus::Deleted {
+            return Ok(ManagedParentDeleteOutcome::AlreadyDeleted(
+                connection.clone(),
+            ));
+        }
+        connection.status = ParentConnectionStatus::Deleted;
+        connection.updated_at = moa_test_support::fixtures::pg_now();
+        Ok(ManagedParentDeleteOutcome::Deleted(connection.clone()))
+    }
+
+    async fn update_health(
+        &self,
+        tenant_id: TenantId,
+        connection_id: ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+        health: ConnectionHealth,
+        reason: Option<String>,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("fake connector connection state should not be poisoned");
+        let connection = connections
+            .get_mut(&connection_id)
+            .ok_or(moa_connectors::Error::ConnectionNotFound { connection_id })?;
+        if connection.tenant_id != tenant_id || connection.generation != expected_generation {
+            return Err(Self::invalid("fake managed-parent health fence mismatch"));
+        }
+        connection.health = health;
+        connection.health_reason = reason;
+        connection.updated_at = moa_test_support::fixtures::pg_now();
+        Ok(connection.clone())
     }
 }
 
@@ -2002,8 +2466,10 @@ struct FakeKnowledgeCredentialStore {
 #[derive(Debug, Default)]
 struct FakeCredentialState {
     versions: HashMap<Uuid, FakeCredentialVersion>,
+    staged_by_operation: HashMap<(String, Uuid), (Uuid, Option<Uuid>)>,
     operations: Vec<(String, CredentialPrincipal)>,
     status_batch_calls: usize,
+    fail_rollback_with_revoked_prior: bool,
 }
 
 impl FakeKnowledgeCredentialStore {
@@ -2019,6 +2485,20 @@ impl FakeKnowledgeCredentialStore {
 
     fn status_batch_calls(&self) -> usize {
         self.lock().status_batch_calls
+    }
+
+    fn fail_rollback_with_revoked_prior(&self) {
+        self.lock().fail_rollback_with_revoked_prior = true;
+    }
+
+    fn active_reference_for_connection(&self, connection_uid: Uuid) -> Option<String> {
+        self.lock()
+            .versions
+            .iter()
+            .find(|(_, version)| {
+                version.connection_uid == connection_uid && version.active && !version.revoked
+            })
+            .map(|(reference, _)| reference.to_string())
     }
 
     /// Returns the opaque reference issued for one connection, if any.
@@ -2084,10 +2564,7 @@ impl FakeKnowledgeCredentialStore {
     fn record(&self, operation_id: String, principal: CredentialPrincipal) {
         self.lock().operations.push((operation_id, principal));
     }
-}
 
-#[async_trait]
-impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
     async fn store_linked_account(
         &self,
         tenant_id: TenantId,
@@ -2095,28 +2572,159 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
         caller: &KnowledgeCaller,
         account: &LinkedAccount,
     ) -> Result<String, KnowledgeServiceError> {
-        self.record(caller.step("credential-create"), caller.principal());
-        let Some(material) = account.credential_material.clone() else {
-            return Ok(account.credential_ref.clone());
-        };
-        let reference = Uuid::now_v7();
-        let mut state = self.lock();
-        for version in state.versions.values_mut() {
-            if version.tenant_id == tenant_id && version.connection_uid == connection_uid {
-                version.active = false;
+        let staged = self
+            .stage_linked_account(tenant_id, connection_uid, caller, account)
+            .await?;
+        let reference = staged.vault_candidate_reference().ok_or_else(|| {
+            KnowledgeServiceError::Credential(
+                "fake managed credential did not produce a vault receipt".to_string(),
+            )
+        })?;
+        self.activate_staged_linked_account(&staged, caller).await?;
+        Ok(reference)
+    }
+}
+
+#[async_trait]
+impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
+    async fn stage_linked_account(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+        caller: &KnowledgeCaller,
+        account: &LinkedAccount,
+    ) -> Result<StagedKnowledgeCredential, KnowledgeServiceError> {
+        let operation_id = caller.step("credential-stage");
+        self.record(operation_id.clone(), caller.principal());
+        match ManagedParentDefinition::for_knowledge_provider(&account.provider)? {
+            ManagedParentDefinition::KnowledgeNangoV1 => {
+                if account.credential_material.is_some() {
+                    return Err(KnowledgeServiceError::InvalidRequest(
+                        "fake Nango account returned credential material".to_string(),
+                    ));
+                }
+                return Ok(StagedKnowledgeCredential::ProviderNative);
             }
+            ManagedParentDefinition::KnowledgeMergeV1 => {}
         }
-        state.versions.insert(
-            reference,
-            FakeCredentialVersion {
-                tenant_id,
-                connection_uid,
-                material,
-                active: true,
-                revoked: false,
-            },
+        let material = account.credential_material.clone().ok_or_else(|| {
+            KnowledgeServiceError::InvalidRequest(
+                "fake Merge account omitted credential material".to_string(),
+            )
+        })?;
+        let mut state = self.lock();
+        let stage_key = (operation_id, connection_uid);
+        let (reference, prior) = if let Some(receipt) = state.staged_by_operation.get(&stage_key) {
+            *receipt
+        } else {
+            let prior = state
+                .versions
+                .iter()
+                .find(|(_, version)| {
+                    version.tenant_id == tenant_id
+                        && version.connection_uid == connection_uid
+                        && version.active
+                        && !version.revoked
+                })
+                .map(|(reference, _)| *reference);
+            let reference = Uuid::now_v7();
+            state
+                .staged_by_operation
+                .insert(stage_key, (reference, prior));
+            state.versions.insert(
+                reference,
+                FakeCredentialVersion {
+                    tenant_id,
+                    connection_uid,
+                    material,
+                    active: false,
+                    revoked: false,
+                },
+            );
+            (reference, prior)
+        };
+        Ok(StagedKnowledgeCredential::Managed {
+            staging: CredentialStagingToken::new(
+                CredentialRef::from_uuid(reference),
+                CredentialIdentity {
+                    tenant_id,
+                    connection_uid,
+                    kind: CredentialKind::ProviderApiKey,
+                    slot_name: CredentialSlotName::PRIMARY,
+                },
+                1,
+                prior.map(CredentialRef::from_uuid),
+            ),
+        })
+    }
+
+    async fn activate_staged_linked_account(
+        &self,
+        staged: &StagedKnowledgeCredential,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError> {
+        self.record(caller.step("credential-activate"), caller.principal());
+        let StagedKnowledgeCredential::Managed { staging } = staged else {
+            return Ok(());
+        };
+        let mut state = self.lock();
+        for version in state.versions.values_mut().filter(|version| {
+            version.tenant_id == staging.identity().tenant_id
+                && version.connection_uid == staging.identity().connection_uid
+        }) {
+            version.active = false;
+        }
+        let candidate = state
+            .versions
+            .get_mut(&staging.staged_reference().as_uuid())
+            .ok_or_else(|| {
+                KnowledgeServiceError::Credential("fake staged credential missing".to_string())
+            })?;
+        candidate.active = true;
+        Ok(())
+    }
+
+    async fn rollback_linked_account_activation(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+        candidate_credential_ref: &str,
+        previous_credential_ref: Option<&str>,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError> {
+        self.record(
+            caller.step("credential-rollback-activation"),
+            caller.principal(),
         );
-        Ok(reference.to_string())
+        let Some(candidate) = Uuid::parse_str(candidate_credential_ref).ok() else {
+            return Ok(());
+        };
+        let previous = previous_credential_ref.and_then(|value| Uuid::parse_str(value).ok());
+        let mut state = self.lock();
+        if state.fail_rollback_with_revoked_prior
+            && let Some(previous) = previous
+        {
+            if let Some(version) = state.versions.get_mut(&previous) {
+                version.active = false;
+                version.revoked = true;
+            }
+            return Err(KnowledgeServiceError::Credential(
+                "fake prior credential is revoked".to_string(),
+            ));
+        }
+        if let Some(version) = state.versions.get_mut(&candidate)
+            && version.tenant_id == tenant_id
+            && version.connection_uid == connection_uid
+        {
+            version.active = false;
+            version.revoked = true;
+        }
+        if let Some(previous) = previous
+            && let Some(version) = state.versions.get_mut(&previous)
+        {
+            version.active = true;
+        }
+        Ok(())
     }
 
     async fn resolve_linked_account(
@@ -2124,55 +2732,54 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
-    ) -> Result<RedactedSecret, KnowledgeServiceError> {
+    ) -> Result<Option<RedactedSecret>, KnowledgeServiceError> {
         self.record(caller.step("credential-resolve"), caller.principal());
-        let Some(reference) = Uuid::parse_str(&connection.credential_ref).ok() else {
-            return Ok(RedactedSecret::new(connection.credential_ref.clone()));
-        };
-        let state = self.lock();
-        let version = state.versions.get(&reference).ok_or_else(|| {
-            KnowledgeServiceError::Credential("fake credential not found".to_string())
-        })?;
-        if version.tenant_id != tenant_id || version.revoked {
-            return Err(KnowledgeServiceError::Credential(
-                "fake credential is not resolvable".to_string(),
-            ));
+        if ManagedParentDefinition::for_knowledge_provider(&connection.provider)?
+            == ManagedParentDefinition::KnowledgeNangoV1
+        {
+            return Ok(None);
         }
-        Ok(RedactedSecret::new(version.material.clone()))
+        let state = self.lock();
+        if let Some(version) = state.versions.values().find(|version| {
+            version.tenant_id == tenant_id
+                && version.connection_uid == connection.connection_uid
+                && version.active
+                && !version.revoked
+        }) {
+            return Ok(Some(RedactedSecret::new(version.material.clone())));
+        }
+        Err(KnowledgeServiceError::Credential(
+            "fake credential is not resolvable".to_string(),
+        ))
     }
 
-    async fn delete_linked_account(
+    async fn revoke_linked_account(
         &self,
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
     ) -> Result<bool, KnowledgeServiceError> {
-        self.record(caller.step("credential-delete"), caller.principal());
-        let mut state = self.lock();
-        let before = state.versions.len();
-        state.versions.retain(|_, version| {
-            !(version.tenant_id == tenant_id && version.connection_uid == connection.connection_uid)
-        });
-        Ok(state.versions.len() != before)
-    }
-
-    async fn revoke_credential(
-        &self,
-        tenant_id: TenantId,
-        reference: &str,
-        caller: &KnowledgeCaller,
-    ) -> Result<(), KnowledgeServiceError> {
-        self.record(caller.step("credential-revoke"), caller.principal());
-        let Some(reference) = Uuid::parse_str(reference).ok() else {
-            return Ok(());
-        };
-        let mut state = self.lock();
-        if let Some(version) = state.versions.get_mut(&reference)
-            && version.tenant_id == tenant_id
+        self.record(
+            caller.step("credential-revoke-connection"),
+            caller.principal(),
+        );
+        if ManagedParentDefinition::for_knowledge_provider(&connection.provider)?
+            == ManagedParentDefinition::KnowledgeNangoV1
         {
-            version.revoked = true;
+            return Ok(false);
         }
-        Ok(())
+        let mut state = self.lock();
+        let mut changed = false;
+        for version in state.versions.values_mut().filter(|version| {
+            version.tenant_id == tenant_id && version.connection_uid == connection.connection_uid
+        }) {
+            if !version.revoked {
+                version.revoked = true;
+                version.active = false;
+                changed = true;
+            }
+        }
+        Ok(changed)
     }
 
     async fn credential_statuses(
@@ -2186,19 +2793,23 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
         Ok(connections
             .iter()
             .map(|connection| {
-                let reference = Uuid::parse_str(&connection.credential_ref).ok()?;
-                Some(
-                    match state
-                        .versions
-                        .get(&reference)
-                        .filter(|version| version.tenant_id == tenant_id)
-                    {
-                        Some(version) if version.revoked => "revoked".to_string(),
-                        Some(version) if !version.active => "superseded".to_string(),
-                        Some(_) => "present".to_string(),
-                        None => "missing".to_string(),
-                    },
-                )
+                match ManagedParentDefinition::for_knowledge_provider(&connection.provider) {
+                    Ok(ManagedParentDefinition::KnowledgeNangoV1) => None,
+                    Ok(ManagedParentDefinition::KnowledgeMergeV1) => Some(
+                        if state.versions.values().any(|version| {
+                            version.tenant_id == tenant_id
+                                && version.connection_uid == connection.connection_uid
+                                && version.active
+                                && !version.revoked
+                        }) {
+                            "present"
+                        } else {
+                            "missing"
+                        }
+                        .to_string(),
+                    ),
+                    Err(_) => Some("missing".to_string()),
+                }
             })
             .collect())
     }
@@ -2236,6 +2847,18 @@ impl InMemoryKnowledgeRepository {
             .lock()
             .expect("repository state should not be poisoned")
             .connections
+            .get(&connection_uid)
+            .cloned()
+    }
+
+    fn disconnect_progress(
+        &self,
+        connection_uid: Uuid,
+    ) -> Option<KnowledgeConnectionDisconnectProgress> {
+        self.state
+            .lock()
+            .expect("repository state should not be poisoned")
+            .disconnects
             .get(&connection_uid)
             .cloned()
     }
@@ -2409,6 +3032,7 @@ struct RepositoryState {
     chunks: HashMap<Uuid, Vec<KnowledgeChunk>>,
     provider_events: HashMap<(TenantId, String, String), KnowledgeProviderEventRecord>,
     link_claims: HashMap<(TenantId, String), LinkClaim>,
+    disconnects: HashMap<Uuid, KnowledgeConnectionDisconnectProgress>,
     /// Stored snapshots keyed by uid, mirroring the immutable SQL table: an
     /// entry set is inserted once and never edited in place.
     acl_snapshots: HashMap<Uuid, moa_knowledge::domain::ProviderAclSnapshot>,
@@ -2524,6 +3148,24 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         self.with_state(|state| state.connections.get(&connection_uid).cloned())
     }
 
+    async fn mark_connection_synced(
+        &self,
+        connection_uid: Uuid,
+        completed_at: DateTime<Utc>,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("mark_connection_synced")?;
+        self.with_state(|state| {
+            let connection = state.connections.get_mut(&connection_uid).ok_or_else(|| {
+                KnowledgeError::Repository(
+                    "active knowledge connection was not visible for sync completion".to_string(),
+                )
+            })?;
+            connection.last_synced_at = Some(completed_at);
+            connection.updated_at = completed_at;
+            Ok(())
+        })?
+    }
+
     async fn connection_by_provider_account(
         &self,
         provider: &str,
@@ -2559,6 +3201,19 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 }
                 return LinkClaimReservation::Existing(existing.clone());
             }
+            if state.link_claims.values().any(|existing| {
+                existing.tenant_id == claim.tenant_id
+                    && existing.connection_uid == claim.connection_uid
+                    && !matches!(
+                        existing.state,
+                        LinkClaimState::Finalized | LinkClaimState::Compensated
+                    )
+            }) {
+                return LinkClaimReservation::ConnectionBusy;
+            }
+            if claim.owner_identity_id.is_none() {
+                return LinkClaimReservation::OwnerRequired;
+            }
             let now = moa_test_support::fixtures::pg_now();
             let reserved = LinkClaim {
                 tenant_id: claim.tenant_id,
@@ -2566,8 +3221,11 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 request_hash: claim.request_hash,
                 owner_identity_id: claim.owner_identity_id,
                 connection_uid: claim.connection_uid,
-                previous_credential_ref: claim.previous_credential_ref,
+                parent_created_by_claim: false,
+                credential_expected_generation: None,
+                credential_ownership: None,
                 candidate_credential_ref: None,
+                previous_vault_credential_ref: None,
                 state: LinkClaimState::Reserved,
                 sync_run_uid: None,
                 created_at: now,
@@ -2593,10 +3251,21 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 return None;
             }
             match &transition {
-                LinkClaimTransition::CredentialWritten {
-                    candidate_credential_ref,
+                LinkClaimTransition::ParentClaimed {
+                    parent_created_by_claim,
+                    credential_expected_generation,
                 } => {
-                    claim.candidate_credential_ref = Some(candidate_credential_ref.clone());
+                    claim.parent_created_by_claim = *parent_created_by_claim;
+                    claim.credential_expected_generation = Some(*credential_expected_generation);
+                }
+                LinkClaimTransition::CredentialWritten {
+                    credential_ownership,
+                    candidate_credential_ref,
+                    previous_vault_credential_ref,
+                } => {
+                    claim.credential_ownership = Some(*credential_ownership);
+                    claim.candidate_credential_ref = candidate_credential_ref.clone();
+                    claim.previous_vault_credential_ref = previous_vault_credential_ref.clone();
                 }
                 LinkClaimTransition::SyncRunClaimed { sync_run_uid }
                 | LinkClaimTransition::Finalized { sync_run_uid } => {
@@ -2624,21 +3293,89 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         })
     }
 
-    async fn restore_connection_credential(
+    async fn reserve_connection_disconnect(
         &self,
+        disconnect: NewKnowledgeConnectionDisconnect,
+    ) -> moa_knowledge::Result<KnowledgeDisconnectReservation> {
+        self.record_op("reserve_connection_disconnect")?;
+        self.with_state(|state| {
+            if let Some(existing) = state.disconnects.get(&disconnect.connection_uid) {
+                if existing.tenant_id != disconnect.tenant_id
+                    || existing.request_hash != disconnect.request_hash
+                {
+                    return KnowledgeDisconnectReservation::OperationConflict;
+                }
+                return KnowledgeDisconnectReservation::Existing(existing.clone());
+            }
+            if state.disconnects.values().any(|existing| {
+                existing.tenant_id == disconnect.tenant_id
+                    && existing.operation_id == disconnect.operation_id
+            }) {
+                return KnowledgeDisconnectReservation::OperationConflict;
+            }
+            let now = moa_test_support::fixtures::pg_now();
+            let progress = KnowledgeConnectionDisconnectProgress {
+                tenant_id: disconnect.tenant_id,
+                connection_uid: disconnect.connection_uid,
+                operation_id: disconnect.operation_id,
+                request_hash: disconnect.request_hash,
+                provider_operation_id: disconnect.provider_operation_id,
+                state: KnowledgeDisconnectState::Reserved,
+                error_code: None,
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+            };
+            state
+                .disconnects
+                .insert(progress.connection_uid, progress.clone());
+            KnowledgeDisconnectReservation::Reserved(progress)
+        })
+    }
+
+    async fn advance_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
         connection_uid: Uuid,
-        credential_ref: &str,
-    ) -> moa_knowledge::Result<bool> {
-        self.record_op("restore_connection_credential")?;
+        transition: KnowledgeDisconnectTransition,
+    ) -> moa_knowledge::Result<Option<KnowledgeConnectionDisconnectProgress>> {
+        self.record_op("advance_connection_disconnect")?;
+        self.with_state(|state| {
+            let progress = state.disconnects.get_mut(&connection_uid)?;
+            if progress.tenant_id != tenant_id || progress.state != transition.source_state() {
+                return None;
+            }
+            progress.state = transition.target_state();
+            progress.error_code = transition.error_code().map(ToOwned::to_owned);
+            progress.updated_at = moa_test_support::fixtures::pg_now();
+            if progress.state.is_terminal() {
+                progress.completed_at = Some(progress.updated_at);
+            }
+            Some(progress.clone())
+        })
+    }
+
+    async fn get_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> moa_knowledge::Result<Option<KnowledgeConnectionDisconnectProgress>> {
+        self.record_op("get_connection_disconnect")?;
         self.with_state(|state| {
             state
-                .connections
-                .get_mut(&connection_uid)
-                .is_some_and(|connection| {
-                    connection.credential_ref = credential_ref.to_string();
-                    true
-                })
+                .disconnects
+                .get(&connection_uid)
+                .filter(|progress| progress.tenant_id == tenant_id)
+                .cloned()
         })
+    }
+
+    async fn delete_connection_projection(
+        &self,
+        connection_uid: Uuid,
+    ) -> moa_knowledge::Result<bool> {
+        self.record_op("delete_connection_projection")?;
+        self.with_state(|state| state.connections.remove(&connection_uid).is_some())
     }
 
     async fn purge_tenant_link_claims(&self, limit: u32) -> moa_knowledge::Result<u64> {
@@ -2686,29 +3423,6 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         })?
     }
 
-    async fn disable_connection(
-        &self,
-        tenant_id: TenantId,
-        connection_uid: Uuid,
-    ) -> moa_knowledge::Result<KnowledgeConnection> {
-        self.record_op("disable_connection")?;
-        self.with_state(|state| {
-            let connection = state.connections.get_mut(&connection_uid).ok_or_else(|| {
-                KnowledgeError::Repository(
-                    "connection should exist for fixture disable".to_string(),
-                )
-            })?;
-            if connection.tenant_id != tenant_id {
-                return Err(KnowledgeError::Repository(
-                    "connection should be tenant-visible for fixture disable".to_string(),
-                ));
-            }
-            connection.status = ConnectionStatus::Disabled;
-            connection.updated_at = moa_test_support::fixtures::pg_now();
-            Ok(connection.clone())
-        })?
-    }
-
     async fn list_connections(
         &self,
         tenant_id: TenantId,
@@ -2733,6 +3447,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                         .map(|run| run.status);
                     KnowledgeConnectionProjection {
                         connection,
+                        parent_lifecycle_status: "active".to_string(),
                         last_sync_status,
                     }
                 })
@@ -2990,6 +3705,25 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                     && stored.connection_uid == binding.connection_uid)
             });
             state.acl_bindings.push(binding);
+        })
+    }
+
+    async fn verified_principal_bindings(
+        &self,
+        connection_uid: Uuid,
+        principals: &[moa_core::types::memory::SourcePrincipalFingerprint],
+    ) -> moa_knowledge::Result<Vec<moa_knowledge::domain::SourcePrincipalBinding>> {
+        self.record_op("verified_principal_bindings")?;
+        self.with_state(|state| {
+            state
+                .acl_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.connection_uid == Some(connection_uid)
+                        && principals.contains(&binding.principal)
+                })
+                .cloned()
+                .collect()
         })
     }
 

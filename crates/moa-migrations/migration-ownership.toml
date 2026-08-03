@@ -480,6 +480,40 @@ schema = "moa"
 owner = "moa-knowledge"
 
 [[table]]
+name = "connector_action_bindings"
+schema = "moa"
+owner = "moa-connectors"
+readers = ["moa-hands"]
+notes = "Generation-pinned compiled connector action contracts owned by moa-connectors."
+
+[[table]]
+name = "connector_action_invocations"
+schema = "moa"
+owner = "moa-connectors"
+readers = ["moa-hands"]
+notes = "Replay-safe secret-free connector invocation ledger owned by moa-connectors."
+
+[[table]]
+name = "connector_connection_use_grants"
+schema = "moa"
+owner = "moa-connectors"
+notes = "Tenant-scoped desired-state registry for exact direct connector Use tuple inverses."
+
+[[table]]
+name = "connector_managed_parent_claims"
+schema = "moa"
+owner = "moa-connectors"
+readers = ["moa-knowledge", "moa-orchestrator"]
+notes = "Immutable tenant-scoped replay ledger for managed knowledge-parent ownership claims."
+
+[[table]]
+name = "connector_connections"
+schema = "moa"
+owner = "moa-connectors"
+readers = ["moa-hands", "moa-knowledge"]
+notes = "Tenant connector lifecycle parents owned by moa-connectors."
+
+[[table]]
 name = "knowledge_chunks"
 schema = "moa"
 owner = "moa-knowledge"
@@ -488,6 +522,13 @@ owner = "moa-knowledge"
 name = "knowledge_connections"
 schema = "moa"
 owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_connection_disconnect_progress"
+schema = "moa"
+owner = "moa-knowledge"
+readers = ["moa-orchestrator"]
+notes = "Replay-safe provider remote-revocation send ledger; transmitting and unknown outcomes cannot be resent automatically."
 
 [[table]]
 name = "knowledge_contact_group_memberships"
@@ -685,7 +726,7 @@ name = "tenant_purge_catalog"
 schema = "moa"
 owner = "moa-orchestrator"
 readers = ["moa-migrations"]
-notes = "Closed 130-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
+notes = "Closed 135-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
 
 [[table]]
 name = "tenant_user_invitations"

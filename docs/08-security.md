@@ -128,7 +128,7 @@ Supported patterns:
 | Pattern | Use | Boundary |
 |---|---|---|
 | Bundled resource access | Git clone/push and tenant setup | Host prepares access without exposing raw token to the model. |
-| MCP credential proxy | External tools and SaaS APIs | Host enriches MCP calls with real credentials. |
+| Host-side connector injection | Reviewed constrained HTTP operations | Trusted runtime resolves one named slot only after authorization and destination admission. |
 | Token Vault provider | User OAuth tokens | Provider retrieves user-approved tokens for trusted host-side calls. |
 | Environment-backed provider keys | LLMs, embeddings, hand providers | Runtime loads directly injected secrets into typed host-side config, not prompt-visible values. |
 
@@ -136,8 +136,9 @@ Local encrypted vault storage is no longer part of the active runtime. New
 credential sources should implement `CredentialVault` or a typed provider vault
 trait and stay behind the host-side credential boundary.
 
-MOA-managed tenant connector material lives in one durable owner. A credential's
-persistence identity is `(tenant, owning connection, kind, version)`; resolution
+MOA-managed tenant connector material lives in one durable owner. A credential
+series identity is `(tenant, owning connection, slot, kind)` with append-only
+versions; resolution
 separately carries the acting principal — a caller that passed
 `(Tenant, tenant_id, Operator)`, or a closed service actor bound to exactly one
 operation — plus a replay-stable operation id and canonical request hash. The
@@ -151,17 +152,52 @@ reachable only from a transaction that explicitly sets `moa.credential_purge`.
 
 Plaintext leaves the owner only as a non-serializable, redacted carrier that
 cannot be cloned into a model payload, serialized into Restate state or an
-event, or persisted on a knowledge row. Deployment-owned operator transport
-secrets are a separate typed source, so a tenant connection can never fall back
-to an operator credential.
+event, or persisted on a knowledge row. Deployment-owned operator MCP transport
+secrets are a separate typed source and are never available to tenant HTTP
+connector connections.
 
-Outbound MCP connectors may use one deployment-owned credential read from an
+Tenant connector credential writes take a dedicated boundary:
+`moa-edge` authenticates and bounds
+`PUT /v1/connectors/connections/{connection_id}/credentials/{slot_name}`, then
+forwards the opaque body to the orchestrator's private
+`/internal/v1/connectors/credentials/write` listener on port 10023. The listener
+derives identity from edge-injected headers and performs delegated `Manage`
+authorization before staging material. Plaintext never enters a Restate
+request, journal, public response, or caller-selected identity/reference field.
+
+The private write stages an inactive candidate, advances the connection's
+secret-free generation fence, and activates only against the exact predecessor.
+Concurrent rotation leaves one winner. Exact rollback revokes only that
+candidate and restores only its recorded non-revoked predecessor. Ordinary
+disconnect revokes all connection versions while preserving history and audit;
+only the bounded tenant-purge actor may delete them.
+
+Operator-owned deployment MCP may use one deployment credential read from an
 operator-selected environment variable at router construction. Missing
 configured material fails startup. The MCP client marks authentication headers
 sensitive and applies them to the complete protocol exchange: initialize,
 initialized notification, discovery, and `tools/call`. Non-success response
 bodies are not copied into errors, so an upstream cannot reflect credentials
 into logs.
+
+## Connector Destination Admission
+
+Production connector HTTP uses one permanently strict outbound policy. It
+accepts one canonical HTTPS origin only when the complete current DNS answer
+set is publicly routable. Every attempt gets a fresh DNS-pinned client with
+system/environment proxies, redirects, and automatic retries disabled.
+Authorization and destination admission run before credential resolution and
+header injection, and every retry repeats the full sequence.
+
+Destination failures expose bounded stable codes, never origins, hosts, IP
+addresses, resolver text, upstream bodies, JSON-RPC errors, or credential-derived
+material. Plain HTTP loopback admission exists only under `cfg(test)` or the
+explicit `test-support` feature for isolated fixtures. The runtime local profile
+does not weaken this policy.
+
+For the complete connection authorization, catalog, idempotency, and
+unknown-outcome contract, see
+[Connectors And Connections](24-connectors-and-connections.md).
 
 ## Encryption And Key Management
 

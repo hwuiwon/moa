@@ -1,6 +1,6 @@
 //! Router construction, provider configuration, and MCP loading helpers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,11 +9,15 @@ use moa_config::LOCAL_DEVELOPMENT_SANDBOX_REVISION;
 use moa_config::MoaConfig;
 use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
+use moa_connectors::catalog::InstalledConnectorCatalogSnapshot;
+use moa_connectors::domain::ConnectionDefinitionRef;
+use moa_connectors::executor::ConnectorActionRuntime;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
     traits::NullLineageHandle, traits::SessionStore, types::action_policy::ActionPolicyEffect,
-    types::action_policy::CallOrigin, types::hands::BuiltinPolicyRevision,
-    types::hands::SandboxPolicySnapshot, types::hands::SandboxTier,
+    types::action_policy::CallOrigin, types::agent::AgentConnectorBinding,
+    types::hands::BuiltinPolicyRevision, types::hands::SandboxPolicySnapshot,
+    types::hands::SandboxTier,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
@@ -425,6 +429,106 @@ impl ToolRouter {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// Builds one ephemeral installed-connector overlay over an immutable base catalog.
+    ///
+    /// `installed` must already have been produced by the governed catalog for
+    /// the authoritative caller and exactly the connection IDs in `bindings`.
+    /// This method performs the second, structural join: every installed action
+    /// must match one exact logical connector binding and its published artifact
+    /// revision. The returned snapshot is never published into the process-wide
+    /// router and therefore cannot leak one agent's connection catalog into
+    /// another session.
+    pub fn installed_connector_overlay(
+        &self,
+        base: &ToolCatalogSnapshot,
+        installed: &InstalledConnectorCatalogSnapshot,
+        bindings: &[AgentConnectorBinding],
+        runtime: Arc<dyn ConnectorActionRuntime>,
+    ) -> Result<Arc<ToolCatalogSnapshot>> {
+        self.require_owned_catalog(base)?;
+        if base.registry.tools.values().any(|registered| {
+            matches!(
+                &registered.execution,
+                super::ToolExecution::InstalledConnectorAction { .. }
+            )
+        }) {
+            return Err(MoaError::ValidationError(
+                "installed connector overlays must be built from the immutable deployment catalog"
+                    .to_string(),
+            ));
+        }
+
+        let mut by_connection = HashMap::new();
+        let mut connector_refs = HashSet::new();
+        for binding in bindings {
+            if binding.connector_ref.trim().is_empty()
+                || binding.connector_ref.trim() != binding.connector_ref
+            {
+                return Err(MoaError::ValidationError(
+                    "agent connector binding reference must be non-empty and trimmed".to_string(),
+                ));
+            }
+            if !connector_refs.insert(binding.connector_ref.as_str()) {
+                return Err(MoaError::ValidationError(format!(
+                    "duplicate agent connector binding for `{}`",
+                    binding.connector_ref
+                )));
+            }
+            if by_connection
+                .insert(binding.connection_id, binding)
+                .is_some()
+            {
+                return Err(MoaError::ValidationError(format!(
+                    "multiple logical connector bindings select connection {}",
+                    binding.connection_id
+                )));
+            }
+        }
+
+        let mut registry = (*base.registry).clone();
+        let mut observed_connections = HashSet::new();
+        for action in installed.actions() {
+            let binding = by_connection.get(&action.connection_id()).ok_or_else(|| {
+                MoaError::ValidationError(format!(
+                    "installed action for connection {} has no agent connector binding",
+                    action.connection_id()
+                ))
+            })?;
+            let expected = ConnectionDefinitionRef::Artifact {
+                artifact_uid: binding.artifact_uid,
+                revision_uid: binding.revision_uid,
+            };
+            if action.definition() != &expected {
+                return Err(MoaError::ValidationError(format!(
+                    "agent connector binding `{}` does not match the installed definition revision",
+                    binding.connector_ref
+                )));
+            }
+            registry.register_installed_connector_action(
+                &binding.connector_ref,
+                action,
+                Arc::clone(&runtime),
+            )?;
+            observed_connections.insert(action.connection_id());
+        }
+
+        if let Some(missing) = bindings
+            .iter()
+            .find(|binding| !observed_connections.contains(&binding.connection_id))
+        {
+            return Err(MoaError::ValidationError(format!(
+                "agent connector binding `{}` has no active installed action",
+                missing.connector_ref
+            )));
+        }
+
+        registry.apply_budgets(&self.tool_budgets);
+        Ok(Arc::new(ToolCatalogSnapshot::new(
+            self.catalog_owner_id,
+            registry,
+        )))
     }
 
     /// Rejects a snapshot minted by a different router instance.

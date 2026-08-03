@@ -116,7 +116,8 @@ async fn mock_connector_end_to_end_db_memory() {
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         96,
-    );
+    )
+    .with_connector_connections(postgres_connector_service(pool.clone()));
 
     let merge_connection = service
         .exchange_public_token(
@@ -241,7 +242,7 @@ async fn mock_connector_end_to_end_db_memory() {
         .list_changed_records(ListChangedRecordsRequest {
             acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             connection: merge_connection_row,
-            credential: RedactedSecret::new("merge-provider-credential".to_string()),
+            credential: Some(RedactedSecret::new("merge-provider-credential".to_string())),
             cursor: None,
             modified_after: None,
             limit: Some(10),
@@ -253,7 +254,7 @@ async fn mock_connector_end_to_end_db_memory() {
         .list_changed_records(ListChangedRecordsRequest {
             acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             connection: nango_connection_row,
-            credential: RedactedSecret::new("nango-provider-credential".to_string()),
+            credential: None,
             cursor: None,
             modified_after: None,
             limit: Some(10),
@@ -773,22 +774,22 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
         pool.clone(),
         scope,
     ));
+    let connection = KnowledgeConnection {
+        connection_uid,
+        tenant_id,
+        provider: "nango".to_string(),
+        connector: "docs".to_string(),
+        provider_account_id: "nango-task14-account".to_string(),
+        metadata: json!({ "safe": "connection" }),
+        source_selection: json!({}),
+        information_barrier: None,
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
+        last_synced_at: Some(modified_after),
+    };
+    seed_managed_connector_parent(&pool, &connection).await;
     repository
-        .upsert_connection(KnowledgeConnection {
-            connection_uid,
-            tenant_id,
-            provider: "nango".to_string(),
-            connector: "docs".to_string(),
-            provider_account_id: "nango-task14-account".to_string(),
-            credential_ref: "c42bc21d-9469-aa8a-2667-39711cae3cb1".to_string(),
-            status: ConnectionStatus::Active,
-            metadata: json!({ "safe": "connection" }),
-            source_selection: json!({}),
-            information_barrier: None,
-            created_at: moa_test_support::fixtures::pg_now(),
-            updated_at: moa_test_support::fixtures::pg_now(),
-            last_synced_at: Some(modified_after),
-        })
+        .upsert_connection(connection)
         .await
         .expect("seed Nango knowledge connection");
     let sync_run_uid =
@@ -913,22 +914,22 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
         pool.clone(),
         scope,
     ));
+    let connection = KnowledgeConnection {
+        connection_uid,
+        tenant_id,
+        provider: "nango".to_string(),
+        connector: "docs".to_string(),
+        provider_account_id: "nango-task14-account".to_string(),
+        metadata: json!({ "safe": "connection" }),
+        source_selection: json!({}),
+        information_barrier: None,
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
+        last_synced_at: Some(modified_after),
+    };
+    seed_managed_connector_parent(&pool, &connection).await;
     repository
-        .upsert_connection(KnowledgeConnection {
-            connection_uid,
-            tenant_id,
-            provider: "nango".to_string(),
-            connector: "docs".to_string(),
-            provider_account_id: "nango-task14-account".to_string(),
-            credential_ref: "c42bc21d-9469-aa8a-2667-39711cae3cb1".to_string(),
-            status: ConnectionStatus::Active,
-            metadata: json!({ "safe": "connection" }),
-            source_selection: json!({}),
-            information_barrier: None,
-            created_at: moa_test_support::fixtures::pg_now(),
-            updated_at: moa_test_support::fixtures::pg_now(),
-            last_synced_at: Some(modified_after),
-        })
+        .upsert_connection(connection)
         .await
         .expect("seed Nango knowledge connection");
     let sync_run_uid =
@@ -1020,8 +1021,6 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             provider: PROVIDER.to_string(),
             connector: CONNECTOR.to_string(),
             provider_account_id: "provider-account-1".to_string(),
-            credential_ref: "resolved-provider-token".to_string(),
-            status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
@@ -1063,16 +1062,16 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
         vec![
             FakeListPageCall {
                 cursor: None,
+                seen_cursors: vec![],
                 limit: 2,
                 page_index: 0,
-                credential_ref: "resolved-provider-token".to_string(),
                 modified_after: Some(modified_after),
             },
             FakeListPageCall {
                 cursor: Some("page-2".to_string()),
+                seen_cursors: vec!["page-2".to_string()],
                 limit: 1,
                 page_index: 1,
-                credential_ref: "resolved-provider-token".to_string(),
                 modified_after: Some(modified_after),
             },
         ]
@@ -1219,16 +1218,16 @@ async fn knowledge_sync_ingestion_workflow_derives_run_identity_and_pages_journa
         vec![
             FakeListPageCall {
                 cursor: None,
+                seen_cursors: vec![],
                 limit: 10,
                 page_index: 0,
-                credential_ref: "resolved-provider-token".to_string(),
                 modified_after: Some(last_synced_at),
             },
             FakeListPageCall {
                 cursor: Some("page-2".to_string()),
+                seen_cursors: vec!["page-2".to_string()],
                 limit: 8,
                 page_index: 1,
-                credential_ref: "resolved-provider-token".to_string(),
                 modified_after: Some(last_synced_at),
             },
         ]

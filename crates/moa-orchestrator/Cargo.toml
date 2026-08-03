@@ -6,7 +6,11 @@ license.workspace = true
 
 [features]
 default = []
-integration = ["moa-test-support/orchestrator-fixture"]
+integration = [
+    "moa-security/test-support",
+    "moa-test-support/connector-api-fixture",
+    "moa-test-support/orchestrator-fixture",
+]
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
 # Deterministic execution-planning fault hooks used only by service E2E fixtures.
@@ -67,6 +71,7 @@ moa-contacts = { workspace = true }
 moa-core = { workspace = true }
 moa-wire = { workspace = true }
 moa-config = { workspace = true }
+moa-connectors = { workspace = true }
 moa-crypto = { workspace = true }
 moa-dlp = { workspace = true }
 moa-kms = { workspace = true }
@@ -121,7 +126,7 @@ moa-artifacts = { workspace = true, features = ["test-support"] }
 clickhouse = { workspace = true, features = ["test-util"] }
 moa-analytics-export = { workspace = true }
 moa-eval-core.workspace = true
-moa-test-support = { workspace = true, features = ["orchestrator-fixture"] }
+moa-test-support = { workspace = true, features = ["connector-api-fixture", "orchestrator-fixture"] }
 serde_canonical_json.workspace = true
 tempfile.workspace = true
 

@@ -155,6 +155,83 @@
       }
     },
     {
+      "type": "connector_connection",
+      "metadata": {
+        "relations": {
+          "tenant": {
+            "directly_related_user_types": [
+              {
+                "type": "tenant"
+              }
+            ]
+          },
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "operator"
+              }
+            ]
+          },
+          "use": {
+            "directly_related_user_types": [
+              {
+                "type": "contact"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "operator"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "tenant": {
+          "this": {}
+        },
+        "owner": {
+          "this": {}
+        },
+        "manage": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "tenant"
+                  },
+                  "computedUserset": {
+                    "relation": "admin"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "use": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "manage"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "type": "tenant",
       "metadata": {
         "relations": {

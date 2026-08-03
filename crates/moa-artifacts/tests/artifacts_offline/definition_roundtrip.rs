@@ -324,6 +324,130 @@ definition:
 }
 
 #[test]
+fn agent_connector_bindings_are_reference_visible_and_structurally_unique() {
+    // Pins: authoring policies resolve one logical connector to one explicit
+    // connection without adding a second top-level agent capability surface.
+    let valid_yaml = r#"
+api_version: moa.artifact/v1
+kind: agent
+metadata:
+  name: billing-agent
+definition:
+  type: agent
+  spec:
+    display_name: Billing Agent
+    purpose:
+      summary: Manage billing operations.
+    action_policy:
+      allowed:
+        - action://billing.CreateInvoice
+      connector_bindings:
+        - connector_ref: connector://billing
+          connection_id: 018f8f1f-36a6-7c90-a7f8-2f2f57f5c111
+"#;
+    let document = ArtifactDocument::from_yaml(valid_yaml).expect("bound agent should parse");
+    let references = document
+        .reference_paths()
+        .into_iter()
+        .map(|(path, reference)| (path, reference.to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        references,
+        vec![
+            (
+                "definition.spec.action_policy.allowed[0]".to_string(),
+                "action://billing.CreateInvoice".to_string(),
+            ),
+            (
+                "definition.spec.action_policy.connector_bindings[0].connector_ref".to_string(),
+                "connector://billing".to_string(),
+            ),
+        ]
+    );
+    assert!(
+        validate_for_status(&document, ArtifactStatus::Draft).is_ok(),
+        "one canonical connector binding should validate"
+    );
+
+    let duplicate_yaml = valid_yaml.replace(
+        "          connection_id: 018f8f1f-36a6-7c90-a7f8-2f2f57f5c111",
+        r#"          connection_id: 018f8f1f-36a6-7c90-a7f8-2f2f57f5c111
+        - connector_ref: connector://billing
+          connection_id: 018f8f1f-36a6-7c90-a7f8-2f2f57f5c111"#,
+    );
+    let duplicate = ArtifactDocument::from_yaml(&duplicate_yaml)
+        .expect("duplicate binding fixture should parse before semantic validation");
+    let report = validate_for_status(&duplicate, ArtifactStatus::Draft);
+    assert_error(
+        &report,
+        "definition.spec.action_policy.connector_bindings[1].connector_ref",
+        "duplicate connector binding reference",
+    );
+    assert_error(
+        &report,
+        "definition.spec.action_policy.connector_bindings[1].connection_id",
+        "connection may be bound to only one logical connector reference",
+    );
+}
+
+#[test]
+fn empty_agent_connector_bindings_preserve_the_pre_t1_policy_shape() {
+    // Pins: agents without connection bindings keep byte-identical authoring policy JSON.
+    let yaml = r#"
+api_version: moa.artifact/v1
+kind: agent
+metadata:
+  name: legacy-agent
+definition:
+  type: agent
+  spec:
+    display_name: Legacy Agent
+    purpose:
+      summary: Continue serving legacy actions.
+    action_policy:
+      allowed:
+        - action://legacy-action
+      require_admin_review:
+        - action://legacy-action
+"#;
+    let document = ArtifactDocument::from_yaml(yaml).expect("legacy agent should parse");
+    let encoded = serde_json::to_value(&document).expect("legacy agent should serialize");
+    assert_eq!(
+        encoded["definition"]["spec"]["action_policy"],
+        serde_json::json!({
+            "allowed": ["action://legacy-action"],
+            "require_admin_review": ["action://legacy-action"]
+        })
+    );
+}
+
+#[test]
+fn agent_connector_binding_rejects_embedded_credential_material() {
+    // Pins: agent artifacts select only a connection ID and cannot carry its secret.
+    let yaml = r#"
+api_version: moa.artifact/v1
+kind: agent
+metadata:
+  name: unsafe-agent
+definition:
+  type: agent
+  spec:
+    display_name: Unsafe Agent
+    purpose:
+      summary: This fixture must fail before it can persist.
+    action_policy:
+      connector_bindings:
+        - connector_ref: connector://billing
+          connection_id: 018f8f1f-36a6-7c90-a7f8-2f2f57f5c111
+          credential: plaintext-must-not-decode
+"#;
+    assert!(
+        ArtifactDocument::from_yaml(yaml).is_err(),
+        "connector binding DTO must reject credential material"
+    );
+}
+
+#[test]
 fn agent_validation_rejects_empty_required_policy_fields() {
     // Pins: invalid tenant-configurable agent policies fail before publish.
     let yaml = r#"

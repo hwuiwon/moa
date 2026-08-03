@@ -559,6 +559,7 @@ async fn handle_tool_call(
                 generation: tool_context.generation,
             },
             capability_provenance: None,
+            capability_policy_context: None,
             resource_budget: tool_context.resource_budget,
         };
         append_cached_tool_result(ctx, &request, &cached_output).await?;
@@ -588,6 +589,7 @@ async fn handle_tool_call(
                 generation: tool_context.generation,
             },
             capability_provenance: None,
+            capability_policy_context: None,
             resource_budget: tool_context.resource_budget,
         },
         workflow.session_limits(),

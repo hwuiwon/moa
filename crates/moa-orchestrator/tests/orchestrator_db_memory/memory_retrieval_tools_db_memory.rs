@@ -256,11 +256,26 @@ async fn govern_tenant_chunk(
         .await
         .expect("begin source-ACL fixture transaction");
     sqlx::query(
+        "INSERT INTO moa.connector_connections ( \
+             connection_uid, tenant_id, display_name, built_in_key, built_in_version, \
+             non_secret_config, lifecycle_status, health_status) \
+         VALUES ($1, $2, 'memory-tool-test', 'knowledge:nango', 1, \
+                 jsonb_build_object( \
+                     'provider_config_key', 'memory-tool-test', \
+                     'provider_connection_id', $1::TEXT, \
+                     'connector', 'google-drive'), \
+                 'active', 'ready')",
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .execute(conn.as_mut())
+    .await
+    .expect("insert governed connector parent");
+    sqlx::query(
         "INSERT INTO moa.knowledge_connections ( \
              connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
-             provider_connection_id, connector, credential_ref, status, metadata) \
-         VALUES ($1, $2, $3, 'nango', 'memory-tool-test', $4, 'google-drive', \
-                 'test-credential', 'active', '{}'::JSONB)",
+             provider_connection_id, connector, metadata) \
+         VALUES ($1, $2, $3, 'nango', 'memory-tool-test', $4, 'google-drive', '{}'::JSONB)",
     )
     .bind(connection_uid)
     .bind(tenant_id.0)

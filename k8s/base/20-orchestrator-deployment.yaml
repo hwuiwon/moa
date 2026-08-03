@@ -70,11 +70,15 @@ spec:
             - "9080"
             - --health-port
             - "9081"
+            - --credential-port
+            - "10023"
           ports:
             - name: restate
               containerPort: 9080
             - name: health
               containerPort: 9081
+            - name: credentials
+              containerPort: 10023
           readinessProbe:
             httpGet:
               path: /_health/ready

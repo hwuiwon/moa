@@ -33,19 +33,19 @@ use crate::types::{
     contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
     contact::StoredSessionAttachment, context::ProcessorOutput, context::WorkingContext,
     credentials::CredentialContext, credentials::CredentialError, credentials::CredentialIdentity,
-    credentials::CredentialRef, credentials::CredentialSource, credentials::CredentialVersion,
-    credentials::RedactedSecret, events_stream::ClaimCheck, events_stream::EventFilter,
-    events_stream::EventRange, events_stream::EventRecord, events_stream::SequenceNum,
-    experience::ExperienceAttribution, experience::ExperienceRecord, experience::LearningCandidate,
-    experience::LearningCandidateStatus, experience::LearningCandidateStatusUpdate,
-    experience::TaskStrategySuccessRate, hands::HandHandle, hands::HandProviderCapabilities,
-    hands::HandSpec, hands::HandStatus, hands::SandboxFile, identifiers::SegmentId,
-    identifiers::SessionAttachmentId, identifiers::SessionId, identifiers::StoragePartitionId,
-    identifiers::TenantId, identifiers::ToolCallId, learning::LearningEntry,
-    model::ModelCapabilities, segment_assessment::SegmentAssessment,
-    segment_assessment::SegmentBaseline, segment_assessment::SkillResolutionRate,
-    segments::SegmentCompletion, segments::TaskSegment, session::Checkpoint,
-    session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
+    credentials::CredentialRef, credentials::CredentialSource, credentials::CredentialStagingToken,
+    credentials::CredentialVersion, credentials::RedactedSecret, events_stream::ClaimCheck,
+    events_stream::EventFilter, events_stream::EventRange, events_stream::EventRecord,
+    events_stream::SequenceNum, experience::ExperienceAttribution, experience::ExperienceRecord,
+    experience::LearningCandidate, experience::LearningCandidateStatus,
+    experience::LearningCandidateStatusUpdate, experience::TaskStrategySuccessRate,
+    hands::HandHandle, hands::HandProviderCapabilities, hands::HandSpec, hands::HandStatus,
+    hands::SandboxFile, identifiers::SegmentId, identifiers::SessionAttachmentId,
+    identifiers::SessionId, identifiers::StoragePartitionId, identifiers::TenantId,
+    identifiers::ToolCallId, learning::LearningEntry, model::ModelCapabilities,
+    segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
+    segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
+    session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
     session::SessionStatus, session::SessionSummary, snapshot::ContextSnapshot, tools::ToolOutput,
 };
 
@@ -912,11 +912,12 @@ pub trait ContextProcessor: Send + Sync {
 
 /// Durable, tenant-scoped credential storage.
 ///
-/// Every operation is addressed by typed identity — never a `(service, scope)`
-/// string — and carries a [`CredentialContext`] with the acting principal, the
-/// requested operation, and a replay-stable operation identity. Implementations
-/// own their storage handle and must not borrow a caller's request transaction,
-/// so a credential written by one replica resolves on another.
+/// Every operation is addressed by typed identity, including its required
+/// credential slot — never a `(service, scope)` string — and carries a
+/// [`CredentialContext`] with the acting principal, the requested operation,
+/// and a replay-stable operation identity. Implementations own their storage
+/// handle and must not borrow a caller's request transaction, so a credential
+/// written by one replica resolves on another.
 ///
 /// There is deliberately no enumeration operation: a caller-selected tenant
 /// credential listing cannot be authorized meaningfully.
@@ -933,6 +934,45 @@ pub trait CredentialVault: Send + Sync {
         ctx: &CredentialContext,
     ) -> std::result::Result<CredentialVersion, CredentialError>;
 
+    /// Seals a new version as inactive without changing the active version.
+    ///
+    /// The returned host-internal token records the exact staged version and
+    /// the exact active predecessor observed in the staging transaction. A
+    /// replay of the same operation returns that same token. Connection
+    /// generation fencing happens after this method and before activation.
+    async fn stage(
+        &self,
+        identity: CredentialIdentity,
+        material: SecretString,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<CredentialStagingToken, CredentialError>;
+
+    /// Activates one staged version under an exact predecessor compare-and-swap.
+    ///
+    /// Implementations lock and validate the staged identity and predecessor in
+    /// one transaction, deactivate only that predecessor, and activate only the
+    /// staged version. A replay returns the same activated version.
+    async fn activate_staged(
+        &self,
+        staged: &CredentialStagingToken,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<CredentialVersion, CredentialError>;
+
+    /// Compensates one completed staged activation without exposing material.
+    ///
+    /// The exact `candidate` must still be active. Implementations atomically
+    /// revoke and deactivate it, then reactivate only the exact non-revoked
+    /// `prior_active` version from the same series. When `prior_active` is
+    /// `None`, the series is deliberately left inactive. Exact retries replay
+    /// the same candidate description; stale or mismatched references fail
+    /// closed without changing the series.
+    async fn rollback_activation(
+        &self,
+        candidate: CredentialRef,
+        prior_active: Option<CredentialRef>,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<CredentialVersion, CredentialError>;
+
     /// Resolves the plaintext behind `source` for one authorized outbound request.
     ///
     /// The operation's audit row is committed before plaintext is returned, so a
@@ -940,6 +980,40 @@ pub trait CredentialVault: Send + Sync {
     async fn resolve(
         &self,
         source: &CredentialSource,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<RedactedSecret, CredentialError>;
+
+    /// Returns whether one exact credential series has an active usable version.
+    ///
+    /// This is a secret-free status check for an already-authorized connection
+    /// and slot. It never returns a credential reference, version, ciphertext,
+    /// or plaintext and cannot enumerate tenant credential state.
+    async fn has_active(
+        &self,
+        identity: &CredentialIdentity,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<bool, CredentialError>;
+
+    /// Returns active readiness for exact tenant connection series in input order.
+    ///
+    /// This is a secret-free, set-based status read for already-authorized
+    /// connections. Implementations must preserve exact positional mapping,
+    /// including duplicate identities, and must not return credential
+    /// references, versions, ciphertext, or plaintext.
+    async fn has_active_batch(
+        &self,
+        identities: &[CredentialIdentity],
+        ctx: &CredentialContext,
+    ) -> std::result::Result<Vec<bool>, CredentialError>;
+
+    /// Resolves the one active version for an exact tenant connection series.
+    ///
+    /// The implementation commits a replay-stable audit row that identifies
+    /// the selected version before decrypting any plaintext. There is no
+    /// fallback across tenants, connections, kinds, or credential slots.
+    async fn resolve_active(
+        &self,
+        identity: &CredentialIdentity,
         ctx: &CredentialContext,
     ) -> std::result::Result<RedactedSecret, CredentialError>;
 
@@ -971,6 +1045,18 @@ pub trait CredentialVault: Send + Sync {
         reference: CredentialRef,
         ctx: &CredentialContext,
     ) -> std::result::Result<(), CredentialError>;
+
+    /// Revokes every version owned by one tenant connection without deleting history.
+    ///
+    /// This is the ordinary disconnect operation. It returns only the number of
+    /// versions newly revoked and never enumerates credential identities or
+    /// references. Replays are idempotent, and all version plus append-only audit
+    /// rows remain available for lifecycle and security review.
+    async fn revoke_connection(
+        &self,
+        connection_uid: Uuid,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<u64, CredentialError>;
 
     /// Removes every credential version for one tenant connection.
     ///

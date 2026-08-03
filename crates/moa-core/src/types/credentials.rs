@@ -3,7 +3,8 @@
 //! These types replace the old free-form `(service, scope)` credential address.
 //! Two boundaries are encoded in the type system rather than in strings:
 //!
-//! - **Persistence identity** is `(tenant, owning connection, kind, version)`.
+//! - **Persistence identity** is
+//!   `(tenant, owning connection, kind, slot, version)`.
 //!   It says *which stored secret* a row is, and nothing about who may read it.
 //! - **Resolution context** carries the acting principal (or a closed service
 //!   actor), the requested operation, and a replay-stable operation identity.
@@ -14,14 +15,151 @@
 //! tenant connection, so they are a distinct [`CredentialSource`] variant rather
 //! than a tenant credential with a synthetic connection.
 
+use std::borrow::Cow;
 use std::fmt;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
 use crate::types::identifiers::TenantId;
+
+/// Validated logical name for one credential slot in a connector definition.
+///
+/// Slot names are lowercase ASCII identifiers matching
+/// `[a-z][a-z0-9_]{0,62}`. The type validates both programmatic construction
+/// and deserialization, so an invalid persisted or wire value cannot enter a
+/// connector auth contract.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CredentialSlotName(Cow<'static, str>);
+
+impl CredentialSlotName {
+    /// Conventional slot used by single-credential connectors.
+    pub const PRIMARY: Self = Self(Cow::Borrowed("primary"));
+
+    /// Validates and constructs a credential slot name.
+    pub fn new(value: impl Into<String>) -> crate::error::Result<Self> {
+        Self::try_from(value.into())
+    }
+
+    /// Returns the canonical slot name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl fmt::Debug for CredentialSlotName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CredentialSlotName")
+            .field(&self.as_str())
+            .finish()
+    }
+}
+
+impl fmt::Display for CredentialSlotName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for CredentialSlotName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for CredentialSlotName {
+    type Err = crate::error::MoaError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        validate_credential_slot_name(value)?;
+        if value == Self::PRIMARY.as_str() {
+            Ok(Self::PRIMARY)
+        } else {
+            Ok(Self(Cow::Owned(value.to_string())))
+        }
+    }
+}
+
+impl TryFrom<&str> for CredentialSlotName {
+    type Error = crate::error::MoaError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::from_str(value)
+    }
+}
+
+impl TryFrom<String> for CredentialSlotName {
+    type Error = crate::error::MoaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_credential_slot_name(&value)?;
+        if value == Self::PRIMARY.as_str() {
+            Ok(Self::PRIMARY)
+        } else {
+            Ok(Self(Cow::Owned(value)))
+        }
+    }
+}
+
+impl Serialize for CredentialSlotName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CredentialSlotName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for CredentialSlotName {
+    fn schema_name() -> Cow<'static, str> {
+        "CredentialSlotName".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::CredentialSlotName").into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,62}$",
+            "minLength": 1,
+            "maxLength": 63
+        })
+    }
+}
+
+fn validate_credential_slot_name(value: &str) -> crate::error::Result<()> {
+    let bytes = value.as_bytes();
+    let valid = (1..=63).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err(crate::error::MoaError::ValidationError(
+            "credential slot name must match [a-z][a-z0-9_]{0,62}".to_string(),
+        ))
+    }
+}
 
 /// Kind of credential material stored for one tenant connection.
 ///
@@ -61,14 +199,16 @@ impl CredentialKind {
 ///
 /// A series accumulates versions through rotation; the active version is the
 /// one resolution returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CredentialIdentity {
     /// Owning tenant.
     pub tenant_id: TenantId,
-    /// Owning knowledge connection this credential belongs to.
+    /// Owning connector connection this credential belongs to.
     pub connection_uid: Uuid,
     /// Material kind stored under this identity.
     pub kind: CredentialKind,
+    /// Logical connector credential slot stored under this identity.
+    pub slot_name: CredentialSlotName,
 }
 
 /// Opaque durable handle to one exact stored credential version.
@@ -252,6 +392,12 @@ pub enum CredentialSource {
 pub enum CredentialOperation {
     /// Store the first version of a new credential series.
     Create,
+    /// Store a sealed version without changing the active version.
+    Stage,
+    /// Atomically make one staged version active under compare-and-swap.
+    Activate,
+    /// Compensate one staged activation under an exact predecessor compare-and-swap.
+    RollbackActivation,
     /// Read the active version's plaintext for an authorized outbound request.
     Resolve,
     /// Store a new active version, superseding the current one.
@@ -268,6 +414,9 @@ impl CredentialOperation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Create => "create",
+            Self::Stage => "stage",
+            Self::Activate => "activate",
+            Self::RollbackActivation => "rollback_activation",
             Self::Resolve => "resolve",
             Self::Rotate => "rotate",
             Self::Revoke => "revoke",
@@ -285,6 +434,8 @@ impl CredentialOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialServiceActor {
+    /// Secret-free connector management checks exact slot readiness.
+    ConnectorManagementReadiness,
     /// The durable knowledge sync workflow listing provider records.
     KnowledgeSyncListing,
     /// Trusted content fetch for an already-listed knowledge record.
@@ -302,6 +453,7 @@ impl CredentialServiceActor {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ConnectorManagementReadiness => "connector_management_readiness",
             Self::KnowledgeSyncListing => "knowledge_sync_listing",
             Self::KnowledgeContentFetch => "knowledge_content_fetch",
             Self::TenantLifecyclePurge => "tenant_lifecycle_purge",
@@ -316,7 +468,9 @@ impl CredentialServiceActor {
     #[must_use]
     pub fn permits(self, operation: CredentialOperation) -> bool {
         match self {
-            Self::KnowledgeSyncListing | Self::KnowledgeContentFetch => {
+            Self::ConnectorManagementReadiness
+            | Self::KnowledgeSyncListing
+            | Self::KnowledgeContentFetch => {
                 matches!(operation, CredentialOperation::Resolve)
             }
             Self::TenantLifecyclePurge => matches!(operation, CredentialOperation::Delete),
@@ -408,6 +562,75 @@ pub struct CredentialVersion {
     pub revoked: bool,
     /// When this version was created.
     pub created_at: DateTime<Utc>,
+}
+
+/// Internal handoff for one inactive credential version awaiting activation.
+///
+/// The token contains no plaintext and deliberately implements neither
+/// `Serialize` nor `Display`. Its fixed [`Debug`](fmt::Debug) output also hides
+/// credential references. The host ingress retains it locally while a separate
+/// secret-free connection generation-fence command runs; it must never enter a
+/// Restate request, trace, or wire payload. It is not an authorization
+/// capability: vault implementations must revalidate every field while holding
+/// the credential-series lock.
+#[derive(PartialEq, Eq)]
+pub struct CredentialStagingToken {
+    staged_reference: CredentialRef,
+    identity: CredentialIdentity,
+    version: i64,
+    expected_prior_active: Option<CredentialRef>,
+}
+
+impl CredentialStagingToken {
+    /// Constructs a host-internal staging handoff.
+    ///
+    /// This constructor exists for vault implementations and deterministic
+    /// fakes. Production activation treats the value only as an assertion and
+    /// validates it against durable state in one transaction.
+    #[must_use]
+    pub fn new(
+        staged_reference: CredentialRef,
+        identity: CredentialIdentity,
+        version: i64,
+        expected_prior_active: Option<CredentialRef>,
+    ) -> Self {
+        Self {
+            staged_reference,
+            identity,
+            version,
+            expected_prior_active,
+        }
+    }
+
+    /// Returns the exact inactive version staged by the vault.
+    #[must_use]
+    pub fn staged_reference(&self) -> CredentialRef {
+        self.staged_reference
+    }
+
+    /// Returns the exact credential series bound to the staged version.
+    #[must_use]
+    pub fn identity(&self) -> &CredentialIdentity {
+        &self.identity
+    }
+
+    /// Returns the staged series version.
+    #[must_use]
+    pub fn version(&self) -> i64 {
+        self.version
+    }
+
+    /// Returns the active version observed when staging began, if any.
+    #[must_use]
+    pub fn expected_prior_active(&self) -> Option<CredentialRef> {
+        self.expected_prior_active
+    }
+}
+
+impl fmt::Debug for CredentialStagingToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CredentialStagingToken(<redacted>)")
+    }
 }
 
 /// Plaintext secret handed to an authorized outbound request.

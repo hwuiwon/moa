@@ -153,6 +153,11 @@ impl KnowledgeService {
                 }
                 run = existing;
             }
+            SyncRunClaim::ParentInactive => {
+                return Err(KnowledgeServiceError::InvalidRequest(
+                    "knowledge connection parent is not active".to_string(),
+                ));
+            }
         }
         let provider_label = connection.provider.clone();
         let current_span = tracing::Span::current();
@@ -383,7 +388,7 @@ impl KnowledgeService {
                 provider: projection.connection.provider,
                 connector: projection.connection.connector,
                 provider_account_id: projection.connection.provider_account_id,
-                status: projection.connection.status.as_str().to_string(),
+                status: projection.parent_lifecycle_status,
                 last_sync_status: projection
                     .last_sync_status
                     .map(|status| status.as_str().to_string()),

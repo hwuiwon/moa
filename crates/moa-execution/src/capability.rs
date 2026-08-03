@@ -3,6 +3,7 @@
 use std::{fmt, str::FromStr};
 
 use moa_artifacts::{
+    document::ArtifactKind,
     execution_plan::{
         CapabilityReference, ExecutionPlanDefinition, PlanAmendment, PlanAmendmentOperation,
     },
@@ -10,7 +11,7 @@ use moa_artifacts::{
 };
 use moa_core::types::{
     action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-    identifiers::TenantId,
+    identifiers::{ConnectorConnectionId, TenantId},
     tools::IdempotencyClass,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -136,7 +137,10 @@ impl ExecutionCapabilityCatalog {
     pub fn build(capabilities: Vec<ExecutionCapability>) -> Result<Self> {
         let mut keyed = capabilities
             .into_iter()
-            .map(|capability| Ok((canonical_sort_key(&capability.reference)?, capability)))
+            .map(|capability| {
+                capability.validate_policy_context()?;
+                Ok((canonical_sort_key(&capability.reference)?, capability))
+            })
             .collect::<Result<Vec<_>>>()?;
         keyed.sort_by(|left, right| left.0.cmp(&right.0));
         if let Some(window) = keyed.windows(2).find(|window| window[0].0 == window[1].0) {
@@ -227,8 +231,227 @@ pub struct ExecutionCapability {
     pub execution_class: ExecutionClass,
     /// Source provenance for this catalog entry.
     pub source: CapabilitySource,
+    /// Canonical policy floor and artifact identity carried to durable dispatch.
+    pub policy_context: CapabilityPolicyContext,
     /// Required worst-case estimate; catalog capabilities must declare one task.
     pub estimate: ExecutionEstimate,
+}
+
+impl ExecutionCapability {
+    pub(crate) fn validate_policy_context(&self) -> Result<()> {
+        if self.policy_context.source != self.source {
+            return Err(Error::InvalidProjection {
+                message: format!(
+                    "capability {} policy source does not match its dispatch source",
+                    self.reference.name
+                ),
+            });
+        }
+        if let CapabilitySource::InstalledConnectorAction {
+            governed_contract_revision,
+            ..
+        } = &self.source
+            && self.contract_revision != *governed_contract_revision
+        {
+            return Err(Error::InvalidProjection {
+                message: format!(
+                    "capability {} installed connector governed revision does not match its contract revision",
+                    self.reference.name
+                ),
+            });
+        }
+        self.policy_context
+            .validate_for_source(&self.reference.name, &self.source)
+    }
+}
+
+/// Canonical action-policy identity and minimum effect pinned with one capability.
+///
+/// The context is part of the immutable catalog so durable dispatch never has to
+/// infer artifact governance from a display name, version string, or live tool
+/// registration. `minimum_effect` is a floor: live tool and tenant policy may make
+/// an invocation stricter, but may not make it weaker.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityPolicyContext {
+    /// Exact capability source whose policy this context governs.
+    pub source: CapabilitySource,
+    /// Canonical action reference used by artifact-aware policy, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_action_ref: Option<ArtifactRef>,
+    /// Artifact row pinned by the capability, when the source is artifact-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_uid: Option<uuid::Uuid>,
+    /// Artifact revision pinned by the capability, when the source is artifact-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_uid: Option<uuid::Uuid>,
+    /// Least permissive effect that policy evaluation may return.
+    pub minimum_effect: ActionPolicyEffect,
+}
+
+impl CapabilityPolicyContext {
+    /// Builds policy context for a non-artifact registered capability.
+    #[must_use]
+    pub fn registered(source: CapabilitySource) -> Self {
+        Self {
+            source,
+            canonical_action_ref: None,
+            artifact_uid: None,
+            revision_uid: None,
+            minimum_effect: ActionPolicyEffect::Allow,
+        }
+    }
+
+    /// Builds policy context for an artifact-backed capability.
+    #[must_use]
+    pub fn artifact(
+        source: CapabilitySource,
+        canonical_action_ref: Option<ArtifactRef>,
+        artifact_uid: uuid::Uuid,
+        revision_uid: uuid::Uuid,
+        minimum_effect: ActionPolicyEffect,
+    ) -> Self {
+        Self {
+            source,
+            canonical_action_ref,
+            artifact_uid: Some(artifact_uid),
+            revision_uid: Some(revision_uid),
+            minimum_effect,
+        }
+    }
+
+    fn validate_for_source(&self, reference: &str, source: &CapabilitySource) -> Result<()> {
+        let invalid = |message: String| Error::InvalidProjection {
+            message: format!("capability {reference} has invalid policy context: {message}"),
+        };
+        match source {
+            CapabilitySource::ActionArtifact {
+                action_ref,
+                revision_uid,
+                ..
+            } => {
+                if self.canonical_action_ref.as_ref() != Some(action_ref) {
+                    return Err(invalid(
+                        "standalone action reference does not match its source".to_string(),
+                    ));
+                }
+                if self.artifact_uid.is_none() || self.revision_uid != Some(*revision_uid) {
+                    return Err(invalid(
+                        "standalone action artifact and revision IDs must be pinned".to_string(),
+                    ));
+                }
+            }
+            CapabilitySource::ConnectorAction {
+                connector_ref,
+                revision_uid,
+                action_id,
+                ..
+            } => {
+                let expected = ArtifactRef::action(connector_ref.target_name(), action_id);
+                if self.canonical_action_ref.as_ref() != Some(&expected) {
+                    return Err(invalid(
+                        "connector action reference does not match its source".to_string(),
+                    ));
+                }
+                if self.artifact_uid.is_none() || self.revision_uid != Some(*revision_uid) {
+                    return Err(invalid(
+                        "connector artifact and revision IDs must be pinned".to_string(),
+                    ));
+                }
+            }
+            CapabilitySource::InstalledConnectorAction {
+                connector_ref,
+                connection_id,
+                binding_id,
+                connection_generation,
+                definition_artifact_uid,
+                definition_revision_uid,
+                action_id,
+                contract_hash,
+                governed_contract_revision,
+                minimum_effect,
+                tool_name,
+            } => {
+                if connector_ref.artifact_kind() != Some(&ArtifactKind::Connector) {
+                    return Err(invalid(
+                        "installed connector reference must identify a connector artifact"
+                            .to_string(),
+                    ));
+                }
+                let expected = ArtifactRef::action(connector_ref.target_name(), action_id);
+                if self.canonical_action_ref.as_ref() != Some(&expected) {
+                    return Err(invalid(
+                        "installed connector action reference does not match its source"
+                            .to_string(),
+                    ));
+                }
+                if self.artifact_uid != Some(*definition_artifact_uid)
+                    || self.revision_uid != Some(*definition_revision_uid)
+                {
+                    return Err(invalid(
+                        "installed connector definition artifact and revision IDs must match its source"
+                            .to_string(),
+                    ));
+                }
+                if self.minimum_effect != *minimum_effect {
+                    return Err(invalid(
+                        "installed connector minimum effect must match its source".to_string(),
+                    ));
+                }
+                if connection_id.0.is_nil()
+                    || binding_id.is_nil()
+                    || *connection_generation == 0
+                    || definition_artifact_uid.is_nil()
+                    || definition_revision_uid.is_nil()
+                    || !is_trimmed_nonempty(action_id)
+                    || !is_canonical_digest(contract_hash)
+                    || !is_trimmed_nonempty(governed_contract_revision)
+                    || !is_trimmed_nonempty(tool_name)
+                {
+                    return Err(invalid(
+                        "installed connector dispatch pins must be complete and non-empty"
+                            .to_string(),
+                    ));
+                }
+            }
+            CapabilitySource::SkillAction { revision_uid, .. }
+            | CapabilitySource::SkillCode { revision_uid, .. } => {
+                if self.artifact_uid.is_none() || self.revision_uid != Some(*revision_uid) {
+                    return Err(invalid(
+                        "skill artifact and revision IDs must be pinned".to_string(),
+                    ));
+                }
+            }
+            CapabilitySource::BuiltInTool { .. }
+            | CapabilitySource::HandTool { .. }
+            | CapabilitySource::McpTool { .. }
+            | CapabilitySource::Memory { .. }
+            | CapabilitySource::Knowledge { .. }
+            | CapabilitySource::Model => {
+                if self.canonical_action_ref.is_some()
+                    || self.artifact_uid.is_some()
+                    || self.revision_uid.is_some()
+                    || self.minimum_effect != ActionPolicyEffect::Allow
+                {
+                    return Err(invalid(
+                        "registered capabilities cannot claim artifact policy identity".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_trimmed_nonempty(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
+fn is_canonical_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Resource execution class for one capability.
@@ -280,24 +503,53 @@ pub enum CapabilitySource {
         /// mistake this shape exists to prevent.
         remote_name: String,
     },
-    /// Published standalone action artifact backed by a registered tool.
+    /// Serving standalone action artifact backed by a registered tool.
     ActionArtifact {
-        /// Stable published action reference.
+        /// Stable serving action reference.
         action_ref: ArtifactRef,
-        /// Exact published artifact revision.
+        /// Exact serving artifact revision.
         revision_uid: uuid::Uuid,
         /// Registered backing tool name.
         tool_name: String,
     },
-    /// Published connector action backed by a registered tool.
+    /// Validated connector action backed by a registered tool.
     ConnectorAction {
         /// Stable connector action reference.
         connector_ref: ArtifactRef,
-        /// Exact published connector revision.
+        /// Exact validated connector revision.
         revision_uid: uuid::Uuid,
         /// Connector action identifier.
         action_id: String,
         /// Registered backing tool name.
+        tool_name: String,
+    },
+    /// Tenant-installed connector action with durable connection and contract provenance.
+    ///
+    /// The model-visible `tool_name` is only a lookup key. Dispatch authority is
+    /// carried by the remaining typed and generation-fenced fields and must never
+    /// be reconstructed by parsing that name.
+    InstalledConnectorAction {
+        /// Canonical logical connector reference selected by the agent policy.
+        connector_ref: ArtifactRef,
+        /// Exact tenant-installed connection selected for this logical connector.
+        connection_id: ConnectorConnectionId,
+        /// Exact immutable installed-action binding row.
+        binding_id: uuid::Uuid,
+        /// Positive connection generation that produced the binding.
+        connection_generation: u64,
+        /// Stable connector definition artifact row.
+        definition_artifact_uid: uuid::Uuid,
+        /// Exact immutable connector definition revision.
+        definition_revision_uid: uuid::Uuid,
+        /// Canonical definition-local action identifier.
+        action_id: String,
+        /// Canonical hash of the installed binding's compiled operation contract.
+        contract_hash: String,
+        /// Policy-facing governed contract revision checked again at dispatch.
+        governed_contract_revision: String,
+        /// Definition-enforced action-policy floor.
+        minimum_effect: ActionPolicyEffect,
+        /// Model-visible overlay tool name used only for registry lookup.
         tool_name: String,
     },
     /// Action declared by an activated skill.
@@ -334,6 +586,27 @@ pub enum CapabilitySource {
     },
     /// Model capability.
     Model,
+}
+
+impl CapabilitySource {
+    /// Returns the model-visible registered tool name used for governed dispatch.
+    ///
+    /// Task-local agents expose and receive tool calls by this name. Multiple
+    /// canonical capability references may therefore share it, which callers
+    /// must treat as ambiguous rather than resolving by declaration order.
+    #[must_use]
+    pub fn model_visible_tool_name(&self) -> Option<&str> {
+        match self {
+            Self::BuiltInTool { name } | Self::HandTool { name } => Some(name),
+            Self::McpTool { tool_name, .. }
+            | Self::ActionArtifact { tool_name, .. }
+            | Self::ConnectorAction { tool_name, .. }
+            | Self::InstalledConnectorAction { tool_name, .. }
+            | Self::SkillAction { tool_name, .. }
+            | Self::Memory { tool_name, .. } => Some(tool_name),
+            Self::SkillCode { .. } | Self::Knowledge { .. } | Self::Model => None,
+        }
+    }
 }
 
 /// Integer worst-case or actual resource estimate.
@@ -513,18 +786,21 @@ fn decode_hex_nibble(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use moa_artifacts::execution_plan::CapabilityReference;
+    use moa_artifacts::reference::ArtifactRef;
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
         tools::IdempotencyClass,
     };
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::{
-        CapabilitySource, ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass,
-        ExecutionEstimate, catalog_hash,
+        CapabilityPolicyContext, CapabilitySource, ExecutionCapability, ExecutionCapabilityCatalog,
+        ExecutionClass, ExecutionEstimate, catalog_hash,
     };
 
     fn capability(name: &str, source: CapabilitySource) -> ExecutionCapability {
+        let policy_context = CapabilityPolicyContext::registered(source.clone());
         ExecutionCapability {
             reference: CapabilityReference {
                 name: name.to_string(),
@@ -540,6 +816,7 @@ mod tests {
             idempotency_class: IdempotencyClass::Idempotent,
             execution_class: ExecutionClass::Data,
             source,
+            policy_context,
             estimate: ExecutionEstimate {
                 tool_calls: 1,
                 tasks: 1,
@@ -615,6 +892,73 @@ mod tests {
                 crate::Error::DuplicateCapabilityReference { ref reference, .. }
                     if reference == "search"
             ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn capability_policy_context_survives_catalog_serialization_with_exact_identity() {
+        // Pins: the immutable catalog carries canonical action identity, exact
+        // artifact/revision IDs, source provenance, and the review floor through replay.
+        let action_ref = ArtifactRef::action_artifact("publish-note");
+        let artifact_uid = Uuid::from_u128(91);
+        let revision_uid = Uuid::from_u128(92);
+        let source = CapabilitySource::ActionArtifact {
+            action_ref: action_ref.clone(),
+            revision_uid,
+            tool_name: "file_read".to_string(),
+        };
+        let mut action = capability(action_ref.to_string().as_str(), source.clone());
+        action.default_effect = ActionPolicyEffect::AdminReview;
+        action.policy_context = CapabilityPolicyContext::artifact(
+            source,
+            Some(action_ref.clone()),
+            artifact_uid,
+            revision_uid,
+            ActionPolicyEffect::AdminReview,
+        );
+        let catalog = ExecutionCapabilityCatalog::build(vec![action])
+            .expect("artifact capability context should validate");
+
+        let encoded = serde_json::to_vec(&catalog).expect("serialize capability catalog");
+        let decoded: ExecutionCapabilityCatalog =
+            serde_json::from_slice(&encoded).expect("deserialize capability catalog");
+        assert_eq!(decoded, catalog);
+        assert_eq!(
+            decoded.capabilities[0].policy_context,
+            CapabilityPolicyContext {
+                source: CapabilitySource::ActionArtifact {
+                    action_ref: action_ref.clone(),
+                    revision_uid,
+                    tool_name: "file_read".to_string(),
+                },
+                canonical_action_ref: Some(action_ref),
+                artifact_uid: Some(artifact_uid),
+                revision_uid: Some(revision_uid),
+                minimum_effect: ActionPolicyEffect::AdminReview,
+            }
+        );
+    }
+
+    #[test]
+    fn capability_policy_context_rejects_source_identity_drift() {
+        // Pins: catalog construction fails closed when policy provenance does
+        // not describe the same runtime source as the capability dispatch path.
+        let mut capability = capability(
+            "file_read",
+            CapabilitySource::BuiltInTool {
+                name: "file_read".to_string(),
+            },
+        );
+        capability.policy_context.source = CapabilitySource::HandTool {
+            name: "file_read".to_string(),
+        };
+
+        let error = ExecutionCapabilityCatalog::build(vec![capability])
+            .expect_err("mismatched policy provenance must fail catalog construction");
+        assert!(
+            matches!(error, crate::Error::InvalidProjection { ref message }
+                if message.contains("policy source does not match")),
             "unexpected error: {error:?}"
         );
     }

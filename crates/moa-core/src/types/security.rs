@@ -20,7 +20,7 @@ use serde_canonical_json::CanonicalFormatter;
 use uuid::Uuid;
 
 use crate::error::MoaError;
-use crate::types::identifiers::{SessionId, ToolCallId};
+use crate::types::identifiers::{ConnectorConnectionId, SessionId, ToolCallId};
 use crate::types::worker::state::WorkerId;
 
 /// Sensitivity class attached to data throughout MOA.
@@ -288,7 +288,7 @@ impl ToolOutputAssessment {
 /// across Hand provider fallback: one logical Hand capability keeps one identity
 /// whichever sandbox provider ultimately served it, so an attacker cannot reset a
 /// tripped circuit by forcing a fallback.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolCapabilityId {
     /// A process-local built-in tool.
@@ -302,6 +302,13 @@ pub enum ToolCapabilityId {
         server: String,
         /// Remote tool name.
         tool: String,
+    },
+    /// An action exposed by one exact tenant-installed connector connection.
+    InstalledConnectorAction {
+        /// Tenant connection selected by the agent's typed connector binding.
+        connection_id: ConnectorConnectionId,
+        /// Definition-local canonical action identifier.
+        action_id: String,
     },
     /// A sandbox-executed capability, independent of which provider served it.
     Hand {
@@ -326,6 +333,18 @@ impl ToolCapabilityId {
         }
     }
 
+    /// Names one action on an exact tenant-installed connector connection.
+    #[must_use]
+    pub fn installed_connector_action(
+        connection_id: ConnectorConnectionId,
+        action_id: impl Into<String>,
+    ) -> Self {
+        Self::InstalledConnectorAction {
+            connection_id,
+            action_id: action_id.into(),
+        }
+    }
+
     /// Names one logical sandbox capability, independent of serving provider.
     #[must_use]
     pub fn hand(tool: impl Into<String>) -> Self {
@@ -344,8 +363,65 @@ impl ToolCapabilityId {
             Self::Mcp { server, tool } => {
                 format!("mcp:{}:{server}:{}:{tool}", server.len(), tool.len())
             }
+            Self::InstalledConnectorAction {
+                connection_id,
+                action_id,
+            } => format!(
+                "connector_action:{}:{}:{action_id}",
+                connection_id.0.simple(),
+                action_id.len()
+            ),
             Self::Hand { tool } => format!("hand:{}:{tool}", tool.len()),
         }
+    }
+}
+
+impl PartialOrd for ToolCapabilityId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ToolCapabilityId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let rank = |capability: &Self| match capability {
+            Self::BuiltIn { .. } => 0_u8,
+            Self::Mcp { .. } => 1,
+            Self::InstalledConnectorAction { .. } => 2,
+            Self::Hand { .. } => 3,
+        };
+        rank(self)
+            .cmp(&rank(other))
+            .then_with(|| match (self, other) {
+                (Self::BuiltIn { tool: left }, Self::BuiltIn { tool: right })
+                | (Self::Hand { tool: left }, Self::Hand { tool: right }) => left.cmp(right),
+                (
+                    Self::Mcp {
+                        server: left_server,
+                        tool: left_tool,
+                    },
+                    Self::Mcp {
+                        server: right_server,
+                        tool: right_tool,
+                    },
+                ) => left_server
+                    .cmp(right_server)
+                    .then(left_tool.cmp(right_tool)),
+                (
+                    Self::InstalledConnectorAction {
+                        connection_id: left_connection,
+                        action_id: left_action,
+                    },
+                    Self::InstalledConnectorAction {
+                        connection_id: right_connection,
+                        action_id: right_action,
+                    },
+                ) => left_connection
+                    .0
+                    .cmp(&right_connection.0)
+                    .then(left_action.cmp(right_action)),
+                _ => std::cmp::Ordering::Equal,
+            })
     }
 }
 

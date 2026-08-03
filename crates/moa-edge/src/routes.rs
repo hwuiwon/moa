@@ -1,6 +1,7 @@
 //! HTTP routes exposed by the MOA edge service.
 #![allow(clippy::result_large_err)]
 
+use crate::connector_credential_proxy::ConnectorCredentialProxy;
 use crate::ingress::{IngressScope, call_path};
 use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
@@ -9,7 +10,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::response::Response;
-use axum::routing::{any, get, patch, post};
+use axum::routing::{any, get, patch, post, put};
 use chrono::{DateTime, Utc};
 use moa_auth_providers::oauth_access_token::AuthenticatedPrincipal;
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
@@ -41,6 +42,7 @@ mod artifacts;
 mod audit;
 mod auth;
 pub(crate) mod auth_accounts;
+mod connectors;
 mod contact_messages;
 pub(crate) mod dashboard;
 mod knowledge;
@@ -67,6 +69,11 @@ use self::webhook_verification::verify_knowledge_webhook_at_edge;
 /// Shared edge application state.
 #[derive(Clone)]
 pub struct AppState {
+    /// Whether public connector management and credential ingress are exposed.
+    ///
+    /// This rollout switch defaults dark in the binary and is checked before
+    /// authentication or request-body translation on every connector route.
+    pub connector_management_enabled: bool,
     /// Loaded edge configuration shared by direct read handlers.
     pub config: Arc<MoaConfig>,
     /// Credential resolver used for incoming requests.
@@ -87,6 +94,8 @@ pub struct AppState {
     pub session_store: Arc<PostgresSessionStore>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
+    /// Exact-path proxy to private orchestrator credential ingress.
+    pub connector_credentials: Arc<ConnectorCredentialProxy>,
     /// ClickHouse lineage store when `[clickhouse]` is configured; lineage
     /// reads and offboarding deletes follow the write backend.
     pub clickhouse_lineage: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
@@ -257,6 +266,10 @@ pub(crate) fn base_router(state: AppState) -> Router {
             "/v1/sessions/{session_id}/attachments/{attachment_id}",
             get(handle_session_attachment),
         )
+        .route(
+            "/v1/connectors/connections/{connection_id}/credentials/{slot_name}",
+            put(connectors::write_credential),
+        )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
 }
@@ -285,6 +298,10 @@ async fn handle_proxy(
     body: Bytes,
 ) -> axum::response::Response {
     let span = tracing::Span::current();
+    if !state.connector_management_enabled && connectors::matches_management_path(uri.path()) {
+        span.record("http.status_code", 404_i64);
+        return StatusCode::NOT_FOUND.into_response();
+    }
     adopt_client_trace_parent(&span, &headers);
     let principal = match authenticate_edge_request(&state, &headers, &span).await {
         Ok(principal) => principal,
@@ -1268,6 +1285,7 @@ fn translate_public_route(
         memory::translate,
         knowledge::translate,
         artifacts::translate,
+        connectors::translate,
     ] {
         if let Some(translation) = translate(method, uri, body, tenant_id) {
             return translation;

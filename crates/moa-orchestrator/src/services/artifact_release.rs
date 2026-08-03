@@ -38,7 +38,7 @@ use moa_artifacts::release::{
 };
 use moa_authz_schema::Relation;
 use moa_core::traits::Identity;
-use moa_hands::ToolRouter;
+use moa_hands::ToolCatalogPin;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_wire::artifact_release::{
     ReleaseActivateRequest, ReleaseActivateResponse, ReleaseAttemptEntry,
@@ -48,6 +48,7 @@ use moa_wire::artifact_release::{
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 
+use crate::connector_catalog::{ScopedConnectorCatalogError, ScopedConnectorCatalogProvider};
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::workflows::artifact_release_evaluation::repository::{
     ReleaseEvaluationRepository, ReleaseSubjectEnvironment,
@@ -89,14 +90,17 @@ pub trait ArtifactRelease {
 #[derive(Clone)]
 pub struct ArtifactReleaseImpl {
     pool: PgPool,
-    tool_router: std::sync::Arc<ToolRouter>,
+    connector_catalog: ScopedConnectorCatalogProvider,
 }
 
 impl ArtifactReleaseImpl {
     /// Creates the release adapter with its artifact pool.
     #[must_use]
-    pub fn new(pool: PgPool, tool_router: std::sync::Arc<ToolRouter>) -> Self {
-        Self { pool, tool_router }
+    pub(crate) fn new(pool: PgPool, connector_catalog: ScopedConnectorCatalogProvider) -> Self {
+        Self {
+            pool,
+            connector_catalog,
+        }
     }
 }
 
@@ -112,15 +116,15 @@ impl ArtifactRelease for ArtifactReleaseImpl {
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = self.pool.clone();
-        let tool_router = self.tool_router.clone();
+        let connector_catalog = self.connector_catalog.clone();
         let submitted = ctx
             .run(|| {
                 let pool = pool.clone();
-                let tool_router = tool_router.clone();
+                let connector_catalog = connector_catalog.clone();
                 let request = request.clone();
                 let identity = identity.clone();
                 async move {
-                    submit_inner(pool, tool_router, request, identity)
+                    submit_inner(pool, connector_catalog, request, identity)
                         .await
                         .map(Json::from)
                 }
@@ -159,10 +163,10 @@ impl ArtifactRelease for ArtifactReleaseImpl {
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = self.pool.clone();
-        let tool_router = self.tool_router.clone();
+        let connector_catalog = self.connector_catalog.clone();
         Ok(ctx
             .run(|| async move {
-                activate_inner(pool, tool_router, request, identity)
+                activate_inner(pool, connector_catalog, request, identity)
                     .await
                     .map(Json::from)
             })
@@ -231,7 +235,7 @@ struct EvaluationDispatch {
 
 async fn submit_inner(
     pool: PgPool,
-    tool_router: std::sync::Arc<ToolRouter>,
+    connector_catalog: ScopedConnectorCatalogProvider,
     request: ReleaseSubmitRequest,
     identity: Identity,
 ) -> Result<SubmitOutcome, HandlerError> {
@@ -258,6 +262,14 @@ async fn submit_inner(
     } else {
         None
     };
+    let scoped_catalog = connector_catalog
+        .for_agent_context(
+            &identity,
+            request.tenant_id,
+            agent_policy.as_ref().map(|policy| &policy.agent_context),
+        )
+        .await
+        .map_err(scoped_catalog_handler_error)?;
 
     let pinned = request
         .pinned_draft_dependencies
@@ -275,7 +287,7 @@ async fn submit_inner(
     let subject_inputs = subject_inputs_for_revision(
         &revision,
         agent_policy.as_ref(),
-        &tool_router,
+        scoped_catalog.pin(),
         subject_environment,
     )
     .map_err(release_error)?;
@@ -392,7 +404,7 @@ fn attempt_entry(row: &ReleaseAttemptRow) -> ReleaseAttemptEntry {
 
 async fn activate_inner(
     pool: PgPool,
-    tool_router: std::sync::Arc<ToolRouter>,
+    connector_catalog: ScopedConnectorCatalogProvider,
     request: ReleaseActivateRequest,
     identity: Identity,
 ) -> Result<ReleaseActivateResponse, HandlerError> {
@@ -414,7 +426,13 @@ async fn activate_inner(
         .into());
     }
     ensure_current_release_environment(&pool, &candidate).await?;
-    ensure_current_tool_catalog(&candidate, &tool_router)?;
+    // Agent deployments use AgentDefinitions, which can supply the exact
+    // candidate policy bindings. Every candidate accepted here is therefore
+    // intentionally compared against the base deployment catalog.
+    let deployment_catalog = connector_catalog
+        .deployment_catalog()
+        .map_err(scoped_catalog_handler_error)?;
+    ensure_current_tool_catalog(&candidate, deployment_catalog.pin())?;
     // The expectation is read here rather than supplied by the caller, and it is
     // not the anti-drift check: the attested subject digest covers the serving
     // baseline, so a pointer that moved since evaluation fails the digest
@@ -451,7 +469,7 @@ async fn activate_inner(
 fn subject_inputs_for_revision(
     revision: &moa_artifacts::registry::StoredArtifactRevision,
     agent_policy: Option<&moa_agents::AgentRuntimePolicy>,
-    tool_router: &ToolRouter,
+    tool_catalog: &ToolCatalogPin,
     environment: ReleaseSubjectEnvironment,
 ) -> moa_artifacts::Result<CandidateSubjectInputs> {
     let document_hash = Digest32(moa_artifacts::canonical::canonical_hash(
@@ -479,7 +497,7 @@ fn subject_inputs_for_revision(
     };
     let tool_bearing = agent_policy.is_some() || !revision.document.reference_paths().is_empty();
     let tool_catalog = if tool_bearing {
-        Some(current_tool_catalog_binding(tool_router)?)
+        Some(current_tool_catalog_binding(tool_catalog)?)
     } else {
         None
     };
@@ -502,16 +520,8 @@ fn subject_inputs_for_revision(
 }
 
 pub(crate) fn current_tool_catalog_binding(
-    tool_router: &ToolRouter,
+    pin: &ToolCatalogPin,
 ) -> moa_artifacts::Result<CatalogSnapshotBinding> {
-    let pin =
-        tool_router
-            .activated_catalog()
-            .pin()
-            .map_err(|error| moa_artifacts::Error::Release {
-                rejection: moa_artifacts::ReleaseRejection::ToolCatalogSnapshotMissing,
-                detail: format!("activated tool catalog cannot be pinned: {error}"),
-            })?;
     let bytes = hex::decode(&pin.contract_hash).map_err(|error| moa_artifacts::Error::Release {
         rejection: moa_artifacts::ReleaseRejection::ToolCatalogSnapshotMissing,
         detail: format!("activated tool catalog hash is not hex: {error}"),
@@ -530,12 +540,12 @@ pub(crate) fn current_tool_catalog_binding(
 
 pub(crate) fn ensure_current_tool_catalog(
     candidate: &moa_artifacts::registry::ReleaseCandidate,
-    tool_router: &ToolRouter,
+    tool_catalog: &ToolCatalogPin,
 ) -> Result<(), HandlerError> {
     if !candidate.subject.tool_bearing {
         return Ok(());
     }
-    let current = current_tool_catalog_binding(tool_router).map_err(release_error)?;
+    let current = current_tool_catalog_binding(tool_catalog).map_err(release_error)?;
     if candidate.subject.tool_catalog.as_ref() != Some(&current) {
         return Err(TerminalError::new_with_code(
             409,
@@ -544,6 +554,14 @@ pub(crate) fn ensure_current_tool_catalog(
         .into());
     }
     Ok(())
+}
+
+fn scoped_catalog_handler_error(error: ScopedConnectorCatalogError) -> HandlerError {
+    TerminalError::new_with_code(
+        409,
+        format!("scoped connector catalog unavailable: {error}"),
+    )
+    .into()
 }
 
 pub(crate) async fn ensure_current_release_environment(

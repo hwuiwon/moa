@@ -10,7 +10,7 @@ use moa_core::{
     types::action_policy::ActionReviewPreview, types::action_policy::CapabilityProvenance,
     types::completion::ToolInvocation, types::contact::SessionActorRef,
     types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionMeta,
-    types::tools::ToolPolicyInput,
+    types::tools::ActionPolicyDecisionSource, types::tools::ToolPolicyInput,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -171,13 +171,27 @@ impl ToolRouter {
         } else {
             Vec::new()
         };
-        let policy = self.policies.check(
+        let mut policy = self.policies.check(
             &policy_input,
             &capability,
             &moa_security::ActionPolicyContext::from_session(session)
                 .with_origin(self.call_origin()),
             &rules,
         )?;
+        if let Some(minimum_effect) = registered_tool
+            .execution
+            .installed_connector_minimum_effect()
+        {
+            let floored = moa_security::stricter_effect(policy.effect, minimum_effect);
+            if floored != policy.effect {
+                policy.effect = floored;
+                policy.source = ActionPolicyDecisionSource::ToolDefinition;
+                policy.reason = Some(
+                    "the installed connector binding requires a stricter action-policy effect"
+                        .to_string(),
+                );
+            }
+        }
         let needs_review_preview = matches!(policy.effect, ActionPolicyEffect::AdminReview);
         let review_root = if needs_review_preview {
             self.workspace_roots

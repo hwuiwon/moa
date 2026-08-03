@@ -142,10 +142,11 @@ const ALLOWANCES: &[Allowance] = &[
 // The workspace is deliberately split by category owner: core runtime, memory
 // and learning, agents/artifacts/experiments, tools and providers, auth and
 // lineage, and eval/dev tooling. These two numbers record that accepted split
-// exactly as it stands today. Growing either requires a new decision record,
-// not a silent bump.
-const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 51;
-const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 48;
+// exactly as ratified by architecture-policy ADR 0005 after `moa-connectors`
+// became the canonical connection-domain owner. Growing either requires a new
+// decision record, not a silent bump.
+const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 52;
+const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 49;
 const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
 const RELEASE_SERVING_TABLES: &[&str] = &[
     "moa.artifact_serving_pointer",
@@ -155,9 +156,9 @@ const SQL_WRITE_PREFIXES: &[&str] = &["insert into", "update", "delete from"];
 
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 43,
-    max_transitive: 46,
-    reason: "moa-core owns the shared ID newtypes, error/result, configuration, and event types every category-owner crate needs, so nearly the whole workspace depends on it directly; this is the accepted current fan-in, and further growth requires a new decision record rather than a budget bump",
+    max_direct: 44,
+    max_transitive: 47,
+    reason: "architecture-policy ADR 0005 adds moa-connectors as the canonical connection category owner; it consumes moa-core IDs and errors, raising the accepted fan-in to 44 direct and 47 transitive reverse dependencies; further growth requires a new decision record rather than a budget bump",
 }];
 
 const LOC_BUDGETS: &[LocBudget] = &[

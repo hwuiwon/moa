@@ -158,11 +158,10 @@ pub enum ToolDiffStrategy {
 
 /// Replay and retry semantics declared for one tool definition.
 ///
-/// There is deliberately no keyed-idempotency class: the runtime cannot honor
-/// keyed idempotency end to end (a durable key is not threaded through the tool
-/// invocation and hands-recovery boundaries), so promising it in the type would
-/// let callers rely on behavior that is never enforced. Reintroduce a keyed class
-/// only once a real consumer threads the key through invocation and recovery.
+/// A connector operation may additionally declare one reviewed upstream
+/// idempotency header. That transport contract sends the durable tool-call ID;
+/// this enum still describes the operation's effect semantics and does not, by
+/// itself, authorize a caller-selected header or retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdempotencyClass {

@@ -3,6 +3,7 @@
 use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
+use moa_core::types::credentials::RedactedSecret;
 use reqwest::{Client, header::HeaderMap};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -13,7 +14,8 @@ use crate::{
     domain::{
         CreateLinkTokenRequest, ExchangePublicTokenRequest, InitialSyncStarted, LinkToken,
         LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
-        StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync,
+        WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -84,6 +86,12 @@ impl MergeProvider {
         mac.verify_slice(&signature)
             .map_err(|_| Error::provider("merge", "webhook signature verification failed"))
     }
+}
+
+fn require_credential(credential: &Option<RedactedSecret>) -> Result<&RedactedSecret> {
+    credential
+        .as_ref()
+        .ok_or_else(|| Error::provider("merge", "active account credential was not resolved"))
 }
 
 /// Merge unified-API product categories MOA can sync knowledge from, as
@@ -196,7 +204,6 @@ impl LinkedIntegrationProvider for MergeProvider {
             provider: "merge".to_string(),
             connector: category.to_string(),
             provider_account_id,
-            credential_ref: "merge-account-token".to_string(),
             credential_material: Some(account_token),
             metadata: redact_provider_metadata(integration),
         })
@@ -204,14 +211,12 @@ impl LinkedIntegrationProvider for MergeProvider {
 
     async fn trigger_sync(&self, req: TriggerSyncRequest) -> Result<TriggeredSync> {
         let category = validated_category(&req.connection.connector)?;
+        let credential = require_credential(&req.credential)?;
         let response = self
             .client
             .post(self.url(&format!("/api/{category}/v1/sync-status/resync")))
             .bearer_auth(&self.api_key)
-            .header(
-                "X-Account-Token",
-                req.credential.expose_for_outbound_request(),
-            )
+            .header("X-Account-Token", credential.expose_for_outbound_request())
             .json(&json!({ "model_name": req.model }))
             .send()
             .await
@@ -231,14 +236,12 @@ impl LinkedIntegrationProvider for MergeProvider {
         // is plan-gated and consumes credits per call, which a replayed link
         // would charge repeatedly for no benefit.
         let category = validated_category(&req.connection.connector)?;
+        let credential = require_credential(&req.credential)?;
         let response = self
             .client
             .get(self.url(&format!("/api/{category}/v1/sync-status")))
             .bearer_auth(&self.api_key)
-            .header(
-                "X-Account-Token",
-                req.credential.expose_for_outbound_request(),
-            )
+            .header("X-Account-Token", credential.expose_for_outbound_request())
             .send()
             .await
             .map_err(|error| {
@@ -254,8 +257,26 @@ impl LinkedIntegrationProvider for MergeProvider {
         })
     }
 
+    async fn revoke_remote_connection(&self, req: RemoteRevokeRequest) -> Result<()> {
+        let category = validated_category(&req.connection.connector)?;
+        let credential = require_credential(&req.credential)?;
+        let response = self
+            .client
+            .post(self.url(&format!("/api/{category}/v1/delete-account")))
+            .bearer_auth(&self.api_key)
+            .header("X-Account-Token", credential.expose_for_outbound_request())
+            .send()
+            .await
+            .map_err(|error| {
+                Error::provider("merge", format!("linked account revoke failed: {error}"))
+            })?;
+        http::ensure_success(response).await?;
+        Ok(())
+    }
+
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage> {
         let category = validated_category(&req.connection.connector)?;
+        let credential = require_credential(&req.credential)?;
         let resource = category_record_resource(category);
         let mut url = http::parse_url(&self.url(&format!("/api/{category}/v1/{resource}")), |m| {
             Error::provider("merge", m)
@@ -275,10 +296,7 @@ impl LinkedIntegrationProvider for MergeProvider {
             .client
             .get(url)
             .bearer_auth(&self.api_key)
-            .header(
-                "X-Account-Token",
-                req.credential.expose_for_outbound_request(),
-            )
+            .header("X-Account-Token", credential.expose_for_outbound_request())
             .send()
             .await
             .map_err(|error| Error::provider("merge", format!("record listing failed: {error}")))?;

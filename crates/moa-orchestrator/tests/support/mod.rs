@@ -19,7 +19,10 @@ pub mod simulator_policy;
 
 /// Facade aggregating the helpers used to drive a live Restate runtime.
 pub mod restate_runtime {
-    pub use super::grants::{grant_session_participant, grant_tenant_admin, grant_tenant_operator};
+    pub use super::grants::{
+        grant_connector_connection_use, grant_session_participant, grant_tenant_admin,
+        grant_tenant_operator,
+    };
     pub use super::restate_env::{RESTATE_E2E_LOCK, restate_admin_url, restate_ingress_url};
     pub use super::restate_identity::{test_user_identity, with_identity};
     pub use super::restate_ports::{

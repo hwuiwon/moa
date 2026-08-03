@@ -226,6 +226,24 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
         "another tenant's source-ACL state must survive this tenant's purge"
     );
 
+    let neighbour_connectors: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM moa.connector_connections WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.connector_action_bindings WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.connector_action_invocations WHERE tenant_id = $1)
+        "#,
+    )
+    .bind(NEIGHBOUR_TENANT)
+    .fetch_one(pool)
+    .await
+    .expect("load neighbour tenant connector state");
+    assert_eq!(
+        neighbour_connectors,
+        (2, 1, 1),
+        "another tenant's action and knowledge connector parents, binding, and invocation must survive this tenant's purge"
+    );
+
     // The neighbour's pending lineage and archived transcript both survive. These
     // are the assertions an `AND FALSE` or a dropped `WHERE` dies on: the purged
     // tenant's residue map cannot see them, because it only counts rows belonging
@@ -2277,6 +2295,8 @@ async fn seed_purge_families(
     seed_source_acl_families(pool, tenant_id, storage_partition_id).await;
     let neighbour_partition = StoragePartitionId::for_tenant(TenantId::from(NEIGHBOUR_TENANT));
     seed_source_acl_families(pool, NEIGHBOUR_TENANT, &neighbour_partition).await;
+    seed_connector_families(pool, tenant_id).await;
+    seed_connector_families(pool, NEIGHBOUR_TENANT).await;
     // Behavior Lab score provenance for BOTH tenants. The purged tenant's rows
     // prove the explicit delete runs; the neighbour's prove it is scoped. Without
     // the neighbour, a step that lost its `WHERE storage_partition_id = $1` would
@@ -2288,6 +2308,61 @@ async fn seed_purge_families(
         oauth_client_id,
         root_generation,
     }
+}
+
+/// Seeds the generic connector parent, binding, and invocation with no cascade
+/// between invocation and binding, so the purge must honor their catalog order.
+async fn seed_connector_families(pool: &PgPool, tenant_id: Uuid) {
+    let connection_uid = Uuid::new_v4();
+    let binding_uid = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            lifecycle_status, health_status
+        )
+        VALUES ($1, $2, 'purge connector', 'managed:purge-test', 1, 'active', 'ready')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("seed connector connection");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_action_bindings (
+            binding_uid, tenant_id, connection_uid, action_id, connection_generation,
+            compiled_contract, contract_hash, governed_contract_revision, minimum_effect
+        )
+        VALUES (
+            $1, $2, $3, 'read', 1, '{}'::JSONB, repeat('a', 64), 'runtime-v1', 'allow'
+        )
+        "#,
+    )
+    .bind(binding_uid)
+    .bind(tenant_id)
+    .bind(connection_uid)
+    .execute(pool)
+    .await
+    .expect("seed connector action binding");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_action_invocations (
+            invocation_uid, tenant_id, connection_uid, binding_uid,
+            connection_generation, tool_call_id, request_hash
+        )
+        VALUES ($1, $2, $3, $4, 1, $5, repeat('b', 64))
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id)
+    .bind(connection_uid)
+    .bind(binding_uid)
+    .bind(format!("purge-call-{tenant_id}"))
+    .execute(pool)
+    .await
+    .expect("seed connector action invocation");
 }
 
 /// Seeds one session and one event for `tenant_id` through the production path.
@@ -2401,11 +2476,30 @@ async fn seed_source_acl_families(
 
     sqlx::query(
         r#"
+        INSERT INTO moa.connector_connections
+            (connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+             non_secret_config, lifecycle_status, health_status)
+        VALUES ($1, $2, 'google-drive', 'knowledge:nango', 1,
+                jsonb_build_object(
+                    'provider_config_key', 'purge-config',
+                    'provider_connection_id', 'purge-account',
+                    'connector', 'google-drive'
+                ),
+                'active', 'ready')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("seed source-ACL connector parent");
+
+    sqlx::query(
+        r#"
         INSERT INTO moa.knowledge_connections
             (connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-             provider_connection_id, connector, credential_ref, status)
-        VALUES ($1, $2, $3, 'nango', 'purge-config', 'purge-account', 'google-drive',
-                'vault://purge', 'active')
+             provider_connection_id, connector)
+        VALUES ($1, $2, $3, 'nango', 'purge-config', 'purge-account', 'google-drive')
         "#,
     )
     .bind(connection_uid)

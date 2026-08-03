@@ -12,6 +12,7 @@ pub mod artifacts;
 pub mod authz_admin;
 pub mod authz_challenges;
 pub mod authz_challenges_reaper;
+pub mod connectors;
 pub mod contacts;
 pub mod dual_control;
 pub mod execution;

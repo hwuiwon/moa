@@ -56,6 +56,13 @@ spec:
               value: 0.0.0.0:8080
             - name: MOA_EDGE_UPSTREAM
               value: http://restate.moa-restate.svc.cluster.local:8080
+            # Credential material takes a private, non-Restate path so it is
+            # never persisted in the durable invocation journal.
+            - name: MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM
+              value: http://moa-orchestrator.moa-system.svc.cluster.local:10023
+            # Stays dark until the connector-management rollout checkpoint.
+            - name: MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED
+              value: "false"
             - name: MOA_DATABASE_URL
               valueFrom:
                 secretKeyRef:

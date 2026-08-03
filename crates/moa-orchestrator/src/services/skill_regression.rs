@@ -142,7 +142,12 @@ impl SkillRegressionGate {
 
 /// Draft execution inputs needed only when a regression suite compiles a template.
 pub struct SkillRegressionCompileContext {
-    /// Production tool router used to resolve governed capability registrations.
+    /// Production tool router used only for its immutable deployment catalog.
+    ///
+    /// Skill review has no authenticated session or exact agent policy binding,
+    /// so it must not enumerate tenant connector connections or claim connector
+    /// invocation authority. Agent-scoped connectors enter execution planning
+    /// only when the reviewed skill is later compiled under a bound agent.
     pub router: Arc<ToolRouter>,
     /// Exact draft revision whose template is being reviewed.
     pub draft: StoredArtifactRevision,
@@ -267,9 +272,10 @@ pub async fn skill_acceptance_regression_report(
         let draft_revision_uid = draft_artifact_revision_uid(&candidate)?;
         let suite_hash = validated_suite_hash(&suite)?;
         let operation_key = format!("skill_regression:{draft_revision_uid}:{suite_hash}");
+        let deployment_catalog = compile_context.router.activated_catalog();
         let authority = resolve_skill_regression_compile_authority(
             store.pool().clone(),
-            compile_context.router.capability_registrations(),
+            deployment_catalog.capability_registrations(),
             scope,
             compile_context.draft,
         )

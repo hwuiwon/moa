@@ -195,6 +195,7 @@ async fn start_edge(
     let audit = moa_ocsf::AuditRuntime::start(pool.as_ref().clone())
         .expect("edge test audit runtime should start");
     let state = AppState {
+        connector_management_enabled: false,
         // The audit writer is owned by this test for its lifetime; dropping the
         // runtime aborts it, which is the same ownership the binary has.
         audit: audit.emitter(),
@@ -218,6 +219,10 @@ async fn start_edge(
         pool,
         session_store: Arc::new(store.clone()),
         proxy: Arc::new(OrchestratorProxy::new(upstream).expect("proxy URL is valid")),
+        connector_credentials: Arc::new(
+            moa_edge::connector_credential_proxy::ConnectorCredentialProxy::new(upstream)
+                .expect("credential proxy URL is valid"),
+        ),
         clickhouse_lineage: None,
         clickhouse_analytics: None,
     };

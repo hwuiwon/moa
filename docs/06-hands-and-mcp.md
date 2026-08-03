@@ -85,10 +85,13 @@ dropped it would turn policy into decoration.
 | Docker | Local/containerized execution | Hardened by `moa-hands` and `moa-security` policies. |
 | Daytona | Cloud workspace provider | Compiled into the normal build; enabled by runtime cloud-hands config. Supports pause/resume/destroy around idle sessions. |
 | E2B | MicroVM isolation | Compiled into the normal build; enabled by runtime cloud-hands config. Use for untrusted or security-sensitive execution. |
-| MCP | External tools and SaaS integrations | Routed through `MCPClient` and the credential proxy. |
+| Operator MCP | Deployment-wide external tools and SaaS integrations | Routed through the process-wide `MCPClient` using operator configuration. |
+| Tenant connector | Reviewed tenant HTTP actions | Routed through exact connection/binding/generation pins and the shared governed tool path. |
 
-All providers implement the `HandProvider` trait from `moa-core`. Tool routing
-code should depend on the trait, not on provider-specific clients.
+Sandbox providers implement the `HandProvider` trait from `moa-core`.
+Operator MCP and tenant HTTP connectors are separate governed tool backends;
+tool routing depends on their typed boundaries rather than provider-specific
+clients.
 
 `HandProvider::install_files` is the trusted setup path for files the runtime
 must place in a sandbox before model-visible execution. MOA uses it to
@@ -106,7 +109,7 @@ materialize selected skill packages under `.moa/skills/<skill>/...`.
 5. Execute allowed actions through one of:
    - built-in tool handler,
    - cached hand provider,
-   - MCP client.
+   - operator MCP client or installed tenant HTTP connector runtime.
 6. Record lineage and route the result back to the turn loop.
 
 The default provider name is `local`. Workspace roots, active hand handles,
@@ -155,13 +158,14 @@ executing the tool.
 
 ## Registry
 
-Tools come from three sources:
+Tools come from four sources:
 
 | Source | Examples | Execution |
 |---|---|---|
 | Built-ins | memory tools, search helpers | In-process Rust handlers |
 | Hand tools | `bash`, `file_read`, `file_write`, `file_search` | Local/Docker/Daytona/E2B hand |
-| MCP tools | GitHub, browser, database, SaaS tools | MCP transport |
+| Operator MCP tools | GitHub, browser, database, SaaS tools | Deployment-configured MCP transport |
+| Tenant connector actions | Reviewed constrained HTTP operations | Exact installed connector binding |
 
 Tool descriptors include name, schema, execution backend, risk level, action
 class, default action-policy effect, and output budget. The context pipeline
@@ -169,8 +173,9 @@ injects only the currently active subset to protect prompt budget and cache
 stability.
 
 The registry's default loadout is an **ordered** list — built-ins, then the
-sandbox descriptors in their authored order, then discovered connector tools in
-catalog order. That order is the deployment's declared capability priority. When
+sandbox descriptors in their authored order, then operator MCP tools in catalog
+order. An authorized request may add a separate ephemeral tenant connector
+overlay from exact agent bindings. That order is the declared capability priority. When
 a loadout exceeds the per-turn schema cap, the context pipeline reduces along
 that order after first keeping the loop's control tools and any tool the pinned
 agent or its skills explicitly declared; it canonicalizes by name only *after*
@@ -183,8 +188,8 @@ these governed operations. Each entry has a stable reference and version,
 governed runtime-contract revision, description, input/output schemas,
 action/risk and idempotency classes, execution class (`data`, `compute`,
 `model`, or `external`), source provenance, authorization metadata, and optional integer cost estimate. It includes typed
-built-ins, actions, skill actions/code, memory operations, connected MCP tools
-whose schemas and policies are stable, and datasource reads only when a typed
+built-ins, actions, skill actions/code, memory operations, operator MCP tools,
+authorized exact-generation tenant connector actions, and datasource reads only when a typed
 query operation exists. A connection identifier alone is not executable.
 
 `Capability` and bounded `Agent` execution resolve through the same action
@@ -329,89 +334,51 @@ Tool calls must also declare their idempotency behavior:
 
 ## MCP
 
-MCP is the primary protocol for external integrations. Supported transports are
-SSE and streamable HTTP. Startup discovers tool definitions through MCP, then
-the router exposes the selected tools exactly like built-ins and hand tools.
-MCP servers must be reachable over HTTP/SSE so any Kubernetes replica can handle
-a request without depending on a pod-local process.
+MOA has two distinct MCP surfaces. The inbound `/mcp` protected resource is an
+edge API adapter into existing product services and never supplies agent tools.
+Operator-owned deployment MCP is the only outbound MCP tool surface. Tenant
+connector connections support reviewed constrained HTTP actions, not MCP.
 
-### Server-qualified tool references
+### Operator-owned deployment MCP
 
-A discovered connector tool registers under
-`mcp__{server_byte_len}_{server}__{remote_tool}` — not under the name the server
-publishes. Including the server byte length makes the encoding injective even
-when server and tool names contain separators. Duplicate qualified insertion is
-rejected. That qualified reference is the tool's identity
-everywhere on MOA's side of the connector boundary: the model-visible schema,
-the registry key, action-policy rules, the persisted `ToolCall` event, and the
-execution capability catalog. Only the outbound `tools/call` and a tenant
-connection binding's `allowed_operations` use the server's own name, because
-those are the two places the connector's vocabulary is the correct one.
+`OperatorOwnedMcp` is process-wide deployment configuration. Supported
+transports are SSE and Streamable HTTP. Startup or a background refresh
+discovers tools, then the router exposes the selected immutable catalog exactly
+like built-ins and hand tools. Servers must be remotely reachable so any
+Kubernetes replica can handle a request without a pod-local process.
 
-Qualification exists so one connector cannot affect another. Before it, a server
-publishing a tool called `bash` failed router construction outright, taking down
-every unrelated tool in the deployment; two servers publishing the same tool
-name could not coexist at all.
+A discovered operator tool registers as
+`mcp__{server_byte_len}_{server}__{remote_tool}`. This injective qualified name
+is its model-visible schema name, registry key, action-policy key, persisted
+`ToolCall` name, and execution-catalog identity. Only outbound `tools/call`
+uses the server's remote name. Duplicate qualified insertion is rejected, so a
+server cannot collide with a built-in or another server.
 
-**Operator-visible consequences.** Both bite on upgrade, and neither is cosmetic:
+Operator policy rules and `permissions.*` patterns must use the qualified
+reference. A stale unqualified pattern no longer matches; `mcp__*` gates every
+operator MCP tool. Changing model-visible names also changes the cached prompt
+prefix for sessions that receive those tools.
 
-- Any persisted action-policy rule or `permissions.*` pattern that targets a
-  connector tool by its unqualified name stops matching. For an
-  `admin_review` pattern this fails **open** — a tool that was review-gated
-  becomes ungated. The router reports every configured permission pattern that
-  matches no registered tool at startup (and after each catalog refresh), so a
-  pattern left behind by this rename is visible rather than silent, but the
-  patterns still have to be rewritten. One `mcp__*` pattern now gates every
-  connector tool regardless of what any server names its tools, which no
-  pattern could express before.
-- Model-visible tool names change, so the cached prompt prefix changes for any
-  deployment running MCP servers. Expect one cache-cold period per session
-  after upgrade.
+Each configured server is `required` or optional, and `eager` or `lazy`.
+Required plus lazy is rejected because required means verified at startup. An
+optional discovery failure affects only that server. After a prior success, a
+transient refresh failure retains its last-known-good tools and reports
+`Degraded`; publication swaps the complete catalog snapshot atomically.
 
-### Connector health and catalog refresh
+An operator server may name one deployment environment variable using
+`bearer` or `api_key`, or omit credentials. The router fails startup when named
+material is missing. It marks headers sensitive and applies the same
+credential to initialize, initialized notification, discovery, and
+`tools/call`. Outbound operator MCP OAuth is not supported by this config.
 
-Each configured server is `required` or optional (the default), and either
-`eager` or `lazy` for discovery. An optional server that fails discovery removes
-only its own tools and is recorded as typed health; a required one that fails
-discovery is a startup failure carrying that health, because a deployment that
-silently drops a required integration is indistinguishable from one that never
-configured it. `required` plus `lazy` is rejected at startup: "required" means
-verified at startup, and a lazily discovered server has not been contacted.
 
-Health is per connector — `Pending`, `Ready`, `Degraded`, `Unavailable` — never
-an aggregate, because an aggregate cannot express "this optional integration is
-down and every other tool is fine", which is the state the router has to serve.
-A background refresh re-discovers every connector on an interval. A connector
-that fails a refresh after a previous success keeps serving its last-known-good
-tools and reports `Degraded`, so one transient error cannot silently shrink the
-model's loadout. The catalog is published as a whole snapshot, so no prompt
-compilation, capability listing, or dispatch ever observes a half-refreshed
-connector.
+Tenant action tool names use deterministic `conn__...` lookup references, but
+the runtime never parses a name for authority. It dispatches only through the
+persisted connection/binding/generation/definition/contract pin supplied by the
+scoped catalog.
 
-Each registered tool carries a governed-contract revision. The revision is
-recorded on compiled capabilities and paired atomically with the exact tool
-schemas offered in conversational prompts. A changed or withdrawn contract is
-therefore rejected before policy evaluation and checked again against the
-immutable snapshot used for dispatch, including across rolling deployments.
-
-### Credentials
-
-An MCP server may name one deployment environment variable using `bearer`,
-`oauth`, or `api_key`. The router reads it once at construction and fails
-startup if it is missing or empty. Omitting `credentials` configures an
-unauthenticated connector.
-
-Credential handling is host-side:
-
-1. The brain emits a normal tool call.
-2. Data-class egress governance runs before invocation.
-3. The same sensitive authentication headers are applied to initialize,
-   initialized notification, discovery, and `tools/call`.
-4. The result is returned with credentials stripped.
-
-HTTP/SSE MCP servers get host-side credential isolation. The MCP client does not
-launch local subprocesses or
-store credential-bearing environment variables for server startup.
+See [Connectors And Connections](24-connectors-and-connections.md) for the
+connection lifecycle, credential vault, management API, and rollout contract.
 
 ## Security Rules
 

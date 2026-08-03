@@ -40,8 +40,6 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_structure_audit".to_string(),
-            credential_ref: "48344059-1fe3-e088-283b-d2f3d3a66d08".to_string(),
-            status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,

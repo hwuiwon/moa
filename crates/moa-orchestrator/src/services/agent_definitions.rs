@@ -15,7 +15,7 @@ use moa_core::{
     types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
-use moa_hands::ToolRouter;
+use moa_hands::ToolCatalogPin;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_wire::agents::{
     AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDefinitionSummary,
@@ -28,6 +28,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Row, types::Json as SqlJson};
 use uuid::Uuid;
 
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{
     authorize_tenant, require_fga_client, require_identity, translate_authz_error,
@@ -70,14 +71,17 @@ pub trait AgentDefinitions {
 #[derive(Clone)]
 pub struct AgentDefinitionsImpl {
     pool: PgPool,
-    tool_router: std::sync::Arc<ToolRouter>,
+    connector_catalog: ScopedConnectorCatalogProvider,
 }
 
 impl AgentDefinitionsImpl {
     /// Creates the agent-definition adapter with its artifact and deployment pool.
     #[must_use]
-    pub fn new(pool: PgPool, tool_router: std::sync::Arc<ToolRouter>) -> Self {
-        Self { pool, tool_router }
+    pub(crate) fn new(pool: PgPool, connector_catalog: ScopedConnectorCatalogProvider) -> Self {
+        Self {
+            pool,
+            connector_catalog,
+        }
     }
 }
 
@@ -171,13 +175,30 @@ impl AgentDefinitions for AgentDefinitionsImpl {
             authorize_agent_operator(&ctx, agent_id).await?;
         }
         let pool = self.pool.clone();
-        let tool_router = self.tool_router.clone();
+        let connector_catalog = self.connector_catalog.clone();
 
         Ok(ctx
             .run(|| async move {
-                deploy_inner(pool, tool_router, request, expected_agent_id, identity)
+                let policy = AgentResolver::new(pool.clone())
+                    .resolve_release_candidate(
+                        &tenant_scope(request.tenant_id),
+                        request.revision_uid,
+                    )
                     .await
-                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)?;
+                let scoped_catalog = connector_catalog
+                    .for_agent_context(&identity, request.tenant_id, Some(&policy.agent_context))
+                    .await
+                    .map_err(|error| moa_error_to_handler_error(error.into_moa_error()))?;
+                deploy_inner_with_catalog(
+                    pool,
+                    scoped_catalog.pin().clone(),
+                    request,
+                    expected_agent_id,
+                    identity,
+                )
+                .await
+                .map(Json::from)
             })
             .name("agent_definitions_deploy")
             .await?)
@@ -343,10 +364,9 @@ pub async fn list_installations_inner(
     })
 }
 
-/// Deploys an exact release-ready agent revision after caller authorization has passed.
-pub async fn deploy_inner(
+async fn deploy_inner_with_catalog(
     pool: PgPool,
-    tool_router: std::sync::Arc<ToolRouter>,
+    tool_catalog: ToolCatalogPin,
     request: AgentDeployRequest,
     expected_agent_id: Option<Uuid>,
     identity: Identity,
@@ -369,7 +389,7 @@ pub async fn deploy_inner(
         .map_err(release_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(409, "agent release candidate not found"))?;
     super::artifact_release::ensure_current_release_environment(&pool, &candidate).await?;
-    super::artifact_release::ensure_current_tool_catalog(&candidate, &tool_router)?;
+    super::artifact_release::ensure_current_tool_catalog(&candidate, &tool_catalog)?;
     let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
@@ -429,6 +449,20 @@ pub async fn deploy_inner(
         revision_uid: request.revision_uid,
         policy_hash: policy.revision_lock.canonical_policy_hash,
     })
+}
+
+/// Integration seam for an already-scoped catalog pin after caller authorization.
+///
+/// Production handlers derive this pin from the authenticated caller and exact
+/// candidate agent policy before entering the deployment transaction.
+pub async fn deploy_inner(
+    pool: PgPool,
+    tool_catalog: ToolCatalogPin,
+    request: AgentDeployRequest,
+    expected_agent_id: Option<Uuid>,
+    identity: Identity,
+) -> Result<AgentDeployResponse, HandlerError> {
+    deploy_inner_with_catalog(pool, tool_catalog, request, expected_agent_id, identity).await
 }
 
 /// Lists deployment history for an installation after caller authorization has passed.

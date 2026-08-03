@@ -10,6 +10,7 @@ pub mod agents;
 pub mod analytics;
 pub mod artifact_release;
 pub mod artifacts;
+pub mod connectors;
 pub mod experiments;
 pub mod knowledge;
 pub mod lineage;

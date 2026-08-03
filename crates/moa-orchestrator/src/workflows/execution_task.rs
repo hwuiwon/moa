@@ -1,6 +1,9 @@
 //! Durable keyed workflow that executes one persisted logical task across generations.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use moa_artifacts::execution_plan::{
     CapabilityReference, ExecutionFailureClass, ExecutionNode, ExecutionOperation,
@@ -37,7 +40,6 @@ use moa_execution::{
         ExecutionSignalRequest, ExecutionTaskWorkflowRequest,
     },
 };
-use moa_hands::ToolRouter;
 use moa_observability::propagation::link_remote_context_from_link_headers;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
@@ -101,7 +103,6 @@ pub trait ExecutionTask {
 pub struct ExecutionTaskImpl {
     repository: ExecutionRepository,
     pool: sqlx::PgPool,
-    router: Arc<ToolRouter>,
     session_store: Arc<PostgresSessionStore>,
     session_limits: SessionLimitsConfig,
     channel_adapters: Arc<std::collections::HashMap<Channel, Arc<dyn ChannelAdapter>>>,
@@ -112,7 +113,6 @@ impl ExecutionTaskImpl {
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
-        router: Arc<ToolRouter>,
         session_store: Arc<PostgresSessionStore>,
         session_limits: SessionLimitsConfig,
         channel_adapters: Arc<std::collections::HashMap<Channel, Arc<dyn ChannelAdapter>>>,
@@ -120,7 +120,6 @@ impl ExecutionTaskImpl {
         Self {
             repository: ExecutionRepository::new(pool.clone()),
             pool,
-            router,
             session_store,
             session_limits,
             channel_adapters,
@@ -683,6 +682,59 @@ struct AgentExecutionRequest<'a> {
     max_turns: u32,
 }
 
+#[derive(Debug)]
+struct AgentCapabilityBinding<'a> {
+    capability: &'a ExecutionCapability,
+    tool_name: &'a str,
+}
+
+fn validate_agent_capability_bindings(
+    capabilities: Vec<&ExecutionCapability>,
+) -> Result<Vec<AgentCapabilityBinding<'_>>, HandlerError> {
+    let mut bindings = Vec::with_capacity(capabilities.len());
+    let mut references_by_tool = BTreeMap::<&str, Vec<&CapabilityReference>>::new();
+    for capability in capabilities {
+        let Some(tool_name) = capability.source.model_visible_tool_name() else {
+            return Err(
+                TerminalError::new("capability has no governed tool owner in Task 6").into(),
+            );
+        };
+        let references = references_by_tool.entry(tool_name).or_default();
+        if !references
+            .iter()
+            .any(|reference| **reference == capability.reference)
+        {
+            references.push(&capability.reference);
+        }
+        bindings.push(AgentCapabilityBinding {
+            capability,
+            tool_name,
+        });
+    }
+    for references in references_by_tool.values_mut() {
+        references.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.version.cmp(&right.version))
+        });
+    }
+    if let Some((tool_name, references)) = references_by_tool
+        .iter()
+        .find(|(_, references)| references.len() > 1)
+    {
+        let references = references
+            .iter()
+            .map(|reference| format!("{}@{}", reference.name, reference.version))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        return Err(TerminalError::new(format!(
+            "task-local agent capability references {references} resolve to ambiguous model-visible tool `{tool_name}`"
+        ))
+        .into());
+    }
+    Ok(bindings)
+}
+
 /// Fixed terminal message for a task the security circuit halted.
 const EXECUTION_TASK_SECURITY_HALT_MESSAGE: &str = "task stopped: a capability returned output classified as a prompt-injection or \
      restricted-material result";
@@ -779,31 +831,24 @@ async fn execute_agent(
             task.actual.clone(),
         ));
     }
+    // Ordinary, map, and reduce agents all materialize as `LogicalTaskKind::Agent`,
+    // so this one pre-I/O guard covers every task-local model/tool loop.
+    let capability_bindings = validate_agent_capability_bindings(
+        capability_refs
+            .iter()
+            .map(|reference| find_capability(run, reference))
+            .collect::<Result<Vec<_>, _>>()?,
+    )?;
     let session = load_session(workflow, ctx, run.session_id, task).await?;
     let skills = load_pinned_skills(workflow, ctx, run, task, skill_refs).await?;
-    let capabilities = capability_refs
+    // The model sees the exact schemas persisted in the run's scoped capability
+    // catalog. Re-reading the deployment router here would make a replay depend
+    // on another tenant's catalog state and would discard installed-connector
+    // provenance before governed dispatch rechecks its durable pins.
+    let tools = capability_bindings
         .iter()
-        .map(|reference| find_capability(run, reference))
-        .collect::<Result<Vec<_>, _>>()?;
-    let tool_names = capabilities
-        .iter()
-        .map(|capability| capability_tool_name(capability))
-        .collect::<Result<Vec<_>, _>>()?;
-    let catalog = workflow.router.activated_catalog();
-    let mut tools = Vec::with_capacity(tool_names.len());
-    for (capability, tool_name) in capabilities.iter().zip(&tool_names) {
-        require_current_tool_contract(
-            tool_name,
-            &capability.contract_revision,
-            catalog.contract_revision(tool_name),
-        )?;
-        let definition = catalog.tool_definition(tool_name).ok_or_else(|| {
-            TerminalError::new(format!(
-                "tool {tool_name} disappeared from its activated catalog snapshot"
-            ))
-        })?;
-        tools.push(definition.anthropic_schema());
-    }
+        .map(task_agent_tool_schema)
+        .collect::<Vec<_>>();
     // One canary per task turn, journaled so a replay reproduces the same token
     // rather than minting a fresh one that the already-persisted output could
     // never match. It goes into the system context AND to every capability
@@ -901,12 +946,9 @@ async fn execute_agent(
             response.thought_signature,
         ));
         for (call_index, tool_call) in tool_calls.into_iter().enumerate() {
-            let capability = capabilities
+            let binding = capability_bindings
                 .iter()
-                .find(|capability| {
-                    capability_tool_name(capability)
-                        .is_ok_and(|name| name == tool_call.invocation.name)
-                })
+                .find(|binding| binding.tool_name == tool_call.invocation.name)
                 .ok_or_else(|| TerminalError::new("agent emitted an undeclared capability"))?;
             if disabled_capabilities.contains_key(&tool_call.invocation.name) {
                 let tool_use_id =
@@ -931,7 +973,7 @@ async fn execute_agent(
                     identity,
                     run,
                     task,
-                    capability,
+                    capability: binding.capability,
                     session: &session,
                     active_canary: Some(active_canary.as_str()),
                 },
@@ -1046,6 +1088,14 @@ async fn execute_agent(
     ))
 }
 
+fn task_agent_tool_schema(binding: &AgentCapabilityBinding<'_>) -> Value {
+    json!({
+        "name": binding.tool_name,
+        "description": binding.capability.description,
+        "input_schema": binding.capability.input_schema,
+    })
+}
+
 /// Fixed model-facing refusal for a capability disabled by the task circuit.
 const EXECUTION_TASK_DISABLED_CAPABILITY_MESSAGE: &str = "This tool capability is disabled for the current task because its prior output triggered the security circuit.";
 
@@ -1123,6 +1173,7 @@ async fn invoke_capability_tool(
                 generation: task.generation,
             },
             capability_provenance: Some(&provenance),
+            capability_policy_context: Some(&capability.policy_context),
             resource_budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         },
         &workflow.session_limits,
@@ -1150,32 +1201,6 @@ async fn invoke_capability_tool(
         return action_review_invocation_result(resolution);
     }
     Ok(CapabilityInvocationResult::Output(Box::new(result.output)))
-}
-
-/// Refuses durable dispatch when the live governed contract no longer matches
-/// the revision pinned in the run's immutable capability catalog.
-fn require_current_tool_contract(
-    tool_name: &str,
-    pinned_contract_revision: &str,
-    live_contract_revision: Option<&str>,
-) -> Result<(), HandlerError> {
-    match live_contract_revision {
-        Some(live) if live == pinned_contract_revision => Ok(()),
-        Some(live) => Err(TerminalError::new_with_code(
-            409,
-            format!(
-                "tool {tool_name} governed contract drifted from {pinned_contract_revision} to {live}"
-            ),
-        )
-        .into()),
-        None => Err(TerminalError::new_with_code(
-            409,
-            format!(
-                "tool {tool_name} is no longer registered at its pinned governed contract revision"
-            ),
-        )
-        .into()),
-    }
 }
 
 async fn persist_task_outcome(
@@ -1385,21 +1410,11 @@ fn find_capability<'a>(
 pub(crate) fn capability_tool_name(
     capability: &ExecutionCapability,
 ) -> Result<String, HandlerError> {
-    match &capability.source {
-        CapabilitySource::BuiltInTool { name } | CapabilitySource::HandTool { name } => {
-            Ok(name.clone())
-        }
-        CapabilitySource::McpTool { tool_name, .. }
-        | CapabilitySource::ActionArtifact { tool_name, .. }
-        | CapabilitySource::ConnectorAction { tool_name, .. }
-        | CapabilitySource::SkillAction { tool_name, .. }
-        | CapabilitySource::Memory { tool_name, .. } => Ok(tool_name.clone()),
-        CapabilitySource::SkillCode { .. }
-        | CapabilitySource::Knowledge { .. }
-        | CapabilitySource::Model => {
-            Err(TerminalError::new("capability has no governed tool owner in Task 6").into())
-        }
-    }
+    capability
+        .source
+        .model_visible_tool_name()
+        .map(str::to_string)
+        .ok_or_else(|| TerminalError::new("capability has no governed tool owner in Task 6").into())
 }
 
 const fn capability_source_kind(source: &CapabilitySource) -> &'static str {
@@ -1409,6 +1424,7 @@ const fn capability_source_kind(source: &CapabilitySource) -> &'static str {
         CapabilitySource::McpTool { .. } => "mcp_tool",
         CapabilitySource::ActionArtifact { .. } => "action_artifact",
         CapabilitySource::ConnectorAction { .. } => "connector_action",
+        CapabilitySource::InstalledConnectorAction { .. } => "installed_connector_action",
         CapabilitySource::SkillAction { .. } => "skill_action",
         CapabilitySource::SkillCode { .. } => "skill_code",
         CapabilitySource::Memory { .. } => "memory",
@@ -1744,18 +1760,194 @@ fn execution_error(error: moa_execution::Error) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::execution_plan::{
-        ExecutionFailureClass, ExecutionNode, ExecutionOperation, ExecutionTaskResult,
-        ExecutionUsage, MapTask, RetryPolicy,
+    use moa_artifacts::{
+        execution_plan::{
+            CapabilityReference, ExecutionFailureClass, ExecutionNode, ExecutionOperation,
+            ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
+        },
+        reference::ArtifactRef,
     };
-    use moa_core::types::tools::IdempotencyClass;
+    use moa_core::types::{
+        action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+        identifiers::ConnectorConnectionId,
+        tools::IdempotencyClass,
+    };
+    use moa_execution::capability::{
+        CapabilityPolicyContext, CapabilitySource, ExecutionCapability, ExecutionClass,
+        ExecutionEstimate,
+    };
     use moa_execution::wire::ExecutionActionReviewResolution;
     use serde_json::json;
 
     use super::{
         CapabilityInvocationResult, action_review_invocation_result, capability_invocation_outcome,
-        require_current_tool_contract, task_output_schema,
+        task_agent_tool_schema, task_output_schema, validate_agent_capability_bindings,
     };
+
+    fn task_agent_capability(
+        reference_name: &str,
+        source: CapabilitySource,
+        policy_context: CapabilityPolicyContext,
+    ) -> ExecutionCapability {
+        ExecutionCapability {
+            reference: CapabilityReference {
+                name: reference_name.to_string(),
+                version: "v1".to_string(),
+            },
+            contract_revision: "contract-v1".to_string(),
+            description: format!("Task agent capability {reference_name}"),
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            action_class: ActionClass::ExternalWrite,
+            risk_level: RiskLevel::High,
+            default_effect: ActionPolicyEffect::Allow,
+            idempotency_class: IdempotencyClass::Idempotent,
+            execution_class: ExecutionClass::External,
+            source,
+            policy_context,
+            estimate: ExecutionEstimate {
+                tool_calls: 1,
+                tasks: 1,
+                ..ExecutionEstimate::default()
+            },
+        }
+    }
+
+    fn registered_task_agent_capability(tool_name: &str) -> ExecutionCapability {
+        let source = CapabilitySource::McpTool {
+            server: "fixture".to_string(),
+            tool_name: tool_name.to_string(),
+            remote_name: "probe".to_string(),
+        };
+        task_agent_capability(
+            tool_name,
+            source.clone(),
+            CapabilityPolicyContext::registered(source),
+        )
+    }
+
+    fn action_task_agent_capability(tool_name: &str) -> ExecutionCapability {
+        let action_ref = ArtifactRef::action_artifact("reviewed-operation");
+        let revision_uid = uuid::Uuid::from_u128(11);
+        let source = CapabilitySource::ActionArtifact {
+            action_ref: action_ref.clone(),
+            revision_uid,
+            tool_name: tool_name.to_string(),
+        };
+        task_agent_capability(
+            &action_ref.to_string(),
+            source.clone(),
+            CapabilityPolicyContext::artifact(
+                source,
+                Some(action_ref),
+                uuid::Uuid::from_u128(10),
+                revision_uid,
+                ActionPolicyEffect::AdminReview,
+            ),
+        )
+    }
+
+    fn skill_action_task_agent_capability(tool_name: &str) -> ExecutionCapability {
+        let skill_ref = ArtifactRef::artifact(
+            moa_artifacts::document::ArtifactKind::Skill,
+            "reviewed-operations",
+        );
+        let action_ref = ArtifactRef::action_artifact("reviewed-operation");
+        let revision_uid = uuid::Uuid::from_u128(21);
+        let source = CapabilitySource::SkillAction {
+            skill_ref: skill_ref.clone(),
+            revision_uid,
+            action_id: "reviewed-operation".to_string(),
+            tool_name: tool_name.to_string(),
+        };
+        task_agent_capability(
+            &format!("{skill_ref}#reviewed-operation"),
+            source.clone(),
+            CapabilityPolicyContext::artifact(
+                source,
+                Some(action_ref),
+                uuid::Uuid::from_u128(20),
+                revision_uid,
+                ActionPolicyEffect::AdminReview,
+            ),
+        )
+    }
+
+    #[test]
+    fn task_agent_schema_uses_persisted_installed_connector_capability() {
+        // Pins: replayed task-agent prompts use the exact model name and schema
+        // already persisted with typed connector provenance; no live global
+        // router lookup or connector-name parsing can substitute authority.
+        let connector_ref = ArtifactRef::connector("support");
+        let action_ref = ArtifactRef::action("support", "create_ticket");
+        let source = CapabilitySource::InstalledConnectorAction {
+            connector_ref,
+            connection_id: ConnectorConnectionId(uuid::Uuid::from_u128(71)),
+            binding_id: uuid::Uuid::from_u128(72),
+            connection_generation: 9,
+            definition_artifact_uid: uuid::Uuid::from_u128(73),
+            definition_revision_uid: uuid::Uuid::from_u128(74),
+            action_id: "create_ticket".to_string(),
+            contract_hash: "ab".repeat(32),
+            governed_contract_revision: "governed-v9".to_string(),
+            minimum_effect: ActionPolicyEffect::AdminReview,
+            tool_name: "conn__00000000000000000000000000000047__create_ticket".to_string(),
+        };
+        let capability = task_agent_capability(
+            &action_ref.to_string(),
+            source.clone(),
+            CapabilityPolicyContext::artifact(
+                source,
+                Some(action_ref),
+                uuid::Uuid::from_u128(73),
+                uuid::Uuid::from_u128(74),
+                ActionPolicyEffect::AdminReview,
+            ),
+        );
+        let bindings = validate_agent_capability_bindings(vec![&capability])
+            .expect("one installed connector capability should be unambiguous");
+
+        assert_eq!(
+            task_agent_tool_schema(&bindings[0]),
+            json!({
+                "name": "conn__00000000000000000000000000000047__create_ticket",
+                "description": "Task agent capability action://support.create_ticket",
+                "input_schema": {"type": "object"},
+            })
+        );
+    }
+
+    #[test]
+    fn artifact_policy_floor_rejects_ambiguous_task_agent_bindings_in_both_orders() {
+        // Pins: model-visible backing-tool names cannot collapse raw Allow authority
+        // with either an Action or inherited SkillAction review floor. This pure
+        // production guard runs before the task performs any model or tool I/O.
+        let tool_name = "mcp__fixture__probe";
+        let raw = registered_task_agent_capability(tool_name);
+        for alias in [
+            action_task_agent_capability(tool_name),
+            skill_action_task_agent_capability(tool_name),
+        ] {
+            let mut reference_labels = [
+                format!("{}@{}", alias.reference.name, alias.reference.version),
+                format!("{}@{}", raw.reference.name, raw.reference.version),
+            ];
+            reference_labels.sort();
+            let expected = format!(
+                "Terminal error [500]: task-local agent capability references {} and {} resolve to ambiguous model-visible tool `{tool_name}`",
+                reference_labels[0], reference_labels[1]
+            );
+            for capabilities in [vec![&raw, &alias], vec![&alias, &raw]] {
+                let error = validate_agent_capability_bindings(capabilities)
+                    .expect_err("ambiguous model-visible authority must fail before model use");
+                let actual = <restate_sdk::prelude::HandlerError as AsRef<
+                    dyn std::error::Error + Send + Sync,
+                >>::as_ref(&error)
+                .to_string();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[test]
     fn map_execution_task_uses_item_output_schema() {
@@ -1791,23 +1983,6 @@ mod tests {
         };
 
         assert_eq!(task_output_schema(&node), &item_schema);
-    }
-
-    #[test]
-    fn durable_dispatch_requires_the_pinned_governed_contract() {
-        // Pins: an immutable execution catalog cannot invoke any tool after a
-        // policy, retry, annotation, schema, ownership, or routing change.
-        let tool_name = "mcp__6_github__search";
-        require_current_tool_contract(tool_name, "contract-v1", Some("contract-v1"))
-            .expect("the exact pinned contract remains dispatchable");
-        assert!(
-            require_current_tool_contract(tool_name, "contract-v1", Some("contract-v2")).is_err(),
-            "a changed live contract must be refused before governed dispatch"
-        );
-        assert!(
-            require_current_tool_contract(tool_name, "contract-v1", None).is_err(),
-            "a withdrawn tool must be refused before governed dispatch"
-        );
     }
 
     #[test]

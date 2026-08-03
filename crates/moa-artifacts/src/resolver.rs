@@ -2,7 +2,6 @@
 
 use moa_core::{error::Result, types::action_policy::ActionRuleScope};
 
-use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind};
 use crate::reference::{ArtifactRef, ReferenceResolution};
 use crate::registry::ArtifactRegistry;
@@ -87,11 +86,11 @@ impl ArtifactResolver {
         else {
             return Ok(false);
         };
-        let ArtifactDefinition::Connector(ConnectorDefinition { actions, .. }) =
-            connector.document.definition
-        else {
+        let ArtifactDefinition::Connector(definition) = connector.document.definition else {
             return Ok(false);
         };
-        Ok(actions.iter().any(|candidate| candidate.id == *action))
+        Ok(definition
+            .actions()
+            .any(|candidate| candidate.id() == action))
     }
 }

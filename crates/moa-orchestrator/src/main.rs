@@ -20,6 +20,7 @@ use moa_orchestrator::{
         ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
         skip_fga_from_env,
     },
+    credential_ingress,
     runtime::{
         channel_ingress::spawn_channel_ingress,
         database::{build_database_pool, database_search_path},
@@ -44,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_RESTATE_PORT: u16 = 10020;
 const DEFAULT_HEALTH_PORT: u16 = 10021;
 const DEFAULT_SCIM_PORT: u16 = 10022;
+const DEFAULT_CONNECTOR_CREDENTIAL_PORT: u16 = 10023;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -64,6 +66,9 @@ struct Args {
     /// HTTP port for SCIM v2 provisioning endpoints.
     #[arg(long, default_value_t = DEFAULT_SCIM_PORT)]
     scim_port: u16,
+    /// Private HTTP port for edge-forwarded connector credential writes.
+    #[arg(long, default_value_t = DEFAULT_CONNECTOR_CREDENTIAL_PORT)]
+    credential_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -185,6 +190,7 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.fga_client.clone(),
         runtime_deps.providers.clone(),
         runtime_deps.tool_router.clone(),
+        &runtime_deps,
         moa_config.session_limits.clone(),
         moa_config.clone(),
         runtime_deps.contact_token_issuer.clone(),
@@ -228,10 +234,16 @@ async fn async_main() -> anyhow::Result<()> {
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
     let scim_listener = bind_listener(args.scim_port).await?;
+    let credential_listener = bind_listener(args.credential_port).await?;
     let mut restate_server = spawn_restate_server(endpoint, restate_listener, shutdown.clone());
     let mut health_server =
         spawn_health_server(health_listener, probe_state.clone(), shutdown.clone());
     let mut scim_server = spawn_scim_server(scim_listener, scim_state, shutdown.clone());
+    let mut credential_server = spawn_credential_server(
+        credential_listener,
+        credential_ingress::router(runtime_deps.connector_credential_ingress()),
+        shutdown.clone(),
+    );
     let mut channel_ingress = spawn_channel_ingress(
         runtime_deps.channel_adapters.clone(),
         runtime_deps.session_store.clone(),
@@ -248,6 +260,7 @@ async fn async_main() -> anyhow::Result<()> {
         port = args.port,
         health_port = args.health_port,
         scim_port = args.scim_port,
+        credential_port = args.credential_port,
         restate_admin_url = %probe_state.admin_base_url(),
         metrics_url = metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
         "starting moa-orchestrator"
@@ -270,6 +283,7 @@ async fn async_main() -> anyhow::Result<()> {
             shutdown.cancel();
             health_server.abort();
             scim_server.abort();
+            credential_server.abort();
             if let Some(handle) = channel_ingress.take() {
                 handle.abort();
             }
@@ -284,6 +298,7 @@ async fn async_main() -> anyhow::Result<()> {
             shutdown.cancel();
             restate_server.abort();
             scim_server.abort();
+            credential_server.abort();
             if let Some(handle) = channel_ingress.take() {
                 handle.abort();
             }
@@ -298,6 +313,7 @@ async fn async_main() -> anyhow::Result<()> {
             shutdown.cancel();
             restate_server.abort();
             health_server.abort();
+            credential_server.abort();
             if let Some(handle) = channel_ingress.take() {
                 handle.abort();
             }
@@ -306,6 +322,21 @@ async fn async_main() -> anyhow::Result<()> {
             }
             result.context("join SCIM server")??;
             bail!("SCIM server exited unexpectedly");
+        }
+        result = &mut credential_server => {
+            readiness.store(false, Ordering::Release);
+            shutdown.cancel();
+            restate_server.abort();
+            health_server.abort();
+            scim_server.abort();
+            if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
+            if let Some(handle) = analytics_export.take() {
+                handle.abort();
+            }
+            result.context("join connector credential ingress server")??;
+            bail!("connector credential ingress server exited unexpectedly");
         }
         signal = shutdown_signal() => {
             signal?;
@@ -322,9 +353,9 @@ async fn async_main() -> anyhow::Result<()> {
             tokio::time::sleep(SHUTDOWN_DRAIN_DELAY).await;
             shutdown.cancel();
 
-            // Restate, SCIM, and channel ingress are the request-owned audit
-            // producers. Join them before closing audit admission so every
-            // accepted request has finished its final audit emission.
+            // Restate, SCIM, connector credential ingress, and channel ingress
+            // are request-owned audit producers. Join them before closing audit
+            // admission so every accepted request finishes its final emission.
             let _ = join_task_bounded("Restate handler server", restate_server).await;
             if let Some(result) = join_task_bounded("health probe server", health_server).await
                 && let Err(error) = result
@@ -335,6 +366,12 @@ async fn async_main() -> anyhow::Result<()> {
                 && let Err(error) = result
             {
                 tracing::warn!(%error, "SCIM server failed during shutdown");
+            }
+            if let Some(result) =
+                join_task_bounded("connector credential ingress server", credential_server).await
+                && let Err(error) = result
+            {
+                tracing::warn!(%error, "connector credential ingress server failed during shutdown");
             }
             if let Some(handle) = channel_ingress.take() {
                 let _ = join_task_bounded("channel ingress", handle).await;
@@ -631,6 +668,19 @@ fn spawn_scim_server(
     shutdown: CancellationToken,
 ) -> JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move { serve_scim_server(listener, state, shutdown).await })
+}
+
+fn spawn_credential_server(
+    listener: TcpListener,
+    router: Router,
+    shutdown: CancellationToken,
+) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        serve(listener, router)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await
+            .context("serve connector credential ingress HTTP server")
+    })
 }
 
 async fn bind_listener(port: u16) -> anyhow::Result<TcpListener> {

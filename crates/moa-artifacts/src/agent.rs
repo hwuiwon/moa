@@ -2,6 +2,7 @@
 
 use moa_core::types::agent::AgentSandboxPolicy;
 use moa_core::types::guardrails::GuardrailMode;
+use moa_core::types::identifiers::ConnectorConnectionId;
 use moa_core::types::memory::{InformationBarrierClearances, InformationBarrierId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -219,6 +220,9 @@ pub struct ActionPolicy {
     /// Actions that must always require administrator review.
     #[serde(default)]
     pub require_admin_review: Vec<ArtifactRef>,
+    /// Exact installed connections selected for logical connector references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connector_bindings: Vec<ConnectorBinding>,
 }
 
 impl ActionPolicy {
@@ -228,8 +232,32 @@ impl ActionPolicy {
             "action_policy.require_admin_review",
             &self.require_admin_review,
         ));
+        refs.extend(self.connector_bindings.iter().enumerate().map(
+            |(index, binding)| {
+                (
+                    format!(
+                        "definition.spec.action_policy.connector_bindings[{index}].connector_ref"
+                    ),
+                    binding.connector_ref.clone(),
+                )
+            },
+        ));
         refs
     }
+}
+
+/// Authoring-time binding from a logical connector to one installed connection.
+///
+/// The artifact resolver later pins the resolved artifact and revision IDs into
+/// the runtime policy snapshot. Credential material and connection configuration
+/// are deliberately absent from this artifact DTO.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorBinding {
+    /// Canonical `connector://...` reference resolved through the artifact registry.
+    pub connector_ref: ArtifactRef,
+    /// Tenant-installed connection selected for this logical connector.
+    pub connection_id: ConnectorConnectionId,
 }
 
 /// Built-in and MCP tool filtering mode.

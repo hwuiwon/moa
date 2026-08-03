@@ -24,6 +24,10 @@ uuid_id!(
     /// Identifier for a tenant runtime boundary.
     pub struct TenantId
 );
+uuid_id!(
+    /// Identifier for one tenant-installed connector connection.
+    pub struct ConnectorConnectionId
+);
 
 impl StoragePartitionId {
     /// Returns the default storage partition for tenant-scoped runtime state.
@@ -71,7 +75,7 @@ impl From<uuid::Uuid> for ToolCallId {
 
 #[cfg(test)]
 mod tests {
-    use super::{StoragePartitionId, TenantId};
+    use super::{ConnectorConnectionId, StoragePartitionId, TenantId};
 
     #[test]
     fn storage_partition_id_for_tenant_uses_tenant_uuid_text() {
@@ -84,5 +88,20 @@ mod tests {
             StoragePartitionId::for_tenant(tenant_id).as_str(),
             tenant_uuid.to_string()
         );
+    }
+
+    #[test]
+    fn connector_connection_id_round_trips_as_uuid_json() {
+        // Pins: connector, knowledge, hand, wire, and orchestration boundaries
+        // exchange one UUID identity rather than unrelated string aliases.
+        let connection_id = ConnectorConnectionId(uuid::Uuid::from_u128(0x0c01_1ec7));
+
+        let encoded = serde_json::to_string(&connection_id)
+            .expect("connector connection id should serialize");
+        let decoded: ConnectorConnectionId =
+            serde_json::from_str(&encoded).expect("connector connection id should deserialize");
+
+        assert_eq!(decoded, connection_id);
+        assert_eq!(encoded, format!("\"{}\"", connection_id.0));
     }
 }

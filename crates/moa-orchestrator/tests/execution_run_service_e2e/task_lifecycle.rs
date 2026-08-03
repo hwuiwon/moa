@@ -9,17 +9,23 @@ use moa_artifacts::execution_plan::{
     ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, InputAudience,
     RetryPolicy,
 };
+use moa_artifacts::{
+    document::ArtifactDocument,
+    registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile},
+    release::{ActivationTarget, TenantScope},
+    test_fixtures::activate_revision,
+};
 use moa_core::{
     events::Event,
     types::{
-        action_policy::{ActionPolicyEffect, ActionReviewStatus},
+        action_policy::{ActionPolicyEffect, ActionReviewStatus, ActionRuleScope},
         execution_planning::{ExecutionSourceProvenance, GeneratedPlanPlannerProvenance},
         identifiers::{SessionId, TenantId},
     },
 };
 use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::{
-    capability::{ExecutionCapability, ExecutionEstimate},
+    capability::{CapabilitySource, ExecutionCapability, ExecutionEstimate},
     compiler::{CompileExecutionRequest, CompiledExecution, compile},
     repository::{
         ExecutionRepository, ExecutionRunRecord, ExecutionScope, ExecutionTaskRecord,
@@ -669,6 +675,134 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn artifact_required_admin_review_reaches_durable_dispatch() -> Result<()> {
+    // Pins: an Action artifact's review floor survives planning-context persistence,
+    // run replay, and durable task dispatch through both the direct Action and a
+    // SkillAction alias even when the backing MCP tool rule allows it.
+    let tool_name = "artifact_review_floor_probe";
+    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let controller = fixture_capability(&fixture)?;
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect artifact-floor review reaper")?;
+    let reaper = ActionReviewReaper::with_restate_ingress(pool, fixture.ingress_url.clone());
+
+    for (completed_calls, route) in [
+        ArtifactCapabilityRoute::DirectAction,
+        ArtifactCapabilityRoute::SkillAction,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let label = route.label();
+        let prepared = prepare_artifact_capability_run(
+            &fixture,
+            label,
+            tool_name,
+            no_retry(),
+            ActionPolicyEffect::Allow,
+            route,
+        )
+        .await?;
+        assert_eq!(
+            prepared.capability.policy_context.minimum_effect,
+            ActionPolicyEffect::AdminReview,
+            "{label} weakened the Action artifact review floor"
+        );
+        assert!(prepared.capability.policy_context.artifact_uid.is_some());
+        assert!(prepared.capability.policy_context.revision_uid.is_some());
+        let canonical_action_ref = prepared
+            .capability
+            .policy_context
+            .canonical_action_ref
+            .as_ref()
+            .map(ToString::to_string)
+            .context("artifact-backed capability omitted its canonical Action reference")?;
+        match route {
+            ArtifactCapabilityRoute::DirectAction => {
+                assert_eq!(canonical_action_ref, prepared.capability.reference.name);
+                assert!(matches!(
+                    prepared.capability.source,
+                    CapabilitySource::ActionArtifact { .. }
+                ));
+            }
+            ArtifactCapabilityRoute::SkillAction => {
+                assert!(canonical_action_ref.starts_with("action://"));
+                assert_ne!(canonical_action_ref, prepared.capability.reference.name);
+                assert!(matches!(
+                    prepared.capability.source,
+                    CapabilitySource::SkillAction { .. }
+                ));
+            }
+        }
+
+        let run = start_service_run(&fixture, &prepared).await?;
+        let persisted = load_run(&run).await?;
+        let persisted_capability = persisted
+            .catalog
+            .capabilities
+            .iter()
+            .find(|capability| capability.reference == prepared.capability.reference)
+            .context("persisted run catalog omitted artifact capability")?;
+        assert_eq!(
+            persisted_capability.policy_context, prepared.capability.policy_context,
+            "run replay must preserve the exact {label} artifact policy context"
+        );
+
+        let review = await_execution_review(&fixture, run.tenant_id, run.task_id).await?;
+        assert_eq!(
+            controller.calls().len(),
+            completed_calls,
+            "{label} must suspend before backing-tool dispatch"
+        );
+        assert_eq!(
+            review.envelope.action_class,
+            prepared.capability.action_class
+        );
+        assert_eq!(review.envelope.risk_level, prepared.capability.risk_level);
+
+        let client = fixture.client.clone();
+        let tenant_id = run.tenant_id;
+        let review_id = review.id;
+        let clear = tokio::spawn(async move {
+            client
+                .post_void(
+                    "/ActionReviews/decide",
+                    &DecideActionReviewRequest {
+                        tenant_id,
+                        review_id,
+                        decision: ActionReviewDecisionKind::Cleared,
+                        reason: None,
+                    },
+                )
+                .await
+        });
+        let calls = controller
+            .wait_for_calls(completed_calls + 1, SERVICE_TIMEOUT)
+            .await?;
+        assert_eq!(calls.len(), completed_calls + 1);
+        assert_eq!(calls[completed_calls].capability, tool_name);
+        controller.release(1);
+        tokio::time::timeout(SERVICE_TIMEOUT, clear)
+            .await
+            .with_context(|| format!("clearing {label} artifact-floor review timed out"))???;
+
+        assert_eq!(reaper.dispatch_execution_review_resolutions().await?, 1);
+        let terminal =
+            await_review_terminal(label, &fixture, &run, Duration::from_secs(15)).await?;
+        assert_terminal(
+            &terminal,
+            ExecutionRunStatus::Completed,
+            ExecutionTerminalCause::Completion { limit_stop: None },
+            1,
+            1,
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> {
     // Pins: cleared, denied, timed-out, and replayed review outbox deliveries are UID-idempotent.
     let tool_name = "lifecycle_review_probe";
@@ -1050,6 +1184,27 @@ struct PreparedCapabilityRun {
     retry: RetryPolicy,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArtifactCapabilityRoute {
+    DirectAction,
+    SkillAction,
+}
+
+impl ArtifactCapabilityRoute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DirectAction => "artifact-review-floor-direct",
+            Self::SkillAction => "artifact-review-floor-skill-alias",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactCapabilitySeed {
+    action_name: String,
+    route: ArtifactCapabilityRoute,
+}
+
 #[derive(Clone)]
 struct RunningCapabilityRun {
     tenant_id: TenantId,
@@ -1114,6 +1269,39 @@ async fn prepare_capability_run(
     retry: RetryPolicy,
     policy_effect: ActionPolicyEffect,
 ) -> Result<PreparedCapabilityRun> {
+    prepare_capability_run_inner(fixture, label, tool_name, retry, policy_effect, None).await
+}
+
+async fn prepare_artifact_capability_run(
+    fixture: &OrchestratorTestFixture,
+    label: &str,
+    tool_name: &str,
+    retry: RetryPolicy,
+    policy_effect: ActionPolicyEffect,
+    route: ArtifactCapabilityRoute,
+) -> Result<PreparedCapabilityRun> {
+    prepare_capability_run_inner(
+        fixture,
+        label,
+        tool_name,
+        retry,
+        policy_effect,
+        Some(ArtifactCapabilitySeed {
+            action_name: format!("{label}-{}", Uuid::now_v7()),
+            route,
+        }),
+    )
+    .await
+}
+
+async fn prepare_capability_run_inner(
+    fixture: &OrchestratorTestFixture,
+    label: &str,
+    tool_name: &str,
+    retry: RetryPolicy,
+    policy_effect: ActionPolicyEffect,
+    artifact_seed: Option<ArtifactCapabilitySeed>,
+) -> Result<PreparedCapabilityRun> {
     let test = fixture.isolated().await;
     let session_id = test.create_session(label).await?;
     let session = fixture.client.get_session(session_id).await?;
@@ -1143,6 +1331,25 @@ async fn prepare_capability_run(
         )
         .await
         .context("upsert exact lifecycle fixture policy")?;
+    let registered_tool_name = moa_hands::mcp_tool_reference("fixture-capability", tool_name);
+    if let Some(seed) = artifact_seed.as_ref() {
+        seed_serving_action(
+            fixture,
+            session.tenant_id,
+            &seed.action_name,
+            &registered_tool_name,
+        )
+        .await?;
+        if seed.route == ArtifactCapabilityRoute::SkillAction {
+            seed_serving_skill_action_alias(
+                fixture,
+                session.tenant_id,
+                &artifact_skill_name(&seed.action_name),
+                &seed.action_name,
+            )
+            .await?;
+        }
+    }
     let objective = format!("Execute the deterministic Task 10 lifecycle case {label}");
     let originating_user_sequence_num = fixture
         .client
@@ -1168,17 +1375,26 @@ async fn prepare_capability_run(
         )
         .await
         .context("load production lifecycle planning context")?;
+    let expected_reference = match artifact_seed.as_ref() {
+        None => registered_tool_name.clone(),
+        Some(seed) if seed.route == ArtifactCapabilityRoute::DirectAction => {
+            format!("action://{}", seed.action_name)
+        }
+        Some(seed) => format!(
+            "skill://{}#artifact_review_floor_alias",
+            artifact_skill_name(&seed.action_name)
+        ),
+    };
     let capability = planning
         .snapshot
         .catalog
         .capabilities
         .iter()
-        .find(|capability| {
-            capability.reference.name
-                == moa_hands::mcp_tool_reference("fixture-capability", tool_name)
-        })
+        .find(|capability| capability.reference.name == expected_reference)
         .cloned()
-        .with_context(|| format!("planning catalog omitted fixture capability `{tool_name}`"))?;
+        .with_context(|| {
+            format!("planning catalog omitted fixture capability `{expected_reference}`")
+        })?;
     let compiled = compile(CompileExecutionRequest {
         goal: lifecycle_goal(objective),
         plan: lifecycle_plan(&capability, retry.clone()),
@@ -1207,6 +1423,153 @@ async fn prepare_capability_run(
         },
         retry,
     })
+}
+
+async fn seed_serving_action(
+    fixture: &OrchestratorTestFixture,
+    tenant_id: TenantId,
+    name: &str,
+    tool_name: &str,
+) -> Result<()> {
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect artifact action fixture to Postgres")?;
+    let registry = ArtifactRegistry::new(pool.clone());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let document = artifact_action_document(name, tool_name);
+    let source = document.to_yaml()?;
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await
+        .context("create artifact action fixture draft")?;
+    activate_revision(
+        &pool,
+        TenantScope::new(tenant_id),
+        ActivationTarget::ActionVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .context("activate artifact action fixture")?;
+    Ok(())
+}
+
+fn artifact_skill_name(action_name: &str) -> String {
+    format!("{action_name}-skill")
+}
+
+async fn seed_serving_skill_action_alias(
+    fixture: &OrchestratorTestFixture,
+    tenant_id: TenantId,
+    skill_name: &str,
+    action_name: &str,
+) -> Result<()> {
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect artifact skill alias fixture to Postgres")?;
+    let registry = ArtifactRegistry::new(pool.clone());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let document = artifact_skill_action_alias_document(skill_name, action_name);
+    let source = document.to_yaml()?;
+    let files = [NewArtifactFile::new(
+        "SKILL.md",
+        b"# Artifact review floor alias\n".to_vec(),
+    )];
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &files,
+            },
+        )
+        .await
+        .context("create artifact skill alias fixture draft")?;
+    activate_revision(
+        &pool,
+        TenantScope::new(tenant_id),
+        ActivationTarget::SkillVisibility {
+            artifact_uid: draft.artifact_uid,
+        },
+        draft.revision_uid,
+    )
+    .await
+    .context("activate artifact skill alias fixture")?;
+    Ok(())
+}
+
+fn artifact_action_document(name: &str, tool_name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "action",
+        "metadata": {
+            "name": name,
+            "description": "Action whose artifact policy requires review",
+            "tags": ["execution-service"]
+        },
+        "definition": {
+            "type": "action",
+            "spec": {
+                "id": "artifact_review_floor",
+                "description": "Dispatch one deterministic fixture action",
+                "tool_name": tool_name,
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["case"],
+                    "properties": {"case": {"type": "string"}}
+                },
+                "output_schema": {"type": "object"},
+                "admin_review_required": true
+            }
+        }
+    }))
+    .expect("artifact action fixture document should deserialize")
+}
+
+fn artifact_skill_action_alias_document(name: &str, action_name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "skill",
+        "metadata": {
+            "name": name,
+            "description": "Skill alias for an Action whose policy requires review",
+            "tags": ["execution-service"]
+        },
+        "definition": {
+            "type": "skill",
+            "spec": {
+                "instructions": {"path": "SKILL.md"},
+                "inputs": {"type": "object"},
+                "outputs": {"type": "object"},
+                "actions": [{
+                    "id": "artifact_review_floor_alias",
+                    "description": "Dispatch the review-required Action through a SkillAction",
+                    "kind": "connector_action",
+                    "ref": format!("action://{action_name}"),
+                    "input_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["case"],
+                        "properties": {"case": {"type": "string"}}
+                    },
+                    "output_schema": {"type": "object"}
+                }]
+            }
+        }
+    }))
+    .expect("artifact skill alias fixture document should deserialize")
 }
 
 fn recompile_with_node_output_schema(

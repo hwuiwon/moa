@@ -56,8 +56,6 @@ pub(super) fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowled
         provider_account_id: row
             .try_get("provider_connection_id")
             .map_err(map_sqlx_error)?,
-        credential_ref: row.try_get("credential_ref").map_err(map_sqlx_error)?,
-        status: connection_status(row.try_get("status").map_err(map_sqlx_error)?)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
         source_selection: row.try_get("source_selection").map_err(map_sqlx_error)?,
         information_barrier: row
@@ -72,6 +70,33 @@ pub(super) fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowled
     })
 }
 
+pub(super) fn connection_disconnect_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<KnowledgeConnectionDisconnectProgress> {
+    let state = row.try_get::<String, _>("state").map_err(map_sqlx_error)?;
+    Ok(KnowledgeConnectionDisconnectProgress {
+        tenant_id: TenantId::from(
+            row.try_get::<Uuid, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
+        connection_uid: row.try_get("connection_uid").map_err(map_sqlx_error)?,
+        operation_id: row.try_get("operation_id").map_err(map_sqlx_error)?,
+        request_hash: row.try_get("request_hash").map_err(map_sqlx_error)?,
+        provider_operation_id: row
+            .try_get("provider_operation_id")
+            .map_err(map_sqlx_error)?,
+        state: KnowledgeDisconnectState::from_str_exact(&state).ok_or_else(|| {
+            Error::Repository(format!(
+                "unknown knowledge connection disconnect state `{state}`"
+            ))
+        })?,
+        error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
+        created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
+        updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
+        completed_at: row.try_get("completed_at").map_err(map_sqlx_error)?,
+    })
+}
+
 pub(super) fn connection_projection_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<KnowledgeConnectionProjection> {
@@ -82,6 +107,9 @@ pub(super) fn connection_projection_from_row(
         .transpose()?;
     Ok(KnowledgeConnectionProjection {
         connection: connection_from_row(row)?,
+        parent_lifecycle_status: row
+            .try_get("parent_lifecycle_status")
+            .map_err(map_sqlx_error)?,
         last_sync_status,
     })
 }
@@ -152,6 +180,9 @@ pub(super) fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowledge
 
 pub(super) fn link_claim_from_row(row: &sqlx::postgres::PgRow) -> Result<LinkClaim> {
     let state: String = row.try_get("state").map_err(map_sqlx_error)?;
+    let credential_ownership: Option<String> = row
+        .try_get("credential_ownership")
+        .map_err(map_sqlx_error)?;
     Ok(LinkClaim {
         tenant_id: TenantId::from(
             row.try_get::<Uuid, _>("tenant_id")
@@ -161,11 +192,29 @@ pub(super) fn link_claim_from_row(row: &sqlx::postgres::PgRow) -> Result<LinkCla
         request_hash: row.try_get("request_hash").map_err(map_sqlx_error)?,
         owner_identity_id: row.try_get("owner_identity_id").map_err(map_sqlx_error)?,
         connection_uid: row.try_get("connection_uid").map_err(map_sqlx_error)?,
-        previous_credential_ref: row
-            .try_get("previous_credential_ref")
+        parent_created_by_claim: row
+            .try_get("parent_created_by_claim")
             .map_err(map_sqlx_error)?,
+        credential_expected_generation: row
+            .try_get::<Option<i64>, _>("credential_expected_generation")
+            .map_err(map_sqlx_error)?
+            .map(u64::try_from)
+            .transpose()
+            .map_err(map_int_error)?,
+        credential_ownership: credential_ownership
+            .map(|ownership| {
+                KnowledgeCredentialOwnership::from_str_exact(&ownership).ok_or_else(|| {
+                    Error::Repository(format!(
+                        "unknown knowledge credential ownership `{ownership}`"
+                    ))
+                })
+            })
+            .transpose()?,
         candidate_credential_ref: row
             .try_get("candidate_credential_ref")
+            .map_err(map_sqlx_error)?,
+        previous_vault_credential_ref: row
+            .try_get("previous_vault_credential_ref")
             .map_err(map_sqlx_error)?,
         state: LinkClaimState::from_str_exact(&state).ok_or_else(|| {
             Error::Repository(format!("unknown knowledge link claim state `{state}`"))
@@ -317,18 +366,6 @@ pub(super) fn step_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeInge
         retry_count: u32::try_from(attempt).map_err(map_int_error)?,
         error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
     })
-}
-
-pub(super) fn connection_status(value: String) -> Result<ConnectionStatus> {
-    match value.as_str() {
-        "pending" => Ok(ConnectionStatus::Pending),
-        "active" => Ok(ConnectionStatus::Active),
-        "disabled" => Ok(ConnectionStatus::Disabled),
-        "error" => Ok(ConnectionStatus::Error),
-        _ => Err(Error::Repository(format!(
-            "unknown knowledge connection status `{value}`"
-        ))),
-    }
 }
 
 pub(super) fn sync_run_status(value: String) -> Result<crate::domain::SyncRunStatus> {

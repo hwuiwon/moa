@@ -8,6 +8,20 @@ fn link_service(
     provider: Arc<FakeLinkedIntegrationProvider>,
     credentials: Arc<FakeKnowledgeCredentialStore>,
 ) -> KnowledgeService {
+    link_service_with_connectors(
+        repository,
+        provider,
+        credentials,
+        Arc::new(FakeKnowledgeConnectorConnections::default()),
+    )
+}
+
+fn link_service_with_connectors(
+    repository: Arc<InMemoryKnowledgeRepository>,
+    provider: Arc<FakeLinkedIntegrationProvider>,
+    credentials: Arc<FakeKnowledgeCredentialStore>,
+    connector_connections: Arc<FakeKnowledgeConnectorConnections>,
+) -> KnowledgeService {
     KnowledgeService::new(
         repository.clone(),
         repository,
@@ -16,6 +30,7 @@ fn link_service(
         fake_ingestion_runner(),
         80,
     )
+    .with_connector_connection_port(connector_connections)
 }
 
 fn exchange_request(tenant_id: TenantId) -> KnowledgeExchangeTokenRequest {
@@ -27,6 +42,55 @@ fn exchange_request(tenant_id: TenantId) -> KnowledgeExchangeTokenRequest {
         source_selection: json!({}),
         information_barrier: None,
     }
+}
+
+#[tokio::test]
+async fn nango_provider_native_link_compensation_writes_no_tenant_credential() {
+    // Pins: Nango uses deployment authentication, so a failed new link removes
+    // its projection without writing or rolling back tenant credential material.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let provider = Arc::new(
+        FakeLinkedIntegrationProvider::nango_with_initial_sync_error(
+            "provider refused the initial sync",
+        ),
+    );
+    let service = KnowledgeService::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_provider("nango", provider)),
+        credentials.clone(),
+        fake_ingestion_runner(),
+        80,
+    )
+    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
+
+    service
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: "nango".to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: None,
+            },
+            &caller,
+        )
+        .await
+        .expect_err("initial sync failure should compensate the Nango link");
+
+    let claim = repository.only_link_claim();
+    assert_eq!(
+        claim.credential_ownership,
+        Some(KnowledgeCredentialOwnership::ProviderNative)
+    );
+    assert_eq!(claim.candidate_credential_ref, None);
+    assert_eq!(claim.previous_vault_credential_ref, None);
+    assert_eq!(repository.connection(claim.connection_uid), None);
+    assert_eq!(credentials.stored_account_count(), 0);
 }
 
 #[tokio::test]
@@ -93,13 +157,11 @@ async fn relinking_the_same_provider_account_binds_the_credential_to_the_kept_co
         relink.connection_uid, first.connection_uid,
         "a re-link must keep the connection the upsert conflict target resolves to"
     );
-    let connection = repository
-        .connection(relink.connection_uid)
-        .expect("connection should be stored");
-    assert_eq!(
-        credentials.connection_for_reference(&connection.credential_ref),
-        Some(connection.connection_uid),
-        "the credential the connection points at must be bound to that connection"
+    assert!(
+        credentials
+            .reference_for_connection(relink.connection_uid)
+            .is_some(),
+        "the active Merge credential must be selected by the shared connection identity"
     );
 }
 
@@ -141,7 +203,7 @@ async fn reusing_a_link_operation_id_for_a_different_account_is_a_typed_conflict
 }
 
 #[tokio::test]
-async fn failed_relink_revokes_only_its_candidate_and_restores_the_previous_reference() {
+async fn failed_relink_revokes_only_its_candidate_and_restores_the_previous_vault_version() {
     // Pins: a post-write failure durably compensates. The candidate this
     // operation wrote is revoked and the exact reference it superseded comes
     // back, so a failed re-link never leaves an unclaimed active credential or
@@ -149,51 +211,47 @@ async fn failed_relink_revokes_only_its_candidate_and_restores_the_previous_refe
     let tenant_id = TenantId::from(Uuid::now_v7());
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
-    let healthy = link_service(
+    let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
+    let healthy = link_service_with_connectors(
         repository.clone(),
         Arc::new(FakeLinkedIntegrationProvider::default()),
         credentials.clone(),
+        connector_connections.clone(),
     );
     let first = healthy
         .exchange_public_token(exchange_request(tenant_id), &test_caller(tenant_id))
         .await
         .expect("first link should finalize");
-    let original_ref = repository
-        .connection(first.connection_uid)
-        .expect("connection should be stored")
-        .credential_ref;
+    let original_vault_ref = credentials
+        .reference_for_connection(first.connection_uid)
+        .expect("first link should activate one managed vault candidate");
     repository.finish_sync_run(first.sync_run_uid.expect("link should start a sync run"));
 
-    let failing = link_service(
+    let failing = link_service_with_connectors(
         repository.clone(),
         Arc::new(FakeLinkedIntegrationProvider::with_initial_sync_error(
             "provider refused the initial sync",
         )),
         credentials.clone(),
+        connector_connections,
     );
     failing
         .exchange_public_token(exchange_request(tenant_id), &test_caller(tenant_id))
         .await
         .expect_err("a failed initial sync must fail the link");
 
-    let connection = repository
-        .connection(first.connection_uid)
-        .expect("connection should still be stored");
+    assert!(repository.connection(first.connection_uid).is_some());
     assert_eq!(
-        connection.credential_ref, original_ref,
-        "compensation must restore the exact previous reference"
-    );
-    assert_eq!(
-        connection.status,
-        ConnectionStatus::Active,
-        "a restored re-link leaves the surviving connection usable"
+        credentials.active_reference_for_connection(first.connection_uid),
+        Some(original_vault_ref.clone()),
+        "compensation must restore the exact previous vault version"
     );
     assert_eq!(
         credentials.revoked_references(),
         credentials
             .references()
             .into_iter()
-            .filter(|reference| *reference != original_ref)
+            .filter(|reference| *reference != original_vault_ref)
             .collect::<Vec<_>>(),
         "only the candidate this operation wrote may be revoked"
     );
@@ -202,6 +260,50 @@ async fn failed_relink_revokes_only_its_candidate_and_restores_the_previous_refe
         claims.contains(&LinkClaimState::Compensated),
         "the failed operation must end compensated, found {claims:?}"
     );
+}
+
+#[tokio::test]
+async fn failed_relink_with_revoked_prior_keeps_candidate_active_and_fails_closed() {
+    // Pins: a revoked prior is not evidence that the candidate rollback already
+    // happened. Compensation must not revoke the still-active candidate.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
+    let healthy = link_service_with_connectors(
+        repository.clone(),
+        Arc::new(FakeLinkedIntegrationProvider::default()),
+        credentials.clone(),
+        connector_connections.clone(),
+    );
+    let first = healthy
+        .exchange_public_token(exchange_request(tenant_id), &test_caller(tenant_id))
+        .await
+        .expect("first link should finalize");
+    repository.finish_sync_run(first.sync_run_uid.expect("link should start a sync run"));
+    let original_vault_ref = credentials
+        .active_reference_for_connection(first.connection_uid)
+        .expect("first candidate should be active");
+    credentials.fail_rollback_with_revoked_prior();
+
+    let failing = link_service_with_connectors(
+        repository,
+        Arc::new(FakeLinkedIntegrationProvider::with_initial_sync_error(
+            "provider refused the initial sync",
+        )),
+        credentials.clone(),
+        connector_connections,
+    );
+    failing
+        .exchange_public_token(exchange_request(tenant_id), &test_caller(tenant_id))
+        .await
+        .expect_err("revoked prior must make rollback fail closed");
+
+    let active = credentials
+        .active_reference_for_connection(first.connection_uid)
+        .expect("the candidate must remain active when its prior is revoked");
+    assert_ne!(active, original_vault_ref);
+    assert_eq!(credentials.revoked_references(), vec![original_vault_ref]);
 }
 
 #[tokio::test]
@@ -344,10 +446,9 @@ async fn a_link_cannot_finalize_on_a_sync_run_it_does_not_own() {
         .exchange_public_token(exchange_request(tenant_id), &test_caller(tenant_id))
         .await
         .expect("first link should finalize");
-    let original_ref = repository
-        .connection(first.connection_uid)
-        .expect("connection should be stored")
-        .credential_ref;
+    let original_vault_ref = credentials
+        .active_reference_for_connection(first.connection_uid)
+        .expect("first candidate should be active");
 
     // The first link's run is deliberately left active.
     let error = service
@@ -359,12 +460,10 @@ async fn a_link_cannot_finalize_on_a_sync_run_it_does_not_own() {
         error.to_string().contains("another sync run is active"),
         "the link should refuse unrelated evidence: {error}"
     );
+    assert!(repository.connection(first.connection_uid).is_some());
     assert_eq!(
-        repository
-            .connection(first.connection_uid)
-            .expect("connection should still be stored")
-            .credential_ref,
-        original_ref,
-        "the refused re-link must compensate back to the previous reference"
+        credentials.active_reference_for_connection(first.connection_uid),
+        Some(original_vault_ref),
+        "the refused re-link must compensate back to the previous vault version"
     );
 }

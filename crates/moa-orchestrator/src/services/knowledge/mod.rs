@@ -15,9 +15,20 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use moa_authz_schema::Relation;
 use moa_config::MoaConfig;
+use moa_connectors::{
+    domain::{
+        ConnectionGeneration, ConnectionHealth, ConnectorConnection, ManagedParentClaim,
+        ManagedParentDefinition, ManagedParentDeleteOutcome,
+    },
+    service::{
+        ConnectorService, CredentialGenerationFenceRequest, ManagedParentActivationRequest,
+        ManagedParentClaimRequest, ManagedParentDeleteRequest,
+    },
+};
 use moa_core::types::credentials::{
     CredentialContext, CredentialError, CredentialIdentity, CredentialKind, CredentialOperation,
-    CredentialPrincipal, CredentialRef, CredentialServiceActor, CredentialSource, RedactedSecret,
+    CredentialPrincipal, CredentialRef, CredentialServiceActor, CredentialSlotName,
+    CredentialStagingToken, RedactedSecret,
 };
 use moa_core::types::memory::RlsContext;
 use moa_core::{
@@ -26,7 +37,7 @@ use moa_core::{
     types::identifiers::TenantId,
 };
 use moa_knowledge::{
-    domain::{KnowledgeConnection, LinkedAccount},
+    domain::{KnowledgeConnection, KnowledgeCredentialOwnership, LinkedAccount},
     providers::{LinkedIntegrationProvider, merge::MergeProvider, nango::NangoProvider},
     repository::{
         KnowledgeDiscoveryStore, KnowledgeRepository, PostgresKnowledgeDiscoveryStore,
@@ -491,6 +502,7 @@ pub struct KnowledgeService {
     discovery: Arc<dyn KnowledgeDiscoveryStore>,
     providers: Arc<dyn KnowledgeProviderResolver>,
     credentials: Arc<dyn KnowledgeCredentialStore>,
+    connector_connections: Option<Arc<dyn KnowledgeConnectorConnections>>,
     ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
     max_preview_chars: usize,
     lineage_clickhouse: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
@@ -512,6 +524,7 @@ impl KnowledgeService {
             discovery,
             providers,
             credentials,
+            connector_connections: None,
             ingestion_runner,
             max_preview_chars,
             lineage_clickhouse: None,
@@ -533,6 +546,7 @@ impl KnowledgeService {
             discovery,
             providers,
             credentials,
+            connector_connections: None,
             ingestion_runner,
             max_preview_chars,
             lineage_clickhouse: None,
@@ -583,6 +597,27 @@ impl KnowledgeService {
         self
     }
 
+    /// Injects the process-shared generic connector lifecycle service.
+    ///
+    /// Runtime composition must pass the same service used by connector
+    /// management and action dispatch; knowledge must never construct a hidden
+    /// repository/service stack for its managed parent.
+    #[must_use]
+    pub fn with_connector_connections(mut self, connector_connections: ConnectorService) -> Self {
+        self.connector_connections = Some(Arc::new(connector_connections));
+        self
+    }
+
+    /// Injects a connector lifecycle port for deterministic service tests.
+    #[must_use]
+    pub fn with_connector_connection_port(
+        mut self,
+        connector_connections: Arc<dyn KnowledgeConnectorConnections>,
+    ) -> Self {
+        self.connector_connections = Some(connector_connections);
+        self
+    }
+
     /// Returns the injected page-ingestion runner.
     #[must_use]
     pub fn ingestion_runner(&self) -> Arc<dyn KnowledgeIngestionRunner> {
@@ -611,6 +646,16 @@ impl KnowledgeService {
         self.discovery.as_ref()
     }
 
+    fn connector_connections(
+        &self,
+    ) -> Result<&dyn KnowledgeConnectorConnections, KnowledgeServiceError> {
+        self.connector_connections.as_deref().ok_or_else(|| {
+            KnowledgeServiceError::InvalidRequest(
+                "generic connector lifecycle service is not configured".to_string(),
+            )
+        })
+    }
+
     /// Resolves one connection's provider credential for an outbound request.
     ///
     /// The plaintext never touches the connection row: it is returned as a
@@ -620,7 +665,7 @@ impl KnowledgeService {
         &self,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
-    ) -> Result<RedactedSecret, KnowledgeServiceError> {
+    ) -> Result<Option<RedactedSecret>, KnowledgeServiceError> {
         self.credentials
             .resolve_linked_account(connection.tenant_id, connection, caller)
             .await
@@ -631,6 +676,149 @@ impl KnowledgeService {
             KnowledgeRepositorySource::Fixed(_) => None,
             KnowledgeRepositorySource::Postgres { pool } => Some(pool.clone()),
         }
+    }
+}
+
+/// Narrow knowledge adapter over the shared generic connector lifecycle service.
+///
+/// The production implementation delegates every method to one
+/// [`ConnectorService`]. The trait exists only so service tests can observe
+/// ordering and generation fences without implementing the connector
+/// repository itself.
+#[async_trait]
+pub trait KnowledgeConnectorConnections: Send + Sync {
+    /// Claims or exactly resumes the managed parent for one link operation.
+    async fn claim_managed_parent(
+        &self,
+        request: ManagedParentClaimRequest,
+    ) -> moa_connectors::Result<ManagedParentClaim>;
+
+    /// Activates a knowledge-only managed parent without inventing actions.
+    async fn activate_managed_knowledge_parent(
+        &self,
+        request: ManagedParentActivationRequest,
+    ) -> moa_connectors::Result<ConnectorConnection>;
+
+    /// Advances the generation fence after a staged credential write.
+    async fn advance_credential_generation(
+        &self,
+        request: CredentialGenerationFenceRequest,
+    ) -> moa_connectors::Result<ConnectorConnection>;
+
+    /// Loads one same-tenant generic connector parent.
+    async fn get(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+    ) -> moa_connectors::Result<Option<ConnectorConnection>>;
+
+    /// Fences an active or suspended parent into disconnecting.
+    async fn disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+    ) -> moa_connectors::Result<ConnectorConnection>;
+
+    /// Marks a disconnecting parent deleted after all child teardown completes.
+    async fn delete(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+    ) -> moa_connectors::Result<ConnectorConnection>;
+
+    /// Deletes a claim-created managed parent only when no capability depends on it.
+    async fn delete_managed_parent_if_unused(
+        &self,
+        request: ManagedParentDeleteRequest,
+    ) -> moa_connectors::Result<ManagedParentDeleteOutcome>;
+
+    /// Records health independently of lifecycle under the observed generation.
+    async fn update_health(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+        health: ConnectionHealth,
+        reason: Option<String>,
+    ) -> moa_connectors::Result<ConnectorConnection>;
+}
+
+#[async_trait]
+impl KnowledgeConnectorConnections for ConnectorService {
+    async fn claim_managed_parent(
+        &self,
+        request: ManagedParentClaimRequest,
+    ) -> moa_connectors::Result<ManagedParentClaim> {
+        self.claim_managed_parent(request).await
+    }
+
+    async fn activate_managed_knowledge_parent(
+        &self,
+        request: ManagedParentActivationRequest,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        self.activate_managed_knowledge_parent(request).await
+    }
+
+    async fn advance_credential_generation(
+        &self,
+        request: CredentialGenerationFenceRequest,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        self.advance_credential_generation(request).await
+    }
+
+    async fn get(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+    ) -> moa_connectors::Result<Option<ConnectorConnection>> {
+        self.get(tenant_id, connection_id).await
+    }
+
+    async fn disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        self.disconnect(tenant_id, connection_id, expected_generation)
+            .await
+    }
+
+    async fn delete(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        self.delete(tenant_id, connection_id, expected_generation)
+            .await
+    }
+
+    async fn delete_managed_parent_if_unused(
+        &self,
+        request: ManagedParentDeleteRequest,
+    ) -> moa_connectors::Result<ManagedParentDeleteOutcome> {
+        self.delete_managed_parent_if_unused(request).await
+    }
+
+    async fn update_health(
+        &self,
+        tenant_id: TenantId,
+        connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+        expected_generation: ConnectionGeneration,
+        health: ConnectionHealth,
+        reason: Option<String>,
+    ) -> moa_connectors::Result<ConnectorConnection> {
+        self.update_health(
+            tenant_id,
+            connection_id,
+            expected_generation,
+            health,
+            reason,
+        )
+        .await
     }
 }
 
@@ -809,52 +997,61 @@ impl KnowledgeCaller {
     }
 }
 
-/// Stores linked-account credentials and returns the reference persisted on connections.
+/// Stores linked-account credentials owned by the generic connector connection.
 #[async_trait]
 pub trait KnowledgeCredentialStore: Send + Sync {
-    /// Stores the first credential version for one newly linked connection.
+    /// Stages one linked-account credential without changing the active version.
     ///
     /// `connection_uid` is generated before the credential is written so the
     /// stored version is bound to its owning connection from the start and can
     /// never be adopted by a different one.
-    async fn store_linked_account(
+    async fn stage_linked_account(
         &self,
         tenant_id: TenantId,
         connection_uid: Uuid,
         caller: &KnowledgeCaller,
         account: &LinkedAccount,
-    ) -> Result<String, KnowledgeServiceError>;
+    ) -> Result<StagedKnowledgeCredential, KnowledgeServiceError>;
+
+    /// Activates one exact staged linked-account credential under vault CAS.
+    async fn activate_staged_linked_account(
+        &self,
+        staged: &StagedKnowledgeCredential,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError>;
+
+    /// Rolls back an activated candidate to its exact staged predecessor.
+    async fn rollback_linked_account_activation(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+        candidate_credential_ref: &str,
+        previous_credential_ref: Option<&str>,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError>;
 
     /// Resolves one connection's credential immediately before a provider request.
     ///
-    /// The plaintext is returned as a non-serializable [`RedactedSecret`] so it
-    /// cannot be cloned into a connection, an event, Restate state, or a model
-    /// payload on the way to the provider.
+    /// Merge returns a non-serializable [`RedactedSecret`] from the shared vault;
+    /// Nango returns `None` because its deployment credential belongs to the
+    /// provider adapter rather than to a tenant connection.
     async fn resolve_linked_account(
         &self,
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
-    ) -> Result<RedactedSecret, KnowledgeServiceError>;
+    ) -> Result<Option<RedactedSecret>, KnowledgeServiceError>;
 
-    /// Deletes MOA-managed credentials for a linked account.
-    async fn delete_linked_account(
+    /// Revokes every MOA-managed credential version for a linked account.
+    ///
+    /// Disconnect retains version and audit history; destructive deletion is
+    /// reserved for tenant purge.
+    async fn revoke_linked_account(
         &self,
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
     ) -> Result<bool, KnowledgeServiceError>;
-
-    /// Revokes exactly one credential version, leaving its audit history intact.
-    ///
-    /// Used by link compensation to undo a candidate it wrote, so a failed
-    /// re-link cannot leave usable material behind.
-    async fn revoke_credential(
-        &self,
-        tenant_id: TenantId,
-        reference: &str,
-        caller: &KnowledgeCaller,
-    ) -> Result<(), KnowledgeServiceError>;
 
     /// Reports credential status for exact, already-authorized connections.
     ///
@@ -868,6 +1065,57 @@ pub trait KnowledgeCredentialStore: Send + Sync {
         connections: &[&KnowledgeConnection],
         caller: &KnowledgeCaller,
     ) -> Result<Vec<Option<String>>, KnowledgeServiceError>;
+}
+
+/// Host-local result of staging a knowledge provider credential.
+///
+/// The managed variant contains the vault's non-serializable staging receipt;
+/// neither variant carries plaintext after the stage call returns.
+pub enum StagedKnowledgeCredential {
+    /// The provider owns credential material outside the tenant connection.
+    ProviderNative,
+    /// MOA owns an inactive credential version awaiting generation fencing.
+    Managed {
+        /// Exact inactive version and predecessor receipt retained host-locally.
+        staging: CredentialStagingToken,
+    },
+}
+
+impl StagedKnowledgeCredential {
+    /// Returns the closed credential owner selected by the managed definition.
+    #[must_use]
+    pub const fn credential_ownership(&self) -> KnowledgeCredentialOwnership {
+        match self {
+            Self::ProviderNative => KnowledgeCredentialOwnership::ProviderNative,
+            Self::Managed { .. } => KnowledgeCredentialOwnership::MoaManaged,
+        }
+    }
+
+    /// Returns the exact candidate vault receipt, only for MOA-managed material.
+    #[must_use]
+    pub fn vault_candidate_reference(&self) -> Option<String> {
+        match self {
+            Self::ProviderNative => None,
+            Self::Managed { staging, .. } => Some(staging.staged_reference().to_string()),
+        }
+    }
+
+    /// Returns the exact active vault predecessor observed while staging.
+    #[must_use]
+    pub fn previous_vault_reference(&self) -> Option<String> {
+        match self {
+            Self::ProviderNative => None,
+            Self::Managed { staging, .. } => staging
+                .expected_prior_active()
+                .map(|reference| reference.to_string()),
+        }
+    }
+
+    /// Returns whether this stage requires a connector generation advance.
+    #[must_use]
+    pub const fn is_managed(&self) -> bool {
+        matches!(self, Self::Managed { .. })
+    }
 }
 
 /// Credential store backed by MOA's durable tenant credential owner.
@@ -903,37 +1151,50 @@ impl VaultKnowledgeCredentialStore {
 
 #[async_trait]
 impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
-    async fn store_linked_account(
+    async fn stage_linked_account(
         &self,
         tenant_id: TenantId,
         connection_uid: Uuid,
         caller: &KnowledgeCaller,
         account: &LinkedAccount,
-    ) -> Result<String, KnowledgeServiceError> {
-        let Some(material) = account.credential_material.as_deref() else {
-            // A provider-native handle: the provider keeps the material, so MOA
-            // stores nothing and the connection carries the provider's own
-            // opaque reference unchanged.
-            return Ok(account.credential_ref.clone());
-        };
+    ) -> Result<StagedKnowledgeCredential, KnowledgeServiceError> {
+        match ManagedParentDefinition::for_knowledge_provider(&account.provider)? {
+            ManagedParentDefinition::KnowledgeNangoV1 => {
+                if account.credential_material.is_some() {
+                    return Err(KnowledgeServiceError::InvalidRequest(
+                        "Nango linked accounts must not return tenant credential material"
+                            .to_string(),
+                    ));
+                }
+                return Ok(StagedKnowledgeCredential::ProviderNative);
+            }
+            ManagedParentDefinition::KnowledgeMergeV1 => {}
+        }
+        let material = account.credential_material.as_deref().ok_or_else(|| {
+            KnowledgeServiceError::InvalidRequest(
+                "Merge linked accounts must return tenant credential material".to_string(),
+            )
+        })?;
         let identity = CredentialIdentity {
             tenant_id,
             connection_uid,
             kind: CredentialKind::ProviderApiKey,
+            slot_name: CredentialSlotName::PRIMARY,
         };
-        let version = self
+        let staging = self
             .vault
-            .create(
+            .stage(
                 identity,
                 SecretString::from(material.to_string()),
                 &Self::context(
                     tenant_id,
                     caller.principal(),
-                    CredentialOperation::Create,
-                    &caller.step("credential-create"),
+                    CredentialOperation::Stage,
+                    &caller.step("credential-stage"),
                     &[
                         &connection_uid.to_string(),
                         CredentialKind::ProviderApiKey.as_str(),
+                        CredentialSlotName::PRIMARY.as_str(),
                         &account.provider,
                         &account.provider_account_id,
                     ],
@@ -941,7 +1202,115 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             )
             .await
             .map_err(credential_error)?;
-        Ok(version.reference.to_string())
+        Ok(StagedKnowledgeCredential::Managed { staging })
+    }
+
+    async fn activate_staged_linked_account(
+        &self,
+        staged: &StagedKnowledgeCredential,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError> {
+        let StagedKnowledgeCredential::Managed { staging } = staged else {
+            return Ok(());
+        };
+        let identity = staging.identity();
+        self.vault
+            .activate_staged(
+                staging,
+                &Self::context(
+                    identity.tenant_id,
+                    caller.principal(),
+                    CredentialOperation::Activate,
+                    &caller.step("credential-activate"),
+                    &[
+                        &identity.connection_uid.to_string(),
+                        CredentialKind::ProviderApiKey.as_str(),
+                        CredentialSlotName::PRIMARY.as_str(),
+                        &staging.staged_reference().to_string(),
+                    ],
+                ),
+            )
+            .await
+            .map(|_| ())
+            .map_err(credential_error)
+    }
+
+    async fn rollback_linked_account_activation(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+        candidate_credential_ref: &str,
+        previous_credential_ref: Option<&str>,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError> {
+        let candidate = parse_vault_receipt(candidate_credential_ref)?;
+        let previous = previous_credential_ref
+            .map(parse_vault_receipt)
+            .transpose()?;
+        match self
+            .vault
+            .rollback_activation(
+                candidate,
+                previous,
+                &Self::context(
+                    tenant_id,
+                    caller.principal(),
+                    CredentialOperation::RollbackActivation,
+                    &caller.step("credential-rollback-activation"),
+                    &[
+                        &connection_uid.to_string(),
+                        &candidate.to_string(),
+                        previous_credential_ref.unwrap_or("none"),
+                    ],
+                ),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(CredentialError::StaleVersion) => self
+                .vault
+                .revoke(
+                    candidate,
+                    &Self::context(
+                        tenant_id,
+                        caller.principal(),
+                        CredentialOperation::Revoke,
+                        &caller.step("credential-revoke-staged"),
+                        &[&connection_uid.to_string(), &candidate.to_string()],
+                    ),
+                )
+                .await
+                .map_err(credential_error),
+            Err(CredentialError::Revoked) => {
+                let described = self
+                    .vault
+                    .describe_batch(
+                        &[(connection_uid, candidate)],
+                        &Self::context(
+                            tenant_id,
+                            caller.principal(),
+                            CredentialOperation::Resolve,
+                            &caller.step("credential-describe-rollback-candidate"),
+                            &[&connection_uid.to_string(), &candidate.to_string()],
+                        ),
+                    )
+                    .await
+                    .map_err(credential_error)?;
+                if matches!(
+                    described.as_slice(),
+                    [(described_connection, version)]
+                        if *described_connection == connection_uid
+                            && version.reference == candidate
+                            && version.revoked
+                            && !version.active
+                ) {
+                    Ok(())
+                } else {
+                    Err(credential_error(CredentialError::Revoked))
+                }
+            }
+            Err(error) => Err(credential_error(error)),
+        }
     }
 
     async fn resolve_linked_account(
@@ -949,19 +1318,25 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
-    ) -> Result<RedactedSecret, KnowledgeServiceError> {
-        let Some(reference) = managed_credential_reference(&connection.credential_ref) else {
-            // Provider-native handle: hand the provider back its own reference
-            // through the same redacted carrier so no call site can tell the two
-            // apart and accidentally log one of them.
-            return Ok(RedactedSecret::new(connection.credential_ref.clone()));
-        };
+    ) -> Result<Option<RedactedSecret>, KnowledgeServiceError> {
         if connection.tenant_id != tenant_id {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
+        match ManagedParentDefinition::for_knowledge_provider(&connection.provider)? {
+            ManagedParentDefinition::KnowledgeNangoV1 => {
+                return Ok(None);
+            }
+            ManagedParentDefinition::KnowledgeMergeV1 => {}
+        }
+        let identity = CredentialIdentity {
+            tenant_id,
+            connection_uid: connection.connection_uid,
+            kind: CredentialKind::ProviderApiKey,
+            slot_name: CredentialSlotName::PRIMARY,
+        };
         self.vault
-            .resolve(
-                &CredentialSource::TenantConnection { reference },
+            .resolve_active(
+                &identity,
                 &Self::context(
                     tenant_id,
                     caller.principal(),
@@ -969,67 +1344,45 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
                     &caller.step("credential-resolve"),
                     &[
                         &connection.connection_uid.to_string(),
-                        &reference.to_string(),
+                        CredentialKind::ProviderApiKey.as_str(),
+                        CredentialSlotName::PRIMARY.as_str(),
                     ],
                 ),
             )
             .await
+            .map(Some)
             .map_err(credential_error)
     }
 
-    async fn delete_linked_account(
+    async fn revoke_linked_account(
         &self,
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
         caller: &KnowledgeCaller,
     ) -> Result<bool, KnowledgeServiceError> {
-        if managed_credential_reference(&connection.credential_ref).is_none() {
-            return Ok(false);
-        }
         if connection.tenant_id != tenant_id {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
-        let removed = self
+        if ManagedParentDefinition::for_knowledge_provider(&connection.provider)?
+            == ManagedParentDefinition::KnowledgeNangoV1
+        {
+            return Ok(false);
+        }
+        let revoked = self
             .vault
-            .delete_connection(
+            .revoke_connection(
                 connection.connection_uid,
                 &Self::context(
                     tenant_id,
                     caller.principal(),
-                    CredentialOperation::Delete,
-                    &caller.step("credential-delete"),
+                    CredentialOperation::Revoke,
+                    &caller.step("credential-revoke-connection"),
                     &[&connection.connection_uid.to_string()],
                 ),
             )
             .await
             .map_err(credential_error)?;
-        Ok(removed > 0)
-    }
-
-    async fn revoke_credential(
-        &self,
-        tenant_id: TenantId,
-        reference: &str,
-        caller: &KnowledgeCaller,
-    ) -> Result<(), KnowledgeServiceError> {
-        let Some(reference) = managed_credential_reference(reference) else {
-            // A provider-native handle was never written by MOA, so there is
-            // nothing for compensation to undo.
-            return Ok(());
-        };
-        self.vault
-            .revoke(
-                reference,
-                &Self::context(
-                    tenant_id,
-                    caller.principal(),
-                    CredentialOperation::Revoke,
-                    &caller.step("credential-revoke"),
-                    &[&reference.to_string()],
-                ),
-            )
-            .await
-            .map_err(credential_error)
+        Ok(revoked > 0)
     }
 
     async fn credential_statuses(
@@ -1038,19 +1391,25 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
         connections: &[&KnowledgeConnection],
         caller: &KnowledgeCaller,
     ) -> Result<Vec<Option<String>>, KnowledgeServiceError> {
-        let mut requested = Vec::new();
+        let mut identities = Vec::new();
+        let mut merge_positions = Vec::new();
         let mut selectors = Vec::new();
-        for connection in connections {
+        for (position, connection) in connections.iter().enumerate() {
             if connection.tenant_id != tenant_id {
                 return Err(KnowledgeServiceError::NotFound("knowledge connection"));
             }
-            if let Some(reference) = managed_credential_reference(&connection.credential_ref) {
-                requested.push((connection.connection_uid, reference));
-                selectors.push(format!(
-                    "{}:{}",
-                    connection.connection_uid,
-                    reference.as_uuid()
-                ));
+            match ManagedParentDefinition::for_knowledge_provider(&connection.provider)? {
+                ManagedParentDefinition::KnowledgeNangoV1 => {}
+                ManagedParentDefinition::KnowledgeMergeV1 => {
+                    identities.push(CredentialIdentity {
+                        tenant_id,
+                        connection_uid: connection.connection_uid,
+                        kind: CredentialKind::ProviderApiKey,
+                        slot_name: CredentialSlotName::PRIMARY,
+                    });
+                    merge_positions.push(position);
+                    selectors.push(connection.connection_uid.to_string());
+                }
             }
         }
         let selector_refs = selectors.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1061,39 +1420,33 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             &caller.step("credential-status-batch"),
             &selector_refs,
         );
-        let versions = self
+        let active = self
             .vault
-            .describe_batch(&requested, &ctx)
+            .has_active_batch(&identities, &ctx)
             .await
             .map_err(credential_error)?;
-        let versions = versions.into_iter().collect::<HashMap<_, _>>();
-
-        Ok(connections
-            .iter()
-            .map(|connection| {
-                let reference = managed_credential_reference(&connection.credential_ref)?;
-                Some(match versions.get(&connection.connection_uid) {
-                    Some(version) if version.reference == reference && version.revoked => {
-                        "revoked".to_string()
-                    }
-                    Some(version) if version.reference == reference && !version.active => {
-                        "superseded".to_string()
-                    }
-                    Some(version) if version.reference == reference => "present".to_string(),
-                    _ => "missing".to_string(),
-                })
-            })
-            .collect())
+        if active.len() != merge_positions.len() {
+            return Err(KnowledgeServiceError::Credential(
+                "credential readiness batch returned the wrong result count".to_string(),
+            ));
+        }
+        let mut statuses = vec![None; connections.len()];
+        for (position, active) in merge_positions.into_iter().zip(active) {
+            statuses[position] = Some(if active { "present" } else { "missing" }.to_string());
+        }
+        Ok(statuses)
     }
 }
 
-/// Parses a connection reference that MOA stores, ignoring provider-native handles.
-///
-/// MOA-managed references are exactly the opaque credential-version identifiers
-/// the vault issues. Anything else is a provider's own handle, which MOA passes
-/// through without ever treating it as addressable vault storage.
-fn managed_credential_reference(value: &str) -> Option<CredentialRef> {
-    Uuid::parse_str(value).ok().map(CredentialRef::from_uuid)
+/// Decodes one explicitly managed vault receipt after ownership was established.
+fn parse_vault_receipt(value: &str) -> Result<CredentialRef, KnowledgeServiceError> {
+    Uuid::parse_str(value)
+        .map(CredentialRef::from_uuid)
+        .map_err(|_| {
+            KnowledgeServiceError::Credential(
+                "managed credential receipt is not a valid vault reference".to_string(),
+            )
+        })
 }
 
 /// Builds the canonical, secret-free request hash for one credential operation.
@@ -1251,6 +1604,9 @@ pub enum KnowledgeServiceError {
     /// Credential storage failed.
     #[error("knowledge credential store failed: {0}")]
     Credential(String),
+    /// Generic connector parent lifecycle failed.
+    #[error(transparent)]
+    Connector(#[from] moa_connectors::Error),
     /// Knowledge crate operation failed.
     #[error(transparent)]
     Knowledge(#[from] moa_knowledge::Error),
@@ -1309,8 +1665,50 @@ fn terminal_knowledge_error_code(error: &KnowledgeServiceError) -> Option<u16> {
         | KnowledgeServiceError::Moa(MoaError::Cancelled) => Some(400),
         KnowledgeServiceError::Moa(MoaError::SessionNotFound(_))
         | KnowledgeServiceError::Moa(MoaError::BlobNotFound(_)) => Some(404),
+        KnowledgeServiceError::Connector(error) => connector_terminal_error_code(error),
         KnowledgeServiceError::Credential(_)
         | KnowledgeServiceError::Knowledge(_)
         | KnowledgeServiceError::Moa(_) => None,
+    }
+}
+
+fn connector_terminal_error_code(error: &moa_connectors::Error) -> Option<u16> {
+    use moa_connectors::Error;
+
+    match error {
+        Error::ConnectionNotFound { .. } => Some(404),
+        Error::AuthorizationDenied => Some(403),
+        Error::GenerationConflict { .. }
+        | Error::ManagedParentClaimConflict { .. }
+        | Error::InvocationConflict { .. }
+        | Error::InvocationStateConflict { .. }
+        | Error::InvocationUnavailable { .. } => Some(409),
+        Error::InvalidConnectionOrigin { .. }
+        | Error::InvalidGeneration { .. }
+        | Error::GenerationExhausted
+        | Error::InvalidTransition { .. }
+        | Error::ManagedParentOwnerRequired { .. }
+        | Error::ManagedParentMismatch { .. }
+        | Error::UnsupportedManagedKnowledgeProvider
+        | Error::ManagedParentActionDependents { .. }
+        | Error::UseGrantConnectionUnavailable { .. }
+        | Error::UseGrantSubjectNotFound { .. }
+        | Error::UseGrantSubjectInactive { .. }
+        | Error::InvalidContract { .. }
+        | Error::CatalogInvariant { .. }
+        | Error::ContractHashMismatch { .. }
+        | Error::CredentialSlotMissing { .. }
+        | Error::ActionPinMismatch { .. }
+        | Error::UnsupportedHttpRuntime
+        | Error::SchemaValidation { .. } => Some(400),
+        Error::Http { .. }
+        | Error::Cancelled { .. }
+        | Error::Credential(_)
+        | Error::Serialization(_)
+        | Error::DatabaseScope(_)
+        | Error::Authorization(_)
+        | Error::AuthorizationUnavailable
+        | Error::ManagedParentRepositoryUnavailable
+        | Error::Storage(_) => None,
     }
 }

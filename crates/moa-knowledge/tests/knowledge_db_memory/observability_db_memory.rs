@@ -11,9 +11,9 @@ use moa_core::{error::MoaError, traits::EmbeddingProvider, types::identifiers::T
 use moa_knowledge::{
     chunking::ChunkingConfig,
     domain::{
-        ConnectionStatus, DocumentElement, DocumentElementKind, IngestionStepStatus,
-        KnowledgeConnection, KnowledgeIngestionStep, KnowledgeSyncCounters, KnowledgeSyncRun,
-        ParsedDocument, ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
+        DocumentElement, DocumentElementKind, IngestionStepStatus, KnowledgeConnection,
+        KnowledgeIngestionStep, KnowledgeSyncCounters, KnowledgeSyncRun, ParsedDocument,
+        ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
     },
     error::Error,
     graph_delta::KnowledgeGraphDelta,
@@ -196,8 +196,6 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "account-observability".to_string(),
-            credential_ref: "vault://tenant/test/knowledge".to_string(),
-            status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection", "access_token": SECRET_TOKEN }),
             source_selection: json!({}),
             information_barrier: None,

@@ -133,13 +133,31 @@ async fn insert_knowledge_chunk(
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, 'vector-sync-test', 'knowledge:nango', 1,
+                jsonb_build_object(
+                    'provider_config_key', 'default',
+                    'provider_connection_id', $3,
+                    'connector', 'test-connector'),
+                'active', 'ready')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id)
+    .bind(format!("account-{connection_uid}"))
+    .execute(conn.as_mut())
+    .await
+    .expect("insert managed connector parent");
+    sqlx::query(
+        r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider,
-            provider_config_key, provider_connection_id, connector,
-            credential_ref, status
+            provider_config_key, provider_connection_id, connector
         )
-        VALUES ($1, $2, $3, 'test-provider', 'default', $4, 'test-connector',
-                'test-credential', 'active')
+        VALUES ($1, $2, $3, 'nango', 'default', $4, 'test-connector')
         "#,
     )
     .bind(connection_uid)

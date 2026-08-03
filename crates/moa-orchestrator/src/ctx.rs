@@ -16,6 +16,8 @@ use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
+
 static CTX: OnceLock<Arc<OrchestratorCtx>> = OnceLock::new();
 
 /// Persistence dependencies shared by handlers that read or write product data.
@@ -118,19 +120,32 @@ impl ProviderDeps {
 #[derive(Clone)]
 pub struct ToolDeps {
     router: Arc<ToolRouter>,
+    connector_catalogs: ScopedConnectorCatalogProvider,
 }
 
 impl ToolDeps {
     /// Creates a tool dependency group.
     #[must_use]
-    pub fn new(router: Arc<ToolRouter>) -> Self {
-        Self { router }
+    pub(crate) fn new(
+        router: Arc<ToolRouter>,
+        connector_catalogs: ScopedConnectorCatalogProvider,
+    ) -> Self {
+        Self {
+            router,
+            connector_catalogs,
+        }
     }
 
     /// Returns the configured tool router.
     #[must_use]
     pub fn router(&self) -> Arc<ToolRouter> {
         self.router.clone()
+    }
+
+    /// Returns the centralized authenticated connector catalog provider.
+    #[must_use]
+    pub(crate) fn connector_catalogs(&self) -> ScopedConnectorCatalogProvider {
+        self.connector_catalogs.clone()
     }
 
     /// Returns the tool schemas of the router's live catalog.
@@ -357,6 +372,12 @@ impl OrchestratorCtx {
         self.tools.router()
     }
 
+    /// Returns the centralized authenticated connector catalog provider.
+    #[must_use]
+    pub(crate) fn connector_catalogs(&self) -> ScopedConnectorCatalogProvider {
+        self.tools.connector_catalogs()
+    }
+
     /// Returns the tool schemas from tool dependencies.
     #[must_use]
     pub fn tool_schemas(&self) -> Arc<Vec<Value>> {
@@ -522,9 +543,42 @@ mod tool_deps_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
+    use moa_connectors::catalog::{
+        InstalledConnectorCatalog, InstalledConnectorCatalogQuery,
+        InstalledConnectorCatalogSnapshot,
+    };
+    use moa_connectors::executor::{
+        ConnectorActionInvocation, ConnectorActionRuntime, RawConnectorActionResult,
+    };
     use moa_hands::{ToolRegistry, ToolRouter, local_development_sandbox_policy};
 
     use super::ToolDeps;
+    use crate::connector_catalog::ScopedConnectorCatalogProvider;
+
+    struct EmptyInstalledCatalog;
+
+    #[async_trait]
+    impl InstalledConnectorCatalog for EmptyInstalledCatalog {
+        async fn snapshot(
+            &self,
+            query: InstalledConnectorCatalogQuery,
+        ) -> moa_connectors::Result<InstalledConnectorCatalogSnapshot> {
+            InstalledConnectorCatalogSnapshot::from_candidates(&query, [])
+        }
+    }
+
+    struct RejectConnectorRuntime;
+
+    #[async_trait]
+    impl ConnectorActionRuntime for RejectConnectorRuntime {
+        async fn invoke(
+            &self,
+            _invocation: ConnectorActionInvocation,
+        ) -> moa_connectors::Result<RawConnectorActionResult> {
+            Err(moa_connectors::Error::UnsupportedHttpRuntime)
+        }
+    }
 
     #[test]
     fn tool_deps_serve_the_routers_live_schema_snapshot() {
@@ -538,7 +592,12 @@ mod tool_deps_tests {
             HashMap::new(),
             local_development_sandbox_policy(),
         ));
-        let deps = ToolDeps::new(Arc::clone(&router));
+        let connector_catalogs = ScopedConnectorCatalogProvider::new(
+            Arc::clone(&router),
+            Arc::new(EmptyInstalledCatalog),
+            Arc::new(RejectConnectorRuntime),
+        );
+        let deps = ToolDeps::new(Arc::clone(&router), connector_catalogs);
 
         assert!(
             Arc::ptr_eq(&deps.schemas(), &router.tool_schema_snapshot()),

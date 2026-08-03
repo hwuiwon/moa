@@ -388,6 +388,65 @@ pub(super) async fn upsert_principal_binding(
     Ok(())
 }
 
+/// Loads only the bounded opaque principals needed by one provider source page.
+pub(super) async fn verified_principal_bindings(
+    repository: &PostgresKnowledgeRepository,
+    connection_uid: Uuid,
+    principals: &[SourcePrincipalFingerprint],
+) -> Result<Vec<SourcePrincipalBinding>> {
+    if principals.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fingerprints = principals
+        .iter()
+        .map(|principal| principal.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let mut conn = repository.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT binding_uid, tenant_id, contact_id, connection_id, principal_kind,
+               principal_fingerprint, verified_at
+        FROM moa.knowledge_source_principal_bindings
+        WHERE tenant_id = $1
+          AND connection_id = $2
+          AND principal_fingerprint = ANY($3::BYTEA[])
+        ORDER BY principal_fingerprint, binding_uid
+        "#,
+    )
+    .bind(repository.scoped_tenant_id().0)
+    .bind(connection_uid)
+    .bind(fingerprints)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
+    conn.commit().await.map_err(map_moa_error)?;
+    rows.iter()
+        .map(|row| {
+            let tenant_id = TenantId::from(
+                row.try_get::<Uuid, _>("tenant_id")
+                    .map_err(map_sqlx_error)?,
+            );
+            let principal = SourcePrincipalFingerprint::from_bytes(
+                row.try_get::<Vec<u8>, _>("principal_fingerprint")
+                    .map_err(map_sqlx_error)?
+                    .as_slice(),
+            )
+            .map_err(map_moa_error)?;
+            Ok(SourcePrincipalBinding {
+                binding_uid: row.try_get("binding_uid").map_err(map_sqlx_error)?,
+                tenant_id,
+                contact_id: row.try_get("contact_id").map_err(map_sqlx_error)?,
+                connection_uid: row.try_get("connection_id").map_err(map_sqlx_error)?,
+                principal_kind: SourcePrincipalKind::parse(
+                    row.try_get("principal_kind").map_err(map_sqlx_error)?,
+                )?,
+                principal,
+                verified_at: row.try_get("verified_at").map_err(map_sqlx_error)?,
+            })
+        })
+        .collect()
+}
+
 /// Records that holders of `member` also hold `group`.
 ///
 /// Retrieval expands exactly one level over these edges, so an adapter that

@@ -422,7 +422,7 @@ async fn provider_webhook_rejects_signed_connection_for_different_provider_befor
     // Pins: signed tenant/connection UUID binding must still match the verified provider.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let mut connection = fixture_connection(tenant_id);
-    connection.provider = "merge".to_string();
+    connection.provider = "nango".to_string();
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
         .insert_connection(connection.clone())

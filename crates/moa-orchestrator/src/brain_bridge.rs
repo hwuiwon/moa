@@ -133,12 +133,15 @@ pub(crate) async fn prepare_turn_request(
     // `file_read` is kept so selected skill packages can be read without a sandbox.
     // The worker tool subsets (built from the unfiltered `tool_schemas`)
     // keep the hand tools, so all compute is delegated.
-    let tool_catalog = ctx.tool_router().activated_catalog();
-    let root_tool_schemas =
-        coordinator_tool_schemas(tool_catalog.tool_schema_snapshot().as_ref(), |name| {
-            tool_catalog.tool_requires_sandbox(name)
-        });
-    let tool_catalog_pin = tool_catalog.pin()?;
+    let tool_catalog = ctx
+        .connector_catalogs()
+        .for_session(&identity, &session)
+        .await
+        .map_err(|error| error.into_moa_error())?;
+    let root_tool_schemas = coordinator_tool_schemas(tool_catalog.schemas().as_ref(), |name| {
+        tool_catalog.snapshot().tool_requires_sandbox(name)
+    });
+    let tool_catalog_pin = tool_catalog.pin().clone();
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         config.as_ref(),
         session_store.clone(),

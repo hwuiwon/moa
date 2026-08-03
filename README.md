@@ -17,10 +17,10 @@ Status: early active development. The architecture is stable enough to document,
 - **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, and the learning log live in Postgres/Neon.
 - **Task-aware sessions:** every session can contain multiple task segments, each with tool and skill usage, cost, and a resolution score.
 - **Per-tenant learning:** tenants own learning entries and outcome aggregates that improve skill ranking and memory updates.
-- **Governed execution:** risky actions require approval, secrets stay outside generated code, and hands/MCP tools run through explicit policy.
+- **Governed execution:** risky actions require approval, secrets stay outside generated code, and hands plus reviewed HTTP connector actions run through explicit policy.
 - **Resolution-weighted skills:** skill ranking uses tenant-level resolution data, not only recency or usage count.
 - **Inspectable operation:** every event, learning entry, tool call, approval, and materialized analytics view is queryable.
-- **Pluggable hands:** local execution, Docker, Daytona, E2B, and MCP tools all route through the hand/tool abstraction.
+- **Pluggable execution:** local hands, Docker, Daytona, E2B, operator MCP tools, and tenant-scoped connector actions share one governed tool boundary.
 - **Model-agnostic providers:** Anthropic, OpenAI, and Google Gemini are first-class provider targets.
 
 ## Local Development
@@ -188,7 +188,8 @@ Restate handler service (`moa-orchestrator-bin`)
         +-- Session VO -> TurnExecution workflow -> context pipeline -> LLMGateway
         +-- TurnExecution run mode -> ExecutionRun -> ExecutionTask
         +-- Worker VO -> explicit conversational child tools and terminal reporting
-        +-- ToolExecutor -> ToolRouter -> hands / MCP / built-ins
+        +-- ToolExecutor -> ToolRouter -> hands / built-ins / operator MCP / connector actions
+        +-- ConnectorConnections -> lifecycle / credentials / HTTP action bindings
         +-- Consolidate workflow -> memory compaction
         +-- IngestionVO -> graph memory updates
         |
@@ -251,6 +252,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-memory-lifecycle`](crates/moa-memory/lifecycle/) | Memory lifecycle jobs for consolidation, promotion, and quality scoring |
 | [`moa-memory-types`](crates/moa-memory/types/) | Shared memory domain types across the memory subcrates |
 | [`moa-knowledge`](crates/moa-knowledge/) | Tenant knowledge-base domain, providers, parsers, and ingestion seams |
+| [`moa-connectors`](crates/moa-connectors/) | Tenant connector lifecycle, reviewed HTTP action bindings, constrained HTTP runtime, and invocation ledgers |
 | [`moa-lineage-core`](crates/moa-lineage/core/) | Lineage records and score record types |
 | [`moa-lineage-citation`](crates/moa-lineage/citation/) | Provider citation normalization and BM25/NLI verification helpers |
 | [`moa-lineage-sink`](crates/moa-lineage/sink/) | Async lineage sink writers plus the OTel/OpenInference span bridge |

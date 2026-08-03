@@ -6,9 +6,9 @@ use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     error::MoaError, error::Result, traits::SessionStore, types::action_policy::ActionRuleScope,
     types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID, types::contact::SessionActorRef,
-    types::guardrails::AgentGuardrailPolicy, types::identifiers::ModelId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::session::SessionMeta,
+    types::guardrails::AgentGuardrailPolicy, types::identifiers::ConnectorConnectionId,
+    types::identifiers::ModelId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::session::SessionMeta,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -283,6 +283,189 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn published_runtime_connector_bindings_pin_canonical_deployment_policy_connector_binding()
+-> Result<()> {
+    // Pins: a release-candidate agent resolves reverse-authored connector
+    // bindings through published Runtime V1 revisions, then a deployed agent
+    // revalidates the same canonical connection/revision policy from its lock.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
+    let registry = ArtifactRegistry::new(pool.clone());
+    let artifact_resolver = ArtifactResolver::new(ArtifactRegistry::new(pool.clone()));
+    let agent_resolver = AgentResolver::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let alpha_name = format!("alpha-billing-{}", Uuid::now_v7());
+    let zeta_name = format!("zeta-crm-{}", Uuid::now_v7());
+    let agent_name = format!("connector-agent-{}", Uuid::now_v7());
+    let alpha_connection = ConnectorConnectionId(Uuid::now_v7());
+    let zeta_connection = ConnectorConnectionId(Uuid::now_v7());
+
+    let alpha_revision = serve_document(
+        &registry,
+        &artifact_resolver,
+        &scope,
+        runtime_mcp_connector_doc(&alpha_name, "Alpha Billing"),
+    )
+    .await?;
+    let zeta_revision = serve_document(
+        &registry,
+        &artifact_resolver,
+        &scope,
+        runtime_mcp_connector_doc(&zeta_name, "Zeta CRM"),
+    )
+    .await?;
+    assert_eq!(alpha_revision.status, ArtifactStatus::Published);
+    assert_eq!(zeta_revision.status, ArtifactStatus::Published);
+
+    let agent_revision = serve_document(
+        &registry,
+        &artifact_resolver,
+        &scope,
+        bound_connector_agent_doc(
+            &agent_name,
+            &zeta_name,
+            zeta_connection,
+            &alpha_name,
+            alpha_connection,
+        ),
+    )
+    .await?;
+    let candidate = agent_resolver
+        .resolve_release_candidate(&scope, agent_revision.revision_uid)
+        .await?;
+
+    let binding_refs = candidate
+        .action_policy
+        .connector_bindings
+        .iter()
+        .map(|binding| binding.connector_ref.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        binding_refs,
+        vec![
+            format!("connector://{alpha_name}"),
+            format!("connector://{zeta_name}"),
+        ],
+        "runtime connector bindings must be canonicalized independently of authoring order"
+    );
+    let alpha_binding = &candidate.action_policy.connector_bindings[0];
+    assert_eq!(alpha_binding.connection_id, alpha_connection);
+    assert_eq!(alpha_binding.artifact_uid, alpha_revision.artifact_uid);
+    assert_eq!(alpha_binding.revision_uid, alpha_revision.revision_uid);
+    let zeta_binding = &candidate.action_policy.connector_bindings[1];
+    assert_eq!(zeta_binding.connection_id, zeta_connection);
+    assert_eq!(zeta_binding.artifact_uid, zeta_revision.artifact_uid);
+    assert_eq!(zeta_binding.revision_uid, zeta_revision.revision_uid);
+
+    let expected_dependency_refs = vec![
+        format!("action://{alpha_name}.Execute"),
+        format!("action://{zeta_name}.Execute"),
+        format!("connector://{alpha_name}"),
+        format!("connector://{zeta_name}"),
+    ];
+    assert_eq!(
+        candidate
+            .revision_lock
+            .artifact_dependencies
+            .iter()
+            .map(|dependency| dependency.reference.clone())
+            .collect::<Vec<_>>(),
+        expected_dependency_refs
+    );
+    let snapshot = candidate.agent_context.parsed_policy_snapshot()?;
+    assert_eq!(snapshot.action_policy, candidate.action_policy);
+    assert_eq!(
+        snapshot.revision_lock.as_ref(),
+        Some(&candidate.revision_lock)
+    );
+    assert_eq!(
+        candidate.agent_context.policy_hash,
+        candidate.revision_lock.canonical_policy_hash
+    );
+
+    let repeated = agent_resolver
+        .resolve_release_candidate(&scope, agent_revision.revision_uid)
+        .await?;
+    assert_eq!(repeated.action_policy, candidate.action_policy);
+    assert_eq!(
+        repeated.revision_lock.canonical_policy_hash, candidate.revision_lock.canonical_policy_hash,
+        "re-resolving one immutable revision must preserve its canonical policy hash"
+    );
+
+    let installation_uid = Uuid::now_v7();
+    insert_installation(
+        &pool,
+        &storage_partition_id,
+        installation_uid,
+        Uuid::now_v7(),
+        &agent_revision,
+        &agent_name,
+    )
+    .await?;
+    moa_artifacts::test_fixtures::activate_agent_revision(
+        &pool,
+        moa_artifacts::release::TenantScope::new(tenant_id),
+        moa_artifacts::release::ActivationTarget::AgentDeployment {
+            artifact_uid: agent_revision.artifact_uid,
+            installation_uid,
+        },
+        agent_revision.revision_uid,
+        candidate.revision_lock.clone(),
+    )
+    .await
+    .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+
+    let installed = agent_resolver
+        .resolve_installation(&scope, installation_uid)
+        .await?;
+    assert_eq!(installed.action_policy, candidate.action_policy);
+    assert_eq!(installed.revision_lock, candidate.revision_lock);
+    assert_eq!(
+        installed
+            .agent_context
+            .parsed_policy_snapshot()?
+            .action_policy,
+        candidate.action_policy
+    );
+
+    let deployment_uid = installed
+        .agent_context
+        .deployment_uid
+        .expect("activated installation should pin a deployment");
+    let mut tampered_lock = installed.revision_lock;
+    tampered_lock.canonical_policy_hash = "0".repeat(64);
+    sqlx::query(
+        r#"
+        UPDATE moa.agent_deployment
+        SET dependency_lock = $2,
+            dependency_lock_hash = $3
+        WHERE deployment_uid = $1
+        "#,
+    )
+    .bind(deployment_uid)
+    .bind(sqlx::types::Json(&tampered_lock))
+    .bind(&tampered_lock.canonical_policy_hash)
+    .execute(&pool)
+    .await
+    .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    let error = agent_resolver
+        .resolve_installation(&scope, installation_uid)
+        .await
+        .expect_err("canonical policy drift in a deployment lock must fail closed");
+    assert!(
+        matches!(error, MoaError::ValidationError(ref message)
+            if message.contains("lock hash mismatch")),
+        "unexpected tampered deployment-lock result: {error}"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn agent_guardrail_policy_is_snapshotted_and_hashed_guardrail() -> Result<()> {
     // Pins: resolved agent guardrails are copied into pinned context snapshots and policy hashes.
     let (store, database_url, schema_name) =
@@ -494,6 +677,90 @@ fn agent_doc(name: &str, skill_name: &str) -> ArtifactDocument {
         }
     }))
     .expect("agent artifact fixture is valid")
+}
+
+fn runtime_mcp_connector_doc(name: &str, display_name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "connector",
+        "metadata": {
+            "name": name,
+            "description": format!("{display_name} connector")
+        },
+        "definition": {
+            "type": "connector",
+            "spec": {
+                "definition_version": "v1",
+                "display_name": display_name,
+                "description": "Invoke one fixed remote operation.",
+                "runtime": {"type": "mcp"},
+                "auth": [{"type": "none"}],
+                "actions": [{
+                    "id": "Execute",
+                    "description": "Execute the governed remote operation.",
+                    "binding": {
+                        "type": "mcp",
+                        "remote_operation": "records.execute",
+                        "contract": {
+                            "input_schema": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "data_classes": ["none"],
+                            "action_class": "external_write",
+                            "risk_level": "high",
+                            "minimum_effect": "admin_review",
+                            "idempotency": "non_idempotent"
+                        }
+                    }
+                }]
+            }
+        }
+    }))
+    .expect("runtime MCP connector fixture is valid")
+}
+
+fn bound_connector_agent_doc(
+    name: &str,
+    first_connector_name: &str,
+    first_connection: ConnectorConnectionId,
+    second_connector_name: &str,
+    second_connection: ConnectorConnectionId,
+) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "agent",
+        "metadata": {
+            "name": name,
+            "description": "Agent bound to exact connector installations"
+        },
+        "definition": {
+            "type": "agent",
+            "spec": {
+                "display_name": "Connector Agent",
+                "purpose": {
+                    "summary": "Execute actions through pinned tenant connections.",
+                    "default_task": "Run the requested connected action.",
+                    "expected_outputs": ["action result"]
+                },
+                "action_policy": {
+                    "allowed": [
+                        format!("action://{first_connector_name}.Execute"),
+                        format!("action://{second_connector_name}.Execute")
+                    ],
+                    "connector_bindings": [
+                        {
+                            "connector_ref": format!("connector://{first_connector_name}"),
+                            "connection_id": first_connection
+                        },
+                        {
+                            "connector_ref": format!("connector://{second_connector_name}"),
+                            "connection_id": second_connection
+                        }
+                    ]
+                }
+            }
+        }
+    }))
+    .expect("bound connector agent fixture is valid")
 }
 
 fn agent_doc_with_output_guardrail_prompt(

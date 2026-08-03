@@ -9,8 +9,9 @@ use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     Error,
     domain::{
-        ConnectionStatus, CreateLinkTokenRequest, ExchangePublicTokenRequest, KnowledgeConnection,
-        ListChangedRecordsRequest, ProviderIntegration, StartInitialSyncRequest,
+        CreateLinkTokenRequest, ExchangePublicTokenRequest, KnowledgeConnection,
+        ListChangedRecordsRequest, ProviderIntegration, RemoteRevokeRequest,
+        StartInitialSyncRequest,
     },
     providers::{LinkedIntegrationProvider, merge::MergeProvider},
 };
@@ -37,11 +38,6 @@ fn connection() -> KnowledgeConnection {
         // selected; every category-scoped URL is built from it.
         connector: "knowledgebase".to_string(),
         provider_account_id: "linked-account-123".to_string(),
-        // Opaque durable reference only: the account token now reaches the
-        // provider through the resolved credential, never through the
-        // connection, so a plaintext token here would fail the header matcher.
-        credential_ref: Uuid::from_u128(202).to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
         source_selection: json!({}),
         information_barrier: None,
@@ -182,7 +178,6 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
         "the linked connection must keep the category the operator selected"
     );
     assert_eq!(account.provider_account_id, "linked-account-123");
-    assert_eq!(account.credential_ref, "merge-account-token");
     assert_eq!(
         account.credential_material.as_deref(),
         Some("account-token-123")
@@ -260,7 +255,7 @@ async fn initial_link_sync_reads_category_status_and_never_force_resyncs() {
         let started = provider
             .start_initial_sync(StartInitialSyncRequest {
                 connection: merge_connection("knowledgebase"),
-                credential: RedactedSecret::new("account-token-123".to_string()),
+                credential: Some(RedactedSecret::new("account-token-123".to_string())),
             })
             .await
             .expect("initial link sync should reconcile provider status");
@@ -297,11 +292,83 @@ async fn initial_link_sync_fails_closed_on_paused_and_unknown_provider_states() 
         provider
             .start_initial_sync(StartInitialSyncRequest {
                 connection: merge_connection("knowledgebase"),
-                credential: RedactedSecret::new("account-token-123".to_string()),
+                credential: Some(RedactedSecret::new("account-token-123".to_string())),
             })
             .await
             .expect_err(&format!("{description} must fail the initial link closed"));
     }
+}
+
+#[tokio::test]
+async fn remote_revoke_posts_the_exact_merge_category_account_delete() {
+    // Pins: Merge identifies the linked account by the resolved account token
+    // and scopes deletion to the connection's validated unified-API category.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/knowledgebase/v1/delete-account"))
+        .and(bearer_token("merge-test-key"))
+        .and(header("X-Account-Token", "account-token-123"))
+        .and(body_bytes(Vec::<u8>::new()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
+    let request = RemoteRevokeRequest {
+        connection: connection(),
+        credential: Some(RedactedSecret::new("account-token-123".to_string())),
+    };
+    let debug = format!("{request:?}");
+    assert!(
+        debug.contains("<redacted>"),
+        "the secret-bearing request should identify its redacted field"
+    );
+    assert!(
+        !debug.contains("account-token-123"),
+        "request Debug must never expose the Merge account token"
+    );
+
+    provider
+        .revoke_remote_connection(request)
+        .await
+        .expect("delete the exact Merge linked account through the local fixture");
+}
+
+#[tokio::test]
+async fn remote_revoke_does_not_invent_merge_already_absent_replay_success() {
+    // Pins: Merge documents only a 200 success and no idempotency key or
+    // already-deleted response. A 404 therefore remains an unknown outcome for
+    // durable disconnect recovery instead of being silently accepted.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/knowledgebase/v1/delete-account"))
+        .and(bearer_token("merge-test-key"))
+        .and(header("X-Account-Token", "account-token-123"))
+        .and(body_bytes(Vec::<u8>::new()))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "detail": "account-token-123"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
+    let error = provider
+        .revoke_remote_connection(RemoteRevokeRequest {
+            connection: connection(),
+            credential: Some(RedactedSecret::new("account-token-123".to_string())),
+        })
+        .await
+        .expect_err("an undocumented already-absent response must remain unknown");
+
+    assert!(matches!(error, Error::HttpStatus { status: 404, .. }));
+    assert!(
+        !format!("{error:?}").contains("account-token-123"),
+        "Merge response bodies and account tokens must not enter errors"
+    );
 }
 
 /// Builds a linked Merge connection bound to one product category.
@@ -312,8 +379,6 @@ fn merge_connection(category: &str) -> KnowledgeConnection {
         provider: "merge".to_string(),
         connector: category.to_string(),
         provider_account_id: "linked-account-123".to_string(),
-        credential_ref: Uuid::from_u128(0x2358_0002).to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,
@@ -448,6 +513,6 @@ async fn linked_account_synced_webhook_verifies_signature_and_rejects_bad_signat
 ///
 /// Provider requests take a non-serializable redacted secret, so tests build one
 /// explicitly instead of smuggling material through the connection.
-fn test_credential() -> RedactedSecret {
-    RedactedSecret::new("account-token-123".to_string())
+fn test_credential() -> Option<RedactedSecret> {
+    Some(RedactedSecret::new("account-token-123".to_string()))
 }

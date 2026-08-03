@@ -3,6 +3,7 @@
 mod acl;
 mod connection;
 mod contact_group;
+mod disconnect;
 mod document;
 mod link_claim;
 mod row_mapping;
@@ -23,12 +24,14 @@ use row_mapping::*;
 
 use crate::{
     domain::{
-        ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
-        ContactGroupTargetMember, DocumentVersion, IngestionStepStatus, KnowledgeBlock,
-        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
-        KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
-        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkClaim,
-        LinkClaimReservation, LinkClaimState, LinkClaimTransition, NewLinkClaim, ObjectAcl,
+        ContactGroup, ContactGroupMembership, ContactGroupTarget, ContactGroupTargetMember,
+        DocumentVersion, IngestionStepStatus, KnowledgeBlock, KnowledgeChunk, KnowledgeConnection,
+        KnowledgeConnectionDisconnectProgress, KnowledgeConnectionProjection,
+        KnowledgeCredentialOwnership, KnowledgeDisconnectReservation, KnowledgeDisconnectState,
+        KnowledgeDisconnectTransition, KnowledgeIngestionStep, KnowledgeObject,
+        KnowledgeObjectInspection, KnowledgeObjectProjection, KnowledgeProviderEventRecord,
+        KnowledgeSyncCounters, KnowledgeSyncRun, LinkClaim, LinkClaimReservation, LinkClaimState,
+        LinkClaimTransition, NewKnowledgeConnectionDisconnect, NewLinkClaim, ObjectAcl,
         ObjectStatus, ProviderAclEntry, ProviderAclSnapshot, SourceAclEntryKind, SourceAclState,
         SourcePrincipalBinding, SourcePrincipalGroupBinding, SourcePrincipalKind, SyncRunStatus,
     },
@@ -72,6 +75,8 @@ pub enum SyncRunClaim {
     Claimed(KnowledgeSyncRun),
     /// Another caller already owns an active sync run for the same connection.
     AlreadyRunning(KnowledgeSyncRun),
+    /// The same-tenant generic connector parent was absent or not active.
+    ParentInactive,
 }
 
 /// Result of atomically claiming ingestion for one object content version.
@@ -117,6 +122,21 @@ pub trait KnowledgeRepository: Send + Sync {
     /// Gets a linked connection by identifier.
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>>;
 
+    /// Deletes a newly-created knowledge projection while compensating a failed link.
+    ///
+    /// This is not a connection lifecycle operation. Normal disconnect retains
+    /// knowledge history and transitions the generic connector parent instead.
+    async fn delete_connection_projection(&self, connection_uid: Uuid) -> Result<bool>;
+
+    /// Advances one active connection's successful sync watermark.
+    ///
+    /// The generic connector parent remains the authoritative lifecycle gate.
+    async fn mark_connection_synced(
+        &self,
+        connection_uid: Uuid,
+        completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()>;
+
     /// Gets the connection an upsert of this provider account would replace.
     ///
     /// Keyed on exactly the columns `upsert_connection` treats as the conflict
@@ -158,17 +178,33 @@ pub trait KnowledgeRepository: Send + Sync {
         operation_id: &str,
     ) -> Result<Option<LinkClaim>>;
 
-    /// Puts one connection's credential reference back to an exact prior value.
+    /// Reserves the one remote-revocation operation for a connection.
     ///
-    /// Used only by link compensation, which restores the version it superseded
-    /// rather than whatever is active at failure time. Returns whether the row
-    /// changed, so a caller can tell a real restore from a connection a newer
-    /// link already moved on.
-    async fn restore_connection_credential(
+    /// A row returned as [`KnowledgeDisconnectReservation::Existing`] owns the
+    /// original provider operation key and state. Callers must resume that row
+    /// and must never synthesize a replacement send attempt.
+    async fn reserve_connection_disconnect(
         &self,
+        disconnect: NewKnowledgeConnectionDisconnect,
+    ) -> Result<KnowledgeDisconnectReservation>;
+
+    /// Advances one remote-revocation ledger row by compare-and-swap.
+    ///
+    /// Returns `None` when another execution already moved the row beyond the
+    /// transition's sole permitted source state.
+    async fn advance_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
         connection_uid: Uuid,
-        credential_ref: &str,
-    ) -> Result<bool>;
+        transition: KnowledgeDisconnectTransition,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>>;
+
+    /// Reads the durable remote-revocation progress for one connection.
+    async fn get_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>>;
 
     /// Removes at most `limit` link claims for this repository's tenant.
     ///
@@ -189,13 +225,6 @@ pub trait KnowledgeRepository: Send + Sync {
         &self,
         connection_uid: Uuid,
         source_selection: serde_json::Value,
-    ) -> Result<KnowledgeConnection>;
-
-    /// Disables a linked connection for one tenant.
-    async fn disable_connection(
-        &self,
-        tenant_id: TenantId,
-        connection_uid: Uuid,
     ) -> Result<KnowledgeConnection>;
 
     /// Lists linked-connection projections for a tenant.
@@ -282,6 +311,17 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Binds one verified provider principal to a contact or to the whole tenant.
     async fn upsert_principal_binding(&self, binding: SourcePrincipalBinding) -> Result<()>;
+
+    /// Loads exact connection-scoped verified bindings by opaque fingerprints.
+    ///
+    /// Raw provider subjects are never accepted by this boundary. Callers must
+    /// canonicalize and key them in memory, then batch only the bounded digests
+    /// needed by one source page.
+    async fn verified_principal_bindings(
+        &self,
+        connection_uid: Uuid,
+        principals: &[SourcePrincipalFingerprint],
+    ) -> Result<Vec<SourcePrincipalBinding>>;
 
     /// Records that holders of one principal also hold a group or domain principal.
     async fn upsert_group_binding(&self, binding: SourcePrincipalGroupBinding) -> Result<()>;
@@ -566,9 +606,8 @@ impl KnowledgeDiscoveryStore for PostgresKnowledgeDiscoveryStore {
             sqlx::query(
                 r#"
                 SELECT connection_uid, tenant_id, provider, connector,
-                       provider_connection_id, credential_ref, status, metadata,
-                       source_selection, information_barrier, created_at, updated_at,
-                       last_synced_at
+                       provider_connection_id, metadata, source_selection, information_barrier,
+                       created_at, updated_at, last_synced_at
                 FROM moa.knowledge_connections
                 WHERE provider = $1
                   AND provider_config_key = $2
@@ -587,9 +626,8 @@ impl KnowledgeDiscoveryStore for PostgresKnowledgeDiscoveryStore {
             sqlx::query(
                 r#"
                 SELECT connection_uid, tenant_id, provider, connector,
-                       provider_connection_id, credential_ref, status, metadata,
-                       source_selection, information_barrier, created_at, updated_at,
-                       last_synced_at
+                       provider_connection_id, metadata, source_selection, information_barrier,
+                       created_at, updated_at, last_synced_at
                 FROM moa.knowledge_connections
                 WHERE provider = $1
                   AND provider_connection_id = $2
@@ -639,6 +677,18 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         connection::get_connection(self, connection_uid).await
     }
 
+    async fn delete_connection_projection(&self, connection_uid: Uuid) -> Result<bool> {
+        connection::delete_connection_projection(self, connection_uid).await
+    }
+
+    async fn mark_connection_synced(
+        &self,
+        connection_uid: Uuid,
+        completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        connection::mark_connection_synced(self, connection_uid, completed_at).await
+    }
+
     async fn connection_by_provider_account(
         &self,
         provider: &str,
@@ -670,12 +720,28 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         link_claim::get_link_claim(self, tenant_id, operation_id).await
     }
 
-    async fn restore_connection_credential(
+    async fn reserve_connection_disconnect(
         &self,
+        disconnect: NewKnowledgeConnectionDisconnect,
+    ) -> Result<KnowledgeDisconnectReservation> {
+        disconnect::reserve_connection_disconnect(self, disconnect).await
+    }
+
+    async fn advance_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
         connection_uid: Uuid,
-        credential_ref: &str,
-    ) -> Result<bool> {
-        connection::restore_connection_credential(self, connection_uid, credential_ref).await
+        transition: KnowledgeDisconnectTransition,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>> {
+        disconnect::advance_connection_disconnect(self, tenant_id, connection_uid, transition).await
+    }
+
+    async fn get_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>> {
+        disconnect::get_connection_disconnect(self, tenant_id, connection_uid).await
     }
 
     async fn purge_tenant_link_claims(&self, limit: u32) -> Result<u64> {
@@ -700,14 +766,6 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         provider: Option<&str>,
     ) -> Result<Vec<KnowledgeConnectionProjection>> {
         connection::list_connections(self, tenant_id, provider).await
-    }
-
-    async fn disable_connection(
-        &self,
-        tenant_id: TenantId,
-        connection_uid: Uuid,
-    ) -> Result<KnowledgeConnection> {
-        connection::disable_connection(self, tenant_id, connection_uid).await
     }
 
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
@@ -795,6 +853,14 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
 
     async fn upsert_principal_binding(&self, binding: SourcePrincipalBinding) -> Result<()> {
         acl::upsert_principal_binding(self, binding).await
+    }
+
+    async fn verified_principal_bindings(
+        &self,
+        connection_uid: Uuid,
+        principals: &[SourcePrincipalFingerprint],
+    ) -> Result<Vec<SourcePrincipalBinding>> {
+        acl::verified_principal_bindings(self, connection_uid, principals).await
     }
 
     async fn upsert_group_binding(&self, binding: SourcePrincipalGroupBinding) -> Result<()> {

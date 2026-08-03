@@ -16,7 +16,9 @@ pub struct ActionDefinition {
     /// Optional connector artifact that owns the backing capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector_ref: Option<ArtifactRef>,
-    /// Optional built-in or MCP tool name used to execute the action.
+    /// Built-in or MCP tool name used to execute the action.
+    ///
+    /// A connector-backed action must name this backing tool explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     /// JSON schema for action inputs.

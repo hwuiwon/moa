@@ -32,8 +32,8 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Tenant knowledge:** relational graph memory stores facts, decisions, lessons, sources, and provenance as Postgres nodes and edges, while sidecar indexes and the configured vector backend provide retrieval. Contact memory is contact-local and does not inherit tenant memory or another contact's memory.
 - **Dynamic execution:** each request is routed once to `Respond`, `Execute`, or `NeedsInput`; Execute derives an `Inline` or `Durable` strategy, and only an initial root Inline turn may make one evidence-preserving upgrade to Durable.
 - **Skills:** skills are optional execution inputs, never routes or admission gates. Custom instruction-only Agent Skills work in Inline Execute and in Durable `Agent` nodes. An activated skill may also carry a pinned reusable `execution_plan` template; one-off compiled plans remain immutable run snapshots and are never auto-published.
-- **Tenant ownership:** skills and policies are tenant-owned runtime data.
-- **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
+- **Tenant ownership:** skills, policies, and connector connections are tenant-owned runtime data.
+- **Pluggable execution:** local hands, Docker, Daytona, E2B, operator MCP servers, and reviewed tenant HTTP connector actions are routed through one governed tool boundary. Tenant knowledge sync remains a separate Nango/Merge provider flow and never becomes a model tool.
 - **Multiple interfaces:** REST/gateway, API automation, and messaging adapters all talk to the same session model.
 
 ## Design Values

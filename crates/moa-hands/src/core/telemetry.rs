@@ -63,6 +63,7 @@ pub(super) fn record_tool_invocation_metadata(
                 .unwrap_or("unknown"),
         ),
         ToolExecution::Mcp { .. } => ("mcp", "external"),
+        ToolExecution::InstalledConnectorAction { .. } => ("installed_connector", "external"),
     };
 
     span.set_attribute("moa.tool.category", category);

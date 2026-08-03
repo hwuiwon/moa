@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::local::LocalHandProvider;
 
+pub use dispatch::PendingConnectorToolOutput;
 use leases::HandLeaseStore;
 pub use mcp_catalog::{
     CandidateConnector, CatalogDefect, McpCatalogActivation, McpCatalogRefresh, McpConnectorHealth,
@@ -217,6 +218,18 @@ impl ToolCatalogSnapshot {
     #[must_use]
     pub fn tool_definition(&self, name: &str) -> Option<moa_core::types::tools::ToolDefinition> {
         self.registry.get(name).cloned()
+    }
+
+    /// Returns typed capability registrations from this exact immutable publication.
+    ///
+    /// Scoped planning and release consumers must use this method rather than a
+    /// fresh global router read so connector provenance cannot drift away from
+    /// the schemas and pin they compile against.
+    #[must_use]
+    pub fn capability_registrations(
+        &self,
+    ) -> Vec<(moa_core::types::tools::ToolDefinition, ToolExecution)> {
+        self.registry.capability_registrations()
     }
 
     /// Returns whether the named tool provisions a hand in this publication.

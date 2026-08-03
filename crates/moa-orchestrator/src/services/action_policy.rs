@@ -6,7 +6,7 @@ use chrono::Utc;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
-    error::MoaError, types::action_policy::ActionEnvelope,
+    error::MoaError, traits::Identity, types::action_policy::ActionEnvelope,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
     types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewPreview,
     types::action_policy::ActionRuleScope, types::action_policy::CapabilityProvenance,
@@ -14,11 +14,13 @@ use moa_core::{
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::ToolCallId,
     types::identifiers::UserId, types::session::SessionMeta,
 };
-use moa_hands::{ActionOrigin, ToolRouter};
+use moa_execution::CapabilityPolicyContext;
+use moa_hands::{ActionOrigin, ToolCatalogSnapshot, ToolRouter};
 use moa_security::{ActionPolicyRuleStore, stricter_effect};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -28,6 +30,8 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 pub struct PrepareActionReviewRequest {
     /// Session metadata used for tenant-scoped policy evaluation.
     pub session: SessionMeta,
+    /// Authenticated caller whose delegated rights select the scoped catalog.
+    pub caller_identity: Identity,
     /// Tool invocation that is about to execute.
     pub invocation: ToolInvocation,
     /// Governed contract revision that admitted the invocation.
@@ -41,6 +45,9 @@ pub struct PrepareActionReviewRequest {
     /// Capability-level provenance, independent of execution ownership.
     #[serde(default)]
     pub capability_provenance: CapabilityProvenance,
+    /// Immutable catalog policy floor for durable capability dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_policy_context: Option<CapabilityPolicyContext>,
     /// Explicit idempotency key supplied for side-effecting tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
@@ -117,14 +124,23 @@ pub trait ActionPolicy {
 #[derive(Clone)]
 pub struct ActionPolicyImpl {
     router: Arc<ToolRouter>,
+    connector_catalog: ScopedConnectorCatalogProvider,
     rule_store: Arc<dyn ActionPolicyRuleStore>,
 }
 
 impl ActionPolicyImpl {
-    /// Creates a new action-policy facade backed by the shared router.
+    /// Creates a new action-policy facade backed by scoped catalog projection.
     #[must_use]
-    pub fn new(router: Arc<ToolRouter>, rule_store: Arc<dyn ActionPolicyRuleStore>) -> Self {
-        Self { router, rule_store }
+    pub(crate) fn new(
+        router: Arc<ToolRouter>,
+        connector_catalog: ScopedConnectorCatalogProvider,
+        rule_store: Arc<dyn ActionPolicyRuleStore>,
+    ) -> Self {
+        Self {
+            router,
+            connector_catalog,
+            rule_store,
+        }
     }
 }
 
@@ -140,10 +156,15 @@ impl ActionPolicy for ActionPolicyImpl {
         annotate_restate_handler_span("ActionPolicy", "prepare_action_review");
         let request = request.into_inner();
         let router = self.router.clone();
+        let connector_catalog = self.connector_catalog.clone();
 
         Ok(ctx
             .run(|| async move {
-                prepare_action_review_inner(router, request)
+                let catalog = connector_catalog
+                    .for_session(&request.caller_identity, &request.session)
+                    .await
+                    .map_err(|error| moa_error_to_handler_error(error.into_moa_error()))?;
+                prepare_action_review_inner(router, catalog.snapshot().clone(), request)
                     .await
                     .map(Json::from)
             })
@@ -198,10 +219,10 @@ impl ActionPolicy for ActionPolicyImpl {
 
 async fn prepare_action_review_inner(
     router: Arc<ToolRouter>,
+    catalog: Arc<ToolCatalogSnapshot>,
     request: PrepareActionReviewRequest,
 ) -> Result<PreparedActionReviewResponse, HandlerError> {
     let expected_revision = request.expected_tool_contract_revision.as_str();
-    let catalog = router.activated_catalog();
     match catalog.contract_revision(&request.invocation.name) {
         Some(activated_revision) if activated_revision == expected_revision => {}
         Some(activated_revision) => {
@@ -241,14 +262,39 @@ async fn prepare_action_review_inner(
         &request.invocation,
         request.capability_provenance.kind.as_deref(),
         request.capability_provenance.id.as_deref(),
+        request
+            .capability_policy_context
+            .as_ref()
+            .and_then(|context| context.canonical_action_ref.as_ref()),
     )
     .map_err(moa_error_to_handler_error)?;
-    let effect = stricter_effect(base_policy.effect, agent_policy.effect);
+    let configured_effect = stricter_effect(base_policy.effect, agent_policy.effect);
+    let minimum_effect = request
+        .capability_policy_context
+        .as_ref()
+        .map_or(ActionPolicyEffect::Allow, |context| context.minimum_effect);
+    let effect = stricter_effect(configured_effect, minimum_effect);
     let base_reason = base_policy.reason.clone();
-    let reason = if effect == base_policy.effect {
+    let configured_reason = if configured_effect == base_policy.effect {
         base_reason.or(agent_policy.reason)
     } else {
         agent_policy.reason.or(base_reason)
+    };
+    let reason = if effect == configured_effect {
+        configured_reason
+    } else {
+        Some(
+            match minimum_effect {
+                ActionPolicyEffect::AdminReview => {
+                    "the pinned capability policy requires tenant-admin review"
+                }
+                ActionPolicyEffect::Deny => "the pinned capability policy denies this action",
+                ActionPolicyEffect::Allow => {
+                    "the pinned capability policy applied a stricter action effect"
+                }
+            }
+            .to_string(),
+        )
     };
     let origin = ActionOrigin {
         capability: request.capability_provenance,
@@ -299,6 +345,7 @@ fn agent_action_policy_effect(
     invocation: &ToolInvocation,
     origin_kind: Option<&str>,
     origin_id: Option<&str>,
+    canonical_action_ref: Option<&moa_artifacts::reference::ArtifactRef>,
 ) -> Result<AgentActionPolicyDecision, MoaError> {
     let Some(snapshot) = agent_policy_snapshot(session)? else {
         return Ok(allow_agent_action());
@@ -314,7 +361,13 @@ fn agent_action_policy_effect(
         });
     }
 
-    if let Some(action_ref) = action_origin_ref(origin_kind, origin_id) {
+    let canonical_action_ref = canonical_action_ref
+        .map(moa_artifacts::reference::ArtifactRef::canonical_string)
+        .transpose()
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    if let Some(action_ref) =
+        canonical_action_ref.or_else(|| action_origin_ref(origin_kind, origin_id))
+    {
         if !snapshot.action_policy.allowed.is_empty()
             && !snapshot
                 .action_policy
@@ -384,23 +437,33 @@ fn allow_agent_action() -> AgentActionPolicyDecision {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use moa_artifacts::reference::ArtifactRef;
     use moa_core::{
-        types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewOwner,
-        types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
-        types::agent::AgentActionPolicy, types::agent::AgentContext,
-        types::agent::AgentPolicySnapshot, types::agent::AgentToolPolicy,
-        types::agent::AgentToolPolicyMode, types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
-        types::agent::SYSTEM_DEFAULT_AGENT_REF, types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
-        types::completion::ToolInvocation, types::identifiers::ToolCallId,
+        traits::{Identity, IdentityType},
+        types::action_policy::ActionPolicyEffect,
+        types::action_policy::ActionReviewOwner,
+        types::action_policy::CapabilityProvenance,
+        types::action_policy::ExecutionTaskOrigin,
+        types::agent::AgentActionPolicy,
+        types::agent::AgentContext,
+        types::agent::AgentPolicySnapshot,
+        types::agent::AgentToolPolicy,
+        types::agent::AgentToolPolicyMode,
+        types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
+        types::agent::SYSTEM_DEFAULT_AGENT_REF,
+        types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
+        types::completion::ToolInvocation,
+        types::identifiers::{ConnectorConnectionId, ToolCallId},
         types::session::SessionMeta,
     };
+    use moa_execution::{CapabilityPolicyContext, CapabilitySource};
     use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
         PrepareActionReviewRequest, PreparedActionReviewResponse, action_origin_ref,
-        agent_action_policy_effect, prepare_action_review_inner,
+        agent_action_policy_effect, allow_agent_action, prepare_action_review_inner,
     };
 
     #[tokio::test]
@@ -441,7 +504,8 @@ mod tests {
             None,
         );
 
-        let response = prepare_action_review_inner(router, request)
+        let catalog = router.activated_catalog();
+        let response = prepare_action_review_inner(router, catalog, request)
             .await
             .expect("validation failure must not be a handler error");
         let PreparedActionReviewResponse::InvalidInput { reason } = response else {
@@ -467,7 +531,8 @@ mod tests {
         let mut request = policy_request(router.as_ref(), SessionMeta::default(), invocation, None);
 
         request.expected_tool_contract_revision = "stale-contract".to_string();
-        let stale = prepare_action_review_inner(router, request)
+        let catalog = router.activated_catalog();
+        let stale = prepare_action_review_inner(router, catalog, request)
             .await
             .expect_err("a stale policy request must fail closed");
         let stale = <restate_sdk::prelude::HandlerError as AsRef<
@@ -475,6 +540,119 @@ mod tests {
         >>::as_ref(&stale)
         .to_string();
         assert!(stale.contains("drifted"), "error: {stale}");
+    }
+
+    #[tokio::test]
+    async fn artifact_policy_floor_cannot_be_weakened_by_registered_tool_allow() {
+        // Pins: an action artifact that requires tenant-admin review stays at
+        // AdminReview even when its registered backing tool evaluates to Allow.
+        let router = Arc::new(ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        ));
+        let action_ref = ArtifactRef::action_artifact("publish-note");
+        let revision_uid = Uuid::from_u128(71);
+        let source = CapabilitySource::ActionArtifact {
+            action_ref: action_ref.clone(),
+            revision_uid,
+            tool_name: "file_read".to_string(),
+        };
+        let mut request = policy_request(
+            router.as_ref(),
+            SessionMeta::default(),
+            ToolInvocation {
+                id: Some("artifact-floor-call".to_string()),
+                name: "file_read".to_string(),
+                input: json!({"path": "README.md"}),
+            },
+            Some(ExecutionTaskOrigin {
+                run_uid: Uuid::from_u128(72),
+                task_uid: Uuid::from_u128(73),
+                generation: 1,
+            }),
+        );
+        request.capability_policy_context = Some(CapabilityPolicyContext::artifact(
+            source,
+            Some(action_ref),
+            Uuid::from_u128(70),
+            revision_uid,
+            ActionPolicyEffect::AdminReview,
+        ));
+
+        let catalog = router.activated_catalog();
+        let response = prepare_action_review_inner(router, catalog, request)
+            .await
+            .expect("artifact floor policy should prepare");
+        let PreparedActionReviewResponse::Prepared(prepared) = response else {
+            panic!("valid artifact-backed invocation should prepare");
+        };
+        assert_eq!(prepared.effect, ActionPolicyEffect::AdminReview);
+        assert_eq!(
+            prepared.reason.as_deref(),
+            Some("the pinned capability policy requires tenant-admin review")
+        );
+    }
+
+    #[tokio::test]
+    async fn installed_connector_policy_floor_cannot_be_weakened_by_registered_tool_allow() {
+        // Pins: an installed connector that requires tenant-admin review stays
+        // at AdminReview even when its registered backing policy evaluates Allow.
+        let router = Arc::new(ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        ));
+        let action_ref = ArtifactRef::action("billing", "refund");
+        let definition_artifact_uid = Uuid::from_u128(74);
+        let definition_revision_uid = Uuid::from_u128(75);
+        let source = CapabilitySource::InstalledConnectorAction {
+            connector_ref: ArtifactRef::connector("billing"),
+            connection_id: ConnectorConnectionId(Uuid::from_u128(76)),
+            binding_id: Uuid::from_u128(77),
+            connection_generation: 3,
+            definition_artifact_uid,
+            definition_revision_uid,
+            action_id: "refund".to_string(),
+            contract_hash: "ab".repeat(32),
+            governed_contract_revision: "billing-refund-v3".to_string(),
+            minimum_effect: ActionPolicyEffect::AdminReview,
+            tool_name: "file_read".to_string(),
+        };
+        let mut request = policy_request(
+            router.as_ref(),
+            SessionMeta::default(),
+            ToolInvocation {
+                id: Some("installed-connector-floor-call".to_string()),
+                name: "file_read".to_string(),
+                input: json!({"path": "README.md"}),
+            },
+            Some(ExecutionTaskOrigin {
+                run_uid: Uuid::from_u128(78),
+                task_uid: Uuid::from_u128(79),
+                generation: 1,
+            }),
+        );
+        request.capability_policy_context = Some(CapabilityPolicyContext::artifact(
+            source,
+            Some(action_ref),
+            definition_artifact_uid,
+            definition_revision_uid,
+            ActionPolicyEffect::AdminReview,
+        ));
+
+        let catalog = router.activated_catalog();
+        let response = prepare_action_review_inner(router, catalog, request)
+            .await
+            .expect("installed connector floor policy should prepare");
+        let PreparedActionReviewResponse::Prepared(prepared) = response else {
+            panic!("valid connector-backed invocation should prepare");
+        };
+        assert_eq!(prepared.effect, ActionPolicyEffect::AdminReview);
+        assert_eq!(
+            prepared.reason.as_deref(),
+            Some("the pinned capability policy requires tenant-admin review")
+        );
     }
 
     #[tokio::test]
@@ -497,6 +675,7 @@ mod tests {
             HashMap::new(),
             moa_hands::local_development_sandbox_policy(),
         ));
+        let catalog = router.activated_catalog();
         let cases = [
             (
                 "read",
@@ -579,10 +758,10 @@ mod tests {
                 }),
             );
 
-            let root = prepare_action_review_inner(router.clone(), root)
+            let root = prepare_action_review_inner(router.clone(), catalog.clone(), root)
                 .await
                 .unwrap_or_else(|error| panic!("{label} root preparation failed: {error:?}"));
-            let execution = prepare_action_review_inner(router.clone(), execution)
+            let execution = prepare_action_review_inner(router.clone(), catalog.clone(), execution)
                 .await
                 .unwrap_or_else(|error| panic!("{label} execution preparation failed: {error:?}"));
             let PreparedActionReviewResponse::Prepared(root) = root else {
@@ -616,6 +795,13 @@ mod tests {
         execution_origin: Option<ExecutionTaskOrigin>,
     ) -> PrepareActionReviewRequest {
         let session_id = session.id;
+        let caller_identity = Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(90),
+            tenant_id: session.tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        };
         let owner = match execution_origin {
             Some(origin) => ActionReviewOwner::ExecutionTask { session_id, origin },
             None => ActionReviewOwner::Coordinator {
@@ -631,11 +817,13 @@ mod tests {
                 .expect("policy fixture tool should have an activated contract")
                 .to_owned(),
             session,
+            caller_identity,
             invocation,
             review_id: Uuid::now_v7(),
             tool_call_id: ToolCallId::new(),
             owner,
             capability_provenance: CapabilityProvenance::default(),
+            capability_policy_context: None,
             idempotency_key: None,
         }
     }
@@ -653,6 +841,7 @@ mod tests {
             &invocation("bash"),
             Some("action"),
             Some("refund"),
+            None,
         )
         .expect("policy");
 
@@ -671,8 +860,8 @@ mod tests {
             ..AgentPolicySnapshot::default()
         });
 
-        let decision =
-            agent_action_policy_effect(&session, &invocation("bash"), None, None).expect("policy");
+        let decision = agent_action_policy_effect(&session, &invocation("bash"), None, None, None)
+            .expect("policy");
 
         assert_eq!(decision.effect, ActionPolicyEffect::Deny);
     }
@@ -685,13 +874,14 @@ mod tests {
             Vec::new(),
         ));
 
-        let raw_tool =
-            agent_action_policy_effect(&session, &invocation("bash"), None, None).expect("raw");
+        let raw_tool = agent_action_policy_effect(&session, &invocation("bash"), None, None, None)
+            .expect("raw");
         let wrong_action = agent_action_policy_effect(
             &session,
             &invocation("bash"),
             Some("action"),
             Some("chargeback"),
+            None,
         )
         .expect("action");
 
@@ -701,6 +891,27 @@ mod tests {
             action_origin_ref(Some("action"), Some("refund")).as_deref(),
             Some("action://refund")
         );
+    }
+
+    #[test]
+    fn connector_looking_base_tool_name_does_not_create_action_provenance() {
+        // Pins: model-visible naming is never parsed into connector authority;
+        // only the typed capability policy context can supply action provenance.
+        let session = session_with_snapshot(snapshot_with_action_rules(
+            vec!["action://billing.refund".to_string()],
+            Vec::new(),
+        ));
+
+        let decision = agent_action_policy_effect(
+            &session,
+            &invocation("conn__0000000000000000000000000000004a__refund"),
+            None,
+            None,
+            None,
+        )
+        .expect("connector-looking base tool policy");
+
+        assert_eq!(decision, allow_agent_action());
     }
 
     fn invocation(name: &str) -> ToolInvocation {
@@ -719,6 +930,7 @@ mod tests {
             action_policy: AgentActionPolicy {
                 allowed,
                 require_admin_review,
+                connector_bindings: Vec::new(),
             },
             ..AgentPolicySnapshot::default()
         }

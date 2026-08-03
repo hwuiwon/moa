@@ -19,7 +19,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use moa_config::{McpServerConfig, MoaConfig};
-use moa_core::{error::MoaError, error::Result};
+use moa_core::{
+    error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
+    types::identifiers::ConnectorConnectionId,
+};
 use moa_security::{ConnectorCandidateFacts, ConnectorPolicyDefect, check_connector_policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -243,6 +246,29 @@ pub enum PinnedToolOwner {
         /// Configured connector name.
         server: String,
     },
+    /// An action on one exact tenant-installed connection and binding revision.
+    InstalledConnectorAction {
+        /// Canonical logical connector reference selected by the agent.
+        connector_ref: String,
+        /// Exact tenant connection identity.
+        connection_id: ConnectorConnectionId,
+        /// Exact immutable installed binding row.
+        binding_id: uuid::Uuid,
+        /// Positive connection generation that compiled the binding.
+        connection_generation: u64,
+        /// Published connector artifact family.
+        definition_artifact_uid: uuid::Uuid,
+        /// Exact published connector artifact revision.
+        definition_revision_uid: uuid::Uuid,
+        /// Definition-local canonical action identifier.
+        action_id: String,
+        /// Canonical normalized operation-contract hash.
+        contract_hash: String,
+        /// Governed action revision persisted with the binding.
+        governed_contract_revision: String,
+        /// Intrinsic effect floor that persisted rules cannot lower.
+        minimum_effect: ActionPolicyEffect,
+    },
 }
 
 /// One tool's exact governed contract inside an activated catalog snapshot.
@@ -292,6 +318,30 @@ impl ToolCatalogPin {
                 ToolExecution::Mcp { server_name, .. } => PinnedToolOwner::Connector {
                     server: server_name.clone(),
                 },
+                ToolExecution::InstalledConnectorAction {
+                    connector_ref,
+                    connection_id,
+                    binding_id,
+                    connection_generation,
+                    definition_artifact_uid,
+                    definition_revision_uid,
+                    action_id,
+                    contract_hash,
+                    governed_contract_revision,
+                    minimum_effect,
+                    ..
+                } => PinnedToolOwner::InstalledConnectorAction {
+                    connector_ref: connector_ref.clone(),
+                    connection_id: *connection_id,
+                    binding_id: binding_id.0,
+                    connection_generation: connection_generation.get(),
+                    definition_artifact_uid: *definition_artifact_uid,
+                    definition_revision_uid: *definition_revision_uid,
+                    action_id: action_id.clone(),
+                    contract_hash: contract_hash.to_string(),
+                    governed_contract_revision: governed_contract_revision.clone(),
+                    minimum_effect: *minimum_effect,
+                },
             };
             let contract_revision = governed_tool_contract_revision(&definition, &execution)?;
             tools.push(PinnedToolContract {
@@ -314,6 +364,9 @@ impl ToolCatalogPin {
                     PinnedToolOwner::BuiltIn => "builtin",
                     PinnedToolOwner::Hand => "hand",
                     PinnedToolOwner::Connector { .. } => "connector",
+                    PinnedToolOwner::InstalledConnectorAction { .. } => {
+                        "installed_connector_action"
+                    }
                 }
                 .as_bytes(),
             );
@@ -321,10 +374,36 @@ impl ToolCatalogPin {
                 &mut hasher,
                 match &tool.owner {
                     PinnedToolOwner::Connector { server } => server.as_str(),
+                    PinnedToolOwner::InstalledConnectorAction { connector_ref, .. } => {
+                        connector_ref.as_str()
+                    }
                     PinnedToolOwner::BuiltIn | PinnedToolOwner::Hand => "",
                 }
                 .as_bytes(),
             );
+            if let PinnedToolOwner::InstalledConnectorAction {
+                connection_id,
+                binding_id,
+                connection_generation,
+                definition_artifact_uid,
+                definition_revision_uid,
+                action_id,
+                contract_hash,
+                governed_contract_revision,
+                minimum_effect,
+                ..
+            } = &tool.owner
+            {
+                absorb(&mut hasher, connection_id.0.as_bytes());
+                absorb(&mut hasher, binding_id.as_bytes());
+                absorb(&mut hasher, &connection_generation.to_be_bytes());
+                absorb(&mut hasher, definition_artifact_uid.as_bytes());
+                absorb(&mut hasher, definition_revision_uid.as_bytes());
+                absorb(&mut hasher, action_id.as_bytes());
+                absorb(&mut hasher, contract_hash.as_bytes());
+                absorb(&mut hasher, governed_contract_revision.as_bytes());
+                absorb(&mut hasher, minimum_effect.as_str().as_bytes());
+            }
             absorb(&mut hasher, tool.contract_revision.as_bytes());
         }
 
@@ -854,7 +933,9 @@ fn mcp_catalog_revision(registry: &ToolRegistry) -> String {
                 schema_hash,
                 ..
             } => Some((name.clone(), server_name.clone(), schema_hash.clone())),
-            ToolExecution::BuiltIn(_) | ToolExecution::Hand { .. } => None,
+            ToolExecution::BuiltIn(_)
+            | ToolExecution::Hand { .. }
+            | ToolExecution::InstalledConnectorAction { .. } => None,
         })
         .collect::<Vec<_>>();
     entries.sort();

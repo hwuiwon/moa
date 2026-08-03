@@ -24,12 +24,15 @@ use moa_core::{
 };
 use moa_hands::ToolCatalogPin;
 use moa_orchestrator::objects::tenant::TenantConfig;
-use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
 use moa_orchestrator::services::action_reviews::{
     ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
     ListActionReviewsRequest, RequestActionReview,
 };
 use moa_orchestrator::services::tool_executor::ExecutionTaskToolCallRequest;
+use moa_orchestrator::services::{
+    action_policy::{PrepareActionReviewRequest, PreparedActionReview},
+    tool_executor::ScopedToolCatalogRequest,
+};
 use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
@@ -532,7 +535,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
     let review_id = Uuid::now_v7();
     let claimed_tool_call_id = Uuid::now_v7();
     let tool_call_id = ToolCallId::new();
-    let contract_revision = activated_contract_revision(&test, "bash").await?;
+    let contract_revision = activated_contract_revision(&test, session_id, "bash").await?;
     let tool_request = ToolCallRequest {
         tool_call_id,
         caller_identity: test
@@ -740,7 +743,7 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
     let test = fixture.isolated().await;
     let session_id = test.create_session("execution-task-no-root-events").await?;
     let tool_call_id = ToolCallId::new();
-    let contract_revision = activated_contract_revision(&test, "bash").await?;
+    let contract_revision = activated_contract_revision(&test, session_id, "bash").await?;
     let output: SecuredToolOutput = test
         .client()
         .post_call(
@@ -1297,13 +1300,19 @@ async fn create_pending_bash_review(
     let meta = test.client().get_session(session_id).await?;
     let review_id = Uuid::new_v4();
     let tool_call_id = ToolCallId::new();
-    let contract_revision = activated_contract_revision(test, "bash").await?;
+    let caller_identity = test
+        .client()
+        .identity()
+        .context("fixture client identity")?
+        .clone();
+    let contract_revision = activated_contract_revision(test, session_id, "bash").await?;
     let prepared: PreparedActionReview = test
         .client()
         .post_call(
             "/ActionPolicy/prepare_action_review",
             &PrepareActionReviewRequest {
                 session: meta.clone(),
+                caller_identity: caller_identity.clone(),
                 invocation: ToolInvocation {
                     id: None,
                     name: "bash".to_string(),
@@ -1314,6 +1323,7 @@ async fn create_pending_bash_review(
                 tool_call_id,
                 owner,
                 capability_provenance: Default::default(),
+                capability_policy_context: None,
                 idempotency_key: None,
             },
         )
@@ -1327,11 +1337,7 @@ async fn create_pending_bash_review(
 
     let tool_request = ToolCallRequest {
         tool_call_id,
-        caller_identity: test
-            .client()
-            .identity()
-            .context("fixture client identity")?
-            .clone(),
+        caller_identity,
         provider_tool_use_id: None,
         tool_name: "bash".to_string(),
         expected_tool_contract_revision: contract_revision,
@@ -1361,10 +1367,25 @@ async fn create_pending_bash_review(
     Ok((review_id, tool_call_id))
 }
 
-async fn activated_contract_revision(test: &IsolatedTest<'_>, tool_name: &str) -> Result<String> {
+async fn activated_contract_revision(
+    test: &IsolatedTest<'_>,
+    session_id: SessionId,
+    tool_name: &str,
+) -> Result<String> {
+    let caller_identity = test
+        .client()
+        .identity()
+        .context("fixture client identity")?
+        .clone();
     let catalog: ToolCatalogPin = test
         .client()
-        .post_empty_call("/ToolExecutor/activated_tool_catalog")
+        .post_call(
+            "/ToolExecutor/activated_tool_catalog",
+            &ScopedToolCatalogRequest {
+                session_id,
+                caller_identity,
+            },
+        )
         .await
         .context("load activated tool catalog")?;
     catalog

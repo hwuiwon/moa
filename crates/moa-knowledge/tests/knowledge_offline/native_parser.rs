@@ -3,7 +3,7 @@
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     chunking::elements_to_blocks,
-    domain::{ConnectionStatus, KnowledgeConnection, KnowledgeObject, ObjectStatus, ParseInput},
+    domain::{KnowledgeConnection, KnowledgeObject, ObjectStatus, ParseInput},
     parser::{
         DocumentParser,
         native::{
@@ -42,8 +42,6 @@ fn parse_input(file_name: &str, mime_type: &str, text: &str) -> ParseInput {
         provider: "nango".to_string(),
         connector: "fixture".to_string(),
         provider_account_id: "fixture".to_string(),
-        credential_ref: "vault://fixture".to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,
