@@ -3,17 +3,34 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
+use crate::credential_ingress::{
+    ConnectorCredentialIngress, CredentialIngressCoordinator,
+    ManagementCredentialIngressCoordinator,
+};
 use crate::ctx::{
     AuthDeps, LineageDeps, MemoryDeps, OrchestratorCtx, OrchestratorDeps, PersistenceDeps,
     ProviderDeps, ToolDeps,
 };
 use anyhow::{Context as AnyhowContext, Result, bail};
+use async_trait::async_trait;
 use moa_authz::{AwakeableResolver, FgaClient};
 use moa_brain::{
     build_graph_memory_retriever,
     pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector},
 };
 use moa_config::MoaConfig;
+use moa_connectors::catalog::{
+    FgaConnectorUseAuthorizer, GovernedInstalledConnectorCatalog, InstalledConnectorCatalog,
+    InstalledConnectorCatalogSource,
+};
+use moa_connectors::executor::{
+    ConnectorActionRuntime, ConnectorInvocationCompletionService, ConnectorInvocationCoordinator,
+};
+use moa_connectors::http::HttpConnectorRuntime;
+use moa_connectors::repository::ConnectionUseGrantRepository;
+use moa_connectors::repository::{ConnectionRepository, PostgresConnectionRepository};
+use moa_connectors::service::{ConnectorService, CredentialSlotVerifier};
 use moa_core::{
     traits::{ChannelAdapter, EmbeddingProvider, RuntimeCacheStore},
     types::channel::Channel,
@@ -26,11 +43,25 @@ use moa_providers::{
     EmbedderConstructionRole, ProviderRegistry, build_embedder_from_config,
     build_embedding_provider_from_config,
 };
-use moa_security::McpEgressGuard;
+#[cfg(feature = "integration")]
+use moa_security::outbound_http::TokioOutboundHostResolver;
+use moa_security::{McpEgressGuard, OutboundHttpPolicy};
 use moa_session::PostgresSessionStore;
 use sqlx::PgPool;
 
-use crate::services::{authz_challenges_reaper::HttpAwakeableResolver, scim::ScimState};
+use crate::services::{
+    authz_challenges_reaper::HttpAwakeableResolver,
+    connectors::{
+        ArtifactConnectorDefinitionResolver, ConnectionCredentialRevoker,
+        ConnectorDefinitionResolver, ConnectorDestinationVerifier,
+        ConnectorManagementAuthorizationError, ConnectorManagementAuthorizer,
+        ConnectorManagementService, FgaConnectorManagementAuthorizer,
+        ManagedKnowledgeConnectorDefinitionResolver, PolicyConnectorDestinationVerifier,
+        VaultConnectionCredentialRevoker, VaultCredentialSlotVerifier,
+    },
+    scim::ScimState,
+};
+use moa_artifacts::registry::ArtifactRegistry;
 
 use crate::{
     config::ProvidersOverride,
@@ -73,6 +104,16 @@ pub struct RuntimeDeps {
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Tool router used by ToolExecutor and runtime services.
     pub tool_router: Arc<ToolRouter>,
+    /// Authenticated ephemeral catalog provider for tenant-installed actions.
+    pub(crate) connector_catalogs: ScopedConnectorCatalogProvider,
+    /// Post-journal connector invocation completion boundary.
+    pub(crate) connector_completion: ConnectorInvocationCompletionService,
+    /// Shared connector lifecycle service used by management and knowledge capabilities.
+    pub(crate) connector_connections: ConnectorService,
+    /// Secret-free connector management application service shared by Restate and ingress.
+    pub(crate) connector_management: ConnectorManagementService,
+    /// Plaintext-owning private connector credential ingress controller.
+    pub(crate) connector_credential_ingress: ConnectorCredentialIngress,
     /// Graph-memory retriever used by the context pipeline.
     pub graph_memory_retriever: Arc<GraphMemoryRetriever>,
     /// Skill injector used by the context pipeline.
@@ -197,6 +238,12 @@ impl RuntimeDeps {
         // cloud requirement can only be checked once the router is complete.
         tool_router.validate_cloud_startup(config.as_ref())?;
         let tool_router = Arc::new(tool_router);
+        let connector_runtime = build_connector_runtime_dependencies(
+            pool.clone(),
+            fga_client.clone(),
+            credential_vault.clone(),
+            tool_router.clone(),
+        );
         let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
         let retrieval_embedder =
             build_retrieval_embedder(config.as_ref(), Arc::clone(&runtime_cache));
@@ -239,6 +286,11 @@ impl RuntimeDeps {
             providers,
             embedding_provider,
             tool_router,
+            connector_catalogs: connector_runtime.catalogs,
+            connector_completion: connector_runtime.completion,
+            connector_connections: connector_runtime.connections,
+            connector_management: connector_runtime.management,
+            connector_credential_ingress: connector_runtime.credential_ingress,
             graph_memory_retriever,
             skill_injector,
             lineage,
@@ -267,6 +319,12 @@ impl RuntimeDeps {
         )
     }
 
+    /// Returns the process-owned private connector credential ingress controller.
+    #[must_use]
+    pub fn connector_credential_ingress(&self) -> ConnectorCredentialIngress {
+        self.connector_credential_ingress.clone()
+    }
+
     fn orchestrator_ctx(&self) -> OrchestratorCtx {
         OrchestratorCtx::new(
             self.config.clone(),
@@ -278,7 +336,7 @@ impl RuntimeDeps {
                     self.providers.clone(),
                     self.embedding_provider.clone(),
                 ),
-                tools: ToolDeps::new(self.tool_router.clone()),
+                tools: ToolDeps::new(self.tool_router.clone(), self.connector_catalogs.clone()),
                 memory: MemoryDeps::new(
                     self.kms.provider(),
                     self.graph_memory_retriever.clone(),
@@ -288,6 +346,118 @@ impl RuntimeDeps {
             },
         )
     }
+}
+
+/// Shared production connector-action composition used by context and Restate services.
+#[derive(Clone)]
+pub(crate) struct ConnectorRuntimeDeps {
+    /// Scoped prompt and dispatch catalog provider.
+    pub(crate) catalogs: ScopedConnectorCatalogProvider,
+    /// Post-journal durable completion boundary.
+    pub(crate) completion: ConnectorInvocationCompletionService,
+    /// Single connector lifecycle service over the shared repository instance.
+    pub(crate) connections: ConnectorService,
+    /// Shared authorization-first connection-management service.
+    pub(crate) management: ConnectorManagementService,
+    /// Private, non-Restate credential-ingress controller.
+    pub(crate) credential_ingress: ConnectorCredentialIngress,
+}
+
+#[derive(Clone, Copy)]
+struct UnavailableConnectorManagementAuthorizer;
+
+#[async_trait]
+impl ConnectorManagementAuthorizer for UnavailableConnectorManagementAuthorizer {
+    async fn require_tenant_admin(
+        &self,
+        _identity: &moa_core::traits::Identity,
+    ) -> Result<(), ConnectorManagementAuthorizationError> {
+        Err(ConnectorManagementAuthorizationError::Unavailable)
+    }
+
+    async fn require_connection_manage(
+        &self,
+        _identity: &moa_core::traits::Identity,
+        _connection_id: moa_core::types::identifiers::ConnectorConnectionId,
+    ) -> Result<(), ConnectorManagementAuthorizationError> {
+        Err(ConnectorManagementAuthorizationError::Unavailable)
+    }
+}
+
+/// Builds the governed catalog, constrained HTTP runtime, and completion service.
+pub(crate) fn build_connector_runtime_dependencies(
+    pool: PgPool,
+    fga_client: Option<FgaClient>,
+    credential_vault: Arc<dyn moa_core::traits::CredentialVault>,
+    tool_router: Arc<ToolRouter>,
+) -> ConnectorRuntimeDeps {
+    let repository = Arc::new(PostgresConnectionRepository::new(pool.clone()));
+    let catalog_source: Arc<dyn InstalledConnectorCatalogSource> = repository.clone();
+    let authorizer = Arc::new(FgaConnectorUseAuthorizer::new(fga_client.clone()));
+    let installed_catalog: Arc<dyn InstalledConnectorCatalog> = Arc::new(
+        GovernedInstalledConnectorCatalog::new(catalog_source, authorizer),
+    );
+    let repository_port: Arc<dyn ConnectionRepository> = repository.clone();
+    let destination_policy = connector_destination_policy();
+    let coordinator =
+        ConnectorInvocationCoordinator::new(installed_catalog.clone(), repository_port.clone());
+    let runtime: Arc<dyn ConnectorActionRuntime> =
+        Arc::new(HttpConnectorRuntime::with_coordinator(
+            coordinator,
+            credential_vault.clone(),
+            destination_policy.clone(),
+        ));
+    let credential_verifier: Arc<dyn CredentialSlotVerifier> =
+        Arc::new(VaultCredentialSlotVerifier::new(credential_vault.clone()));
+    let connector_service = ConnectorService::new(repository_port.clone(), credential_verifier);
+    let use_grants: Arc<dyn ConnectionUseGrantRepository> = repository;
+    let management_authorizer: Arc<dyn ConnectorManagementAuthorizer> = match fga_client {
+        Some(fga) => Arc::new(FgaConnectorManagementAuthorizer::new(fga)),
+        None => Arc::new(UnavailableConnectorManagementAuthorizer),
+    };
+    let artifact_definitions: Arc<dyn ConnectorDefinitionResolver> = Arc::new(
+        ArtifactConnectorDefinitionResolver::new(ArtifactRegistry::new(pool)),
+    );
+    let definitions: Arc<dyn ConnectorDefinitionResolver> = Arc::new(
+        ManagedKnowledgeConnectorDefinitionResolver::new(artifact_definitions),
+    );
+    let destinations: Arc<dyn ConnectorDestinationVerifier> = Arc::new(
+        PolicyConnectorDestinationVerifier::new(destination_policy.clone()),
+    );
+    let credential_revoker: Arc<dyn ConnectionCredentialRevoker> = Arc::new(
+        VaultConnectionCredentialRevoker::new(credential_vault.clone()),
+    );
+    let management = ConnectorManagementService::new(
+        management_authorizer,
+        definitions,
+        connector_service.clone(),
+        use_grants,
+        destinations,
+        credential_revoker,
+    );
+    let coordinator: Arc<dyn CredentialIngressCoordinator> = Arc::new(
+        ManagementCredentialIngressCoordinator::new(management.clone()),
+    );
+    let credential_ingress = ConnectorCredentialIngress::new(coordinator, credential_vault);
+    ConnectorRuntimeDeps {
+        catalogs: ScopedConnectorCatalogProvider::new(tool_router, installed_catalog, runtime),
+        completion: ConnectorInvocationCompletionService::new(repository_port),
+        connections: connector_service,
+        management,
+        credential_ingress,
+    }
+}
+
+fn connector_destination_policy() -> OutboundHttpPolicy {
+    #[cfg(feature = "integration")]
+    if std::env::var("MOA_INTEGRATION_CONNECTOR_LOOPBACK_ENABLED").as_deref() == Ok("1") {
+        // The constructor and opt-in are both integration-only. Ordinary binaries
+        // keep the production HTTPS/public-address policy even if this test env
+        // name is accidentally present in their deployment.
+        return OutboundHttpPolicy::loopback_http_for_tests(Arc::new(TokioOutboundHostResolver));
+    }
+
+    OutboundHttpPolicy::production_system()
 }
 
 async fn build_runtime_cache_store(config: &MoaConfig) -> Result<Arc<dyn RuntimeCacheStore>> {

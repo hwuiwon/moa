@@ -4,18 +4,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use moa_connectors::executor::ConnectorInvocationCompletionService;
 use moa_core::traits::{SessionEventLookupStore, SessionStore};
 use moa_core::{
     error::MoaError, error::ToolFailureClass, events::Event, events::EventType,
     types::action_policy::ExecutionTaskOrigin, types::completion::ToolInvocation,
     types::events_stream::ClaimCheck, types::events_stream::EventRecord, types::hands::SandboxFile,
-    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::identifiers::SessionId, types::identifiers::ToolCallId,
     types::security::ToolCapabilityId, types::session::SessionMeta, types::tools::IdempotencyClass,
     types::tools::SecuredToolOutput, types::tools::ToolCallRequest, types::tools::ToolDefinition,
     types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
     types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
-use moa_hands::{ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolRouter};
+use moa_hands::{
+    PendingConnectorToolOutput, ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution,
+    ToolRouter,
+};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -33,6 +37,8 @@ use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
+
 /// Restate service surface for durable tool execution.
 #[restate_sdk::service]
 pub trait ToolExecutor {
@@ -46,13 +52,15 @@ pub trait ToolExecutor {
         request: Json<ExecutionTaskToolCallRequest>,
     ) -> Result<Json<SecuredToolOutput>, HandlerError>;
 
-    /// Lists the currently registered tools for the requested tenant.
+    /// Lists tools in one authenticated session and agent catalog scope.
     async fn list_tools(
-        tenant_id: Json<TenantId>,
+        request: Json<ScopedToolCatalogRequest>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError>;
 
-    /// Returns the exact governed tool-contract snapshot this deployment has activated.
-    async fn activated_tool_catalog() -> Result<Json<ToolCatalogPin>, HandlerError>;
+    /// Returns the exact governed tool-contract snapshot for one authenticated session.
+    async fn activated_tool_catalog(
+        request: Json<ScopedToolCatalogRequest>,
+    ) -> Result<Json<ToolCatalogPin>, HandlerError>;
 
     /// Releases the hands and durable leases owned by one finishing worker scope.
     async fn release_worker_hands(
@@ -68,6 +76,16 @@ pub trait ToolExecutor {
     async fn release_session_hands(
         request: Json<ReleaseSessionHandsRequest>,
     ) -> Result<(), HandlerError>;
+}
+
+/// Authenticated scope for catalog schemas, descriptors, and drift checks.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedToolCatalogRequest {
+    /// Authoritative session whose pinned agent bindings select connections.
+    pub session_id: SessionId,
+    /// Authenticated caller whose delegated `Use` rights govern the projection.
+    pub caller_identity: moa_core::traits::Identity,
 }
 
 /// Tool request owned by one persisted dynamic execution task.
@@ -116,6 +134,21 @@ pub struct ToolRunPlan {
     pub max_attempts: u32,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedCatalogAdmission {
+    pin: ToolCatalogPin,
+    definition: Option<ToolDefinition>,
+    installed_connector: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", content = "output", rename_all = "snake_case")]
+enum JournaledToolExecution {
+    Standard(SecuredToolOutput),
+    InstalledConnector(PendingConnectorToolOutput),
+}
+
 /// The two session-log contracts durable tool execution reads through.
 ///
 /// They are supplied together because no path needs only one: a tool call is
@@ -133,6 +166,8 @@ struct SessionAccess {
 #[derive(Clone)]
 pub struct ToolExecutorImpl {
     router: Arc<ToolRouter>,
+    connector_catalogs: Option<ScopedConnectorCatalogProvider>,
+    connector_completion: Option<ConnectorInvocationCompletionService>,
     session_access: Option<SessionAccess>,
     trusted_manifest_store: Option<Arc<dyn TrustedSandboxFileManifestStore>>,
 }
@@ -143,9 +178,23 @@ impl ToolExecutorImpl {
     pub fn new(router: Arc<ToolRouter>) -> Self {
         Self {
             router,
+            connector_catalogs: None,
+            connector_completion: None,
             session_access: None,
             trusted_manifest_store: None,
         }
+    }
+
+    /// Supplies the authenticated connector catalog and post-journal completion boundaries.
+    #[must_use]
+    pub(crate) fn with_connectors(
+        mut self,
+        connector_catalogs: ScopedConnectorCatalogProvider,
+        connector_completion: ConnectorInvocationCompletionService,
+    ) -> Self {
+        self.connector_catalogs = Some(connector_catalogs);
+        self.connector_completion = Some(connector_completion);
+        self
     }
 
     /// Supplies the session reads and event lookups durable execution paths use.
@@ -187,6 +236,90 @@ impl ToolExecutorImpl {
             })
     }
 
+    async fn scoped_catalog_for_session(
+        &self,
+        caller: &moa_core::traits::Identity,
+        session: &SessionMeta,
+    ) -> moa_core::error::Result<Arc<ToolCatalogSnapshot>> {
+        if let Some(provider) = self.connector_catalogs.as_ref() {
+            return provider
+                .for_session(caller, session)
+                .await
+                .map(|catalog| Arc::clone(catalog.snapshot()))
+                .map_err(|error| error.into_moa_error());
+        }
+
+        let has_connector_bindings = session
+            .agent_context
+            .as_ref()
+            .map(moa_core::types::agent::AgentContext::parsed_policy_snapshot)
+            .transpose()?
+            .is_some_and(|policy| !policy.action_policy.connector_bindings.is_empty());
+        if has_connector_bindings {
+            return Err(MoaError::ConfigError(
+                "tool executor connector catalog is not configured".to_string(),
+            ));
+        }
+        if caller.tenant_id != session.tenant_id {
+            return Err(MoaError::PermissionDenied(
+                "tool caller identity does not match the loaded session tenant".to_string(),
+            ));
+        }
+        Ok(self.router.activated_catalog())
+    }
+
+    fn required_connector_completion(
+        &self,
+    ) -> moa_core::error::Result<&ConnectorInvocationCompletionService> {
+        self.connector_completion.as_ref().ok_or_else(|| {
+            MoaError::ConfigError(
+                "tool executor connector completion service is not configured".to_string(),
+            )
+        })
+    }
+
+    async fn admit_scoped_catalog(
+        &self,
+        session: &SessionMeta,
+        request: &ToolCallRequest,
+    ) -> moa_core::error::Result<ScopedCatalogAdmission> {
+        let catalog = self
+            .scoped_catalog_for_session(&request.caller_identity, session)
+            .await?;
+        let pin = catalog.pin()?;
+        let definition = catalog.tool_definition(&request.tool_name);
+        Ok(ScopedCatalogAdmission {
+            pin,
+            installed_connector: is_installed_connector_action(&catalog, &request.tool_name),
+            definition,
+        })
+    }
+
+    async fn execute_scoped_with_scope(
+        &self,
+        session: &SessionMeta,
+        request: &ToolCallRequest,
+        hand_scope: Option<&str>,
+    ) -> moa_core::error::Result<JournaledToolExecution> {
+        let catalog = self
+            .scoped_catalog_for_session(&request.caller_identity, session)
+            .await?;
+        let pin = catalog.pin()?;
+        if let Some(denial) = tool_contract_denial(request, &pin) {
+            return Err(MoaError::ValidationError(denial.to_text()));
+        }
+        if is_installed_connector_action(&catalog, &request.tool_name) {
+            return self
+                .execute_connector_pending(catalog.as_ref(), session, request)
+                .await
+                .map(JournaledToolExecution::InstalledConnector);
+        }
+        self.execute_buffered_with_scope(catalog.as_ref(), session, request, hand_scope)
+            .await
+            .map(JournaledToolExecution::Standard)
+    }
+
+    #[cfg(test)]
     async fn execute_buffered(
         &self,
         catalog: &ToolCatalogSnapshot,
@@ -258,6 +391,30 @@ impl ToolExecutorImpl {
             .await
     }
 
+    async fn execute_connector_pending(
+        &self,
+        catalog: &ToolCatalogSnapshot,
+        session: &SessionMeta,
+        request: &ToolCallRequest,
+    ) -> moa_core::error::Result<PendingConnectorToolOutput> {
+        let invocation = ToolInvocation {
+            id: request.provider_tool_use_id.clone(),
+            name: request.tool_name.clone(),
+            input: request.input.clone(),
+        };
+        self.router
+            .execute_installed_connector_pending_from_catalog_within(
+                catalog,
+                session,
+                &request.caller_identity,
+                &invocation,
+                request.tool_call_id,
+                request.active_canary.as_deref(),
+                ToolCallScope::unbounded().with_budget(request.resource_budget),
+            )
+            .await
+    }
+
     async fn trusted_sandbox_files_for_request(
         &self,
         request: &ToolCallRequest,
@@ -284,6 +441,40 @@ impl ToolExecutorImpl {
             .map(tool_descriptor)
             .collect()
     }
+
+    fn catalog_descriptors(catalog: &ToolCatalogSnapshot) -> Vec<ToolDescriptor> {
+        catalog
+            .capability_registrations()
+            .into_iter()
+            .map(|(definition, _)| tool_descriptor(definition))
+            .collect()
+    }
+
+    async fn scoped_catalog_request(
+        &self,
+        request: &ScopedToolCatalogRequest,
+    ) -> moa_core::error::Result<Arc<ToolCatalogSnapshot>> {
+        let sessions = self
+            .session_access
+            .as_ref()
+            .map(|access| access.sessions.clone())
+            .ok_or_else(|| {
+                MoaError::ConfigError("tool executor session access is not configured".to_string())
+            })?;
+        let session = sessions.get_session(request.session_id).await?;
+        self.scoped_catalog_for_session(&request.caller_identity, &session)
+            .await
+    }
+}
+
+fn is_installed_connector_action(catalog: &ToolCatalogSnapshot, tool_name: &str) -> bool {
+    catalog
+        .capability_registrations()
+        .into_iter()
+        .any(|(definition, execution)| {
+            definition.name == tool_name
+                && matches!(execution, ToolExecution::InstalledConnectorAction { .. })
+        })
 }
 
 fn root_trusted_file_read(input: &Value, files: &[SandboxFile]) -> Option<ToolOutput> {
@@ -396,11 +587,21 @@ impl ToolExecutor for ToolExecutorImpl {
             append_tool_call_event(&ctx, &request).await?;
         }
 
-        // Read once and reused for the deployment-subject check and the span
-        // attribute, so a mid-handler refresh cannot make the refusal message
-        // disagree with the snapshot the span recorded.
-        let catalog = self.router.activated_catalog();
-        let activated_catalog = catalog.pin().map_err(moa_error_to_handler_error)?;
+        let service = self.clone();
+        let session_for_catalog = session.clone();
+        let request_for_catalog = request.clone();
+        let admission = ctx
+            .run(|| async move {
+                service
+                    .admit_scoped_catalog(&session_for_catalog, &request_for_catalog)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!("tool_catalog_admission:{}", request.tool_call_id))
+            .await?
+            .into_inner();
+        let activated_catalog = admission.pin;
         annotate_activated_catalog_span(&activated_catalog);
         if let Some(output) = tool_contract_denial(&request, &activated_catalog) {
             append_tool_dispatch_denied_event(&ctx, &request, &output).await?;
@@ -411,7 +612,7 @@ impl ToolExecutor for ToolExecutorImpl {
             return Ok(Json::from(secured_handler_output(&request, output)));
         }
 
-        let definition = match catalog.tool_definition(&request.tool_name) {
+        let definition = match admission.definition {
             Some(definition) => definition,
             None => {
                 let secured = secured_handler_output(
@@ -446,25 +647,46 @@ impl ToolExecutor for ToolExecutorImpl {
             build_tool_run_plan(&definition, &request).map_err(moa_error_to_handler_error)?;
         let request_for_run = request.clone();
         let session_for_run = session.clone();
+        let hand_scope = request.worker_id.clone();
         let service = self.clone();
-        let catalog_for_run = Arc::clone(&catalog);
-
-        let output = match ctx
+        let retry_policy = if admission.installed_connector {
+            RunRetryPolicy::new().max_attempts(1)
+        } else {
+            tool_run_retry_policy(definition.idempotency_class)
+        };
+        let journaled = match ctx
             .run(|| async move {
                 service
-                    .execute_buffered(catalog_for_run.as_ref(), &session_for_run, &request_for_run)
+                    .execute_scoped_with_scope(
+                        &session_for_run,
+                        &request_for_run,
+                        hand_scope.as_deref(),
+                    )
                     .await
                     .map(Json::from)
                     .map_err(moa_error_to_handler_error)
             })
             .name(run_plan.name)
-            .retry_policy(tool_run_retry_policy(definition.idempotency_class))
+            .retry_policy(retry_policy)
             .await
         {
             Ok(result) => result.into_inner(),
             Err(error) => {
                 append_tool_error_event(&ctx, &request, &definition, error.to_string()).await?;
                 return Err(error.into());
+            }
+        };
+        let output = match journaled {
+            JournaledToolExecution::Standard(output) => output,
+            JournaledToolExecution::InstalledConnector(pending) => {
+                let (secured, metadata, ticket) = pending.into_parts();
+                self.required_connector_completion()?
+                    .finalize_succeeded(&ticket, metadata)
+                    .await
+                    .map_err(|error| {
+                        moa_error_to_handler_error(MoaError::StorageError(error.to_string()))
+                    })?;
+                secured
             }
         };
 
@@ -505,8 +727,24 @@ impl ToolExecutor for ToolExecutorImpl {
                 blocked_canary_tool_output(&request.call.tool_name),
             )));
         }
-        let catalog = self.router.activated_catalog();
-        let activated_catalog = catalog.pin().map_err(moa_error_to_handler_error)?;
+        let service = self.clone();
+        let session_for_catalog = session.clone();
+        let request_for_catalog = request.call.clone();
+        let admission = ctx
+            .run(|| async move {
+                service
+                    .admit_scoped_catalog(&session_for_catalog, &request_for_catalog)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!(
+                "execution_tool_catalog_admission:{}",
+                request.call.tool_call_id
+            ))
+            .await?
+            .into_inner();
+        let activated_catalog = admission.pin;
         annotate_activated_catalog_span(&activated_catalog);
         if let Some(output) = tool_contract_denial(&request.call, &activated_catalog) {
             return Ok(Json::from(secured_handler_output(&request.call, output)));
@@ -516,7 +754,7 @@ impl ToolExecutor for ToolExecutorImpl {
         {
             return Ok(Json::from(secured_handler_output(&request.call, output)));
         }
-        let Some(definition) = catalog.tool_definition(&request.call.tool_name) else {
+        let Some(definition) = admission.definition else {
             return Ok(Json::from(secured_handler_output(
                 &request.call,
                 ToolOutput::from(ToolFailureClass::Fatal {
@@ -529,12 +767,15 @@ impl ToolExecutor for ToolExecutorImpl {
         let request_for_run = request.call.clone();
         let session_for_run = session.clone();
         let service = self.clone();
-        let catalog_for_run = Arc::clone(&catalog);
-        let output = ctx
+        let retry_policy = if admission.installed_connector {
+            RunRetryPolicy::new().max_attempts(1)
+        } else {
+            tool_run_retry_policy(definition.idempotency_class)
+        };
+        let journaled = ctx
             .run(|| async move {
                 service
-                    .execute_buffered_with_scope(
-                        catalog_for_run.as_ref(),
+                    .execute_scoped_with_scope(
                         &session_for_run,
                         &request_for_run,
                         Some(hand_scope.as_str()),
@@ -544,41 +785,71 @@ impl ToolExecutor for ToolExecutorImpl {
                     .map_err(moa_error_to_handler_error)
             })
             .name(run_name)
-            .retry_policy(tool_run_retry_policy(definition.idempotency_class))
+            .retry_policy(retry_policy)
             .await?
             .into_inner();
+        let output = match journaled {
+            JournaledToolExecution::Standard(output) => output,
+            JournaledToolExecution::InstalledConnector(pending) => {
+                let (secured, metadata, ticket) = pending.into_parts();
+                self.required_connector_completion()?
+                    .finalize_succeeded(&ticket, metadata)
+                    .await
+                    .map_err(|error| {
+                        moa_error_to_handler_error(MoaError::StorageError(error.to_string()))
+                    })?;
+                secured
+            }
+        };
 
         Ok(Json::from(output))
     }
 
-    #[tracing::instrument(skip(self, ctx, tenant_id))]
-    // SAFETY: Returns informational tool descriptors; the tenant id only scopes descriptor listing.
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal authenticated catalog projection; session admission owns the caller identity.
     async fn list_tools(
         &self,
         ctx: Context<'_>,
-        tenant_id: Json<TenantId>,
+        request: Json<ScopedToolCatalogRequest>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "list_tools");
-        let _tenant_id = tenant_id.into_inner();
-        Ok(Json::from(self.list_descriptors()))
+        let request = request.into_inner();
+        let service = self.clone();
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .scoped_catalog_request(&request)
+                    .await
+                    .map(|catalog| Json::from(Self::catalog_descriptors(catalog.as_ref())))
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name("list_scoped_tools")
+            .await?)
     }
 
-    #[tracing::instrument(skip(self, ctx))]
-    // SAFETY: purely informational. It returns the deployment-wide activated tool schema
-    // snapshot — tool names, owners, and schema/contract digests — which carries no
-    // tenant-owned data and is the same value every tenant's prompt already contains.
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal authenticated catalog projection; session admission owns the caller identity.
     async fn activated_tool_catalog(
         &self,
         ctx: Context<'_>,
+        request: Json<ScopedToolCatalogRequest>,
     ) -> Result<Json<ToolCatalogPin>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "activated_tool_catalog");
-        self.router
-            .activated_catalog()
-            .pin()
-            .map(Json::from)
-            .map_err(moa_error_to_handler_error)
+        let request = request.into_inner();
+        let service = self.clone();
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .scoped_catalog_request(&request)
+                    .await
+                    .and_then(|catalog| catalog.pin())
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name("get_scoped_tool_catalog")
+            .await?)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -1182,7 +1453,7 @@ mod tests {
     use chrono::Utc;
     use moa_config::{McpServerConfig, MoaConfig};
     use moa_core::{
-        events::Event, events::EventType, traits::HandProvider,
+        events::Event, events::EventType, traits::BuiltInTool, traits::HandProvider,
         types::action_policy::ExecutionTaskOrigin, types::action_policy::RiskLevel,
         types::agent::AgentContext, types::agent::AgentPolicySnapshot,
         types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
@@ -1196,7 +1467,8 @@ mod tests {
         types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_hands::{
-        HandRoute, PinnedToolContract, PinnedToolOwner, ToolCatalogPin, ToolRegistry, ToolRouter,
+        HandRoute, PinnedToolContract, PinnedToolOwner, ToolCatalogPin, ToolExecution,
+        ToolRegistry, ToolRouter,
     };
     use moa_memory_pii::{MockClassifier, PiiResult};
     use moa_security::McpEgressGuard;
@@ -1206,11 +1478,45 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ExecutionTaskToolCallRequest, ToolExecutorImpl, TrustedSandboxFileManifestStore,
-        agent_deployment_tool_denial, blocked_canary_tool_output, execution_task_hand_scope,
-        execution_task_tool_run_name, has_prior_tool_call_event, require_execution_task_origin,
+        ExecutionTaskToolCallRequest, JournaledToolExecution, ScopedToolCatalogRequest,
+        ToolExecutorImpl, TrustedSandboxFileManifestStore, agent_deployment_tool_denial,
+        blocked_canary_tool_output, execution_task_hand_scope, execution_task_tool_run_name,
+        has_prior_tool_call_event, is_installed_connector_action, require_execution_task_origin,
         root_trusted_file_read, tool_contract_denial,
     };
+
+    struct ConnectorLookingBuiltIn;
+
+    #[async_trait]
+    impl BuiltInTool for ConnectorLookingBuiltIn {
+        fn name(&self) -> &'static str {
+            "conn__00000000000000000000000000000001__lookup"
+        }
+
+        fn description(&self) -> &'static str {
+            "Base tool with a connector-looking name."
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn policy_spec(&self) -> ToolPolicySpec {
+            moa_core::types::tools::read_tool_policy(ToolInputShape::Json)
+        }
+
+        fn idempotency_class(&self) -> IdempotencyClass {
+            IdempotencyClass::Idempotent
+        }
+
+        async fn execute(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &moa_core::traits::ToolContext<'_>,
+        ) -> moa_core::error::Result<ToolOutput> {
+            Ok(ToolOutput::text("base", Duration::ZERO))
+        }
+    }
 
     #[derive(Default)]
     struct InstallingProvider {
@@ -1317,6 +1623,75 @@ mod tests {
 
         assert!(has_prior_tool_call_event(&events, existing));
         assert!(!has_prior_tool_call_event(&events, ToolCallId::new()));
+    }
+
+    #[test]
+    fn scoped_catalog_requests_require_caller_and_session() {
+        // Pins: tenant ID alone can neither select an agent binding nor prove delegated Use.
+        let request = tool_request("file_read");
+        let scoped = ScopedToolCatalogRequest {
+            session_id: request.session_id,
+            caller_identity: request.caller_identity.clone(),
+        };
+        let value = serde_json::to_value(&scoped).expect("serialize scoped catalog request");
+
+        assert_eq!(
+            serde_json::from_value::<ScopedToolCatalogRequest>(value)
+                .expect("exact scoped request should decode"),
+            scoped
+        );
+        assert!(
+            serde_json::from_value::<ScopedToolCatalogRequest>(serde_json::json!({
+                "tenant_id": request.caller_identity.tenant_id
+            }))
+            .is_err(),
+            "the removed tenant-only contract must remain rejected"
+        );
+    }
+
+    #[test]
+    fn connector_looking_base_tool_keeps_typed_base_provenance() {
+        // Pins: generated-name syntax never selects the installed connector runtime.
+        let mut registry = ToolRegistry::default_local();
+        registry.register_builtin(Arc::new(ConnectorLookingBuiltIn));
+        let router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        );
+        let catalog = router.activated_catalog();
+
+        assert!(!is_installed_connector_action(
+            &catalog,
+            ConnectorLookingBuiltIn.name()
+        ));
+        assert!(matches!(
+            catalog
+                .capability_registrations()
+                .into_iter()
+                .find(|(definition, _)| definition.name == ConnectorLookingBuiltIn.name())
+                .map(|(_, execution)| execution),
+            Some(ToolExecution::BuiltIn(_))
+        ));
+    }
+
+    #[test]
+    fn connector_completion_is_required_before_connector_dispatch() {
+        // Pins: a connector cannot return classified output without a configured durable finalizer.
+        let executor = ToolExecutorImpl::new(Arc::new(ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        )));
+
+        let error = match executor.required_connector_completion() {
+            Ok(_) => panic!("missing connector completion must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "configuration error: tool executor connector completion service is not configured"
+        );
     }
 
     #[test]
@@ -1748,9 +2123,16 @@ mod tests {
     }
 
     fn manifest_request(
+        executor: &ToolExecutorImpl,
         manifest: TrustedSandboxFileManifestRef,
         worker_id: Option<String>,
     ) -> ToolCallRequest {
+        let expected_tool_contract_revision = executor
+            .router
+            .activated_catalog()
+            .contract_revision("bash")
+            .expect("install scenario must publish bash")
+            .to_string();
         ToolCallRequest {
             tool_call_id: ToolCallId::new(),
             caller_identity: moa_core::traits::Identity {
@@ -1762,7 +2144,7 @@ mod tests {
             },
             provider_tool_use_id: Some("provider-tool-use".to_string()),
             tool_name: "bash".to_string(),
-            expected_tool_contract_revision: "contract-v1".to_string(),
+            expected_tool_contract_revision,
             input: serde_json::json!({"cmd": "cat .moa/skills/test/SKILL.md"}),
             active_canary: None,
             session_id: SessionId::new(),
@@ -1776,7 +2158,7 @@ mod tests {
     async fn execute_buffered_installs_files_from_durable_request_manifest() {
         // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
         let (executor, provider, files, manifest) = install_scenario();
-        let request = manifest_request(manifest, None);
+        let request = manifest_request(&executor, manifest, None);
         let catalog = executor.router.activated_catalog();
 
         let output = executor
@@ -1793,13 +2175,20 @@ mod tests {
         // Pins: a worker's trusted files install on ITS scoped hand, proving the
         // set_trusted_sandbox_files write scope and the hand-execution read scope match.
         let (executor, provider, files, manifest) = install_scenario();
-        let request = manifest_request(manifest, Some("worker-7".to_string()));
-        let catalog = executor.router.activated_catalog();
+        let request = manifest_request(&executor, manifest, Some("worker-7".to_string()));
+        let worker_scope = request.worker_id.clone();
 
         let output = executor
-            .execute_buffered(catalog.as_ref(), &session_for_request(&request), &request)
+            .execute_scoped_with_scope(
+                &session_for_request(&request),
+                &request,
+                worker_scope.as_deref(),
+            )
             .await
             .expect("worker tool execution should install its scoped manifest");
+        let JournaledToolExecution::Standard(output) = output else {
+            panic!("base worker tool must keep standard dispatch provenance");
+        };
 
         assert!(!output.is_error());
         assert_eq!(provider.installed_files(), files);
@@ -1886,7 +2275,7 @@ mod tests {
     async fn root_file_read_uses_trusted_manifest_without_installing_hand_files() {
         // Pins: selected skill reads on the root coordinator stay sandbox-free.
         let (executor, provider, _files, manifest) = install_scenario();
-        let mut request = manifest_request(manifest, None);
+        let mut request = manifest_request(&executor, manifest, None);
         request.tool_name = "file_read".to_string();
         request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
         let catalog = executor.router.activated_catalog();
@@ -1929,7 +2318,7 @@ mod tests {
                 executable: false,
             }],
         }));
-        let mut request = manifest_request(manifest, None);
+        let mut request = manifest_request(&executor, manifest, None);
         request.tool_name = "file_read".to_string();
         request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
         let catalog = executor.router.activated_catalog();

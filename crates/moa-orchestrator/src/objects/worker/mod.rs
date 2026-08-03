@@ -33,13 +33,14 @@ use moa_core::{
     types::worker::state::WorkerTerminalResult,
     types::worker::tool_schema::child_report_tool_schemas,
 };
-use moa_hands::{ToolCatalogPin, ToolRouter};
+use moa_hands::ToolCatalogPin;
 use moa_providers::ProviderRegistry;
 use moa_wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use restate_sdk::prelude::*;
 use serde_json::json;
 
 use crate::action_reviews::scheduling::ActionReviewSchedule;
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::objects::durable_utc_now;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{apply_response_to_history, summarize_response_text};
@@ -220,29 +221,23 @@ pub struct WorkerImpl {
     session_store: Arc<dyn SessionStore>,
     session_limits: SessionLimitsConfig,
     providers: Arc<ProviderRegistry>,
-    /// Source of the live tool catalog a worker turn is compiled from.
-    ///
-    /// The router is held instead of a startup copy of its schemas so a worker
-    /// and the coordinator that delegated to it read the same catalog revision.
-    /// Two independently captured copies would drift apart the first time a
-    /// connector catalog refreshed.
-    tool_router: Arc<ToolRouter>,
+    connector_catalogs: ScopedConnectorCatalogProvider,
 }
 
 impl WorkerImpl {
     /// Creates a worker object with its persistence, scheduling, and request dependencies.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         session_store: Arc<dyn SessionStore>,
         session_limits: SessionLimitsConfig,
         providers: Arc<ProviderRegistry>,
-        tool_router: Arc<ToolRouter>,
+        connector_catalogs: ScopedConnectorCatalogProvider,
     ) -> Self {
         Self {
             session_store,
             session_limits,
             providers,
-            tool_router,
+            connector_catalogs,
         }
     }
 }

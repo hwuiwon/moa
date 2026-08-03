@@ -24,3 +24,13 @@ spec:
     - ports:
         - protocol: TCP
           port: 9081
+    # Opaque connector credential writes bypass Restate so secret bytes never
+    # enter its journal. Only the trusted public edge may reach this listener.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-edge
+              app.kubernetes.io/part-of: moa
+      ports:
+        - protocol: TCP
+          port: 10023

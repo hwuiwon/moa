@@ -39,7 +39,118 @@ use moa_execution::{
 use serde_json::json;
 use uuid::Uuid;
 
+#[cfg(feature = "integration")]
+use moa_artifacts::{
+    document::{ArtifactDocument, ArtifactKind, ArtifactStatus},
+    registry::{ArtifactRegistry, NewArtifactDraft},
+    release::{ActivationTarget, TenantScope},
+    test_fixtures::{activate_revision, attest_revision},
+};
+#[cfg(feature = "integration")]
+use moa_core::types::action_policy::ActionRuleScope;
+
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+#[cfg(feature = "integration")]
+#[tokio::test]
+async fn serving_action_revision_enters_capability_catalog_db() -> TestResult {
+    // Pins: the production capability loader follows the Action serving pointer,
+    // not the latest release candidate state. A ready sibling remains non-serving.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let release_scope = TenantScope::new(tenant_id);
+    let registry = ArtifactRegistry::new(pool.clone());
+    let name = format!("serving-action-{}", Uuid::now_v7());
+
+    let serving_document = action_document(&name, "serving revision");
+    let serving_source = serving_document.to_yaml()?;
+    let serving = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &serving_document,
+                source_format: "yaml",
+                source_text: serving_source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    activate_revision(
+        &pool,
+        release_scope,
+        ActivationTarget::ActionVisibility {
+            artifact_uid: serving.artifact_uid,
+        },
+        serving.revision_uid,
+    )
+    .await?;
+
+    let sibling_document = action_document(&name, "ready but not serving");
+    let sibling_source = sibling_document.to_yaml()?;
+    let sibling = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &sibling_document,
+                source_format: "yaml",
+                source_text: sibling_source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    attest_revision(
+        &pool,
+        release_scope,
+        ActivationTarget::ActionVisibility {
+            artifact_uid: sibling.artifact_uid,
+        },
+        sibling.revision_uid,
+    )
+    .await?;
+    let sibling = registry
+        .load_revision(&scope, sibling.revision_uid)
+        .await?
+        .expect("ready sibling revision remains loadable by exact UID");
+    assert_eq!(sibling.status, ArtifactStatus::Ready);
+
+    let loaded =
+        moa_orchestrator::services::execution::load_serving_revisions_for_test(&registry, &scope)
+            .await?;
+    assert_eq!(loaded.len(), 1, "only the exact serving Action should load");
+    assert_eq!(loaded[0].kind, ArtifactKind::Action);
+    assert_eq!(loaded[0].name, name);
+    assert_eq!(loaded[0].artifact_uid, serving.artifact_uid);
+    assert_eq!(loaded[0].revision_uid, serving.revision_uid);
+    assert_ne!(loaded[0].revision_uid, sibling.revision_uid);
+    Ok(())
+}
+
+#[cfg(feature = "integration")]
+fn action_document(name: &str, description: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "action",
+        "metadata": {
+            "name": name,
+            "description": description,
+            "tags": ["execution-loader"]
+        },
+        "definition": {
+            "type": "action",
+            "spec": {
+                "id": "publish_note",
+                "description": description,
+                "tool_name": "file_read",
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+                "admin_review_required": true
+            }
+        }
+    }))
+    .expect("action loader fixture document should deserialize")
+}
 
 #[tokio::test]
 async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db() -> TestResult {

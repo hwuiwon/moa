@@ -22,10 +22,10 @@ use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_knowledge::{
     chunking::{ChunkingConfig, content_hash},
     domain::{
-        ConnectionStatus, DocumentElement, DocumentElementKind, DocumentVersion,
-        FetchedRecordContent, IngestionStepStatus, KnowledgeChunk, KnowledgeConnection,
-        KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun,
-        ObjectStatus, ParsedDocument, ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
+        DocumentElement, DocumentElementKind, DocumentVersion, FetchedRecordContent,
+        IngestionStepStatus, KnowledgeChunk, KnowledgeConnection, KnowledgeIngestionStep,
+        KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, ParsedDocument,
+        ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
     },
     graph_delta::KnowledgeGraphDelta,
     ingestion::{
@@ -447,8 +447,6 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
         provider: "test_provider".to_string(),
         connector: "google-drive".to_string(),
         provider_account_id: "acct_fetch".to_string(),
-        credential_ref: "cb57cc63-b5cf-a112-f438-761700b5648c".to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,

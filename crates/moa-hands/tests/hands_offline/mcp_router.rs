@@ -3,9 +3,13 @@ use moa_config::McpServerConfig;
 use moa_config::MoaConfig;
 use moa_config::SecurityProfile;
 use moa_core::{
-    traits::Identity, traits::IdentityType, types::completion::ToolInvocation,
-    types::identifiers::ModelId, types::identifiers::TenantId, types::identifiers::ToolCallId,
-    types::security::SensitivityClass, types::session::SessionMeta, types::tools::IdempotencyClass,
+    traits::Identity,
+    traits::IdentityType,
+    types::completion::ToolInvocation,
+    types::identifiers::{ModelId, TenantId, ToolCallId},
+    types::security::SensitivityClass,
+    types::session::SessionMeta,
+    types::tools::IdempotencyClass,
 };
 use moa_hands::ToolRouter;
 use moa_memory_pii::{MockClassifier, PiiResult};

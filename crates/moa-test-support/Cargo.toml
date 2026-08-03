@@ -7,6 +7,9 @@ publish = false
 
 [features]
 integration = ["orchestrator-fixture"]
+# A programmable loopback HTTP server for custom connector runtime tests.
+# It has no Docker, Restate, Postgres, or production-network dependency.
+connector-api-fixture = ["dep:reqwest"]
 # Just the in-process MCP capability fixture: no Docker, Restate, or Postgres.
 # Split out so connector-catalog staging tests can drive scripted connector
 # outcomes without pulling the whole orchestrator harness into their build.

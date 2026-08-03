@@ -33,10 +33,24 @@ enum HistoryRequirement {
     Complete,
 }
 
+#[derive(Clone, Copy)]
 struct SchemaFragment {
     name: &'static str,
     sql: &'static str,
 }
+
+const TENANT_CONNECTOR_CONNECTIONS_SQL: &str =
+    include_str!("../migrations/postgres/V000050__tenant_connector_connections.sql");
+const CONNECTOR_CONNECTION_USE_GRANTS_SQL: &str =
+    include_str!("../migrations/postgres/V000051__connector_connection_use_grants.sql");
+const CONNECTOR_CREDENTIAL_SLOT_FRAGMENT_BEGIN: &str =
+    "-- BEGIN TENANT CONNECTOR CREDENTIAL SLOT AUTH FRAGMENT";
+const CONNECTOR_CREDENTIAL_SLOT_FRAGMENT_END: &str =
+    "-- END TENANT CONNECTOR CREDENTIAL SLOT AUTH FRAGMENT";
+const STAGED_CREDENTIAL_OPERATION_FRAGMENT_BEGIN: &str =
+    "-- BEGIN STAGED TENANT CREDENTIAL OPERATION AUTH FRAGMENT";
+const STAGED_CREDENTIAL_OPERATION_FRAGMENT_END: &str =
+    "-- END STAGED TENANT CREDENTIAL OPERATION AUTH FRAGMENT";
 
 const AUTH_SCHEMA_FRAGMENTS: &[SchemaFragment] = &[
     SchemaFragment {
@@ -60,6 +74,59 @@ const AUTH_SCHEMA_FRAGMENTS: &[SchemaFragment] = &[
         sql: include_str!("../migrations/postgres/V000036__tenant_credential_vault.sql"),
     },
 ];
+
+fn auth_schema_fragments() -> Result<Vec<SchemaFragment>> {
+    let mut fragments = AUTH_SCHEMA_FRAGMENTS.to_vec();
+    fragments.push(SchemaFragment {
+        name: "tenant_connector_connections",
+        sql: extract_marked_schema_fragment(
+            TENANT_CONNECTOR_CONNECTIONS_SQL,
+            CONNECTOR_CREDENTIAL_SLOT_FRAGMENT_BEGIN,
+            CONNECTOR_CREDENTIAL_SLOT_FRAGMENT_END,
+        )?,
+    });
+    fragments.push(SchemaFragment {
+        name: "connector_connection_use_grants",
+        sql: extract_marked_schema_fragment(
+            CONNECTOR_CONNECTION_USE_GRANTS_SQL,
+            STAGED_CREDENTIAL_OPERATION_FRAGMENT_BEGIN,
+            STAGED_CREDENTIAL_OPERATION_FRAGMENT_END,
+        )?,
+    });
+    Ok(fragments)
+}
+
+fn extract_marked_schema_fragment<'a>(
+    source: &'a str,
+    begin_marker: &str,
+    end_marker: &str,
+) -> Result<&'a str> {
+    let begin_offsets = source
+        .match_indices(begin_marker)
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    let end_offsets = source
+        .match_indices(end_marker)
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    if begin_offsets.len() != 1 || end_offsets.len() != 1 {
+        bail!(
+            "schema fragment markers must occur exactly once: begin={}, end={}",
+            begin_offsets.len(),
+            end_offsets.len()
+        );
+    }
+    let fragment_start = begin_offsets[0] + begin_marker.len();
+    let fragment_end = end_offsets[0];
+    if fragment_start >= fragment_end {
+        bail!("schema fragment end marker must follow its begin marker");
+    }
+    let fragment = source[fragment_start..fragment_end].trim();
+    if fragment.is_empty() {
+        bail!("schema fragment between markers must not be empty");
+    }
+    Ok(fragment)
+}
 
 const ORCHESTRATOR_SCHEMA_FRAGMENTS: &[SchemaFragment] = &[SchemaFragment {
     name: "orchestrator_baseline",
@@ -433,7 +500,8 @@ pub fn full_database_template_fingerprint() -> String {
 
 /// Runs the auth DDL fragments inside an isolated schema.
 pub async fn run_auth_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
-    run_schema_fragments(pool, schema_name, AUTH_SCHEMA_FRAGMENTS).await
+    let fragments = auth_schema_fragments()?;
+    run_schema_fragments(pool, schema_name, &fragments).await
 }
 
 /// Runs the orchestrator DDL fragments inside an isolated schema.
@@ -605,9 +673,9 @@ fn quote_identifier(identifier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_SCHEMA_FRAGMENTS, HistoryRequirement, HistoryRow, MigrationIdentity,
-        OCSF_SCHEMA_FRAGMENTS, ORCHESTRATOR_SCHEMA_FRAGMENTS, central_migration_runner,
-        expected_migration_identities, validate_history_rows,
+        HistoryRequirement, HistoryRow, MigrationIdentity, OCSF_SCHEMA_FRAGMENTS,
+        ORCHESTRATOR_SCHEMA_FRAGMENTS, auth_schema_fragments, central_migration_runner,
+        expected_migration_identities, extract_marked_schema_fragment, validate_history_rows,
     };
 
     fn row(identity: &MigrationIdentity) -> HistoryRow {
@@ -643,8 +711,11 @@ mod tests {
             .map(|migration| migration.name)
             .collect::<Vec<_>>();
 
+        let auth_fragments = auth_schema_fragments()
+            .expect("the V50 credential-slot fragment markers must be exact");
+
         for fragments in [
-            AUTH_SCHEMA_FRAGMENTS,
+            auth_fragments.as_slice(),
             ORCHESTRATOR_SCHEMA_FRAGMENTS,
             OCSF_SCHEMA_FRAGMENTS,
         ] {
@@ -661,6 +732,29 @@ mod tests {
                 positions.windows(2).all(|window| window[0] < window[1]),
                 "schema fragments must preserve embedded order"
             );
+        }
+    }
+
+    #[test]
+    fn marked_schema_fragment_requires_one_ordered_nonempty_pair() {
+        // Pins: isolated auth bootstrap cannot silently omit or ambiguously select
+        // the V50 credential-slot DDL when marker comments drift.
+        assert_eq!(
+            extract_marked_schema_fragment("before BEGIN\nSELECT 1;\nEND after", "BEGIN", "END")
+                .expect("one ordered marker pair should extract"),
+            "SELECT 1;"
+        );
+
+        for malformed in [
+            "SELECT 1; END",
+            "BEGIN SELECT 1;",
+            "BEGIN SELECT 1; BEGIN SELECT 2; END",
+            "BEGIN SELECT 1; END END",
+            "END SELECT 1; BEGIN",
+            "BEGIN   END",
+        ] {
+            extract_marked_schema_fragment(malformed, "BEGIN", "END")
+                .expect_err("missing, duplicate, reversed, or empty markers must fail closed");
         }
     }
 

@@ -28,6 +28,17 @@ bound on the developer machine.
 RustFS host ports are overridable via `MOA_RUSTFS_PORT` (default `9000`) and
 `MOA_RUSTFS_CONSOLE_PORT` (default `9001`).
 
+The orchestrator also listens on container-internal port `10023` for connector
+credential writes from `moa-edge`. Compose does not publish that listener to
+the host. The same numeric host port in the table above still maps to the
+orchestrator's container-internal Prometheus port `9090`.
+
+Local Compose sets `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED=true` so connector
+development works through public edge port `10000`. This changes route
+visibility only; it does not publish the private credential listener. Use a
+Compose override with the flag set to `false` to exercise the production-dark
+Checkpoint A posture.
+
 ## Rules
 
 - Add new host ports in the nearest group block, leaving room for related
@@ -38,3 +49,5 @@ RustFS host ports are overridable via `MOA_RUSTFS_PORT` (default `9000`) and
 - Keep service-to-service compose URLs on internal container ports. For
   example, `moa-edge` talks to `http://restate:8080`, not
   `http://localhost:10010`.
+- Keep connector credential ingress private. `moa-edge` uses
+  `http://moa-orchestrator:10023`; do not add a host `ports` mapping for it.

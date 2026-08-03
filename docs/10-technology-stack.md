@@ -25,7 +25,7 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   `moa-lineage-audit`, `moa-observability`, `moa-analytics`,
   `moa-analytics-export` (incremental Postgres-to-ClickHouse exporter; see
   [ClickHouse Analytics: Supported, Not Deployed](#clickhouse-analytics-supported-not-deployed)).
-- Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`,
+- Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`, `moa-connectors`,
   `moa-experiments`, `moa-scoring`, `moa-messaging`, `moa-skills`.
 - Providers/tools/eval/dev: `moa-hands`, `moa-providers`,
   `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`,
@@ -61,9 +61,9 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
-`moa-migrations` owns the fresh-install-only, contiguous 49-file PostgreSQL
-chain and the central table-ownership manifest. The current 139 table
-families span 142 `CREATE TABLE` declarations and map one-to-one to 139
+`moa-migrations` owns the fresh-install-only, contiguous 54-file PostgreSQL
+chain and the central table-ownership manifest. The current 148 table
+families span 151 `CREATE TABLE` declarations and map one-to-one to 148
 ownership entries. `cargo run -p xtask --locked -- check-migrations` enforces
 this contract.
 

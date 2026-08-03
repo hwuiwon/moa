@@ -73,11 +73,13 @@ pub fn admit_capability_for_origin(
             "generated code holds no MOA capabilities",
         )),
         CallOrigin::Experiment { .. } => match capability {
-            ToolCapabilityId::Mcp { .. } => Err(refusal(
-                origin,
-                capability,
-                "experiment trials may not reach production connectors",
-            )),
+            ToolCapabilityId::Mcp { .. } | ToolCapabilityId::InstalledConnectorAction { .. } => {
+                Err(refusal(
+                    origin,
+                    capability,
+                    "experiment trials may not reach production connectors",
+                ))
+            }
             ToolCapabilityId::Hand { .. } if is_run_scoped(action_class) => Ok(()),
             ToolCapabilityId::BuiltIn { .. } if action_class == ActionClass::Read => Ok(()),
             ToolCapabilityId::Hand { .. } | ToolCapabilityId::BuiltIn { .. } => Err(refusal(
@@ -107,6 +109,7 @@ fn refusal(origin: CallOrigin, capability: &ToolCapabilityId, reason: &str) -> M
 mod tests {
     use moa_core::types::action_policy::ActionClass;
     use moa_core::types::action_policy::CallOrigin;
+    use moa_core::types::identifiers::ConnectorConnectionId;
     use moa_core::types::security::ToolCapabilityId;
     use uuid::Uuid;
 
@@ -152,6 +155,18 @@ mod tests {
             ActionClass::ExternalWrite,
         )
         .expect("production traffic keeps its connectors");
+
+        let installed = ToolCapabilityId::installed_connector_action(
+            ConnectorConnectionId(Uuid::from_u128(0xc011)),
+            "create_deal",
+        );
+        let error = admit_capability_for_origin(experiment(), &installed, ActionClass::Read)
+            .expect_err("an installed connector action remains a production integration");
+        assert!(
+            matches!(error, moa_core::error::MoaError::PermissionDenied(message)
+                if message.contains("production connectors")
+                    && message.contains("connector_action"))
+        );
     }
 
     #[test]
@@ -233,6 +248,10 @@ mod tests {
             ToolCapabilityId::builtin("memory_search"),
             ToolCapabilityId::hand("file_read"),
             ToolCapabilityId::mcp("crm", "lookup"),
+            ToolCapabilityId::installed_connector_action(
+                ConnectorConnectionId(Uuid::from_u128(0xc011)),
+                "lookup",
+            ),
         ] {
             let error = admit_capability_for_origin(
                 CallOrigin::GeneratedCode,

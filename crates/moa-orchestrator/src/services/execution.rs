@@ -36,9 +36,9 @@ use moa_core::{
 use moa_db::ScopedConn;
 use moa_execution::capability::{
     CapabilitiesListRequest, CapabilitiesListResponse, CapabilityCatalogDiagnostic,
-    CapabilityCatalogDiagnosticCode, CapabilitySource, ExecutionCapability,
-    ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate, ExecutionHash, amendment_hash,
-    amendment_operations_fingerprint, capability_version, plan_hash,
+    CapabilityCatalogDiagnosticCode, CapabilityPolicyContext, CapabilitySource,
+    ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate,
+    ExecutionHash, amendment_hash, amendment_operations_fingerprint, capability_version, plan_hash,
 };
 use moa_execution::{
     budget::{BudgetLedger, estimate_fits_limit},
@@ -79,9 +79,10 @@ use moa_execution::{
         originating_user_event_hash, planning_context_hash,
     },
 };
-use moa_hands::{ToolExecution, ToolRouter};
+use moa_hands::ToolExecution;
 use moa_knowledge::repository::{KnowledgeRepository, PostgresKnowledgeRepository};
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_security::stricter_effect;
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::handlers::authz_shim::{authorize_session_participant, authorize_tenant};
 use crate::objects::session::{ExecutionRunStartedDelivery, SessionClient};
 use crate::restate_identity::with_identity_headers;
@@ -371,7 +373,7 @@ pub trait Execution {
 #[derive(Clone)]
 pub struct ExecutionImpl {
     pool: sqlx::PgPool,
-    router: Arc<ToolRouter>,
+    connector_catalog: ScopedConnectorCatalogProvider,
     config: ExecutionConfig,
     session_store: Arc<PostgresSessionStore>,
 }
@@ -379,15 +381,15 @@ pub struct ExecutionImpl {
 impl ExecutionImpl {
     /// Creates the execution service with its live invocation registry.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         pool: sqlx::PgPool,
-        router: Arc<ToolRouter>,
+        connector_catalog: ScopedConnectorCatalogProvider,
         config: ExecutionConfig,
         session_store: Arc<PostgresSessionStore>,
     ) -> Self {
         Self {
             pool,
-            router,
+            connector_catalog,
             config,
             session_store,
         }
@@ -463,13 +465,18 @@ impl Execution for ExecutionImpl {
             .into());
         }
         let pool = self.pool.clone();
-        let registrations = self.router.capability_registrations();
+        let connector_catalog = self.connector_catalog.clone();
+        let catalog_identity = identity.clone();
         let config = self.config.clone();
         Ok(ctx
             .run(|| async move {
+                let scoped_catalog = connector_catalog
+                    .for_session(&catalog_identity, &parent)
+                    .await
+                    .map_err(scoped_catalog_error)?;
                 planning_context_inner(
                     pool,
-                    registrations,
+                    scoped_catalog.snapshot().capability_registrations(),
                     config,
                     parent,
                     owner_user_id,
@@ -915,9 +922,17 @@ impl Execution for ExecutionImpl {
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         let pool = self.pool.clone();
-        let registrations = self.router.capability_registrations();
+        let connector_catalog = self.connector_catalog.clone();
         Ok(ctx
             .run(|| async move {
+                // This tenant-wide listing has no authoritative agent revision or
+                // connector binding. It therefore exposes only the immutable
+                // deployment catalog instead of inventing tenant connector authority.
+                let registrations = connector_catalog
+                    .deployment_catalog()
+                    .map_err(scoped_catalog_error)?
+                    .snapshot()
+                    .capability_registrations();
                 list_capabilities_inner(pool, registrations, request)
                     .await
                     .map(Json::from)
@@ -925,6 +940,16 @@ impl Execution for ExecutionImpl {
             .name("execution_list_capabilities")
             .await?)
     }
+}
+
+fn scoped_catalog_error(
+    error: crate::connector_catalog::ScopedConnectorCatalogError,
+) -> HandlerError {
+    TerminalError::new_with_code(
+        409,
+        format!("scoped connector catalog unavailable: {error}"),
+    )
+    .into()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -988,6 +1013,16 @@ async fn planning_context_inner(
     let registrations = registrations
         .into_iter()
         .filter_map(|registration| {
+            if matches!(
+                &registration.1,
+                ToolExecution::InstalledConnectorAction { .. }
+            ) {
+                // Installed actions are selected by the exact connector bindings
+                // in the session action policy. A generated connection-qualified
+                // model name is not an authored raw-tool dependency and must not
+                // become a second source of authority.
+                return Some(Ok(registration));
+            }
             let allowed = parent
                 .agent_context
                 .as_ref()
@@ -2749,7 +2784,27 @@ pub(crate) fn build_capability_response(
                     .to_string(),
         })
         .collect::<Vec<_>>();
-    let mut artifact_tools = HashMap::new();
+    let mut artifact_action_bindings = Vec::new();
+    for capability in &capabilities {
+        if !matches!(
+            &capability.source,
+            CapabilitySource::InstalledConnectorAction { .. }
+        ) {
+            continue;
+        }
+        let Some(tool_name) = capability.source.model_visible_tool_name() else {
+            continue;
+        };
+        let Some((definition, _)) = registered.get(tool_name) else {
+            return Err(moa_execution::Error::InvalidProjection {
+                message: format!(
+                    "installed connector capability {} lost its typed registry owner",
+                    capability.reference.name
+                ),
+            });
+        };
+        record_artifact_action_binding(&mut artifact_action_bindings, capability, definition)?;
+    }
 
     for revision in revisions {
         match &revision.document.definition {
@@ -2757,9 +2812,9 @@ pub(crate) fn build_capability_response(
                 let action_ref = ArtifactRef::action_artifact(revision.name.clone());
                 match resolve_tool(action.tool_name.as_deref(), &registered) {
                     Some((definition, execution)) => {
-                        artifact_tools.insert(action_ref.to_string(), definition.name.clone());
-                        capabilities.push(action_capability(ActionCapabilityRequest {
+                        let capability = action_capability(ActionCapabilityRequest {
                             action_ref,
+                            artifact_uid: revision.artifact_uid,
                             revision_uid: revision.revision_uid,
                             description: &action.description,
                             input_schema: &action.input_schema,
@@ -2767,7 +2822,13 @@ pub(crate) fn build_capability_response(
                             admin_review_required: action.admin_review_required,
                             definition,
                             execution,
-                        })?);
+                        })?;
+                        record_artifact_action_binding(
+                            &mut artifact_action_bindings,
+                            &capability,
+                            definition,
+                        )?;
+                        capabilities.push(capability);
                     }
                     None => diagnostics.push(unresolved_action_diagnostic(
                         action_ref.to_string(),
@@ -2776,20 +2837,29 @@ pub(crate) fn build_capability_response(
                 }
             }
             ArtifactDefinition::Connector(connector) => {
-                for action in &connector.actions {
+                let Some(legacy) = connector.legacy() else {
+                    continue;
+                };
+                for action in &legacy.actions {
                     let action_ref = ArtifactRef::action(revision.name.clone(), action.id.clone());
                     let connector_ref = ArtifactRef::connector(revision.name.clone());
                     match resolve_tool(action.tool_name.as_deref(), &registered) {
                         Some((definition, execution)) => {
-                            artifact_tools.insert(action_ref.to_string(), definition.name.clone());
-                            capabilities.push(connector_action_capability(
+                            let capability = connector_action_capability(
                                 action_ref,
                                 connector_ref,
+                                revision.artifact_uid,
                                 revision.revision_uid,
                                 action,
                                 definition,
                                 execution,
-                            )?);
+                            )?;
+                            record_artifact_action_binding(
+                                &mut artifact_action_bindings,
+                                &capability,
+                                definition,
+                            )?;
+                            capabilities.push(capability);
                         }
                         None => diagnostics.push(unresolved_action_diagnostic(
                             action_ref.to_string(),
@@ -2814,8 +2884,9 @@ pub(crate) fn build_capability_response(
                 capabilities: &mut capabilities,
                 diagnostics: &mut diagnostics,
                 registered: &registered,
-                artifact_tools: &artifact_tools,
+                artifact_action_bindings: &artifact_action_bindings,
                 skill_ref: skill_ref.clone(),
+                artifact_uid: revision.artifact_uid,
                 revision_uid: revision.revision_uid,
                 action,
             })?;
@@ -2831,6 +2902,50 @@ pub(crate) fn build_capability_response(
         catalog: ExecutionCapabilityCatalog::build(capabilities)?,
         diagnostics,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactActionBinding {
+    canonical_action_ref: ArtifactRef,
+    tool_name: String,
+    minimum_effect: ActionPolicyEffect,
+}
+
+fn record_artifact_action_binding(
+    bindings: &mut Vec<ArtifactActionBinding>,
+    capability: &ExecutionCapability,
+    definition: &ToolDefinition,
+) -> moa_execution::Result<()> {
+    let Some(canonical_action_ref) = capability.policy_context.canonical_action_ref.clone() else {
+        return Err(moa_execution::Error::InvalidProjection {
+            message: format!(
+                "artifact capability {} has no canonical action reference",
+                capability.reference.name
+            ),
+        });
+    };
+    let binding = ArtifactActionBinding {
+        canonical_action_ref,
+        tool_name: definition.name.clone(),
+        minimum_effect: capability.policy_context.minimum_effect,
+    };
+    if let Some(existing) = bindings
+        .iter_mut()
+        .find(|existing| existing.canonical_action_ref == binding.canonical_action_ref)
+    {
+        if existing.tool_name != binding.tool_name {
+            return Err(moa_execution::Error::InvalidProjection {
+                message: format!(
+                    "artifact action binding `{}` resolves to conflicting backing tools",
+                    binding.canonical_action_ref
+                ),
+            });
+        }
+        existing.minimum_effect = stricter_effect(existing.minimum_effect, binding.minimum_effect);
+    } else {
+        bindings.push(binding);
+    }
+    Ok(())
 }
 
 /// Exact governed catalog and allowlist supplied to skill-regression compilation.
@@ -2949,6 +3064,58 @@ fn registered_tool_capability(
             "moa.execution.capability.mcp",
             json!({"kind": "mcp", "server": server_name}),
         ),
+        ToolExecution::InstalledConnectorAction {
+            connector_ref,
+            connection_id,
+            binding_id,
+            connection_generation,
+            definition_artifact_uid,
+            definition_revision_uid,
+            action_id,
+            contract_hash,
+            governed_contract_revision,
+            minimum_effect,
+            ..
+        } => {
+            let connector_ref = connector_ref.parse::<ArtifactRef>().map_err(|error| {
+                moa_execution::Error::InvalidProjection {
+                    message: format!(
+                        "installed connector tool {} has invalid logical reference: {error}",
+                        definition.name
+                    ),
+                }
+            })?;
+            (
+                CapabilitySource::InstalledConnectorAction {
+                    connector_ref: connector_ref.clone(),
+                    connection_id: *connection_id,
+                    binding_id: binding_id.0,
+                    connection_generation: connection_generation.get(),
+                    definition_artifact_uid: *definition_artifact_uid,
+                    definition_revision_uid: *definition_revision_uid,
+                    action_id: action_id.clone(),
+                    contract_hash: contract_hash.to_string(),
+                    governed_contract_revision: contract_revision.clone(),
+                    minimum_effect: *minimum_effect,
+                    tool_name: definition.name.clone(),
+                },
+                ExecutionClass::External,
+                "moa.execution.capability.installed-connector-action",
+                json!({
+                    "kind": "installed_connector_action",
+                    "connector_ref": connector_ref,
+                    "connection_id": connection_id,
+                    "binding_id": binding_id,
+                    "connection_generation": connection_generation,
+                    "definition_artifact_uid": definition_artifact_uid,
+                    "definition_revision_uid": definition_revision_uid,
+                    "action_id": action_id,
+                    "contract_hash": contract_hash,
+                    "governed_contract_revision": governed_contract_revision,
+                    "minimum_effect": minimum_effect,
+                }),
+            )
+        }
     };
     let version = capability_version(
         domain,
@@ -2961,9 +3128,34 @@ fn registered_tool_capability(
             "owner": owner,
         }),
     )?;
+    let reference_name = match &source {
+        CapabilitySource::InstalledConnectorAction {
+            connector_ref,
+            action_id,
+            ..
+        } => ArtifactRef::action(connector_ref.target_name(), action_id).to_string(),
+        _ => definition.name.clone(),
+    };
+    let policy_context = match &source {
+        CapabilitySource::InstalledConnectorAction {
+            connector_ref,
+            definition_artifact_uid,
+            definition_revision_uid,
+            action_id,
+            minimum_effect,
+            ..
+        } => CapabilityPolicyContext::artifact(
+            source.clone(),
+            Some(ArtifactRef::action(connector_ref.target_name(), action_id)),
+            *definition_artifact_uid,
+            *definition_revision_uid,
+            *minimum_effect,
+        ),
+        _ => CapabilityPolicyContext::registered(source.clone()),
+    };
     Ok(ExecutionCapability {
         reference: CapabilityReference {
-            name: definition.name.clone(),
+            name: reference_name,
             version,
         },
         contract_revision,
@@ -2976,12 +3168,14 @@ fn registered_tool_capability(
         idempotency_class: definition.idempotency_class,
         execution_class,
         source,
+        policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
     })
 }
 
 struct ActionCapabilityRequest<'a> {
     action_ref: ArtifactRef,
+    artifact_uid: uuid::Uuid,
     revision_uid: uuid::Uuid,
     description: &'a str,
     input_schema: &'a Value,
@@ -2996,6 +3190,7 @@ fn action_capability(
 ) -> moa_execution::Result<ExecutionCapability> {
     let ActionCapabilityRequest {
         action_ref,
+        artifact_uid,
         revision_uid,
         description,
         input_schema,
@@ -3004,6 +3199,18 @@ fn action_capability(
         definition,
         execution,
     } = request;
+    let source = CapabilitySource::ActionArtifact {
+        action_ref: action_ref.clone(),
+        revision_uid,
+        tool_name: definition.name.clone(),
+    };
+    let policy_context = CapabilityPolicyContext::artifact(
+        source.clone(),
+        Some(action_ref.clone()),
+        artifact_uid,
+        revision_uid,
+        artifact_minimum_effect(admin_review_required),
+    );
     Ok(ExecutionCapability {
         reference: CapabilityReference {
             name: action_ref.to_string(),
@@ -3018,11 +3225,8 @@ fn action_capability(
         default_effect: artifact_effect(admin_review_required, &definition.policy),
         idempotency_class: definition.idempotency_class,
         execution_class: execution_class(execution, definition),
-        source: CapabilitySource::ActionArtifact {
-            action_ref,
-            revision_uid,
-            tool_name: definition.name.clone(),
-        },
+        source,
+        policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
     })
 }
@@ -3030,11 +3234,25 @@ fn action_capability(
 fn connector_action_capability(
     action_ref: ArtifactRef,
     connector_ref: ArtifactRef,
+    artifact_uid: uuid::Uuid,
     revision_uid: uuid::Uuid,
     action: &moa_artifacts::connector::ConnectorActionDefinition,
     definition: &ToolDefinition,
     execution: &ToolExecution,
 ) -> moa_execution::Result<ExecutionCapability> {
+    let source = CapabilitySource::ConnectorAction {
+        connector_ref,
+        revision_uid,
+        action_id: action.id.clone(),
+        tool_name: definition.name.clone(),
+    };
+    let policy_context = CapabilityPolicyContext::artifact(
+        source.clone(),
+        Some(action_ref.clone()),
+        artifact_uid,
+        revision_uid,
+        artifact_minimum_effect(action.admin_review_required),
+    );
     Ok(ExecutionCapability {
         reference: CapabilityReference {
             name: action_ref.to_string(),
@@ -3049,12 +3267,8 @@ fn connector_action_capability(
         default_effect: artifact_effect(action.admin_review_required, &definition.policy),
         idempotency_class: definition.idempotency_class,
         execution_class: execution_class(execution, definition),
-        source: CapabilitySource::ConnectorAction {
-            connector_ref,
-            revision_uid,
-            action_id: action.id.clone(),
-            tool_name: definition.name.clone(),
-        },
+        source,
+        policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
     })
 }
@@ -3063,8 +3277,9 @@ struct SkillActionContext<'a> {
     capabilities: &'a mut Vec<ExecutionCapability>,
     diagnostics: &'a mut Vec<CapabilityCatalogDiagnostic>,
     registered: &'a HashMap<String, (ToolDefinition, ToolExecution)>,
-    artifact_tools: &'a HashMap<String, String>,
+    artifact_action_bindings: &'a [ArtifactActionBinding],
     skill_ref: ArtifactRef,
+    artifact_uid: uuid::Uuid,
     revision_uid: uuid::Uuid,
     action: &'a SkillActionDefinition,
 }
@@ -3074,8 +3289,9 @@ fn append_skill_action(context: SkillActionContext<'_>) -> moa_execution::Result
         capabilities,
         diagnostics,
         registered,
-        artifact_tools,
+        artifact_action_bindings,
         skill_ref,
+        artifact_uid,
         revision_uid,
         action,
     } = context;
@@ -3088,22 +3304,54 @@ fn append_skill_action(context: SkillActionContext<'_>) -> moa_execution::Result
         });
         return Ok(());
     }
-    let tool_name = action.artifact_ref.as_ref().and_then(|artifact_ref| {
-        artifact_tools
-            .get(&artifact_ref.to_string())
-            .cloned()
-            .or_else(|| match artifact_ref {
-                ArtifactRef::Tool { name } => Some(name.clone()),
-                ArtifactRef::Artifact { .. } | ArtifactRef::Action { .. } => None,
-            })
+    let inherited_binding = action.artifact_ref.as_ref().and_then(|artifact_ref| {
+        artifact_action_bindings
+            .iter()
+            .find(|binding| binding.canonical_action_ref == *artifact_ref)
     });
-    let Some((definition, execution)) = resolve_tool(tool_name.as_deref(), registered) else {
-        diagnostics.push(unresolved_action_diagnostic(
-            reference,
-            tool_name.as_deref(),
-        ));
+    let tool_name = inherited_binding
+        .map(|binding| binding.tool_name.as_str())
+        .or(match action.artifact_ref.as_ref() {
+            Some(ArtifactRef::Tool { name }) => Some(name.as_str()),
+            Some(ArtifactRef::Artifact { .. } | ArtifactRef::Action { .. }) | None => None,
+        });
+    let Some((definition, execution)) = resolve_tool(tool_name, registered) else {
+        diagnostics.push(unresolved_action_diagnostic(reference, tool_name));
         return Ok(());
     };
+    if matches!(execution, ToolExecution::InstalledConnectorAction { .. }) {
+        let mut capability = registered_tool_capability(definition, execution)?;
+        capability.reference = CapabilityReference {
+            name: reference,
+            version: revision_uid.to_string(),
+        };
+        capability.description = action.description.clone();
+        capability.input_schema = action.input_schema.clone();
+        capability.output_schema = action.output_schema.clone();
+        // The skill alias changes presentation and authorization naming only.
+        // Durable execution provenance remains the exact installed connection
+        // source and definition policy context, so replay never has to recover
+        // connection authority from the generated model-visible tool name.
+        capabilities.push(capability);
+        return Ok(());
+    }
+    let canonical_action_ref =
+        inherited_binding.map(|binding| binding.canonical_action_ref.clone());
+    let minimum_effect =
+        inherited_binding.map_or(ActionPolicyEffect::Allow, |binding| binding.minimum_effect);
+    let source = CapabilitySource::SkillAction {
+        skill_ref,
+        revision_uid,
+        action_id: action.id.clone(),
+        tool_name: definition.name.clone(),
+    };
+    let policy_context = CapabilityPolicyContext::artifact(
+        source.clone(),
+        canonical_action_ref,
+        artifact_uid,
+        revision_uid,
+        minimum_effect,
+    );
     capabilities.push(ExecutionCapability {
         reference: CapabilityReference {
             name: reference,
@@ -3118,12 +3366,8 @@ fn append_skill_action(context: SkillActionContext<'_>) -> moa_execution::Result
         default_effect: definition.policy.default_effect,
         idempotency_class: definition.idempotency_class,
         execution_class: execution_class(execution, definition),
-        source: CapabilitySource::SkillAction {
-            skill_ref,
-            revision_uid,
-            action_id: action.id.clone(),
-            tool_name: definition.name.clone(),
-        },
+        source,
+        policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
     });
     Ok(())
@@ -3173,10 +3417,20 @@ fn artifact_effect(admin_review_required: bool, policy: &ToolPolicySpec) -> Acti
     }
 }
 
+fn artifact_minimum_effect(admin_review_required: bool) -> ActionPolicyEffect {
+    if admin_review_required {
+        ActionPolicyEffect::AdminReview
+    } else {
+        ActionPolicyEffect::Allow
+    }
+}
+
 fn execution_class(execution: &ToolExecution, definition: &ToolDefinition) -> ExecutionClass {
     match execution {
         ToolExecution::Hand { .. } => ExecutionClass::Compute,
-        ToolExecution::Mcp { .. } => ExecutionClass::External,
+        ToolExecution::Mcp { .. } | ToolExecution::InstalledConnectorAction { .. } => {
+            ExecutionClass::External
+        }
         ToolExecution::BuiltIn(_)
             if definition.policy.action_class
                 == moa_core::types::action_policy::ActionClass::Read =>
@@ -3208,30 +3462,46 @@ fn generic_json_output_schema() -> Value {
 
 /// Loads the artifact revisions a tenant actually serves for plan compilation.
 ///
-/// Skills come from their type-owned serving pointers. Actions and connectors
-/// still come from validated `published` revisions because their activation
-/// seams are not part of the skill-only release gate.
+/// Skills and actions come from their type-owned serving pointers. Connectors
+/// still come from validated `published` revisions because connector catalog
+/// activation is platform-owned rather than part of the artifact release gate.
 async fn load_serving_revisions(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
 ) -> MoaResult<Vec<StoredArtifactRevision>> {
     let mut revisions = Vec::new();
-    for kind in [ArtifactKind::Action, ArtifactKind::Connector] {
-        for summary in registry
-            .list_visible(scope, Some(kind), Some(ArtifactStatus::Published))
-            .await?
-        {
+    for summary in registry
+        .list_visible(
+            scope,
+            Some(ArtifactKind::Connector),
+            Some(ArtifactStatus::Published),
+        )
+        .await?
+    {
+        if let Some(revision) = registry.load_revision(scope, summary.revision_uid).await? {
+            revisions.push(revision);
+        }
+    }
+    for kind in [ArtifactKind::Action, ArtifactKind::Skill] {
+        for summary in registry.list_serving(scope, kind).await? {
             if let Some(revision) = registry.load_revision(scope, summary.revision_uid).await? {
                 revisions.push(revision);
             }
         }
     }
-    for summary in registry.list_serving(scope, ArtifactKind::Skill).await? {
-        if let Some(revision) = registry.load_revision(scope, summary.revision_uid).await? {
-            revisions.push(revision);
-        }
-    }
     Ok(revisions)
+}
+
+/// Loads the exact revisions used by the production capability loader.
+///
+/// This integration-only seam exists so the PostgreSQL lane can pin serving
+/// pointer semantics without copying the loader query into the test.
+#[cfg(feature = "integration")]
+pub async fn load_serving_revisions_for_test(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+) -> MoaResult<Vec<StoredArtifactRevision>> {
+    load_serving_revisions(registry, scope).await
 }
 
 async fn load_locked_skill_revisions(
@@ -3326,12 +3596,18 @@ mod tests {
         ExecutionGoalTemplate, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
         ExecutionPlanTemplate, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
     };
+    use moa_artifacts::reference::ArtifactRef;
     use moa_artifacts::registry::StoredArtifactRevision;
     use moa_artifacts::skill::SkillDefinition;
     use moa_core::types::{
+        action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
         agent::{AgentSkillPolicy, AgentSkillPolicyMode},
         execution_planning::{
             ExecutionPlanningContractError, ExecutionSourceProvenance, PinnedExecutionTemplateRef,
+        },
+        identifiers::ConnectorConnectionId,
+        tools::{
+            IdempotencyClass, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
         },
     };
     use moa_execution::{
@@ -3344,16 +3620,171 @@ mod tests {
         state::FailureFingerprintInput,
         wire::PinnedExecutionTemplate,
     };
-    use moa_hands::{McpDiscoveredTool, ToolRegistry};
+    use moa_hands::{McpDiscoveredTool, ToolExecution, ToolRegistry};
     use serde_json::{Value, json};
     use uuid::Uuid;
 
     use super::{
         build_capability_response, build_planning_skill_context,
         build_skill_regression_compile_authority, durable_amendment_operation_fingerprints,
-        durable_failure_fingerprint_counts, persisted_input_audience, single_tool_estimate,
-        validate_external_wait_payload, validate_start_source_provenance,
+        durable_failure_fingerprint_counts, persisted_input_audience, registered_tool_capability,
+        single_tool_estimate, validate_external_wait_payload, validate_start_source_provenance,
     };
+
+    struct NeverInvokeConnectorRuntime;
+
+    #[async_trait::async_trait]
+    impl moa_connectors::executor::ConnectorActionRuntime for NeverInvokeConnectorRuntime {
+        async fn invoke(
+            &self,
+            _invocation: moa_connectors::executor::ConnectorActionInvocation,
+        ) -> moa_connectors::Result<moa_connectors::executor::RawConnectorActionResult> {
+            panic!("capability projection must not invoke the connector runtime")
+        }
+    }
+
+    #[test]
+    fn installed_connector_registration_preserves_every_durable_dispatch_pin() {
+        // Pins: compiler capability projection keeps typed installed-connector
+        // authority; the model name never replaces connection, binding,
+        // generation, definition, action, hash, revision, or policy provenance.
+        let connection_id = ConnectorConnectionId(uuid::Uuid::from_u128(41));
+        let binding_id =
+            moa_connectors::domain::InstalledActionBindingId(uuid::Uuid::from_u128(42));
+        let generation = moa_connectors::domain::ConnectionGeneration::new(7)
+            .expect("positive fixture generation");
+        let definition_artifact_uid = uuid::Uuid::from_u128(43);
+        let definition_revision_uid = uuid::Uuid::from_u128(44);
+        let contract_hash = moa_connectors::domain::OperationContractHash::from_bytes([5; 32]);
+        let governed_contract_revision = "governed-revision-v7".to_string();
+        let definition = ToolDefinition {
+            name: format!("conn__{}__create_ticket", connection_id.0.simple()),
+            description: "Create a ticket using the selected support account.".to_string(),
+            schema: json!({"type": "object", "required": ["title"]}),
+            policy: ToolPolicySpec {
+                risk_level: RiskLevel::High,
+                default_effect: ActionPolicyEffect::AdminReview,
+                action_class: ActionClass::ExternalWrite,
+                input_shape: ToolInputShape::Json,
+                diff_strategy: ToolDiffStrategy::None,
+            },
+            idempotency_class: IdempotencyClass::NonIdempotent,
+            max_output_tokens: 512,
+        };
+        let execution = ToolExecution::InstalledConnectorAction {
+            connector_ref: "connector://support".to_string(),
+            connection_id,
+            binding_id,
+            connection_generation: generation,
+            definition_artifact_uid,
+            definition_revision_uid,
+            action_id: "create_ticket".to_string(),
+            contract_hash,
+            governed_contract_revision: governed_contract_revision.clone(),
+            minimum_effect: ActionPolicyEffect::AdminReview,
+            runtime: std::sync::Arc::new(NeverInvokeConnectorRuntime),
+        };
+
+        let capability = registered_tool_capability(&definition, &execution)
+            .expect("installed connector registration should project");
+        let CapabilitySource::InstalledConnectorAction {
+            connector_ref,
+            connection_id: projected_connection,
+            binding_id: projected_binding,
+            connection_generation,
+            definition_artifact_uid: projected_artifact,
+            definition_revision_uid: projected_revision,
+            action_id,
+            contract_hash: projected_hash,
+            governed_contract_revision: projected_governed_revision,
+            minimum_effect,
+            tool_name,
+        } = &capability.source
+        else {
+            panic!("installed connector must retain typed source provenance");
+        };
+        assert_eq!(connector_ref.to_string(), "connector://support");
+        assert_eq!(*projected_connection, connection_id);
+        assert_eq!(*projected_binding, binding_id.0);
+        assert_eq!(*connection_generation, generation.get());
+        assert_eq!(*projected_artifact, definition_artifact_uid);
+        assert_eq!(*projected_revision, definition_revision_uid);
+        assert_eq!(action_id, "create_ticket");
+        assert_eq!(projected_hash, &contract_hash.to_string());
+        assert_eq!(projected_governed_revision, &capability.contract_revision);
+        assert_eq!(*minimum_effect, ActionPolicyEffect::AdminReview);
+        assert_eq!(tool_name, &definition.name);
+        assert_eq!(capability.reference.name, "action://support.create_ticket");
+        assert_eq!(
+            capability.policy_context.canonical_action_ref,
+            Some(ArtifactRef::action("support", "create_ticket"))
+        );
+        assert_eq!(
+            capability.policy_context.artifact_uid,
+            Some(definition_artifact_uid)
+        );
+        assert_eq!(
+            capability.policy_context.revision_uid,
+            Some(definition_revision_uid)
+        );
+        assert_eq!(
+            capability.policy_context.minimum_effect,
+            ActionPolicyEffect::AdminReview
+        );
+
+        let skill_revision = revision(
+            "support-workflow",
+            75,
+            document(
+                "support-workflow",
+                ArtifactKind::Skill,
+                serde_json::from_value(json!({
+                    "type": "skill",
+                    "spec": {
+                        "instructions": {"path": "SKILL.md"},
+                        "inputs": {"type": "object"},
+                        "outputs": {"type": "object"},
+                        "actions": [{
+                            "id": "open-ticket",
+                            "description": "Open a ticket through the bound account",
+                            "kind": "connector_action",
+                            "ref": "action://support.create_ticket",
+                            "input_schema": {"type": "object", "required": ["title"]},
+                            "output_schema": {"type": "object"}
+                        }]
+                    }
+                }))
+                .expect("skill fixture should decode"),
+            ),
+        );
+        let response =
+            build_capability_response(&[(definition, execution)], &[skill_revision], &[])
+                .expect("installed connector skill alias should project");
+        let alias = response
+            .catalog
+            .capabilities
+            .iter()
+            .find(|candidate| candidate.reference.name == "skill://support-workflow#open-ticket")
+            .expect("skill alias should enter the scoped catalog");
+        assert!(matches!(
+            &alias.source,
+            CapabilitySource::InstalledConnectorAction {
+                connection_id: actual_connection,
+                binding_id: actual_binding,
+                connection_generation: 7,
+                ..
+            } if *actual_connection == connection_id && *actual_binding == binding_id.0
+        ));
+        assert_eq!(
+            alias.policy_context.canonical_action_ref,
+            Some(ArtifactRef::action("support", "create_ticket"))
+        );
+        assert_eq!(
+            alias.policy_context.artifact_uid,
+            Some(definition_artifact_uid),
+            "skill aliases retain connector definition authority, not presentation provenance"
+        );
+    }
 
     #[test]
     fn tool_estimate_reserves_serialized_output_bytes_from_token_budget() {
@@ -3364,6 +3795,101 @@ mod tests {
         assert_eq!(
             single_tool_estimate(u32::MAX).retrieved_bytes,
             u64::from(u32::MAX) * 16
+        );
+    }
+
+    #[test]
+    fn connector_definition_capability_boundary_keeps_legacy_aliases_only() {
+        // Pins: parsing a connection-installable runtime V1 connector does not
+        // bypass installation by entering the existing legacy alias catalog.
+        let registry = ToolRegistry::default_local();
+        let revisions = vec![
+            revision(
+                "legacy-files",
+                61,
+                document(
+                    "legacy-files",
+                    ArtifactKind::Connector,
+                    serde_json::from_value(json!({
+                        "type": "connector",
+                        "spec": {
+                            "auth": {},
+                            "actions": [{
+                                "id": "lookup",
+                                "description": "look up a file",
+                                "tool_name": "file_read",
+                                "input_schema": {"type": "object"},
+                                "output_schema": {"type": "object"},
+                                "admin_review_required": false,
+                                "ui": {}
+                            }],
+                            "ui": {}
+                        }
+                    }))
+                    .expect("legacy connector fixture should decode"),
+                ),
+            ),
+            revision(
+                "runtime-billing",
+                62,
+                document(
+                    "runtime-billing",
+                    ArtifactKind::Connector,
+                    serde_json::from_value(json!({
+                        "type": "connector",
+                        "spec": {
+                            "definition_version": "v1",
+                            "display_name": "Runtime billing",
+                            "runtime": {"type": "built_in_managed", "provider": "billing"},
+                            "auth": [{"type": "none"}],
+                            "actions": [{
+                                "id": "charge",
+                                "binding": {
+                                    "type": "built_in_managed",
+                                    "operation": "file_read",
+                                    "contract": {
+                                        "input_schema": {"type": "object"},
+                                        "output_schema": {"type": "object"},
+                                        "data_classes": ["none"],
+                                        "action_class": "external_write",
+                                        "risk_level": "high",
+                                        "minimum_effect": "admin_review",
+                                        "idempotency": "non_idempotent"
+                                    }
+                                }
+                            }]
+                        }
+                    }))
+                    .expect("runtime connector fixture should decode"),
+                ),
+            ),
+        ];
+
+        let response =
+            build_capability_response(&registry.capability_registrations(), &revisions, &[])
+                .expect("mixed connector definitions should build the current catalog");
+        let names = response
+            .catalog
+            .capabilities
+            .iter()
+            .map(|capability| capability.reference.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "action://legacy-files.lookup")
+                .count(),
+            1,
+            "the exact legacy connector alias must remain executable"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "action://runtime-billing.charge")
+                .count(),
+            0,
+            "runtime V1 requires an installed connection before it can enter a catalog"
         );
     }
 
@@ -3970,6 +4496,147 @@ mod tests {
             validate_start_source_provenance(&provenance, &"a".repeat(64), &templates),
             Ok(())
         );
+    }
+
+    #[test]
+    fn artifact_policy_floor_is_inherited_by_skill_action_aliases() {
+        // Pins: a SkillAction alias cannot weaken the exact Action or connector-action
+        // review floor while reusing the referenced binding's governed backing tool.
+        let registry = ToolRegistry::default_local();
+        let revisions = vec![
+            revision(
+                "publish-note",
+                10,
+                document(
+                    "publish-note",
+                    ArtifactKind::Action,
+                    serde_json::from_value(json!({
+                        "type": "action",
+                        "spec": {
+                            "id": "publish-note",
+                            "description": "publish a note",
+                            "tool_name": "bash",
+                            "input_schema": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "admin_review_required": true
+                        }
+                    }))
+                    .expect("action definition fixture should decode"),
+                ),
+            ),
+            revision(
+                "notifications",
+                20,
+                document(
+                    "notifications",
+                    ArtifactKind::Connector,
+                    serde_json::from_value(json!({
+                        "type": "connector",
+                        "spec": {
+                            "auth": {},
+                            "actions": [{
+                                "id": "send",
+                                "description": "send one notification",
+                                "tool_name": "file_write",
+                                "input_schema": {"type": "object"},
+                                "output_schema": {"type": "object"},
+                                "admin_review_required": true
+                            }]
+                        }
+                    }))
+                    .expect("connector definition fixture should decode"),
+                ),
+            ),
+            revision(
+                "reviewed-operations",
+                30,
+                document(
+                    "reviewed-operations",
+                    ArtifactKind::Skill,
+                    serde_json::from_value(json!({
+                        "type": "skill",
+                        "spec": {
+                            "instructions": {"path": "SKILL.md"},
+                            "inputs": {"type": "object"},
+                            "outputs": {"type": "object"},
+                            "actions": [
+                                {
+                                    "id": "publish",
+                                    "description": "publish through the action alias",
+                                    "kind": "connector_action",
+                                    "ref": "action://publish-note",
+                                    "input_schema": {"type": "object"},
+                                    "output_schema": {"type": "object"}
+                                },
+                                {
+                                    "id": "notify",
+                                    "description": "notify through the connector alias",
+                                    "kind": "connector_action",
+                                    "ref": "action://notifications.send",
+                                    "input_schema": {"type": "object"},
+                                    "output_schema": {"type": "object"}
+                                }
+                            ]
+                        }
+                    }))
+                    .expect("skill definition fixture should decode"),
+                ),
+            ),
+        ];
+
+        let response =
+            build_capability_response(&registry.capability_registrations(), &revisions, &[])
+                .expect("artifact aliases should build into the production catalog");
+
+        for (alias, canonical_ref, tool_name) in [
+            (
+                "skill://reviewed-operations#publish",
+                "action://publish-note",
+                "bash",
+            ),
+            (
+                "skill://reviewed-operations#notify",
+                "action://notifications.send",
+                "file_write",
+            ),
+        ] {
+            let capability = response
+                .catalog
+                .capabilities
+                .iter()
+                .find(|capability| capability.reference.name == alias)
+                .unwrap_or_else(|| panic!("production catalog omitted skill alias `{alias}`"));
+            assert_eq!(
+                capability.policy_context.minimum_effect,
+                ActionPolicyEffect::AdminReview,
+                "skill alias `{alias}` weakened the referenced artifact policy floor"
+            );
+            assert_eq!(
+                capability
+                    .policy_context
+                    .canonical_action_ref
+                    .as_ref()
+                    .map(ToString::to_string),
+                Some(canonical_ref.to_string())
+            );
+            assert_eq!(
+                capability.policy_context.artifact_uid,
+                Some(Uuid::from_u128(130)),
+                "skill alias must preserve the skill artifact identity"
+            );
+            assert_eq!(
+                capability.policy_context.revision_uid,
+                Some(Uuid::from_u128(30)),
+                "skill alias must preserve the skill revision identity"
+            );
+            assert!(matches!(
+                &capability.source,
+                CapabilitySource::SkillAction {
+                    tool_name: actual_tool,
+                    ..
+                } if actual_tool == tool_name
+            ));
+        }
     }
 
     #[test]

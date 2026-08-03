@@ -1,8 +1,5 @@
 //! Durable keyed workflow that advances one persisted dynamic execution run.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use moa_artifacts::execution_plan::{ExecutionOperation, ExecutionReducer};
 use moa_brain::execution_planning::request::record_applied_planning_audit;
@@ -46,7 +43,6 @@ use moa_execution::{
         ExecutionTaskWorkflowRequest, ExecutionTerminalDelivery, execution_progress_from_run,
     },
 };
-use moa_hands::ToolRouter;
 use moa_observability::{
     ExecutionMetricReducerKind, record_execution_map_fanout_items, record_execution_reducer_depth,
     restate_observability::annotate_restate_handler_span,
@@ -54,6 +50,7 @@ use moa_observability::{
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::objects::session::SessionClient;
@@ -84,7 +81,6 @@ pub struct ExecutionRunImpl {
     repository: ExecutionRepository,
     config: moa_config::ExecutionConfig,
     planner_model: ModelId,
-    router: Arc<ToolRouter>,
 }
 
 impl ExecutionRunImpl {
@@ -94,13 +90,11 @@ impl ExecutionRunImpl {
         pool: sqlx::PgPool,
         config: moa_config::ExecutionConfig,
         planner_model: ModelId,
-        router: Arc<ToolRouter>,
     ) -> Self {
         Self {
             repository: ExecutionRepository::new(pool),
             config,
             planner_model,
-            router,
         }
     }
 }
@@ -161,12 +155,6 @@ impl ExecutionRun for ExecutionRunImpl {
                         ctx.sleep(std::time::Duration::from_millis(25)).await?;
                         continue;
                     }
-                    let available_tool_names = self
-                        .router
-                        .capability_registrations()
-                        .into_iter()
-                        .map(|(definition, _)| definition.name)
-                        .collect();
                     let amendment_step = plan_and_apply_waiting_replan(
                         &ctx,
                         AmendmentOperationContext {
@@ -175,7 +163,6 @@ impl ExecutionRun for ExecutionRunImpl {
                             planner_model: self.planner_model.clone(),
                             scope,
                             request: request.clone(),
-                            available_tool_names,
                         },
                         plan_revision,
                     )
@@ -520,7 +507,6 @@ struct AmendmentOperationContext {
     planner_model: ModelId,
     scope: ExecutionScope,
     request: ExecutionRunWorkflowRequest,
-    available_tool_names: BTreeSet<String>,
 }
 
 async fn plan_and_apply_waiting_replan(
@@ -534,21 +520,14 @@ async fn plan_and_apply_waiting_replan(
         planner_model,
         scope,
         request,
-        available_tool_names,
     } = operation;
     let load_request = request.clone();
     let load_repository = repository.clone();
     let prepared = ctx
         .run(|| async move {
-            prepare_amendment_planning(
-                &load_repository,
-                scope,
-                &load_request,
-                plan_revision,
-                &available_tool_names,
-            )
-            .await
-            .map(Json::from)
+            prepare_amendment_planning(&load_repository, scope, &load_request, plan_revision)
+                .await
+                .map(Json::from)
         })
         .name(format!(
             "execution_amendment_inputs_{}_{}",
@@ -646,7 +625,6 @@ async fn prepare_amendment_planning(
     scope: ExecutionScope,
     request: &ExecutionRunWorkflowRequest,
     plan_revision: u64,
-    available_tool_names: &BTreeSet<String>,
 ) -> Result<Option<PreparedAmendmentPlanning>, HandlerError> {
     let Some(snapshot) = repository
         .load_scheduling_snapshot(scope, request.run_uid)
@@ -711,7 +689,18 @@ async fn prepare_amendment_planning(
     }
     let mut effective_context = planning_context.snapshot;
     effective_context.budget = snapshot.run.approved_budget.clone();
-    let context = narrow_amendment_context(effective_context, available_tool_names)
+    // Amendment replay is governed by the exact capability catalog persisted with
+    // the run. Consulting the deployment router here would make the same wake
+    // compile differently after a catalog refresh and would drop installed
+    // connector provenance before dispatch can generation-fence it.
+    let admitted_tool_names = effective_context
+        .catalog
+        .capabilities
+        .iter()
+        .filter_map(|capability| capability.source.model_visible_tool_name())
+        .map(ToString::to_string)
+        .collect();
+    let context = narrow_amendment_context(effective_context, &admitted_tool_names)
         .map_err(execution_error)?;
     let remaining_budget = snapshot
         .budget_ledger
@@ -766,6 +755,7 @@ fn narrow_amendment_context(
             CapabilitySource::McpTool { tool_name, .. }
             | CapabilitySource::ActionArtifact { tool_name, .. }
             | CapabilitySource::ConnectorAction { tool_name, .. }
+            | CapabilitySource::InstalledConnectorAction { tool_name, .. }
             | CapabilitySource::SkillAction { tool_name, .. }
             | CapabilitySource::Memory { tool_name, .. } => {
                 available_tool_names.contains(tool_name)
@@ -1756,8 +1746,9 @@ mod tests {
         ReplanStopReason,
         budget::BudgetLedger,
         capability::{
-            CapabilitySource, ExecutionAuthorizationEnvelope, ExecutionCapability,
-            ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate, ExecutionHash,
+            CapabilityPolicyContext, CapabilitySource, ExecutionAuthorizationEnvelope,
+            ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate,
+            ExecutionHash,
         },
         compiler::{
             CompileExecutionRequest, ValidateAmendmentRequest, compile, validate_amendment,
@@ -1956,16 +1947,10 @@ mod tests {
                 acting_on_behalf_of: None,
             },
         };
-        let prepared = prepare_amendment_planning(
-            &repository,
-            scope,
-            &request,
-            1,
-            &std::collections::BTreeSet::new(),
-        )
-        .await
-        .expect("confirmed WaitingReplan should prepare amendment planning")
-        .expect("active WaitingReplan revision should produce planner input");
+        let prepared = prepare_amendment_planning(&repository, scope, &request, 1)
+            .await
+            .expect("confirmed WaitingReplan should prepare amendment planning")
+            .expect("active WaitingReplan revision should produce planner input");
         assert_eq!(prepared.context.budget, confirmed_budget);
         assert_eq!(
             repository
@@ -2529,6 +2514,9 @@ mod tests {
     }
 
     fn amendment_tool_capability(reference_name: &str, tool_name: &str) -> ExecutionCapability {
+        let source = CapabilitySource::BuiltInTool {
+            name: tool_name.to_string(),
+        };
         ExecutionCapability {
             reference: CapabilityReference {
                 name: reference_name.to_string(),
@@ -2543,9 +2531,8 @@ mod tests {
             default_effect: ActionPolicyEffect::Allow,
             idempotency_class: IdempotencyClass::Idempotent,
             execution_class: ExecutionClass::Data,
-            source: CapabilitySource::BuiltInTool {
-                name: tool_name.to_string(),
-            },
+            policy_context: CapabilityPolicyContext::registered(source.clone()),
+            source,
             estimate: ExecutionEstimate {
                 tool_calls: 1,
                 tasks: 1,

@@ -140,6 +140,15 @@ impl ToolRouter {
                 )
                 .await
             }
+            ToolExecution::InstalledConnectorAction { .. } => Ok(Self::secure_router_output(
+                capability,
+                active_canary,
+                ToolOutput::error(
+                    "installed connector actions require the durable pending-output dispatch path; generic recovery will not retransmit them",
+                    Duration::ZERO,
+                ),
+                None,
+            )),
         }
     }
 

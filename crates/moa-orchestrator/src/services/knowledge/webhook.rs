@@ -163,6 +163,7 @@ impl KnowledgeService {
                             .record("sync_run_id", tracing::field::display(run.sync_run_uid));
                         sync_run_uid = Some(run.sync_run_uid);
                     }
+                    SyncRunClaim::ParentInactive => {}
                 }
             }
         } else if !recorded.duplicate

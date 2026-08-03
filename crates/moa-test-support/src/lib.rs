@@ -11,6 +11,8 @@ pub mod execution_audits;
 
 #[cfg(feature = "capability-fixture")]
 pub mod fixture_capability;
+#[cfg(feature = "connector-api-fixture")]
+pub mod fixture_connector_api;
 pub mod fixtures;
 pub mod invariants;
 pub mod postgres;

@@ -13,12 +13,13 @@ use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifa
 use moa_artifacts::release::{EvalOverlayBinding, ReleaseState};
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
-    types::agent::AgentActionPolicy, types::agent::AgentContext,
-    types::agent::AgentKnowledgePolicy, types::agent::AgentKnowledgeScopeMode,
-    types::agent::AgentModelPolicy, types::agent::AgentPolicySnapshot,
-    types::agent::AgentRevisionLock, types::agent::AgentSandboxPolicy,
-    types::agent::AgentSkillPolicy, types::agent::AgentSkillPolicyMode,
-    types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode, types::agent::LockedToolRef,
+    types::agent::AgentActionPolicy, types::agent::AgentConnectorBinding,
+    types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
+    types::agent::AgentKnowledgeScopeMode, types::agent::AgentModelPolicy,
+    types::agent::AgentPolicySnapshot, types::agent::AgentRevisionLock,
+    types::agent::AgentSandboxPolicy, types::agent::AgentSkillPolicy,
+    types::agent::AgentSkillPolicyMode, types::agent::AgentToolPolicy,
+    types::agent::AgentToolPolicyMode, types::agent::LockedToolRef,
     types::agent::ResolvedArtifactRevisionRef, types::guardrails::AgentGuardrailPolicy,
     types::guardrails::AgentGuardrailStagePolicy, types::identifiers::ModelId,
 };
@@ -235,33 +236,42 @@ impl AgentResolver {
         );
         let sandbox_policy = definition.sandbox_policy.clone();
         let instructions = instructions_from_definition(definition);
-        let resolved_policy = ResolvedHashPolicy {
-            instructions: &instructions,
-            model_policy: &model_policy,
-            knowledge_policy: &knowledge_policy,
-            skill_policy: &skill_policy,
-            action_policy: &action_policy,
-            tool_policy: &tool_policy,
-            guardrail_policy: &guardrail_policy,
-            sandbox_policy: &sandbox_policy,
-        };
+        let mut reference_paths = revision.document.reference_paths();
+        if let Some(release_target_ref) = release_target_ref {
+            reference_paths.push(("release_evaluation.target".to_string(), release_target_ref));
+        }
         let revision_lock = match pointer.as_ref() {
-            Some(pointer) if overlay.is_none() => pointer.revision_lock.clone(),
+            Some(pointer) if overlay.is_none() => {
+                action_policy.connector_bindings = connector_bindings_from_lock(
+                    &definition.action_policy,
+                    &pointer.revision_lock.artifact_dependencies,
+                )?;
+                pointer.revision_lock.clone()
+            }
             _ => {
-                let mut reference_paths = revision.document.reference_paths();
-                if let Some(release_target_ref) = release_target_ref {
-                    reference_paths
-                        .push(("release_evaluation.target".to_string(), release_target_ref));
-                }
                 let resolved = self
                     .resolve_artifact_dependencies(scope, &reference_paths, overlay)
                     .await?;
+                action_policy.connector_bindings = resolve_connector_bindings(
+                    &definition.action_policy,
+                    &resolved.connector_revisions,
+                )?;
                 let artifact_dependencies = resolved.artifacts;
                 let tool_dependencies = locked_tools_from_definition(
                     definition,
                     &reference_paths,
                     &resolved.skill_tools,
                 );
+                let resolved_policy = ResolvedHashPolicy {
+                    instructions: &instructions,
+                    model_policy: &model_policy,
+                    knowledge_policy: &knowledge_policy,
+                    skill_policy: &skill_policy,
+                    action_policy: &action_policy,
+                    tool_policy: &tool_policy,
+                    guardrail_policy: &guardrail_policy,
+                    sandbox_policy: &sandbox_policy,
+                };
                 let policy_hash = policy_hash_for(
                     revision.revision_uid,
                     &artifact_dependencies,
@@ -276,7 +286,17 @@ impl AgentResolver {
                 }
             }
         };
-        validate_revision_lock(&revision_lock, &revision, &resolved_policy)?;
+        let resolved_policy = ResolvedHashPolicy {
+            instructions: &instructions,
+            model_policy: &model_policy,
+            knowledge_policy: &knowledge_policy,
+            skill_policy: &skill_policy,
+            action_policy: &action_policy,
+            tool_policy: &tool_policy,
+            guardrail_policy: &guardrail_policy,
+            sandbox_policy: &sandbox_policy,
+        };
+        validate_revision_lock(&revision_lock, revision.revision_uid, &resolved_policy)?;
         let policy_hash = revision_lock.canonical_policy_hash.clone();
         let artifact_dependencies = revision_lock.artifact_dependencies.clone();
         let tool_dependencies = revision_lock.tool_dependencies.clone();
@@ -430,9 +450,27 @@ impl AgentResolver {
         dependencies.dedup_by(|left, right| left.reference == right.reference);
         skill_tools.sort();
         skill_tools.dedup();
+        let connector_revisions = loaded_revisions
+            .into_values()
+            .filter(|revision| revision.kind == ArtifactKind::Connector)
+            .filter_map(|revision| {
+                let ArtifactDefinition::Connector(definition) = revision.document.definition else {
+                    return None;
+                };
+                Some((
+                    revision.name,
+                    ResolvedConnectorRevision {
+                        artifact_uid: revision.artifact_uid,
+                        revision_uid: revision.revision_uid,
+                        definition,
+                    },
+                ))
+            })
+            .collect();
         Ok(ResolvedAgentDependencies {
             artifacts: dependencies,
             skill_tools,
+            connector_revisions,
         })
     }
 }
@@ -441,6 +479,14 @@ impl AgentResolver {
 struct ResolvedAgentDependencies {
     artifacts: Vec<ResolvedArtifactRevisionRef>,
     skill_tools: Vec<String>,
+    connector_revisions: BTreeMap<String, ResolvedConnectorRevision>,
+}
+
+#[derive(Clone)]
+struct ResolvedConnectorRevision {
+    artifact_uid: Uuid,
+    revision_uid: Uuid,
+    definition: moa_artifacts::connector::ConnectorDefinition,
 }
 
 /// Returns the registered tool names one activated skill revision declares.
@@ -674,7 +720,144 @@ fn action_policy_from_definition(definition: &ActionPolicy) -> AgentActionPolicy
     AgentActionPolicy {
         allowed: sorted_unique(&definition.allowed),
         require_admin_review: sorted_unique(&definition.require_admin_review),
+        connector_bindings: Vec::new(),
     }
+}
+
+fn resolve_connector_bindings(
+    definition: &ActionPolicy,
+    connector_revisions: &BTreeMap<String, ResolvedConnectorRevision>,
+) -> Result<Vec<AgentConnectorBinding>> {
+    let mut bindings = Vec::with_capacity(definition.connector_bindings.len());
+    for binding in &definition.connector_bindings {
+        let connector_name = connector_binding_name(&binding.connector_ref)?;
+        let connector_ref = binding
+            .connector_ref
+            .canonical_string()
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        let revision = connector_revisions.get(connector_name).ok_or_else(|| {
+            MoaError::ValidationError(format!(
+                "agent connector binding `{connector_ref}` did not resolve a published revision"
+            ))
+        })?;
+        if !revision.definition.is_connection_installable() {
+            return Err(MoaError::ValidationError(format!(
+                "agent connector binding `{connector_ref}` targets a legacy connector definition"
+            )));
+        }
+        bindings.push(AgentConnectorBinding {
+            connector_ref,
+            connection_id: binding.connection_id,
+            artifact_uid: revision.artifact_uid,
+            revision_uid: revision.revision_uid,
+        });
+    }
+    validate_connector_binding_uniqueness(&bindings)?;
+    canonicalize_connector_bindings(&mut bindings);
+
+    for artifact_ref in definition
+        .allowed
+        .iter()
+        .chain(&definition.require_admin_review)
+    {
+        let ArtifactRef::Action { connector, .. } = artifact_ref else {
+            continue;
+        };
+        let Some(revision) = connector_revisions.get(connector) else {
+            return Err(unresolved_dependency(artifact_ref));
+        };
+        if revision.definition.runtime_v1().is_some() {
+            let required_ref = ArtifactRef::connector(connector.clone()).to_string();
+            let count = bindings
+                .iter()
+                .filter(|binding| binding.connector_ref == required_ref)
+                .count();
+            if count != 1 {
+                return Err(MoaError::ValidationError(format!(
+                    "runtime connector action `{artifact_ref}` requires exactly one binding for `{required_ref}`"
+                )));
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+fn connector_bindings_from_lock(
+    definition: &ActionPolicy,
+    artifact_dependencies: &[ResolvedArtifactRevisionRef],
+) -> Result<Vec<AgentConnectorBinding>> {
+    let mut bindings = Vec::with_capacity(definition.connector_bindings.len());
+    for binding in &definition.connector_bindings {
+        let connector_ref = binding
+            .connector_ref
+            .canonical_string()
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        connector_binding_name(&binding.connector_ref)?;
+        let dependency = artifact_dependencies
+            .iter()
+            .find(|dependency| dependency.reference == connector_ref)
+            .ok_or_else(|| {
+                MoaError::ValidationError(format!(
+                    "agent revision lock is missing connector binding dependency `{connector_ref}`"
+                ))
+            })?;
+        if dependency.kind != ArtifactKind::Connector.as_str() {
+            return Err(MoaError::ValidationError(format!(
+                "agent revision lock dependency `{connector_ref}` is not a connector"
+            )));
+        }
+        bindings.push(AgentConnectorBinding {
+            connector_ref,
+            connection_id: binding.connection_id,
+            artifact_uid: dependency.artifact_uid,
+            revision_uid: dependency.revision_uid,
+        });
+    }
+    validate_connector_binding_uniqueness(&bindings)?;
+    canonicalize_connector_bindings(&mut bindings);
+    Ok(bindings)
+}
+
+fn connector_binding_name(artifact_ref: &ArtifactRef) -> Result<&str> {
+    match artifact_ref {
+        ArtifactRef::Artifact {
+            kind: ArtifactKind::Connector,
+            name,
+        } => Ok(name),
+        _ => Err(MoaError::ValidationError(format!(
+            "agent connector binding `{artifact_ref}` must use connector://"
+        ))),
+    }
+}
+
+fn canonicalize_connector_bindings(bindings: &mut [AgentConnectorBinding]) {
+    bindings.sort_by(|left, right| {
+        left.connector_ref
+            .cmp(&right.connector_ref)
+            .then_with(|| left.connection_id.0.cmp(&right.connection_id.0))
+            .then_with(|| left.artifact_uid.cmp(&right.artifact_uid))
+            .then_with(|| left.revision_uid.cmp(&right.revision_uid))
+    });
+}
+
+fn validate_connector_binding_uniqueness(bindings: &[AgentConnectorBinding]) -> Result<()> {
+    let mut connector_refs = BTreeSet::new();
+    let mut connection_ids = BTreeSet::new();
+    for binding in bindings {
+        if !connector_refs.insert(binding.connector_ref.as_str()) {
+            return Err(MoaError::ValidationError(format!(
+                "agent action policy binds connector `{}` more than once",
+                binding.connector_ref
+            )));
+        }
+        if !connection_ids.insert(binding.connection_id.0) {
+            return Err(MoaError::ValidationError(format!(
+                "agent action policy binds connection {} more than once",
+                binding.connection_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn tool_policy_from_definition(definition: &AgentDefinition) -> AgentToolPolicy {
@@ -866,17 +1049,17 @@ struct ResolvedHashPolicy<'a> {
 
 fn validate_revision_lock(
     revision_lock: &AgentRevisionLock,
-    revision: &StoredArtifactRevision,
+    revision_uid: Uuid,
     policy: &ResolvedHashPolicy<'_>,
 ) -> Result<()> {
-    if revision_lock.agent_revision_uid != revision.revision_uid {
+    if revision_lock.agent_revision_uid != revision_uid {
         return Err(MoaError::ValidationError(format!(
             "agent deployment lock points at revision {}, expected {}",
-            revision_lock.agent_revision_uid, revision.revision_uid
+            revision_lock.agent_revision_uid, revision_uid
         )));
     }
     let expected_hash = policy_hash_for(
-        revision.revision_uid,
+        revision_uid,
         &revision_lock.artifact_dependencies,
         &revision_lock.tool_dependencies,
         policy,
@@ -884,7 +1067,7 @@ fn validate_revision_lock(
     if revision_lock.canonical_policy_hash != expected_hash {
         return Err(MoaError::ValidationError(format!(
             "agent deployment lock hash mismatch for revision {}",
-            revision.revision_uid
+            revision_uid
         )));
     }
     Ok(())
@@ -932,8 +1115,9 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::agent::{AgentPurpose, KnowledgePolicy, ToolPolicy};
+    use moa_artifacts::agent::{AgentPurpose, ConnectorBinding, KnowledgePolicy, ToolPolicy};
     use moa_core::types::guardrails::GuardrailMode;
+    use moa_core::types::identifiers::ConnectorConnectionId;
 
     use super::*;
 
@@ -1075,6 +1259,223 @@ mod tests {
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["file_read", "mcp__crm__lookup"]);
+    }
+
+    #[test]
+    fn connector_binding_empty_policy_preserves_pre_t1_hash_and_revision_lock() {
+        // Pins: adding serde-omitted connector bindings must not invalidate a
+        // previously persisted no-binding policy hash or deployment lock.
+        let revision_uid = Uuid::from_u128(0xfeed);
+        let action_policy = AgentActionPolicy {
+            allowed: vec!["action://refund".to_string()],
+            require_admin_review: vec!["action://refund".to_string()],
+            connector_bindings: Vec::new(),
+        };
+        let fixed_pre_t1_hash = "218a327081d3d33b77bf1f23cc934b5ebbda61a296fde601651bfa0fefad93ca";
+
+        assert_eq!(
+            test_policy_hash(revision_uid, &action_policy),
+            fixed_pre_t1_hash
+        );
+
+        let lock = AgentRevisionLock {
+            agent_revision_uid: revision_uid,
+            artifact_dependencies: Vec::new(),
+            tool_dependencies: Vec::new(),
+            canonical_policy_hash: fixed_pre_t1_hash.to_string(),
+        };
+        let instructions = Vec::new();
+        let model_policy = AgentModelPolicy::default();
+        let knowledge_policy = AgentKnowledgePolicy::default();
+        let skill_policy = AgentSkillPolicy::default();
+        let tool_policy = AgentToolPolicy::default();
+        let guardrail_policy = AgentGuardrailPolicy::default();
+        let sandbox_policy = AgentSandboxPolicy::default();
+        let policy = ResolvedHashPolicy {
+            instructions: &instructions,
+            model_policy: &model_policy,
+            knowledge_policy: &knowledge_policy,
+            skill_policy: &skill_policy,
+            action_policy: &action_policy,
+            tool_policy: &tool_policy,
+            guardrail_policy: &guardrail_policy,
+            sandbox_policy: &sandbox_policy,
+        };
+
+        validate_revision_lock(&lock, revision_uid, &policy)
+            .expect("the pre-T1 no-binding revision lock should remain valid");
+    }
+
+    #[test]
+    fn connector_binding_order_is_hash_stable_and_connection_is_significant() {
+        // Pins: authoring order cannot churn the revision lock, while selecting
+        // another installed connection must change the replay-stable policy hash.
+        let first = AgentConnectorBinding {
+            connector_ref: "connector://billing".to_string(),
+            connection_id: ConnectorConnectionId(Uuid::from_u128(1)),
+            artifact_uid: Uuid::from_u128(10),
+            revision_uid: Uuid::from_u128(11),
+        };
+        let second = AgentConnectorBinding {
+            connector_ref: "connector://crm".to_string(),
+            connection_id: ConnectorConnectionId(Uuid::from_u128(2)),
+            artifact_uid: Uuid::from_u128(20),
+            revision_uid: Uuid::from_u128(21),
+        };
+        let mut ordered = vec![first.clone(), second.clone()];
+        let mut reversed = vec![second, first.clone()];
+        canonicalize_connector_bindings(&mut ordered);
+        canonicalize_connector_bindings(&mut reversed);
+        let ordered_policy = AgentActionPolicy {
+            connector_bindings: ordered,
+            ..AgentActionPolicy::default()
+        };
+        let reversed_policy = AgentActionPolicy {
+            connector_bindings: reversed,
+            ..AgentActionPolicy::default()
+        };
+
+        let ordered_hash = test_policy_hash(Uuid::from_u128(99), &ordered_policy);
+        assert_eq!(
+            ordered_hash,
+            test_policy_hash(Uuid::from_u128(99), &reversed_policy)
+        );
+
+        let mut changed_policy = ordered_policy;
+        changed_policy.connector_bindings[0].connection_id =
+            ConnectorConnectionId(Uuid::from_u128(3));
+        canonicalize_connector_bindings(&mut changed_policy.connector_bindings);
+        assert_ne!(
+            ordered_hash,
+            test_policy_hash(Uuid::from_u128(99), &changed_policy)
+        );
+    }
+
+    #[test]
+    fn connector_binding_resolution_pins_runtime_revision_and_requires_coverage() {
+        // Pins: each referenced runtime connector resolves to one exact
+        // connection/artifact/revision tuple; legacy aliases need no binding.
+        let runtime = resolved_connector_test_revision(Uuid::from_u128(31), true);
+        let legacy = resolved_connector_test_revision(Uuid::from_u128(41), false);
+        let revisions = BTreeMap::from([
+            ("billing".to_string(), runtime.clone()),
+            ("legacy-crm".to_string(), legacy),
+        ]);
+        let connection_id = ConnectorConnectionId(Uuid::from_u128(51));
+        let definition = ActionPolicy {
+            allowed: vec![ArtifactRef::action("billing", "charge")],
+            connector_bindings: vec![ConnectorBinding {
+                connector_ref: ArtifactRef::connector("billing"),
+                connection_id,
+            }],
+            ..ActionPolicy::default()
+        };
+
+        assert_eq!(
+            resolve_connector_bindings(&definition, &revisions)
+                .expect("runtime connector binding should resolve"),
+            vec![AgentConnectorBinding {
+                connector_ref: "connector://billing".to_string(),
+                connection_id,
+                artifact_uid: runtime.artifact_uid,
+                revision_uid: runtime.revision_uid,
+            }]
+        );
+
+        let missing = ActionPolicy {
+            connector_bindings: Vec::new(),
+            ..definition
+        };
+        let error = resolve_connector_bindings(&missing, &revisions)
+            .expect_err("a referenced runtime connector must be bound");
+        assert!(matches!(error, MoaError::ValidationError(message)
+            if message.contains("requires exactly one binding")));
+
+        let legacy_only = ActionPolicy {
+            allowed: vec![ArtifactRef::action("legacy-crm", "lookup")],
+            ..ActionPolicy::default()
+        };
+        assert_eq!(
+            resolve_connector_bindings(&legacy_only, &revisions)
+                .expect("legacy connector aliases remain binding-free"),
+            Vec::new()
+        );
+    }
+
+    fn test_policy_hash(revision_uid: Uuid, action_policy: &AgentActionPolicy) -> String {
+        let instructions = Vec::new();
+        let model_policy = AgentModelPolicy::default();
+        let knowledge_policy = AgentKnowledgePolicy::default();
+        let skill_policy = AgentSkillPolicy::default();
+        let tool_policy = AgentToolPolicy::default();
+        let guardrail_policy = AgentGuardrailPolicy::default();
+        let sandbox_policy = AgentSandboxPolicy::default();
+        policy_hash_for(
+            revision_uid,
+            &[],
+            &[],
+            &ResolvedHashPolicy {
+                instructions: &instructions,
+                model_policy: &model_policy,
+                knowledge_policy: &knowledge_policy,
+                skill_policy: &skill_policy,
+                action_policy,
+                tool_policy: &tool_policy,
+                guardrail_policy: &guardrail_policy,
+                sandbox_policy: &sandbox_policy,
+            },
+        )
+        .expect("test policy should hash")
+    }
+
+    fn resolved_connector_test_revision(
+        revision_uid: Uuid,
+        runtime: bool,
+    ) -> ResolvedConnectorRevision {
+        let spec = if runtime {
+            serde_json::json!({
+                "definition_version": "v1",
+                "display_name": "Billing",
+                "runtime": {"type": "mcp"},
+                "auth": [{"type": "none"}],
+                "actions": [{
+                    "id": "charge",
+                    "binding": {
+                        "type": "mcp",
+                        "remote_operation": "charge",
+                        "contract": {
+                            "input_schema": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "data_classes": ["none"],
+                            "action_class": "external_write",
+                            "risk_level": "high",
+                            "minimum_effect": "admin_review",
+                            "idempotency": "non_idempotent"
+                        }
+                    }
+                }]
+            })
+        } else {
+            serde_json::json!({
+                "auth": {},
+                "actions": [{
+                    "id": "lookup",
+                    "description": "legacy lookup",
+                    "tool_name": "file_read",
+                    "input_schema": {"type": "object"},
+                    "output_schema": {"type": "object"},
+                    "admin_review_required": false,
+                    "ui": {}
+                }],
+                "ui": {}
+            })
+        };
+        ResolvedConnectorRevision {
+            artifact_uid: Uuid::from_u128(revision_uid.as_u128() + 1_000),
+            revision_uid,
+            definition: serde_json::from_value(spec)
+                .expect("connector definition fixture should deserialize"),
+        }
     }
 
     fn agent_definition() -> AgentDefinition {

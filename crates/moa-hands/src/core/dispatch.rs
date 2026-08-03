@@ -3,6 +3,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use moa_connectors::executor::{
+    ConnectorActionInvocation, ConnectorInvocationCompletionTicket, SecuredConnectorOutputMetadata,
+};
 use moa_core::{
     error::MoaError, error::Result, traits::Identity, types::completion::ToolInvocation,
     types::hands::HandHandle, types::hands::HandStatus, types::identifiers::ToolCallId,
@@ -44,6 +47,57 @@ pub(super) struct McpDispatch<'a> {
     pub(super) client_route: McpClientRoute,
     /// Replay-stable durable tool-call identity.
     pub(super) tool_call_id: ToolCallId,
+}
+
+/// Classified connector output awaiting durable journaling and completion.
+///
+/// The raw upstream response has already passed through the single hands output
+/// classifier. The secret-free ticket remains paired with that secured result
+/// so an in-process durable caller can journal both, then finalize the connector
+/// invocation through `moa-connectors`. Generic router dispatch never produces
+/// this type and therefore can never retry a connector action.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingConnectorToolOutput {
+    secured_output: SecuredToolOutput,
+    secured_metadata: SecuredConnectorOutputMetadata,
+    completion_ticket: ConnectorInvocationCompletionTicket,
+}
+
+impl PendingConnectorToolOutput {
+    /// Returns the classified output that the durable caller must journal.
+    #[must_use]
+    pub const fn secured_output(&self) -> &SecuredToolOutput {
+        &self.secured_output
+    }
+
+    /// Returns secret-free classifier metadata for post-journal finalization.
+    #[must_use]
+    pub const fn secured_metadata(&self) -> &SecuredConnectorOutputMetadata {
+        &self.secured_metadata
+    }
+
+    /// Returns the private-constructor completion ticket to finalize after journaling.
+    #[must_use]
+    pub const fn completion_ticket(&self) -> &ConnectorInvocationCompletionTicket {
+        &self.completion_ticket
+    }
+
+    /// Consumes the pending result into its durable, secret-free components.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        SecuredToolOutput,
+        SecuredConnectorOutputMetadata,
+        ConnectorInvocationCompletionTicket,
+    ) {
+        (
+            self.secured_output,
+            self.secured_metadata,
+            self.completion_ticket,
+        )
+    }
 }
 
 impl ToolRouter {
@@ -236,6 +290,121 @@ impl ToolRouter {
         }
         .instrument(instrument_tool_span)
         .await
+    }
+
+    /// Executes one installed connector action exactly once and returns its
+    /// classified output plus secret-free completion authority.
+    ///
+    /// The caller must have completed action-policy review before entering this
+    /// method. The connector runtime independently reauthorizes delegated `Use`
+    /// and re-reads every durable pin before credentials or network. The caller
+    /// must journal the returned secured output and metadata before asking the
+    /// connector completion service to consume the ticket.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_installed_connector_pending_from_catalog_within(
+        &self,
+        catalog: &ToolCatalogSnapshot,
+        session: &SessionMeta,
+        caller_identity: &Identity,
+        invocation: &ToolInvocation,
+        tool_call_id: ToolCallId,
+        active_canary: Option<&str>,
+        scope: ToolCallScope<'_>,
+    ) -> Result<PendingConnectorToolOutput> {
+        self.require_owned_catalog(catalog)?;
+        scope.admit()?;
+        let registry = &catalog.registry;
+        let registered_tool = registry
+            .tools
+            .get(&invocation.name)
+            .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
+        validate_tool_invocation(&registered_tool.definition, invocation)?;
+        let ToolExecution::InstalledConnectorAction { runtime, .. } = &registered_tool.execution
+        else {
+            return Err(MoaError::ValidationError(format!(
+                "tool `{}` is not an installed connector action",
+                invocation.name
+            )));
+        };
+        let action = registered_tool
+            .execution
+            .installed_connector_pin()
+            .ok_or_else(|| {
+                MoaError::ValidationError(
+                    "installed connector execution is missing its typed action pin".to_string(),
+                )
+            })?;
+        let capability = registered_tool.execution.capability_id(&invocation.name);
+        moa_security::admit_capability_for_origin(
+            self.effective_call_origin(session),
+            &capability,
+            registered_tool.definition.policy.action_class,
+        )?;
+
+        let tool_span = tool_execution_span(session, invocation);
+        record_tool_invocation_metadata(
+            &tool_span,
+            session,
+            &registered_tool.execution,
+            &registered_tool.definition.policy.default_effect,
+        );
+        let started_at = Instant::now();
+        let cancellation_token = scope
+            .effective_cancel_token()
+            .cloned()
+            .unwrap_or_else(CancellationToken::new);
+        let raw_result = self
+            .run_within_scope(
+                scope,
+                async {
+                    runtime
+                        .invoke(ConnectorActionInvocation {
+                            caller: caller_identity.clone(),
+                            tool_call_id,
+                            action,
+                            input: invocation.input.clone(),
+                            cancellation_token,
+                        })
+                        .await
+                        .map_err(connector_runtime_error)
+                }
+                .instrument(tool_span.clone()),
+            )
+            .await?;
+        let (raw_output, completion_ticket) = raw_result.into_parts();
+        let secured_output = self
+            .secure_and_budget(
+                session,
+                &registered_tool.definition,
+                capability,
+                active_canary,
+                ToolOutput::json(
+                    "Connector action completed.",
+                    raw_output,
+                    started_at.elapsed(),
+                ),
+                None,
+            )
+            .await;
+        let secured_output_bytes = serde_json::to_vec(&secured_output.safe_output)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?
+            .len() as u64;
+        let pending = PendingConnectorToolOutput {
+            secured_metadata: SecuredConnectorOutputMetadata {
+                assessment: secured_output.assessment.clone(),
+                secured_output_bytes,
+            },
+            secured_output,
+            completion_ticket,
+        };
+        let telemetry_result = Ok(pending.secured_output.clone());
+        record_tool_execution_result(
+            &tool_span,
+            &invocation.name,
+            started_at.elapsed(),
+            &telemetry_result,
+        );
+        Ok(pending)
     }
 
     /// Executes an already-authorized tool invocation with retry and recovery enabled.
@@ -435,6 +604,10 @@ impl ToolRouter {
                 )
                 .await
             }
+            ToolExecution::InstalledConnectorAction { .. } => Err(MoaError::ToolError(
+                "installed connector actions require the durable pending-output dispatch path"
+                    .to_string(),
+            )),
         }
     }
 
@@ -731,6 +904,19 @@ impl ToolRouter {
         let client = Arc::new(MCPClient::connect(server, headers).await?);
         *client_route.write().await = Some(client);
         Ok(())
+    }
+}
+
+fn connector_runtime_error(error: moa_connectors::Error) -> MoaError {
+    match error {
+        moa_connectors::Error::AuthorizationDenied => {
+            MoaError::PermissionDenied("connector use authorization denied".to_string())
+        }
+        moa_connectors::Error::AuthorizationUnavailable => {
+            MoaError::PermissionDenied("connector use authorization unavailable".to_string())
+        }
+        moa_connectors::Error::Cancelled { .. } => MoaError::Cancelled,
+        other => MoaError::ToolError(other.to_string()),
     }
 }
 

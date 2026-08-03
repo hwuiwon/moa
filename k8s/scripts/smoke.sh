@@ -125,6 +125,9 @@ validate_schemas() {
 validate_manifests() {
   local work_dir local_manifest production_manifest jobs_manifest
   local local_orchestrator production_orchestrator local_edge production_edge
+  local local_orchestrator_service production_orchestrator_service
+  local local_orchestrator_policy production_orchestrator_policy
+  local local_edge_service production_edge_service
   local local_runtime_config production_runtime_config local_key_secret
   local local_restate production_restate
   local rewrap_job application_content
@@ -142,6 +145,12 @@ validate_manifests() {
   production_orchestrator="$(manifest_document "${production_manifest}" RestateDeployment moa-orchestrator)"
   local_edge="$(manifest_document "${local_manifest}" Deployment moa-edge)"
   production_edge="$(manifest_document "${production_manifest}" Deployment moa-edge)"
+  local_orchestrator_service="$(manifest_document "${local_manifest}" Service moa-orchestrator)"
+  production_orchestrator_service="$(manifest_document "${production_manifest}" Service moa-orchestrator)"
+  local_orchestrator_policy="$(manifest_document "${local_manifest}" NetworkPolicy moa-orchestrator-ingress)"
+  production_orchestrator_policy="$(manifest_document "${production_manifest}" NetworkPolicy moa-orchestrator-ingress)"
+  local_edge_service="$(manifest_document "${local_manifest}" Service moa-edge)"
+  production_edge_service="$(manifest_document "${production_manifest}" Service moa-edge)"
   local_restate="$(manifest_document "${local_manifest}" RestateCluster moa-restate)"
   production_restate="$(manifest_document "${production_manifest}" RestateCluster moa-restate)"
   local_runtime_config="$(manifest_document "${local_manifest}" ConfigMap moa-runtime-config)"
@@ -202,6 +211,40 @@ validate_manifests() {
     assert_excludes "${edge}" "MOA_KMS_" "edge unexpectedly receives KMS configuration"
     assert_excludes "${edge}" "moa-kms-root-keys" "edge unexpectedly mounts the KMS Secret"
     assert_excludes "${edge}" "/var/run/secrets/moa-kms" "edge unexpectedly exposes the KMS keyring"
+    assert_contains "${edge}" "name: MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM" \
+      "edge is missing the private connector credential upstream"
+    assert_contains "${edge}" "http://moa-orchestrator.moa-system.svc.cluster.local:10023" \
+      "edge connector credential upstream does not target the private orchestrator listener"
+  done
+  for orchestrator in "${local_orchestrator}" "${production_orchestrator}"; do
+    assert_contains "${orchestrator}" "- --credential-port" \
+      "orchestrator does not configure the private credential listener"
+    assert_contains "${orchestrator}" "name: credentials" \
+      "orchestrator pod does not declare its private credential port"
+    assert_contains "${orchestrator}" "containerPort: 10023" \
+      "orchestrator private credential listener is not on the expected port"
+  done
+  for service in "${local_orchestrator_service}" "${production_orchestrator_service}"; do
+    assert_contains "${service}" "type: ClusterIP" \
+      "orchestrator Service is not explicitly internal-only"
+    assert_contains "${service}" "name: credentials" \
+      "orchestrator Service does not route the private credential listener"
+    assert_contains "${service}" "port: 10023" \
+      "orchestrator Service has the wrong credential port"
+    assert_contains "${service}" "targetPort: credentials" \
+      "orchestrator Service does not target the named credential port"
+  done
+  for service in "${local_edge_service}" "${production_edge_service}"; do
+    assert_excludes "${service}" "10023" \
+      "edge Service publicly exposes the orchestrator credential port"
+  done
+  for policy in "${local_orchestrator_policy}" "${production_orchestrator_policy}"; do
+    assert_contains "${policy}" "app.kubernetes.io/name: moa-edge" \
+      "orchestrator NetworkPolicy does not select edge as the credential caller"
+    assert_contains "${policy}" "port: 10023" \
+      "orchestrator NetworkPolicy does not allow the private credential listener"
+    assert_occurrences "${policy}" 1 "port: 10023" \
+      "orchestrator NetworkPolicy must have one narrowly scoped credential allow rule"
   done
   for workload in \
     "${local_orchestrator}" \

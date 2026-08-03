@@ -1,5 +1,7 @@
 //! Linked-provider request, response, and webhook domain types.
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
@@ -153,8 +155,6 @@ pub struct LinkedAccount {
     pub connector: String,
     /// Provider account identifier.
     pub provider_account_id: String,
-    /// Credential vault reference or provider token reference.
-    pub credential_ref: String,
     /// Raw credential material returned by the provider, kept in memory only until stored.
     #[serde(skip)]
     pub credential_material: Option<String>,
@@ -173,8 +173,8 @@ pub struct LinkedAccount {
 pub struct TriggerSyncRequest {
     /// Connection to sync.
     pub connection: KnowledgeConnection,
-    /// Resolved credential for this connection's provider account.
-    pub credential: RedactedSecret,
+    /// Resolved tenant credential, when the provider requires one.
+    pub credential: Option<RedactedSecret>,
     /// Provider model or collection to sync.
     pub model: Option<String>,
     /// Provider sync variant or partition name.
@@ -195,8 +195,37 @@ pub struct TriggerSyncRequest {
 pub struct StartInitialSyncRequest {
     /// Newly linked connection whose first provider sync should be running.
     pub connection: KnowledgeConnection,
-    /// Resolved credential for this connection's provider account.
-    pub credential: RedactedSecret,
+    /// Resolved tenant credential, when the provider requires one.
+    pub credential: Option<RedactedSecret>,
+}
+
+/// Request to revoke one linked account at its remote provider.
+///
+/// This request crosses the final secret-bearing boundary before an outbound
+/// provider deletion. It deliberately implements neither `Clone`, `Serialize`,
+/// nor `Deserialize`, so resolved primary credential material cannot enter a
+/// durable disconnect journal, event, or model payload. Its custom `Debug`
+/// implementation includes only the provider-native non-secret selector and a
+/// fixed credential redaction.
+pub struct RemoteRevokeRequest {
+    /// Connection whose provider-native linked account must be revoked.
+    pub connection: KnowledgeConnection,
+    /// Resolved active credential from this connection's `primary` slot, when required.
+    pub credential: Option<RedactedSecret>,
+}
+
+impl fmt::Debug for RemoteRevokeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemoteRevokeRequest")
+            .field("connection_uid", &self.connection.connection_uid)
+            .field("tenant_id", &self.connection.tenant_id)
+            .field("provider", &self.connection.provider)
+            .field("connector", &self.connection.connector)
+            .field("provider_account_id", &self.connection.provider_account_id)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Outcome of an idempotent initial-sync start.
@@ -241,8 +270,8 @@ pub struct TriggeredSync {
 pub struct ListChangedRecordsRequest {
     /// Connection to inspect.
     pub connection: KnowledgeConnection,
-    /// Resolved credential for this connection's provider account.
-    pub credential: RedactedSecret,
+    /// Resolved tenant credential, when the provider requires one.
+    pub credential: Option<RedactedSecret>,
     /// The tenant's current ACL fingerprint key.
     ///
     /// Adapters key each provider principal as they normalize a record, inside
@@ -324,8 +353,8 @@ pub struct ProviderRecord {
 pub struct FetchRecordContentRequest {
     /// Connection whose provider account authorizes the fetch.
     pub connection: KnowledgeConnection,
-    /// Resolved credential for this connection's provider account.
-    pub credential: RedactedSecret,
+    /// Resolved tenant credential, when the provider requires one.
+    pub credential: Option<RedactedSecret>,
     /// Normalized record whose byte content should be downloaded.
     pub record: ProviderRecord,
 }

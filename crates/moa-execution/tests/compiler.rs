@@ -15,16 +15,18 @@ use moa_artifacts::reference::ArtifactRef;
 use moa_config::ExecutionConfig;
 use moa_core::types::{
     action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+    identifiers::ConnectorConnectionId,
     tools::IdempotencyClass,
 };
 use moa_execution::{
     capability::{
-        CapabilitySource, ExecutionAuthorizationEnvelope, ExecutionCapability,
-        ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate, catalog_hash, plan_hash,
+        CapabilityPolicyContext, CapabilitySource, ExecutionAuthorizationEnvelope,
+        ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate,
+        catalog_hash, plan_hash,
     },
     compiler::{
-        CompileExecutionRequest, ExecutionValidationIssue, ExecutionValidationSeverity,
-        ValidateAmendmentRequest, compile, validate_amendment,
+        CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationIssue,
+        ExecutionValidationSeverity, ValidateAmendmentRequest, compile, validate_amendment,
     },
     state::{
         ExecutionNodeStatus, ExecutionProjection, ExecutionTaskId, ExecutionTaskProjection,
@@ -402,6 +404,208 @@ fn compile_rejects_every_reference_outside_catalog_or_authorization() {
             .iter()
             .any(|issue| issue.code == "skill_not_authorized")
     );
+}
+
+#[test]
+fn installed_connector_catalog_hash_pins_exact_dispatch_identity_across_serde_replay() {
+    // Pins: durable installed-connector catalogs preserve typed provenance and
+    // change identity when a connection generation changes, without parsing the tool name.
+    let capability = installed_connector_capability(7, installed_connector_tool_name());
+    let first = ExecutionCapabilityCatalog::build(vec![capability.clone()])
+        .expect("complete installed connector pins should build a catalog");
+    let repeated = ExecutionCapabilityCatalog::build(vec![capability])
+        .expect("the same installed connector pins should rebuild deterministically");
+    assert_eq!(repeated.catalog_hash, first.catalog_hash);
+
+    let encoded = serde_json::to_vec(&first).expect("serialize installed connector catalog");
+    let replayed: ExecutionCapabilityCatalog =
+        serde_json::from_slice(&encoded).expect("deserialize installed connector catalog");
+    assert_eq!(replayed, first);
+    assert_eq!(
+        replayed.capabilities[0].source,
+        installed_connector_source(7, installed_connector_tool_name())
+    );
+    assert_eq!(
+        replayed.capabilities[0].source.model_visible_tool_name(),
+        Some(installed_connector_tool_name())
+    );
+
+    let advanced = ExecutionCapabilityCatalog::build(vec![installed_connector_capability(
+        8,
+        installed_connector_tool_name(),
+    )])
+    .expect("next-generation installed connector pins should build a catalog");
+    assert_ne!(advanced.catalog_hash, first.catalog_hash);
+
+    let mut request = valid_request();
+    let reference = first.capabilities[0].reference.clone();
+    install_catalog(&mut request, first.clone());
+    request.plan.nodes[0].operation = ExecutionOperation::Capability { reference };
+    let outcome = compile(request);
+    assert!(
+        outcome.report.issues.is_empty(),
+        "complete installed connector capability should compile: {:?}",
+        outcome.report.issues
+    );
+    assert_eq!(
+        outcome
+            .compiled
+            .expect("complete installed connector capability should compile")
+            .plan
+            .catalog_hash,
+        first.catalog_hash
+    );
+}
+
+#[test]
+fn compile_rejects_installed_connector_policy_context_drift_after_deserialization() {
+    // Pins: a correctly rehashed wire catalog cannot weaken the installed
+    // connector review floor independently of its durable dispatch source.
+    let mut capability = installed_connector_capability(7, installed_connector_tool_name());
+    capability.policy_context.minimum_effect = ActionPolicyEffect::Allow;
+    let catalog = ExecutionCapabilityCatalog {
+        schema_version: 1,
+        catalog_hash: catalog_hash(1, std::slice::from_ref(&capability))
+            .expect("hash intentionally drifted wire catalog"),
+        capabilities: vec![capability],
+    };
+    let encoded = serde_json::to_vec(&catalog).expect("serialize drifted wire catalog");
+    let catalog: ExecutionCapabilityCatalog =
+        serde_json::from_slice(&encoded).expect("deserialize drifted wire catalog");
+    let mut request = valid_request();
+    let reference = catalog.capabilities[0].reference.clone();
+    install_catalog(&mut request, catalog);
+    request.plan.nodes[0].operation = ExecutionOperation::Capability { reference };
+
+    let outcome = compile(request);
+    assert!(outcome.compiled.is_none());
+    assert_eq!(outcome.report.issues.len(), 1);
+    assert_eq!(
+        outcome.report.issues[0].severity,
+        ExecutionValidationSeverity::Error
+    );
+    assert_eq!(
+        outcome.report.issues[0].code,
+        "invalid_capability_policy_context"
+    );
+    assert_eq!(
+        outcome.report.issues[0].path,
+        "catalog.capabilities[0].policy_context"
+    );
+    assert_eq!(
+        outcome.report.issues[0].message,
+        "invalid execution projection: capability action://billing.refund has invalid policy context: installed connector minimum effect must match its source"
+    );
+}
+
+#[test]
+fn installed_connector_catalog_rejects_a_zero_generation_pin() {
+    // Pins: a missing connection generation cannot become a durable installed
+    // connector capability, even when every other binding field is present.
+    let capability = installed_connector_capability(0, installed_connector_tool_name());
+
+    let error = ExecutionCapabilityCatalog::build(vec![capability])
+        .expect_err("zero-generation installed connector source must fail closed");
+    assert!(
+        matches!(error, moa_execution::Error::InvalidProjection { ref message }
+            if message == "capability action://billing.refund has invalid policy context: installed connector dispatch pins must be complete and non-empty"),
+        "unexpected zero-generation error: {error:?}"
+    );
+}
+
+#[test]
+fn compile_rejects_ambiguous_agent_capability_tool_for_task_agents_in_both_orders() {
+    // Pins: task-local agents cannot choose between raw and governed aliases of one tool by list order.
+    for alias_kind in [
+        GovernedAliasKind::Action,
+        GovernedAliasKind::InstalledConnector,
+        GovernedAliasKind::SkillAction,
+    ] {
+        let (catalog, raw_reference, alias_reference) = aliased_tool_catalog(alias_kind);
+        for capability_refs in both_reference_orders(&raw_reference, &alias_reference) {
+            let mut request = valid_request();
+            install_catalog(&mut request, catalog.clone());
+            request.plan.nodes[0].operation = ExecutionOperation::Agent {
+                instructions: "Refund the order safely".to_string(),
+                skill_refs: Vec::new(),
+                capability_refs,
+                max_turns: 1,
+            };
+
+            assert_ambiguous_agent_tool_rejected(
+                compile(request),
+                "plan.nodes[0].operation.capability_refs",
+                alias_kind,
+            );
+        }
+    }
+}
+
+#[test]
+fn compile_rejects_ambiguous_agent_capability_tool_for_map_agents_in_both_orders() {
+    // Pins: map agents cannot silently select one policy identity for duplicate visible tools.
+    for alias_kind in [
+        GovernedAliasKind::Action,
+        GovernedAliasKind::InstalledConnector,
+        GovernedAliasKind::SkillAction,
+    ] {
+        let (catalog, raw_reference, alias_reference) = aliased_tool_catalog(alias_kind);
+        for capability_refs in both_reference_orders(&raw_reference, &alias_reference) {
+            let mut request = valid_request();
+            install_catalog(&mut request, catalog.clone());
+            request.plan.nodes[0].operation = ExecutionOperation::Map {
+                items: json!([{ "id": "ord-1" }]),
+                item_key: "/id".to_string(),
+                max_items: 1,
+                item_output_schema: json!({ "type": "object" }),
+                task: MapTask::Agent {
+                    instructions: "Refund each order safely".to_string(),
+                    skill_refs: Vec::new(),
+                    capability_refs,
+                    max_turns: 1,
+                },
+            };
+
+            assert_ambiguous_agent_tool_rejected(
+                compile(request),
+                "plan.nodes[0].operation.task.capability_refs",
+                alias_kind,
+            );
+        }
+    }
+}
+
+#[test]
+fn compile_rejects_ambiguous_agent_capability_tool_for_reduce_agents_in_both_orders() {
+    // Pins: reduce agents cannot weaken review by resolving duplicate tool names to the first ref.
+    for alias_kind in [
+        GovernedAliasKind::Action,
+        GovernedAliasKind::InstalledConnector,
+        GovernedAliasKind::SkillAction,
+    ] {
+        let (catalog, raw_reference, alias_reference) = aliased_tool_catalog(alias_kind);
+        for capability_refs in both_reference_orders(&raw_reference, &alias_reference) {
+            let mut request = valid_request();
+            install_catalog(&mut request, catalog.clone());
+            request.plan.nodes[0].operation = ExecutionOperation::Reduce {
+                items: json!([{ "id": "ord-1" }, { "id": "ord-2" }]),
+                max_items: 2,
+                reducer: ExecutionReducer::Agent {
+                    instructions: "Summarize the refund results safely".to_string(),
+                    skill_refs: Vec::new(),
+                    capability_refs,
+                    max_turns: 1,
+                },
+                batch_size: 2,
+            };
+
+            assert_ambiguous_agent_tool_rejected(
+                compile(request),
+                "plan.nodes[0].operation.reducer.capability_refs",
+                alias_kind,
+            );
+        }
+    }
 }
 
 #[test]
@@ -1458,6 +1662,9 @@ fn amendment_validation_for_output(
 }
 
 fn capability(name: &str) -> ExecutionCapability {
+    let source = CapabilitySource::BuiltInTool {
+        name: name.to_string(),
+    };
     ExecutionCapability {
         reference: CapabilityReference {
             name: name.to_string(),
@@ -1472,9 +1679,8 @@ fn capability(name: &str) -> ExecutionCapability {
         default_effect: ActionPolicyEffect::Allow,
         idempotency_class: IdempotencyClass::Idempotent,
         execution_class: ExecutionClass::Data,
-        source: CapabilitySource::BuiltInTool {
-            name: name.to_string(),
-        },
+        policy_context: CapabilityPolicyContext::registered(source.clone()),
+        source,
         estimate: ExecutionEstimate {
             cost_microusd: 7,
             tokens: 11,
@@ -1483,6 +1689,182 @@ fn capability(name: &str) -> ExecutionCapability {
             tasks: 1,
         },
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GovernedAliasKind {
+    Action,
+    InstalledConnector,
+    SkillAction,
+}
+
+fn aliased_tool_catalog(
+    alias_kind: GovernedAliasKind,
+) -> (
+    ExecutionCapabilityCatalog,
+    CapabilityReference,
+    CapabilityReference,
+) {
+    let backing_tool_name = "orders.refund";
+    let mut raw = capability("raw.orders_refund");
+    let raw_source = CapabilitySource::BuiltInTool {
+        name: backing_tool_name.to_string(),
+    };
+    raw.source = raw_source.clone();
+    raw.policy_context = CapabilityPolicyContext::registered(raw_source);
+
+    let revision_uid = Uuid::from_u128(202);
+    let canonical_action_ref = ArtifactRef::action_artifact("reviewed-refund");
+    let (reference_name, source, canonical_action_ref, artifact_uid, revision_uid) =
+        match alias_kind {
+            GovernedAliasKind::Action => (
+                "action://reviewed-refund",
+                CapabilitySource::ActionArtifact {
+                    action_ref: canonical_action_ref.clone(),
+                    revision_uid,
+                    tool_name: backing_tool_name.to_string(),
+                },
+                canonical_action_ref.clone(),
+                Uuid::from_u128(101),
+                revision_uid,
+            ),
+            GovernedAliasKind::InstalledConnector => (
+                "action://billing.refund",
+                installed_connector_source(7, backing_tool_name),
+                ArtifactRef::action("billing", "refund"),
+                Uuid::from_u128(303),
+                Uuid::from_u128(304),
+            ),
+            GovernedAliasKind::SkillAction => (
+                "skill://reviewed-operations#refund",
+                CapabilitySource::SkillAction {
+                    skill_ref: ArtifactRef::from_str("skill://reviewed-operations")
+                        .expect("fixture: parse skill reference"),
+                    revision_uid,
+                    action_id: "refund".to_string(),
+                    tool_name: backing_tool_name.to_string(),
+                },
+                canonical_action_ref,
+                Uuid::from_u128(101),
+                revision_uid,
+            ),
+        };
+    let mut alias = capability(reference_name);
+    if let CapabilitySource::InstalledConnectorAction {
+        governed_contract_revision,
+        ..
+    } = &source
+    {
+        alias.contract_revision = governed_contract_revision.clone();
+    }
+    alias.default_effect = ActionPolicyEffect::AdminReview;
+    alias.source = source.clone();
+    alias.policy_context = CapabilityPolicyContext::artifact(
+        source,
+        Some(canonical_action_ref),
+        artifact_uid,
+        revision_uid,
+        ActionPolicyEffect::AdminReview,
+    );
+
+    let raw_reference = raw.reference.clone();
+    let alias_reference = alias.reference.clone();
+    let catalog = ExecutionCapabilityCatalog::build(vec![raw, alias])
+        .expect("fixture: aliased capabilities should form a valid catalog");
+    (catalog, raw_reference, alias_reference)
+}
+
+fn install_catalog(request: &mut CompileExecutionRequest, catalog: ExecutionCapabilityCatalog) {
+    request.authorization.capability_refs = catalog
+        .capabilities
+        .iter()
+        .map(|capability| capability.reference.clone())
+        .collect();
+    request.catalog = catalog;
+    request.approved_budget.max_retrieved_bytes = None;
+}
+
+fn both_reference_orders(
+    raw: &CapabilityReference,
+    alias: &CapabilityReference,
+) -> [Vec<CapabilityReference>; 2] {
+    [
+        vec![raw.clone(), alias.clone()],
+        vec![alias.clone(), raw.clone()],
+    ]
+}
+
+fn assert_ambiguous_agent_tool_rejected(
+    outcome: CompileExecutionOutcome,
+    path: &str,
+    alias_kind: GovernedAliasKind,
+) {
+    let alias_reference = match alias_kind {
+        GovernedAliasKind::Action => "action://reviewed-refund@v1",
+        GovernedAliasKind::InstalledConnector => "action://billing.refund@v1",
+        GovernedAliasKind::SkillAction => "skill://reviewed-operations#refund@v1",
+    };
+    let mut reference_labels = [alias_reference, "raw.orders_refund@v1"];
+    reference_labels.sort();
+    assert!(
+        outcome.compiled.is_none(),
+        "compiler accepted {alias_kind:?} and raw capability aliases of one model-visible tool"
+    );
+    assert_eq!(
+        outcome.report.issues,
+        vec![ExecutionValidationIssue {
+            severity: ExecutionValidationSeverity::Error,
+            code: "ambiguous_agent_capability_tool".to_string(),
+            path: path.to_string(),
+            message: format!(
+                "task-local agent capability references {} and {} resolve to ambiguous model-visible tool `orders.refund`",
+                reference_labels[0], reference_labels[1]
+            ),
+        }],
+        "compiler must reject {alias_kind:?} ambiguity deterministically"
+    );
+}
+
+fn installed_connector_tool_name() -> &'static str {
+    "conn__0000000000000000000000000000012d__refund"
+}
+
+fn installed_connector_source(connection_generation: u64, tool_name: &str) -> CapabilitySource {
+    CapabilitySource::InstalledConnectorAction {
+        connector_ref: ArtifactRef::connector("billing"),
+        connection_id: ConnectorConnectionId(Uuid::from_u128(301)),
+        binding_id: Uuid::from_u128(302),
+        connection_generation,
+        definition_artifact_uid: Uuid::from_u128(303),
+        definition_revision_uid: Uuid::from_u128(304),
+        action_id: "refund".to_string(),
+        contract_hash: "ab".repeat(32),
+        governed_contract_revision: "connector-artifact:revision-304:contract-ab".to_string(),
+        minimum_effect: ActionPolicyEffect::AdminReview,
+        tool_name: tool_name.to_string(),
+    }
+}
+
+fn installed_connector_capability(
+    connection_generation: u64,
+    tool_name: &str,
+) -> ExecutionCapability {
+    let source = installed_connector_source(connection_generation, tool_name);
+    let mut capability = capability("action://billing.refund");
+    capability.contract_revision = "connector-artifact:revision-304:contract-ab".to_string();
+    capability.action_class = ActionClass::ExternalWrite;
+    capability.default_effect = ActionPolicyEffect::AdminReview;
+    capability.idempotency_class = IdempotencyClass::NonIdempotent;
+    capability.execution_class = ExecutionClass::External;
+    capability.source = source.clone();
+    capability.policy_context = CapabilityPolicyContext::artifact(
+        source,
+        Some(ArtifactRef::action("billing", "refund")),
+        Uuid::from_u128(303),
+        Uuid::from_u128(304),
+        ActionPolicyEffect::AdminReview,
+    );
+    capability
 }
 
 fn retry(max_attempts: u32) -> RetryPolicy {

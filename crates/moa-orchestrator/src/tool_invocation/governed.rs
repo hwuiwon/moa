@@ -18,6 +18,7 @@ use moa_core::{
     types::tools::TrustedSandboxFileManifestRef,
     types::worker::tool_schema::is_delegation_tool_name,
 };
+use moa_execution::CapabilityPolicyContext;
 use moa_hands::{ToolCatalogDrift, ToolCatalogPin};
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
@@ -34,7 +35,7 @@ use crate::services::{
     },
     action_reviews::{ActionReviewsClient, RequestActionReview},
     session_store::RestateSessionStoreClient,
-    tool_executor::{ExecutionTaskToolCallRequest, ToolExecutorClient},
+    tool_executor::{ExecutionTaskToolCallRequest, ScopedToolCatalogRequest, ToolExecutorClient},
 };
 use crate::turn::util::{
     blocked_canary_tool_output, denied_tool_output, disallowed_tool_output, tool_input_leaks_canary,
@@ -158,6 +159,8 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) origin: GovernedInvocationOrigin<'a>,
     /// Capability-level provenance, independent of execution-task ownership.
     pub(crate) capability_provenance: Option<&'a CapabilityProvenance>,
+    /// Immutable capability policy floor pinned by a durable execution catalog.
+    pub(crate) capability_policy_context: Option<&'a CapabilityPolicyContext>,
     /// Downward-only resource slice that bounds the eventual tool dispatch.
     pub(crate) resource_budget: ResourceBudget,
 }
@@ -282,7 +285,8 @@ pub(crate) async fn invoke_governed_tool(
     append_tool_call_event(ctx, &request).await?;
 
     if let Some(drift) =
-        current_tool_contract_drift(ctx, expected_tool_contract_revision, &invocation).await?
+        current_tool_contract_drift(ctx, &request, expected_tool_contract_revision, &invocation)
+            .await?
     {
         let output = catalog_drift_output(&invocation, &drift);
         append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
@@ -380,12 +384,16 @@ pub(crate) async fn invoke_governed_tool(
 /// check against its own dispatch snapshot because it may run on another replica.
 async fn current_tool_contract_drift(
     ctx: &WorkflowContext<'_>,
+    request: &GovernedInvocationRequest<'_>,
     expected_revision: &str,
     invocation: &ToolInvocation,
 ) -> Result<Option<ToolCatalogDrift>, HandlerError> {
     let activated = crate::restate_identity::replay_safe_request(
         ctx.service_client::<ToolExecutorClient>()
-            .activated_tool_catalog(),
+            .activated_tool_catalog(Json(ScopedToolCatalogRequest {
+                session_id: request.session_id,
+                caller_identity: request.identity.clone(),
+            })),
     )
     .call()
     .await?
@@ -643,6 +651,7 @@ fn prepare_action_review_request(
 
     PrepareActionReviewRequest {
         session: request.session.clone(),
+        caller_identity: request.identity.clone(),
         invocation: invocation.clone(),
         review_id: request.tool_id.0,
         tool_call_id: request.tool_id,
@@ -651,6 +660,7 @@ fn prepare_action_review_request(
             .capability_provenance
             .cloned()
             .unwrap_or(default_provenance),
+        capability_policy_context: request.capability_policy_context.cloned(),
         idempotency_key: invocation.id.clone(),
         expected_tool_contract_revision: expected_tool_contract_revision.to_owned(),
     }
@@ -834,8 +844,10 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::LazyLock;
 
+    use moa_artifacts::reference::ArtifactRef;
     use moa_core::{
         traits::{Identity, IdentityType},
+        types::action_policy::ActionPolicyEffect,
         types::action_policy::CapabilityProvenance,
         types::completion::CompletionRequest,
         types::completion::ToolCallContent,
@@ -844,6 +856,7 @@ mod tests {
         types::contact::ContactRef,
         types::contact::ContactVerificationState,
         types::contact::SessionActorRef,
+        types::identifiers::ConnectorConnectionId,
         types::identifiers::SessionId,
         types::identifiers::TenantId,
         types::identifiers::ToolCallId,
@@ -852,6 +865,7 @@ mod tests {
         types::tools::TrustedSandboxFileEntry,
         types::tools::TrustedSandboxFileManifestRef,
     };
+    use moa_execution::{CapabilityPolicyContext, CapabilitySource};
     use moa_hands::{PinnedToolContract, PinnedToolOwner};
     use moa_test_support::fixtures::contact_ref_fixture;
     use serde_json::json;
@@ -914,6 +928,7 @@ mod tests {
             trusted_sandbox_manifest: None,
             origin,
             capability_provenance: None,
+            capability_policy_context: None,
             resource_budget: Default::default(),
         }
     }
@@ -938,6 +953,7 @@ mod tests {
             prepare_action_review_request(&request, &tool_call.invocation, "contract-v1");
 
         assert_eq!(policy_request.session, session);
+        assert_eq!(policy_request.caller_identity, *TEST_IDENTITY);
         assert_eq!(policy_request.invocation, tool_call.invocation);
         assert_eq!(policy_request.review_id, request.tool_id.0);
         assert_eq!(policy_request.tool_call_id, request.tool_id);
@@ -986,6 +1002,66 @@ mod tests {
 
         let durable = tool_call_request(&request, &tool_call.invocation, "contract-v1");
         assert_eq!(durable.resource_budget, request.resource_budget);
+    }
+
+    #[test]
+    fn capability_policy_context_survives_governed_review_request_serialization() {
+        // Pins: durable dispatch copies the exact installed-connector source,
+        // connection/binding/generation pins, canonical action reference, and
+        // policy floor into the serialized policy request without name parsing.
+        let session = test_session_meta();
+        let tool_name = "conn__00000000000000000000000000000055__create_ticket";
+        let tool_call = ToolCallContent {
+            invocation: ToolInvocation {
+                id: Some("provider-connector-1".to_string()),
+                name: tool_name.to_string(),
+                input: json!({"subject": "incident"}),
+            },
+            provider_metadata: None,
+        };
+        let allowed_tools = BTreeSet::from([tool_name.to_string()]);
+        let action_ref = ArtifactRef::action("support", "create_ticket");
+        let definition_artifact_uid = Uuid::from_u128(81);
+        let definition_revision_uid = Uuid::from_u128(82);
+        let source = CapabilitySource::InstalledConnectorAction {
+            connector_ref: ArtifactRef::connector("support"),
+            connection_id: ConnectorConnectionId(Uuid::from_u128(85)),
+            binding_id: Uuid::from_u128(86),
+            connection_generation: 7,
+            definition_artifact_uid,
+            definition_revision_uid,
+            action_id: "create_ticket".to_string(),
+            contract_hash: "cd".repeat(32),
+            governed_contract_revision: "support-ticket-v7".to_string(),
+            minimum_effect: ActionPolicyEffect::AdminReview,
+            tool_name: tool_name.to_string(),
+        };
+        let context = CapabilityPolicyContext::artifact(
+            source,
+            Some(action_ref),
+            definition_artifact_uid,
+            definition_revision_uid,
+            ActionPolicyEffect::AdminReview,
+        );
+        let mut request = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::ExecutionTask {
+                run_uid: Uuid::from_u128(83),
+                task_uid: Uuid::from_u128(84),
+                generation: 2,
+            },
+        );
+        request.capability_policy_context = Some(&context);
+
+        let prepared =
+            prepare_action_review_request(&request, &tool_call.invocation, "contract-v1");
+        assert_eq!(prepared.capability_policy_context.as_ref(), Some(&context));
+        let encoded = serde_json::to_vec(&prepared).expect("serialize policy preparation request");
+        let decoded: crate::services::action_policy::PrepareActionReviewRequest =
+            serde_json::from_slice(&encoded).expect("deserialize policy preparation request");
+        assert_eq!(decoded, prepared);
     }
 
     #[test]

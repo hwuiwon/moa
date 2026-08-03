@@ -35,9 +35,9 @@ use moa_eval::kernel::cost::{
 use moa_knowledge::acl_key::{KmsSourceAclKeyOwner, SourceAclKey, SourceAclKeyOwner};
 use moa_knowledge::chunking::{ChunkingConfig, content_hash};
 use moa_knowledge::domain::{
-    CanonicalSourcePrincipal, ConnectionStatus, KnowledgeConnection, KnowledgeSyncRun,
-    ProviderAclEntry, ProviderRecord, ProviderRecordAcl, RecordPage, SourceAclEntryKind,
-    SourcePrincipalKind, SyncRunStatus,
+    CanonicalSourcePrincipal, KnowledgeConnection, KnowledgeSyncRun, ProviderAclEntry,
+    ProviderRecord, ProviderRecordAcl, RecordPage, SourceAclEntryKind, SourcePrincipalKind,
+    SyncRunStatus,
 };
 use moa_knowledge::graph_delta::stable_uid;
 use moa_knowledge::ingestion::{
@@ -566,6 +566,7 @@ async fn ingest_articles(
     kms: Arc<dyn KeyManagementProvider>,
     embedder: Arc<dyn EmbeddingProvider>,
 ) -> Result<IngestionReport> {
+    ensure_wixqa_eval_parent(pool, tenant_id, connection_uid, selected).await?;
     let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
@@ -579,8 +580,6 @@ async fn ingest_articles(
             provider: WIXQA_PROVIDER.to_string(),
             connector: WIXQA_CONNECTOR.to_string(),
             provider_account_id: selected.cache_key.clone(),
-            credential_ref: "wixqa-local-jsonl".to_string(),
-            status: ConnectionStatus::Active,
             metadata: json!({
                 "dataset": selected.dataset.as_str(),
                 "cache_key": selected.cache_key,
@@ -626,6 +625,9 @@ async fn ingest_articles(
             "WixQA connection already has active sync run {} with status {:?}; finish or clear it before rerunning",
             existing.sync_run_uid,
             existing.status
+        ),
+        SyncRunClaim::ParentInactive => bail!(
+            "WixQA eval connection has no active generic connector parent; rebuild the eval fixture before rerunning"
         ),
     }
 
@@ -706,6 +708,62 @@ async fn ingest_articles(
         embeddings_created: page_report.embeddings_created,
         elapsed_ms: elapsed_ms(started),
     })
+}
+
+async fn ensure_wixqa_eval_parent(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    selected: &SelectedWorkload,
+) -> Result<()> {
+    let scope = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope)
+        .await
+        .context("begin scoped WixQA connector-parent transaction")?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .context("assume moa_app role for WixQA connector parent")?;
+    // This storage fixture is private to the benchmark; connector management
+    // cannot author or resolve its `eval:wixqa` built-in definition.
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key,
+            built_in_version, non_secret_config, config_generation,
+            lifecycle_status, health_status
+        )
+        VALUES ($1, $2, 'WixQA evaluation fixture', 'eval:wixqa', 1,
+                jsonb_build_object('cache_key', $3::TEXT), 1, 'active', 'ready')
+        ON CONFLICT (connection_uid) DO NOTHING
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(&selected.cache_key)
+    .execute(conn.as_mut())
+    .await
+    .context("ensure WixQA eval-only connector parent")?;
+    let parent = sqlx::query_as::<_, (Uuid, Option<String>, Option<i64>, String)>(
+        r#"
+        SELECT tenant_id, built_in_key, built_in_version, lifecycle_status
+        FROM moa.connector_connections
+        WHERE connection_uid = $1
+        "#,
+    )
+    .bind(connection_uid)
+    .fetch_optional(conn.as_mut())
+    .await
+    .context("verify WixQA eval-only connector parent")?;
+    match parent {
+        Some((parent_tenant, Some(key), Some(1), status))
+            if parent_tenant == tenant_id.0 && key == "eval:wixqa" && status == "active" => {}
+        _ => bail!("WixQA eval connector parent is missing or incompatible"),
+    }
+    conn.commit()
+        .await
+        .context("commit WixQA connector-parent transaction")?;
+    Ok(())
 }
 
 async fn complete_sync_run(

@@ -13,7 +13,8 @@ use crate::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
         LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        RecordPage, RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest,
+        TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -29,6 +30,9 @@ mod google_drive;
 /// Maximum record content size fetched through the proxy, mirroring the crate's
 /// 10 MiB HTTP response cap.
 const MAX_RECORD_CONTENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Maximum response accepted from Nango's otherwise tiny delete acknowledgement.
+const MAX_DELETE_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// A resolved Nango proxy content-fetch request for one record: path segments
 /// appended after `/proxy/`, query parameters, and how the result MIME is
@@ -262,7 +266,6 @@ impl LinkedIntegrationProvider for NangoProvider {
             connection_id: Option<String>,
             provider_config_key: Option<String>,
             provider: Option<String>,
-            credentials_reference: Option<String>,
             metadata: Option<Value>,
         }
 
@@ -287,9 +290,6 @@ impl LinkedIntegrationProvider for NangoProvider {
                 .provider_config_key
                 .or(response.provider)
                 .unwrap_or_default(),
-            credential_ref: response
-                .credentials_reference
-                .unwrap_or_else(|| format!("nango:{provider_account_id}")),
             credential_material: None,
             provider_account_id,
             metadata: redact_provider_metadata(response.metadata.unwrap_or(Value::Null)),
@@ -371,6 +371,57 @@ impl LinkedIntegrationProvider for NangoProvider {
             completed: false,
             metadata: redact_provider_metadata(value),
         })
+    }
+
+    async fn revoke_remote_connection(&self, req: RemoteRevokeRequest) -> Result<()> {
+        let mut url = http::parse_url(&self.url("/connections"), |message| {
+            Error::provider("nango", message)
+        })?;
+        url.path_segments_mut()
+            .map_err(|()| Error::provider("nango", "Nango base URL cannot be a base"))?
+            .push(&req.connection.provider_account_id);
+        url.query_pairs_mut()
+            .append_pair("provider_config_key", &req.connection.connector);
+
+        // Nango's management endpoint is authenticated by the environment API
+        // key owned by this adapter. Nango has no tenant credential to place in
+        // a header or body.
+        let response = self
+            .client
+            .delete(url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| {
+                Error::provider(
+                    "nango",
+                    format!("connection revoke request failed: {error}"),
+                )
+            })?;
+        let body = http::bytes_response_capped(response, MAX_DELETE_RESPONSE_BYTES).await?;
+        // The current HTTP reference returns {"success":true}; the official
+        // Node client describes the same operation as bodyless. Accept either
+        // documented success representation, but never accept an explicit
+        // false acknowledgement from a raced/failed delete.
+        if body.is_empty() {
+            return Ok(());
+        }
+        let acknowledgement: Value = serde_json::from_slice(&body).map_err(|error| {
+            Error::Decode(format!(
+                "failed to decode Nango connection revoke response: {error}"
+            ))
+        })?;
+        match acknowledgement.get("success").and_then(Value::as_bool) {
+            Some(true) => Ok(()),
+            Some(false) => Err(Error::provider(
+                "nango",
+                "connection revoke was not confirmed by the provider",
+            )),
+            None => Err(Error::provider(
+                "nango",
+                "connection revoke response did not include success",
+            )),
+        }
     }
 
     async fn apply_source_selection(&self, req: ApplySourceSelectionRequest) -> Result<()> {

@@ -25,6 +25,8 @@ pub enum ObjectType {
     ApiKey,
     /// An AI agent principal.
     Agent,
+    /// A tenant-owned installed connector account.
+    ConnectorConnection,
 }
 
 /// Subject types on the subject side of an OpenFGA tuple.
@@ -76,6 +78,10 @@ pub enum Relation {
     Workspace,
     /// Contact object relationship.
     Contact,
+    /// Administrative control of a tenant-owned resource.
+    Manage,
+    /// Permission to invoke or otherwise consume a tenant-owned resource.
+    Use,
 }
 
 /// A fully qualified OpenFGA tuple key.
@@ -158,7 +164,7 @@ pub enum TupleOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SCHEMA_V1_JSON;
+    use crate::{MODEL_VERSION, SCHEMA_V1_JSON};
 
     #[test]
     fn display_strings_are_pinned() {
@@ -172,6 +178,7 @@ mod tests {
             (ObjectType::Session, "session"),
             (ObjectType::ApiKey, "api_key"),
             (ObjectType::Agent, "agent"),
+            (ObjectType::ConnectorConnection, "connector_connection"),
         ];
         for (value, label) in object_types {
             assert_eq!(value.to_string(), label);
@@ -198,6 +205,8 @@ mod tests {
             (Relation::Tenant, "tenant"),
             (Relation::Workspace, "workspace"),
             (Relation::Contact, "contact"),
+            (Relation::Manage, "manage"),
+            (Relation::Use, "use"),
         ];
         for (value, label) in relations {
             assert_eq!(value.to_string(), label);
@@ -261,8 +270,38 @@ mod tests {
     }
 
     #[test]
+    fn tuple_wire_format_agent_use_to_connector_connection() {
+        // Pins: connector grants use the typed connection object and `use`
+        // relation, so outbox identities cannot drift to ad hoc wire strings.
+        let agent_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("fixture agent UUID should parse");
+        let connection_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+            .expect("fixture connector connection UUID should parse");
+        let tuple = TupleKey::new(
+            UserType::Agent,
+            agent_id,
+            Relation::Use,
+            ObjectType::ConnectorConnection,
+            connection_id,
+        );
+
+        assert_eq!(
+            tuple.to_wire(),
+            TupleKeyWire {
+                user: "agent:11111111-1111-1111-1111-111111111111".to_string(),
+                relation: "use".to_string(),
+                object: "connector_connection:22222222-2222-2222-2222-222222222222".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn schema_v1_json_contains_security_contract_types_and_delegation() {
         // Pins: the deployed OpenFGA JSON model includes the auth object set and agent delegation.
+        assert_eq!(
+            MODEL_VERSION, 6,
+            "connector connection relations require a new outbox model version"
+        );
         let schema: serde_json::Value =
             serde_json::from_str(SCHEMA_V1_JSON).expect("schema_v1.json must parse");
         assert_eq!(schema["schema_version"], "1.2");
@@ -284,6 +323,7 @@ mod tests {
             [
                 "agent",
                 "api_key",
+                "connector_connection",
                 "contact",
                 "operator",
                 "service",
@@ -356,6 +396,69 @@ mod tests {
                     && child.get("tupleToUserset").is_none()
             }),
             "participant must grant the session contact via a same-object computed userset"
+        );
+    }
+
+    #[test]
+    fn connector_connection_schema_pins_manage_and_use_inheritance() {
+        // Pins: an installed connector is managed only by its owner or tenant
+        // administrators, while use is an explicit contact/agent/operator grant
+        // or inherited from manage.
+        let schema: serde_json::Value =
+            serde_json::from_str(SCHEMA_V1_JSON).expect("schema_v1.json must parse");
+        let definitions = schema["type_definitions"]
+            .as_array()
+            .expect("schema_v1.json type_definitions must be an array");
+        let connection = definitions
+            .iter()
+            .find(|definition| definition["type"] == "connector_connection")
+            .expect("schema_v1.json must define connector_connection");
+
+        assert_eq!(
+            connection["metadata"]["relations"],
+            serde_json::json!({
+                "tenant": {
+                    "directly_related_user_types": [{ "type": "tenant" }]
+                },
+                "owner": {
+                    "directly_related_user_types": [{ "type": "operator" }]
+                },
+                "use": {
+                    "directly_related_user_types": [
+                        { "type": "contact" },
+                        { "type": "agent" },
+                        { "type": "operator" }
+                    ]
+                }
+            })
+        );
+        assert_eq!(
+            connection["relations"],
+            serde_json::json!({
+                "tenant": { "this": {} },
+                "owner": { "this": {} },
+                "manage": {
+                    "union": {
+                        "child": [
+                            { "computedUserset": { "relation": "owner" } },
+                            {
+                                "tupleToUserset": {
+                                    "tupleset": { "relation": "tenant" },
+                                    "computedUserset": { "relation": "admin" }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "use": {
+                    "union": {
+                        "child": [
+                            { "this": {} },
+                            { "computedUserset": { "relation": "manage" } }
+                        ]
+                    }
+                }
+            })
         );
     }
 }

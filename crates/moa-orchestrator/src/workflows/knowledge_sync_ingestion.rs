@@ -189,6 +189,7 @@ pub trait KnowledgeSyncIngestionSteps {
         cursor: Option<String>,
         limit: u32,
         page_index: u32,
+        seen_cursors: Vec<String>,
     ) -> Result<KnowledgeSyncProviderPage, HandlerError>;
 
     /// Applies one provider page to local knowledge state.
@@ -228,6 +229,7 @@ pub async fn run_knowledge_sync_ingestion_workflow(
 ) -> Result<KnowledgeSyncIngestionReport, HandlerError> {
     let prepared = steps.prepare_ingestion_run(&request).await?;
     let mut cursor = None;
+    let mut seen_cursors = Vec::new();
     let mut page_index = 0_u32;
     let mut records_processed = 0_u64;
     let mut records_applied = 0_u64;
@@ -241,7 +243,13 @@ pub async fn run_knowledge_sync_ingestion_workflow(
             HandlerError::from(TerminalError::new("knowledge sync page limit overflow"))
         })?;
         let listed_page = match steps
-            .list_changed_records_page(&prepared, cursor.clone(), limit, page_index)
+            .list_changed_records_page(
+                &prepared,
+                cursor.clone(),
+                limit,
+                page_index,
+                seen_cursors.clone(),
+            )
             .await
         {
             Ok(page) => page,
@@ -274,10 +282,12 @@ pub async fn run_knowledge_sync_ingestion_workflow(
         };
         records_processed = records_processed.saturating_add(records_in_page);
         records_applied = records_applied.saturating_add(application.records_applied);
-
         if next_cursor.is_none() || reached_cap || empty_page {
             listing_exhaustive = provider_next_cursor.is_none() && !provider_returned_over_limit;
             break;
+        }
+        if let Some(next_cursor) = &next_cursor {
+            seen_cursors.push(next_cursor.clone());
         }
         cursor = next_cursor;
         page_index = page_index.saturating_add(1);
@@ -410,6 +420,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         cursor: Option<String>,
         limit: u32,
         page_index: u32,
+        _seen_cursors: Vec<String>,
     ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
         let config = self.config.clone();
         let tenant_id = prepared.run.tenant_id;
@@ -583,23 +594,8 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                     .await
                     .map_err(knowledge_ingestion_error)?;
 
-                let mut connection = repository
-                    .get_connection(connection_uid)
-                    .await
-                    .map_err(knowledge_ingestion_error)?
-                    .ok_or_else(|| {
-                        TerminalError::new_with_code(404, "knowledge connection not found")
-                    })?;
-                if connection.tenant_id != tenant_id {
-                    return Err(TerminalError::new_with_code(
-                        404,
-                        "knowledge connection tenant mismatch",
-                    )
-                    .into());
-                }
-                connection.last_synced_at = Some(completed_at);
                 repository
-                    .upsert_connection(connection)
+                    .mark_connection_synced(connection_uid, completed_at)
                     .await
                     .map_err(knowledge_ingestion_error)?;
                 Ok(Json::from(()))
@@ -731,7 +727,7 @@ impl ConnectionCredentialResolver for StoreConnectionCredentialResolver {
     async fn resolve(
         &self,
         connection: &KnowledgeConnection,
-    ) -> moa_knowledge::Result<RedactedSecret> {
+    ) -> moa_knowledge::Result<Option<RedactedSecret>> {
         self.credentials
             .resolve_linked_account(connection.tenant_id, connection, &self.caller)
             .await

@@ -1,6 +1,7 @@
 //! DB-backed tests for direct edge read routes.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::Router;
@@ -23,7 +24,7 @@ use moa_session::{PostgresSessionStore, testing};
 use moa_wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
 use moa_wire::lineage::LineageQueryResponse;
 use moa_wire::tenants::{TenantPurgeStatus, TenantPurgeStatusResponse};
-use reqwest::StatusCode;
+use reqwest::{Method as RequestMethod, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -52,6 +53,28 @@ impl AuthProvider for FixedAuth {
 
     fn name(&self) -> &'static str {
         "fixed-test"
+    }
+
+    fn requires_credentials(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Clone)]
+struct CountingAuth {
+    identity: Identity,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AuthProvider for CountingAuth {
+    async fn authenticate(&self, _credential: &Credential) -> Result<Identity, AuthError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.identity.clone())
+    }
+
+    fn name(&self) -> &'static str {
+        "counting-test"
     }
 
     fn requires_credentials(&self) -> bool {
@@ -200,6 +223,27 @@ async fn start_edge_with_auth_and_upstream(
     fga: Option<FgaClient>,
     upstream: &str,
 ) -> EdgeServer {
+    start_edge_with_auth_upstream_and_connector_management(
+        store,
+        database_url,
+        schema_name,
+        auth,
+        fga,
+        upstream,
+        false,
+    )
+    .await
+}
+
+async fn start_edge_with_auth_upstream_and_connector_management(
+    store: &PostgresSessionStore,
+    database_url: &str,
+    schema_name: &str,
+    auth: Arc<dyn AuthProvider>,
+    fga: Option<FgaClient>,
+    upstream: &str,
+    connector_management_enabled: bool,
+) -> EdgeServer {
     let mut config = MoaConfig::default();
     config.database.url = database_url.to_string();
     config.database.schema = Some(schema_name.to_string());
@@ -213,6 +257,7 @@ async fn start_edge_with_auth_and_upstream(
     let audit = moa_ocsf::AuditRuntime::start(pool.as_ref().clone())
         .expect("edge test audit runtime should start");
     let state = AppState {
+        connector_management_enabled,
         // The audit writer is owned by this test for its lifetime; dropping the
         // runtime aborts it, which is the same ownership the binary has.
         audit: audit.emitter(),
@@ -229,6 +274,10 @@ async fn start_edge_with_auth_and_upstream(
         session_store: Arc::new(store.clone()),
         proxy: Arc::new(
             OrchestratorProxy::new(upstream).expect("proxy URL should be syntactically valid"),
+        ),
+        connector_credentials: Arc::new(
+            moa_edge::connector_credential_proxy::ConnectorCredentialProxy::new(upstream)
+                .expect("credential proxy URL should be syntactically valid"),
         ),
         clickhouse_lineage: None,
         clickhouse_analytics: None,
@@ -1537,6 +1586,110 @@ async fn the_github_secret_scanning_placeholder_route_is_not_registered_db() {
     );
 
     stop_server(edge.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn disabled_connector_management_is_dark_before_auth_body_and_proxy_db() {
+    // Pins: the rollout switch makes both ordinary management and private
+    // credential proxy routes indistinguishable from absent routes before any
+    // caller authentication, JSON/header validation, or upstream request.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let auth_calls = Arc::new(AtomicUsize::new(0));
+    let upstream = start_purge_upstream().await;
+    let edge = start_edge_with_auth_upstream_and_connector_management(
+        &store,
+        &database_url,
+        &schema_name,
+        Arc::new(CountingAuth {
+            identity: identity(IdentityType::Operator, tenant_id),
+            calls: auth_calls.clone(),
+        }),
+        None,
+        &upstream.base_url,
+        false,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let connection_id = Uuid::now_v7();
+
+    let routes = [
+        (
+            RequestMethod::POST,
+            "/v1/connectors/connections".to_string(),
+        ),
+        (RequestMethod::GET, "/v1/connectors/connections".to_string()),
+        (
+            RequestMethod::GET,
+            format!("/v1/connectors/connections/{connection_id}"),
+        ),
+        (
+            RequestMethod::DELETE,
+            format!("/v1/connectors/connections/{connection_id}"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/verify"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/activate"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/suspend"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/resume"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/disconnect"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/delete"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/use/grant"),
+        ),
+        (
+            RequestMethod::POST,
+            format!("/v1/connectors/connections/{connection_id}/use/revoke"),
+        ),
+        (
+            RequestMethod::PUT,
+            format!("/v1/connectors/connections/{connection_id}/credentials/primary"),
+        ),
+    ];
+    for (method, path) in routes {
+        let response = client
+            .request(method, format!("{}{path}", edge.base_url))
+            .body("{")
+            .send()
+            .await
+            .expect("send disabled connector management request");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "disabled connector route {path} must stay dark"
+        );
+    }
+    assert_eq!(
+        auth_calls.load(Ordering::SeqCst),
+        0,
+        "dark connector routes must not authenticate callers"
+    );
+    assert!(
+        upstream.requests.lock().await.is_empty(),
+        "dark connector routes must not reach either orchestrator ingress"
+    );
+
+    stop_server(edge.server).await;
+    stop_server(upstream.server).await;
     cleanup_test_store(store, database_url, schema_name).await;
 }
 

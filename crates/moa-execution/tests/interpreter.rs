@@ -15,8 +15,8 @@ use moa_core::types::{
 use moa_execution::{
     budget::BudgetLedger,
     capability::{
-        CapabilitySource, ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass,
-        ExecutionEstimate, ExecutionHash, catalog_hash,
+        CapabilityPolicyContext, CapabilitySource, ExecutionCapability, ExecutionCapabilityCatalog,
+        ExecutionClass, ExecutionEstimate, ExecutionHash, catalog_hash,
     },
     compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
     completion::{CompletionEvaluationRequest, CompletionStatus, evaluate_completion},
@@ -988,6 +988,9 @@ fn capability() -> CapabilityReference {
 }
 
 fn catalog() -> ExecutionCapabilityCatalog {
+    let source = CapabilitySource::BuiltInTool {
+        name: "orders.lookup".to_string(),
+    };
     let capability = ExecutionCapability {
         reference: capability(),
         contract_revision: "contract-v1".to_string(),
@@ -999,9 +1002,8 @@ fn catalog() -> ExecutionCapabilityCatalog {
         default_effect: ActionPolicyEffect::Allow,
         idempotency_class: IdempotencyClass::Idempotent,
         execution_class: ExecutionClass::Data,
-        source: CapabilitySource::BuiltInTool {
-            name: "orders.lookup".to_string(),
-        },
+        policy_context: CapabilityPolicyContext::registered(source.clone()),
+        source,
         estimate: ExecutionEstimate {
             cost_microusd: 7,
             tokens: 11,

@@ -6,8 +6,8 @@ use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     domain::{
-        ConnectionStatus, CreateLinkTokenRequest, FetchRecordContentRequest, KnowledgeConnection,
-        KnowledgeObject, ListChangedRecordsRequest, ObjectStatus, ParseInput,
+        CreateLinkTokenRequest, FetchRecordContentRequest, KnowledgeConnection, KnowledgeObject,
+        ListChangedRecordsRequest, ObjectStatus, ParseInput,
     },
     ingestion::parse_input_from_record,
     parser::{DocumentParser, native::NativeDocumentParser},
@@ -452,8 +452,6 @@ fn live_connection(connector: &str, connection_id: &str, model: &str) -> Knowled
         provider: "nango".to_string(),
         connector: connector.to_string(),
         provider_account_id: connection_id.to_string(),
-        credential_ref: format!("nango:{connection_id}"),
-        status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({ "model": model }),
         information_barrier: None,
@@ -557,10 +555,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Builds the resolved credential a provider request carries.
-///
-/// Provider requests take a non-serializable redacted secret, so tests build one
-/// explicitly instead of smuggling material through the connection.
-fn test_credential() -> RedactedSecret {
-    RedactedSecret::new("test-provider-credential".to_string())
+/// Returns the absence of a tenant credential for deployment-authenticated Nango requests.
+fn test_credential() -> Option<RedactedSecret> {
+    None
 }

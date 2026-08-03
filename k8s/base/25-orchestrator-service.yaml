@@ -7,6 +7,7 @@ metadata:
     app.kubernetes.io/name: moa-orchestrator
     app.kubernetes.io/part-of: moa
 spec:
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: moa-orchestrator
     app.kubernetes.io/part-of: moa
@@ -17,3 +18,8 @@ spec:
     - name: health
       port: 9081
       targetPort: health
+    # Private connector credential ingress. ClusterIP plus the orchestrator
+    # NetworkPolicy limits this port to moa-edge pods in moa-system.
+    - name: credentials
+      port: 10023
+      targetPort: credentials

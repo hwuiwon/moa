@@ -681,7 +681,6 @@ fn connector_doc(name: &str) -> ArtifactDocument {
         "definition": {
             "type": "connector",
             "spec": {
-                "provider": "fixture",
                 "actions": [{
                     "id": "ping",
                     "description": "Ping the fixture provider.",

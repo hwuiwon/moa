@@ -11,6 +11,7 @@ use anyhow::Context;
 use clap::Parser;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_config::{AuthzEngine, optional_config_secret};
+use moa_edge::connector_credential_proxy::ConnectorCredentialProxy;
 use moa_edge::mcp::{self, McpHttpConfig};
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{AppState, KnowledgeWebhookEdgeConfig};
@@ -25,6 +26,16 @@ struct Args {
     /// Internal Restate ingress base URL.
     #[arg(long, env = "MOA_EDGE_UPSTREAM")]
     upstream: Option<String>,
+    /// Private orchestrator origin for connector credential ingress.
+    #[arg(long, env = "MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM")]
+    connector_credential_upstream: String,
+    /// Exposes connector management and credential routes during staged rollout.
+    #[arg(
+        long,
+        env = "MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED",
+        default_value_t = false
+    )]
+    connector_management_enabled: bool,
     /// Maximum edge Postgres pool connections.
     #[arg(long, env = "MOA_EDGE_DB_MAX_CONNECTIONS", default_value_t = 50)]
     db_max_connections: u32,
@@ -113,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
     .context("build edge session store")?;
 
     let state = AppState {
+        connector_management_enabled: args.connector_management_enabled,
         config: Arc::new(moa_config.clone()),
         auth,
         oauth_server,
@@ -126,6 +138,10 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         session_store: Arc::new(session_store),
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
+        connector_credentials: Arc::new(
+            ConnectorCredentialProxy::new(&args.connector_credential_upstream)
+                .context("build private connector credential proxy")?,
+        ),
         clickhouse_lineage: moa_config
             .clickhouse
             .as_ref()

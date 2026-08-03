@@ -617,6 +617,14 @@ fn validate_catalog(catalog: &ExecutionCapabilityCatalog, report: &mut Execution
                 "capability contract revision must not be empty",
             );
         }
+        if let Err(error) = capability.validate_policy_context() {
+            append_error(
+                report,
+                "invalid_capability_policy_context",
+                format!("{path}.policy_context"),
+                error,
+            );
+        }
         validate_capability_source(capability, &path, report);
         if capability.estimate.tasks != 1 {
             report.error(
@@ -666,6 +674,11 @@ fn validate_capability_source(
         }
         CapabilitySource::ActionArtifact { tool_name, .. } => tool_name.trim().is_empty(),
         CapabilitySource::ConnectorAction {
+            action_id,
+            tool_name,
+            ..
+        }
+        | CapabilitySource::InstalledConnectorAction {
             action_id,
             tool_name,
             ..
@@ -1168,6 +1181,7 @@ fn validate_plan_references(
     authorization: &ExecutionAuthorizationEnvelope,
     report: &mut ExecutionValidationReport,
 ) {
+    validate_agent_tool_name_ambiguity(plan, catalog, report);
     let catalog_refs = catalog
         .capabilities
         .iter()
@@ -1207,6 +1221,103 @@ fn validate_plan_references(
                 "skill_not_authorized",
                 "plan.nodes",
                 "plan references a skill outside the authorization envelope",
+            );
+        }
+    }
+}
+
+fn validate_agent_tool_name_ambiguity(
+    plan: &ExecutionPlanDefinition,
+    catalog: &ExecutionCapabilityCatalog,
+    report: &mut ExecutionValidationReport,
+) {
+    let capabilities = capability_lookup(catalog);
+    for (index, node) in plan.nodes.iter().enumerate() {
+        match &node.operation {
+            ExecutionOperation::Agent {
+                capability_refs, ..
+            } => validate_agent_tool_refs(
+                capability_refs,
+                &format!("plan.nodes[{index}].operation.capability_refs"),
+                &capabilities,
+                report,
+            ),
+            ExecutionOperation::Map {
+                task: MapTask::Agent {
+                    capability_refs, ..
+                },
+                ..
+            } => validate_agent_tool_refs(
+                capability_refs,
+                &format!("plan.nodes[{index}].operation.task.capability_refs"),
+                &capabilities,
+                report,
+            ),
+            ExecutionOperation::Reduce {
+                reducer:
+                    ExecutionReducer::Agent {
+                        capability_refs, ..
+                    },
+                ..
+            } => validate_agent_tool_refs(
+                capability_refs,
+                &format!("plan.nodes[{index}].operation.reducer.capability_refs"),
+                &capabilities,
+                report,
+            ),
+            ExecutionOperation::Capability { .. }
+            | ExecutionOperation::Map { .. }
+            | ExecutionOperation::Reduce { .. }
+            | ExecutionOperation::Review { .. }
+            | ExecutionOperation::WaitSignal { .. }
+            | ExecutionOperation::Output { .. } => {}
+        }
+    }
+}
+
+fn validate_agent_tool_refs(
+    references: &[moa_artifacts::execution_plan::CapabilityReference],
+    path: &str,
+    catalog: &BTreeMap<Vec<u8>, &ExecutionCapability>,
+    report: &mut ExecutionValidationReport,
+) {
+    let mut visible_names =
+        BTreeMap::<&str, Vec<&moa_artifacts::execution_plan::CapabilityReference>>::new();
+    for reference in references {
+        let Some(capability) = canonical_sort_key(reference)
+            .ok()
+            .and_then(|key| catalog.get(&key).copied())
+        else {
+            continue;
+        };
+        if let Some(tool_name) = capability.source.model_visible_tool_name() {
+            let visible_references = visible_names.entry(tool_name).or_default();
+            if !visible_references
+                .iter()
+                .any(|visible_reference| **visible_reference == *reference)
+            {
+                visible_references.push(reference);
+            }
+        }
+    }
+    for (tool_name, mut visible_references) in visible_names {
+        if visible_references.len() > 1 {
+            visible_references.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.version.cmp(&right.version))
+            });
+            let references = visible_references
+                .iter()
+                .map(|reference| format!("{}@{}", reference.name, reference.version))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            report.error(
+                "ambiguous_agent_capability_tool",
+                path,
+                format!(
+                    "task-local agent capability references {references} resolve to ambiguous model-visible tool `{tool_name}`"
+                ),
             );
         }
     }

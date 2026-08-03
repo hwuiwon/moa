@@ -12,7 +12,8 @@ use crate::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
         LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        RecordPage, RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest,
+        TriggeredSync, WebhookEvent,
     },
     error::Result,
 };
@@ -58,6 +59,15 @@ pub trait LinkedIntegrationProvider: Send + Sync {
     /// call. Implementations must therefore be naturally idempotent or purely
     /// read-only, and must never consume a provider quota per attempt.
     async fn start_initial_sync(&self, req: StartInitialSyncRequest) -> Result<InitialSyncStarted>;
+
+    /// Revokes the provider-native linked account selected by the connection.
+    ///
+    /// This method is required with no default because silently skipping remote
+    /// revocation would leave provider access live after MOA reports a
+    /// disconnect. Implementations must not classify an already-absent response
+    /// as success unless the provider's published contract guarantees that
+    /// replay behavior.
+    async fn revoke_remote_connection(&self, req: RemoteRevokeRequest) -> Result<()>;
 
     /// Applies provider-native selected source state for one connection.
     async fn apply_source_selection(&self, _req: ApplySourceSelectionRequest) -> Result<()> {
@@ -163,8 +173,8 @@ impl RecordContentFetcher for LinkedProviderContentFetcher {
 /// closed service-actor identity, and tests implement it with a fixed value.
 #[async_trait]
 pub trait ConnectionCredentialResolver: Send + Sync {
-    /// Resolves the credential authorizing requests for `connection`.
-    async fn resolve(&self, connection: &KnowledgeConnection) -> Result<RedactedSecret>;
+    /// Resolves the tenant credential authorizing requests for `connection`, when required.
+    async fn resolve(&self, connection: &KnowledgeConnection) -> Result<Option<RedactedSecret>>;
 }
 
 pub(crate) mod http {

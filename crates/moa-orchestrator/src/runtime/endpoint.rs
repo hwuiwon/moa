@@ -35,6 +35,8 @@ use restate_sdk::prelude::*;
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
+use crate::runtime::deps::RuntimeDeps;
+use crate::services::connectors::{ConnectorConnections, ConnectorConnectionsImpl};
 use crate::services::experiments::{Experiments, ExperimentsImpl};
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
@@ -84,6 +86,7 @@ const CORE_HEAD_SERVICE_NAMES: &[&str] = &[
     "Authz",
     "AuthzChallenges",
     "Contacts",
+    "ConnectorConnections",
 ];
 
 const CORE_BODY_SERVICE_NAMES: &[&str] = &[
@@ -161,6 +164,7 @@ pub fn build_endpoint(
     fga_client: Option<FgaClient>,
     providers: Arc<ProviderRegistry>,
     tool_router: Arc<ToolRouter>,
+    runtime_deps: &RuntimeDeps,
     session_limits: SessionLimitsConfig,
     config: Arc<MoaConfig>,
     contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
@@ -171,6 +175,8 @@ pub fn build_endpoint(
     runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
     score_lineage: Option<crate::lineage::ScoreLineageHandle>,
 ) -> Endpoint {
+    let connector_catalogs = runtime_deps.connector_catalogs.clone();
+    let connector_completion = runtime_deps.connector_completion.clone();
     let mut builder = Endpoint::builder()
         .bind(
             SessionStoreImpl::new(
@@ -186,11 +192,11 @@ pub fn build_endpoint(
                 .with_session_limits(session_limits.clone())
                 .serve(),
         )
-        .bind(AgentDefinitionsImpl::new(pool.clone(), tool_router.clone()).serve())
+        .bind(AgentDefinitionsImpl::new(pool.clone(), connector_catalogs.clone()).serve())
         .bind(AgentsImpl::new(pool.clone(), fga_client.clone()).serve())
         .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone()).serve())
         .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone())).serve())
-        .bind(ArtifactReleaseImpl::new(pool.clone(), tool_router.clone()).serve())
+        .bind(ArtifactReleaseImpl::new(pool.clone(), connector_catalogs.clone()).serve())
         .bind(
             ActionReviewsImpl::new(
                 pool.clone(),
@@ -210,7 +216,12 @@ pub fn build_endpoint(
                 contact_token_issuer,
             )
             .serve(),
-        )
+        );
+
+    builder = builder
+        .bind(ConnectorConnectionsImpl::new(runtime_deps.connector_management.clone()).serve());
+
+    builder = builder
         .bind(ExperimentsImpl::new(pool.clone(), providers.clone(), session_store.clone()).serve());
 
     builder = builder
@@ -218,13 +229,21 @@ pub fn build_endpoint(
         .bind(
             ToolExecutorImpl::new(tool_router.clone())
                 .with_session_store(session_store.clone(), session_store.clone())
+                .with_connectors(connector_catalogs.clone(), connector_completion)
                 .serve(),
         )
-        .bind(ActionPolicyImpl::new(tool_router.clone(), session_store.clone()).serve())
+        .bind(
+            ActionPolicyImpl::new(
+                tool_router.clone(),
+                connector_catalogs.clone(),
+                session_store.clone(),
+            )
+            .serve(),
+        )
         .bind(
             ExecutionImpl::new(
                 pool.clone(),
-                tool_router.clone(),
+                connector_catalogs.clone(),
                 config.execution.clone(),
                 session_store.clone(),
             )
@@ -233,13 +252,16 @@ pub fn build_endpoint(
         .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
         .bind(SecurityEventsImpl::new(pool.clone()).serve())
         .bind(
-            KnowledgeImpl::new(KnowledgeService::from_config(
-                pool.clone(),
-                kms.clone(),
-                credential_vault.clone(),
-                config.as_ref(),
-                runtime_cache.clone(),
-            ))
+            KnowledgeImpl::new(
+                KnowledgeService::from_config(
+                    pool.clone(),
+                    kms.clone(),
+                    credential_vault.clone(),
+                    config.as_ref(),
+                    runtime_cache.clone(),
+                )
+                .with_connector_connections(runtime_deps.connector_connections.clone()),
+            )
             .serve(),
         )
         .bind(
@@ -289,7 +311,7 @@ pub fn build_endpoint(
                 session_store.clone(),
                 session_limits.clone(),
                 providers.clone(),
-                tool_router.clone(),
+                connector_catalogs.clone(),
             )
             .serve(),
         )
@@ -307,14 +329,12 @@ pub fn build_endpoint(
                         .clone()
                         .unwrap_or_else(|| config.models.main.clone()),
                 ),
-                tool_router.clone(),
             )
             .serve(),
         )
         .bind(
             ExecutionTaskImpl::new(
                 pool.clone(),
-                tool_router.clone(),
                 session_store.clone(),
                 session_limits.clone(),
                 channel_adapters.clone(),

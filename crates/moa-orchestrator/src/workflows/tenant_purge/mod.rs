@@ -537,12 +537,62 @@ mod tests {
             unreachable!("tenant purge never creates credentials")
         }
 
+        async fn stage(
+            &self,
+            _identity: moa_core::types::credentials::CredentialIdentity,
+            _material: secrecy::SecretString,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::CredentialStagingToken, CredentialError> {
+            unreachable!("tenant purge never stages credentials")
+        }
+
+        async fn activate_staged(
+            &self,
+            _staged: &moa_core::types::credentials::CredentialStagingToken,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
+            unreachable!("tenant purge never activates staged credentials")
+        }
+
+        async fn rollback_activation(
+            &self,
+            _candidate: moa_core::types::credentials::CredentialRef,
+            _prior_active: Option<moa_core::types::credentials::CredentialRef>,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
+            unreachable!("tenant purge never rolls back credential activation")
+        }
+
         async fn resolve(
             &self,
             _source: &moa_core::types::credentials::CredentialSource,
             _ctx: &CredentialContext,
         ) -> Result<moa_core::types::credentials::RedactedSecret, CredentialError> {
             unreachable!("tenant purge never resolves credentials")
+        }
+
+        async fn has_active(
+            &self,
+            _identity: &moa_core::types::credentials::CredentialIdentity,
+            _ctx: &CredentialContext,
+        ) -> Result<bool, CredentialError> {
+            unreachable!("tenant purge never reads credential readiness")
+        }
+
+        async fn has_active_batch(
+            &self,
+            _identities: &[moa_core::types::credentials::CredentialIdentity],
+            _ctx: &CredentialContext,
+        ) -> Result<Vec<bool>, CredentialError> {
+            unreachable!("tenant purge never reads credential readiness")
+        }
+
+        async fn resolve_active(
+            &self,
+            _identity: &moa_core::types::credentials::CredentialIdentity,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::RedactedSecret, CredentialError> {
+            unreachable!("tenant purge never resolves active credentials")
         }
 
         async fn describe_batch(
@@ -571,6 +621,14 @@ mod tests {
             _ctx: &CredentialContext,
         ) -> Result<(), CredentialError> {
             unreachable!("tenant purge never revokes credentials")
+        }
+
+        async fn revoke_connection(
+            &self,
+            _connection_uid: uuid::Uuid,
+            _ctx: &CredentialContext,
+        ) -> Result<u64, CredentialError> {
+            unreachable!("tenant purge never performs ordinary connection revocation")
         }
 
         async fn delete_connection(

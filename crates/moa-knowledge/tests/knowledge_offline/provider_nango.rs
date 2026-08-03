@@ -8,10 +8,9 @@ use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     Error,
     domain::{
-        ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest,
-        FetchRecordContentRequest, KnowledgeConnection, ListChangedRecordsRequest,
-        ProviderIntegration, ProviderRecord, ProviderRecordAcl, StartInitialSyncRequest,
-        TriggerSyncRequest,
+        ApplySourceSelectionRequest, CreateLinkTokenRequest, FetchRecordContentRequest,
+        KnowledgeConnection, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
+        ProviderRecordAcl, RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest,
     },
     providers::{LinkedIntegrationProvider, nango::NangoProvider},
 };
@@ -21,7 +20,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{bearer_token, body_json, header, method, path, query_param},
+    matchers::{bearer_token, body_bytes, body_json, header, method, path, query_param},
 };
 
 fn connection() -> KnowledgeConnection {
@@ -32,10 +31,6 @@ fn connection() -> KnowledgeConnection {
         provider: "nango".to_string(),
         connector: "google-drive".to_string(),
         provider_account_id: "conn_123".to_string(),
-        // Opaque durable reference only: the provider credential now arrives
-        // through the resolved secret, never through the connection row.
-        credential_ref: Uuid::from_u128(103).to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
         source_selection: json!({}),
         information_barrier: None,
@@ -186,6 +181,110 @@ async fn initial_link_sync_fails_closed_when_the_provider_rejects_the_start() {
         })
         .await
         .expect_err("a rejected start must fail the initial link closed");
+}
+
+#[tokio::test]
+async fn remote_revoke_deletes_the_exact_nango_connection_without_a_secret_body() {
+    // Pins: remote revocation uses Nango's current connection-delete contract:
+    // exact provider account path, provider-config query, environment bearer
+    // key, and no credential-bearing request body.
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/connections/conn_123"))
+        .and(query_param("provider_config_key", "google-drive"))
+        .and(bearer_token("nango-test-key"))
+        .and(body_bytes(Vec::<u8>::new()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let request = RemoteRevokeRequest {
+        connection: connection(),
+        credential: None,
+    };
+
+    provider
+        .revoke_remote_connection(request)
+        .await
+        .expect("delete the exact Nango connection through the local fixture");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should retain the exact revoke request");
+    assert_eq!(requests.len(), 1, "exactly one remote delete is allowed");
+    assert_eq!(
+        requests[0].url.query(),
+        Some("provider_config_key=google-drive")
+    );
+}
+
+#[tokio::test]
+async fn remote_revoke_rejects_a_false_nango_delete_acknowledgement() {
+    // Pins: a raced Nango delete can return HTTP 200 with `success:false`; that
+    // does not prove the remote account is absent and cannot advance disconnect.
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/connections/conn_123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": false })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let error = provider
+        .revoke_remote_connection(RemoteRevokeRequest {
+            connection: connection(),
+            credential: None,
+        })
+        .await
+        .expect_err("success:false must not be reported as a completed revoke");
+
+    assert!(
+        matches!(
+            error,
+            Error::Provider { provider, message }
+                if provider == "nango" && message == "connection revoke was not confirmed by the provider"
+        ),
+        "false acknowledgement should produce the exact safe provider error"
+    );
+}
+
+#[tokio::test]
+async fn remote_revoke_does_not_invent_nango_already_absent_replay_success() {
+    // Pins: Nango publishes possible 404s but no idempotent replay guarantee.
+    // Until durable disconnect progress resolves the unknown-outcome boundary,
+    // an already-absent-looking response remains an error rather than success.
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/connections/conn_123"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "code": "unknown_connection" },
+            "reflected_secret": "primary-secret-must-not-leak"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let error = provider
+        .revoke_remote_connection(RemoteRevokeRequest {
+            connection: connection(),
+            credential: None,
+        })
+        .await
+        .expect_err("an undocumented replay response must remain resumable/unknown");
+
+    assert!(matches!(error, Error::HttpStatus { status: 404, .. }));
+    assert!(
+        !format!("{error:?}").contains("primary-secret-must-not-leak"),
+        "provider response bodies and credentials must not enter errors"
+    );
 }
 
 #[tokio::test]
@@ -883,6 +982,6 @@ async fn sync_completed_webhook_verifies_signature_and_rejects_bad_signature() {
 ///
 /// Provider requests take a non-serializable redacted secret, so tests build one
 /// explicitly instead of smuggling material through the connection.
-fn test_credential() -> RedactedSecret {
-    RedactedSecret::new("test-provider-credential".to_string())
+fn test_credential() -> Option<RedactedSecret> {
+    None
 }

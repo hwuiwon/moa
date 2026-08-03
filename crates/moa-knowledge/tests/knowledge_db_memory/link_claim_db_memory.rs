@@ -4,7 +4,7 @@ use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
     domain::{
-        ConnectionStatus, KnowledgeConnection, LinkClaimReservation, LinkClaimState,
+        KnowledgeConnection, KnowledgeCredentialOwnership, LinkClaimReservation, LinkClaimState,
         LinkClaimTransition, NewLinkClaim,
     },
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
@@ -27,7 +27,14 @@ fn new_claim(tenant_id: TenantId, connection_uid: Uuid, operation_id: &str) -> N
         request_hash: format!("hash-{operation_id}"),
         owner_identity_id: Some(Uuid::now_v7()),
         connection_uid,
-        previous_credential_ref: None,
+    }
+}
+
+fn credential_written(candidate_credential_ref: String) -> LinkClaimTransition {
+    LinkClaimTransition::CredentialWritten {
+        credential_ownership: KnowledgeCredentialOwnership::MoaManaged,
+        candidate_credential_ref: Some(candidate_credential_ref),
+        previous_vault_credential_ref: None,
     }
 }
 
@@ -39,8 +46,6 @@ fn connection(tenant_id: TenantId) -> KnowledgeConnection {
         provider: "merge".to_string(),
         connector: "knowledgebase".to_string(),
         provider_account_id: format!("linked-account-{}", Uuid::now_v7()),
-        credential_ref: Uuid::now_v7().to_string(),
-        status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,
@@ -48,6 +53,29 @@ fn connection(tenant_id: TenantId) -> KnowledgeConnection {
         updated_at: now,
         last_synced_at: None,
     }
+}
+
+async fn insert_connector_parent(
+    db: &postgres::TestDb,
+    connection: &KnowledgeConnection,
+    lifecycle_status: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, $3, 'knowledge:merge', 1, '{}'::JSONB, $4, 'ready')
+        "#,
+    )
+    .bind(connection.connection_uid)
+    .bind(connection.tenant_id.0)
+    .bind(&connection.connector)
+    .bind(lifecycle_status)
+    .execute(db.store().pool())
+    .await
+    .expect("insert generic connector parent for knowledge fixture");
 }
 
 #[tokio::test]
@@ -86,14 +114,27 @@ async fn link_claim_transitions_are_compare_and_swap_and_terminal_states_stick_d
         "finalization must be impossible before the credential exists"
     );
 
+    let parent = repository
+        .advance_link_claim(
+            tenant_id,
+            &operation_id,
+            LinkClaimTransition::ParentClaimed {
+                parent_created_by_claim: true,
+                credential_expected_generation: 1,
+            },
+        )
+        .await
+        .expect("record parent claim")
+        .expect("parent transition should apply");
+    assert_eq!(parent.state, LinkClaimState::ParentClaimed);
+    assert!(parent.parent_created_by_claim);
+
     let candidate = Uuid::now_v7().to_string();
     let written = repository
         .advance_link_claim(
             tenant_id,
             &operation_id,
-            LinkClaimTransition::CredentialWritten {
-                candidate_credential_ref: candidate.clone(),
-            },
+            credential_written(candidate.clone()),
         )
         .await
         .expect("record candidate")
@@ -105,15 +146,13 @@ async fn link_claim_transitions_are_compare_and_swap_and_terminal_states_stick_d
     );
 
     // Repeating the same transition is not a silent no-op success: the claim has
-    // already left `reserved`, so the compare-and-swap reports the loss.
+    // already left `parent_claimed`, so the compare-and-swap reports the loss.
     assert!(
         repository
             .advance_link_claim(
                 tenant_id,
                 &operation_id,
-                LinkClaimTransition::CredentialWritten {
-                    candidate_credential_ref: Uuid::now_v7().to_string(),
-                },
+                credential_written(Uuid::now_v7().to_string()),
             )
             .await
             .expect("attempt duplicate credential write")
@@ -152,6 +191,112 @@ async fn link_claim_transitions_are_compare_and_swap_and_terminal_states_stick_d
         .expect("read claim")
         .expect("claim should exist");
     assert_eq!(claim.state, LinkClaimState::Compensated);
+}
+
+#[tokio::test]
+async fn ownerless_service_actor_can_resume_but_cannot_create_link_claim_db_memory() {
+    // Pins: only an authenticated operator may establish durable ownership of a
+    // new link. A closed service actor can replay the exact already-owned claim,
+    // but an ownerless first attempt writes no row.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap ownerless link claim db");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repository = repository(&db, tenant_id);
+    let connection_uid = Uuid::now_v7();
+    let operation_id = format!("link-{}", Uuid::now_v7());
+    let mut ownerless = new_claim(tenant_id, connection_uid, &operation_id);
+    ownerless.owner_identity_id = None;
+
+    assert_eq!(
+        repository
+            .reserve_link_claim(ownerless.clone())
+            .await
+            .expect("ownerless reservation should return a typed outcome"),
+        LinkClaimReservation::OwnerRequired
+    );
+    assert_eq!(
+        repository
+            .get_link_claim(tenant_id, &operation_id)
+            .await
+            .expect("read after refused ownerless reservation"),
+        None,
+        "ownerless first use must not insert a claim"
+    );
+
+    let owned = new_claim(tenant_id, connection_uid, &operation_id);
+    let owner = owned
+        .owner_identity_id
+        .expect("operator fixture should carry an owner");
+    assert!(matches!(
+        repository
+            .reserve_link_claim(owned)
+            .await
+            .expect("operator should reserve claim"),
+        LinkClaimReservation::Reserved(_)
+    ));
+
+    let replay = repository
+        .reserve_link_claim(ownerless)
+        .await
+        .expect("service actor should resume exact claim");
+    let LinkClaimReservation::Existing(replay) = replay else {
+        panic!("exact ownerless replay should return the existing claim");
+    };
+    assert_eq!(replay.owner_identity_id, Some(owner));
+    assert_eq!(replay.connection_uid, connection_uid);
+}
+
+#[tokio::test]
+async fn parent_claim_phase_records_exact_parent_ownership_before_credentials_db_memory() {
+    // Pins: the claim durably distinguishes a parent it created from a shared
+    // pre-existing parent before a credential can be recorded, so compensation
+    // cannot delete shared connector state.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap parent ownership claim db");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repository = repository(&db, tenant_id);
+
+    for parent_created_by_claim in [false, true] {
+        let connection_uid = Uuid::now_v7();
+        let operation_id = format!("link-{}", Uuid::now_v7());
+        repository
+            .reserve_link_claim(new_claim(tenant_id, connection_uid, &operation_id))
+            .await
+            .expect("reserve parent ownership claim");
+
+        assert!(
+            repository
+                .advance_link_claim(
+                    tenant_id,
+                    &operation_id,
+                    credential_written(Uuid::now_v7().to_string()),
+                )
+                .await
+                .expect("attempt credential before parent")
+                .is_none(),
+            "credential write must not skip the parent claim phase"
+        );
+
+        let parent = repository
+            .advance_link_claim(
+                tenant_id,
+                &operation_id,
+                LinkClaimTransition::ParentClaimed {
+                    parent_created_by_claim,
+                    credential_expected_generation: 1,
+                },
+            )
+            .await
+            .expect("record parent ownership")
+            .expect("parent claim transition should apply");
+        assert_eq!(parent.state, LinkClaimState::ParentClaimed);
+        assert_eq!(
+            parent.parent_created_by_claim, parent_created_by_claim,
+            "the durable ownership bit must match the managed-parent outcome"
+        );
+    }
 }
 
 #[tokio::test]
@@ -228,9 +373,7 @@ async fn forced_rls_denies_missing_and_wrong_tenant_claim_access_as_moa_app_db_m
             .advance_link_claim(
                 owner,
                 &operation_id,
-                LinkClaimTransition::CredentialWritten {
-                    candidate_credential_ref: Uuid::now_v7().to_string(),
-                },
+                credential_written(Uuid::now_v7().to_string()),
             )
             .await
             .expect("attempt cross-tenant transition")
@@ -283,8 +426,10 @@ async fn provider_trigger_boundary_is_write_once_and_survives_status_updates_db_
         .expect("bootstrap trigger boundary db");
     let tenant_id = TenantId::from(Uuid::now_v7());
     let repository = repository(&db, tenant_id);
+    let fixture = connection(tenant_id);
+    insert_connector_parent(&db, &fixture, "active").await;
     let connection = repository
-        .upsert_connection(connection(tenant_id))
+        .upsert_connection(fixture)
         .await
         .expect("store connection");
     let mut run = moa_knowledge::domain::KnowledgeSyncRun {

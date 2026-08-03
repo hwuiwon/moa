@@ -67,7 +67,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of complete MCP server objects; replaces file-backed server configuration. Every object requires `name` and `url`. `credentials` may name one deployment environment variable using `bearer` or `api_key`; omit it for an unauthenticated connector. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. `required` defaults to `false`: an optional server that fails discovery removes only its own tools and is recorded as typed health, while a `required` server that fails discovery fails startup. `discovery` defaults to `eager`; `lazy` defers a server's tools to the first background catalog refresh so a slow or unused connector never delays startup. `required` combined with `lazy` is rejected — "required" means verified at startup. Duplicate server names are rejected rather than silently overwriting each other's configuration. |
+| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of operator-owned deployment MCP server objects. Every object requires `name` and `url`. `credentials` may name one deployment environment variable using `bearer` or `api_key`; omit it for an unauthenticated server. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. `required` defaults to `false`: an optional server that fails discovery removes only its own tools and is recorded as typed health, while a `required` server that fails discovery fails startup. `discovery` defaults to `eager`; `lazy` defers a server's tools to the first background catalog refresh. `required` combined with `lazy` is rejected. Duplicate server names are rejected. Tenant connector connections do not consume this configuration. |
 
 ### `sandbox_policy`
 
@@ -610,7 +610,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_POSTMARK_*` | Postmark live-email credentials |
 | `MOA_E2B_*` | E2B sandbox credentials |
 | `MOA_OPENROUTER_*` | OpenRouter credentials (deploy) |
-| `MOA_EDGE_*` | Edge binary bind/upstream and exact MCP allowlists (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`) |
+| `MOA_EDGE_*` | Edge binary bind/upstreams, connector rollout switch, and exact inbound MCP allowlists (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM`, `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`). Connector management defaults dark: when false, every `/v1/connectors/connections...` route returns 404 before authentication, translation, or proxying. The credential upstream must target the orchestrator's private port 10023, never Restate or a public endpoint. Local Compose explicitly opts in; the Kubernetes base explicitly remains false. |
 | `MOA_RESTATE_DEPLOYMENT_*` | Restate deploy-registration (`MOA_RESTATE_DEPLOYMENT_HOST`/`_URI`) |
 
 ### Approved exact names
@@ -714,16 +714,16 @@ convention for live-test gates.
 | `SMOKE_MODEL` / `SMOKE_PROMPT` / `SMOKE_INGRESS_PORT` / `SMOKE_*_BUDGET_SECONDS` | Smoke traffic and timing budgets |
 | `OBSERVABILITY_TOOLS_ALLOW_UNPINNED` | Accepts a non-pinned `kubeconform`/`alloy`/`promtool`, acknowledging that a local pass may not predict CI |
 
-### Connector tool names changed to server-qualified references
+### Operator MCP tool names changed to server-qualified references
 
-Discovered MCP tools now register as
+Discovered operator-owned MCP tools now register as
 `mcp__{server_byte_len}_{server}__{remote_tool}` rather than under the name the
 server publishes. **Any persisted action-policy rule or
 `permissions.always_deny` / `permissions.admin_review` pattern targeting a
-connector tool by its unqualified name stops matching after upgrade**, and for
+operator MCP tool by its unqualified name stops matching after upgrade**, and for
 an `admin_review` pattern that fails open: a tool that was review-gated becomes
 ungated. Rewrite those patterns against the qualified reference; `mcp__*` gates
-every connector tool at once.
+every operator MCP tool at once.
 
 The router logs a warning at startup — and after every catalog refresh — for
 each configured permission pattern that matches no registered tool, which is how
@@ -733,17 +733,22 @@ pattern matching nothing is almost always a mistake regardless of cause.
 Model-visible tool names are part of the cached prompt prefix, so deployments
 running MCP servers should expect one cache-cold period per session on upgrade.
 
-### MCP tool permission posture
+### Operator MCP tool permission posture
 
-Non-builtin tools (MCP servers) now default to **admin review** at the tool
+Non-builtin operator MCP tools now default to **admin review** at the tool
 descriptor level (`crates/moa-hands/src/core/policy.rs`): a tenant must approve
 an MCP tool action unless an operator action-policy rule (or config) grants it.
 Builtin hands keep their own per-tool defaults. Operator rules always override
 the descriptor default.
-MCP tool annotations are treated as untrusted hints by default. A tool becomes
+Operator MCP tool annotations are treated as untrusted hints by default. A tool becomes
 retry-safe only when its exact server config sets `trust_tool_annotations` to
 `true`, the negotiated protocol revision is `2025-03-26` or newer, and the
 discovered tool declares `idempotentHint=true`; server names never imply trust.
+
+Tenant connector actions do not inherit these deployment-name rules. They are
+reviewed constrained HTTP actions with exact connection/binding/generation pins
+and ephemeral authorized `conn__...` catalog references. See
+[Connectors And Connections](24-connectors-and-connections.md).
 
 ### Hardcoded tuning knobs
 

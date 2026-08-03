@@ -50,6 +50,10 @@ async fn install_is_non_serving_and_deploy_requires_an_attestation_db_memory() -
         HashMap::new(),
         moa_hands::local_development_sandbox_policy(),
     ));
+    let tool_catalog = tool_router
+        .activated_catalog()
+        .pin()
+        .expect("test deployment catalog should be pinnable");
     crate::artifact_release::seed_environment(
         &pool,
         tenant_id,
@@ -132,7 +136,7 @@ async fn install_is_non_serving_and_deploy_requires_an_attestation_db_memory() -
     // A deploy with no attestation for this subject is refused.
     let unattested = deploy_inner(
         pool.clone(),
-        tool_router.clone(),
+        tool_catalog.clone(),
         AgentDeployRequest {
             tenant_id,
             installation_uid: installed.installation_uid,
@@ -161,7 +165,7 @@ async fn install_is_non_serving_and_deploy_requires_an_attestation_db_memory() -
     let deployed_v1 = map_handler_error(
         deploy_inner(
             pool.clone(),
-            tool_router.clone(),
+            tool_catalog.clone(),
             AgentDeployRequest {
                 tenant_id,
                 installation_uid: installed.installation_uid,
@@ -179,7 +183,7 @@ async fn install_is_non_serving_and_deploy_requires_an_attestation_db_memory() -
     // The same attestation cannot deploy twice.
     let replay = deploy_inner(
         pool.clone(),
-        tool_router.clone(),
+        tool_catalog.clone(),
         AgentDeployRequest {
             tenant_id,
             installation_uid: installed.installation_uid,
@@ -205,7 +209,7 @@ async fn install_is_non_serving_and_deploy_requires_an_attestation_db_memory() -
     let deployed_v2 = map_handler_error(
         deploy_inner(
             pool.clone(),
-            tool_router,
+            tool_catalog,
             AgentDeployRequest {
                 tenant_id,
                 installation_uid: installed.installation_uid,

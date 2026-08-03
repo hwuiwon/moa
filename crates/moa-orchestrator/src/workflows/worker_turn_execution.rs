@@ -746,6 +746,7 @@ async fn handle_tool_call(
                 generation: tool_context.generation,
             },
             capability_provenance: None,
+            capability_policy_context: None,
             resource_budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         },
         &workflow.session_limits,

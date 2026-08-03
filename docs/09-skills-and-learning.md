@@ -98,12 +98,22 @@ Every entry includes a stable reference/version, description, input/output
 schemas, action/risk and idempotency classes, execution class, source
 provenance, authorization metadata, and optional cost estimate.
 
-The catalog merges typed built-ins, serving actions and connector actions,
-serving skill actions/code, memory operations, currently connected MCP tools
-with stable schemas and policies, and datasource reads backed by typed query
-operations. A connection ID alone is not a capability. Every invocation goes
-through the existing action-policy and `ToolExecutor` or typed service owner;
-the execution interpreter never bypasses governance.
+The immutable deployment catalog merges typed built-ins, serving actions,
+serving skill actions/code, memory operations, operator-owned MCP tools with
+stable schemas/policies, and datasource reads backed by typed query operations.
+For one authenticated request, MOA may add an ephemeral tenant connector
+overlay only from delegated `Use`, the exact agent connector bindings, and
+enabled action bindings at the current non-quarantined Active connection
+generation. The overlay carries immutable definition, binding, generation,
+contract, action, and policy-floor pins; a `conn__...` model name or connection
+ID alone is not a capability and is never parsed for authority.
+
+Nango/Merge knowledge connections are intentionally absent from the execution
+catalog. They run through the knowledge sync workflow and never become
+model-visible connector actions. Every reviewed HTTP connector action still
+goes through action policy and `ToolExecutor`, and the execution interpreter
+never bypasses governance. See
+[Connectors And Connections](24-connectors-and-connections.md).
 
 ## Storage
 

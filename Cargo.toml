@@ -17,6 +17,7 @@ members = [
     "crates/moa-brain",
     "crates/moa-retrieval",
     "crates/moa-contacts",
+    "crates/moa-connectors",
     "crates/moa-observability",
     "crates/moa-session",
     "crates/moa-migrations",
@@ -70,6 +71,7 @@ default-members = [
     "crates/moa-brain",
     "crates/moa-retrieval",
     "crates/moa-contacts",
+    "crates/moa-connectors",
     "crates/moa-observability",
     "crates/moa-session",
     "crates/moa-migrations",
@@ -121,6 +123,7 @@ moa-agents = { path = "crates/moa-agents" }
 moa-brain = { path = "crates/moa-brain" }
 moa-retrieval = { path = "crates/moa-retrieval" }
 moa-contacts = { path = "crates/moa-contacts" }
+moa-connectors = { path = "crates/moa-connectors" }
 moa-core = { path = "crates/moa-core" }
 moa-config = { path = "crates/moa-config" }
 moa-wire = { path = "crates/moa-wire" }

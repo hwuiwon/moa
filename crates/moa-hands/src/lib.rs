@@ -11,10 +11,10 @@ pub use adapters::mcp::{MCPClient, McpDiscoveredTool};
 pub use core::{
     ActionOrigin, CandidateConnector, CatalogDefect, HandLeaseReaper, HandLeaseReaperConfig,
     HandRoute, MCP_TOOL_REFERENCE_PREFIX, McpCatalogActivation, McpCatalogRefresh,
-    McpConnectorHealth, PinnedToolContract, PinnedToolOwner, PostgresExpiredHandLeaseClaims,
-    PostgresTenantSandboxPolicyStore, PreparedActionInvocation, TenantSandboxPolicyStore,
-    ToolCallScope, ToolCatalogDrift, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution,
-    ToolRegistry, ToolRouter, deployment_sandbox_policy, governed_tool_contract_revision,
-    local_development_sandbox_policy, mcp_tool_reference, route_sandbox_policy,
-    spawn_mcp_catalog_refresh,
+    McpConnectorHealth, PendingConnectorToolOutput, PinnedToolContract, PinnedToolOwner,
+    PostgresExpiredHandLeaseClaims, PostgresTenantSandboxPolicyStore, PreparedActionInvocation,
+    TenantSandboxPolicyStore, ToolCallScope, ToolCatalogDrift, ToolCatalogPin, ToolCatalogSnapshot,
+    ToolExecution, ToolRegistry, ToolRouter, deployment_sandbox_policy,
+    governed_tool_contract_revision, local_development_sandbox_policy, mcp_tool_reference,
+    route_sandbox_policy, spawn_mcp_catalog_refresh,
 };

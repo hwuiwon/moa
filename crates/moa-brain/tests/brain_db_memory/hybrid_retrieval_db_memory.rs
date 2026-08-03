@@ -403,12 +403,33 @@ async fn seed_knowledge_document_chunks(
 
     sqlx::query(
         r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, $3, 'knowledge:merge', 1,
+                jsonb_build_object(
+                    'provider_config_key', $4,
+                    'provider_connection_id', $5,
+                    'connector', 'drive'),
+                'active', 'ready')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(format!("duplicate-crowding-{object_slug}"))
+    .bind(format!("duplicate-crowding-{object_slug}"))
+    .bind(format!("acct-{object_slug}"))
+    .execute(pool)
+    .await
+    .expect("insert duplicate-crowding connector parent");
+    sqlx::query(
+        r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, metadata
+            provider_connection_id, connector, metadata
         )
-        VALUES ($1, $2, $3, 'merge', $4, $5, 'drive',
-                'vault://hybrid-duplicate-test', 'active', '{}'::jsonb)
+        VALUES ($1, $2, $3, 'merge', $4, $5, 'drive', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
@@ -2401,12 +2422,33 @@ async fn seed_source_acl_chunk(
 
     sqlx::query(
         r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, $3, 'knowledge:nango', 1,
+                jsonb_build_object(
+                    'provider_config_key', $4,
+                    'provider_connection_id', $5,
+                    'connector', 'google-drive'),
+                'active', 'ready')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(format!("source-acl-{object_slug}"))
+    .bind(format!("source-acl-{object_slug}"))
+    .bind(format!("acct-{object_slug}"))
+    .execute(pool)
+    .await
+    .expect("insert source-governed connector parent");
+    sqlx::query(
+        r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, metadata
+            provider_connection_id, connector, metadata
         )
-        VALUES ($1, $2, $3, 'nango', $4, $5, 'google-drive',
-                'vault://source-acl-test', 'active', '{}'::jsonb)
+        VALUES ($1, $2, $3, 'nango', $4, $5, 'google-drive', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)

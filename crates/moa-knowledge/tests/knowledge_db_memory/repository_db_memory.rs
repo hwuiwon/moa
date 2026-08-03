@@ -1,14 +1,13 @@
 //! Postgres repository coverage for tenant knowledge-base RLS and timelines.
 
 use chrono::Duration;
-use moa_core::types::identifiers::TenantId;
+use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
 use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_knowledge::{
     domain::{
-        ConnectionStatus, DocumentVersion, IngestionStepStatus, KnowledgeBlock, KnowledgeChunk,
-        KnowledgeConnection, KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncRun,
-        ObjectStatus, SyncRunStatus,
+        DocumentVersion, IngestionStepStatus, KnowledgeBlock, KnowledgeChunk, KnowledgeConnection,
+        KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
     },
     repository::{
         KnowledgeDiscoveryStore, KnowledgeRepository, PostgresKnowledgeDiscoveryStore,
@@ -38,8 +37,6 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
         provider: "nango".to_string(),
         connector: format!("google-drive-{label}"),
         provider_account_id: format!("provider-account-{label}"),
-        credential_ref: format!("vault://tenant/{label}/knowledge"),
-        status: ConnectionStatus::Active,
         metadata: json!({ "safe_label": label }),
         source_selection: json!({}),
         information_barrier: None,
@@ -47,6 +44,49 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
         updated_at: now,
         last_synced_at: None,
     }
+}
+
+async fn insert_connector_parent(
+    db: &postgres::TestDb,
+    connection: &KnowledgeConnection,
+    lifecycle_status: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO moa.connector_connections (
+            connection_uid, tenant_id, display_name, built_in_key, built_in_version,
+            non_secret_config, lifecycle_status, health_status
+        )
+        VALUES ($1, $2, $3, 'knowledge:nango', 1, '{}'::JSONB, $4, 'ready')
+        "#,
+    )
+    .bind(connection.connection_uid)
+    .bind(connection.tenant_id.0)
+    .bind(&connection.connector)
+    .bind(lifecycle_status)
+    .execute(db.store().pool())
+    .await
+    .expect("insert generic connector parent for knowledge fixture");
+}
+
+async fn set_connector_parent_lifecycle(
+    db: &postgres::TestDb,
+    connection_uid: Uuid,
+    lifecycle_status: &str,
+) {
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.connector_connections
+        SET lifecycle_status = $2, updated_at = now()
+        WHERE connection_uid = $1
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(lifecycle_status)
+    .execute(db.store().pool())
+    .await
+    .expect("update generic connector parent lifecycle");
+    assert_eq!(result.rows_affected(), 1);
 }
 
 fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
@@ -118,6 +158,43 @@ fn step(
 }
 
 #[tokio::test]
+async fn knowledge_projection_reuses_generic_parent_uuid_db_knowledge() {
+    // Pins: the knowledge row is only a sync projection. It reuses the generic
+    // connector parent's exact UUID while provider credentials and lifecycle
+    // remain owned by the generic parent and vault.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap shared connection identity DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo = repository(&db, tenant_id);
+    let projection = connection(tenant_id, "shared-identity");
+    insert_connector_parent(&db, &projection, "active").await;
+
+    let stored = repo
+        .upsert_connection(projection.clone())
+        .await
+        .expect("insert knowledge sync projection");
+    let parent: (Uuid, Uuid) = sqlx::query_as(
+        r#"
+        SELECT connection_uid, tenant_id
+        FROM moa.connector_connections
+        WHERE connection_uid = $1
+        "#,
+    )
+    .bind(projection.connection_uid)
+    .fetch_one(db.store().pool())
+    .await
+    .expect("read generic connector parent identity");
+
+    assert_eq!(
+        stored.connector_connection_id(),
+        ConnectorConnectionId(parent.0)
+    );
+    assert_eq!(parent.1, tenant_id.0);
+    assert_eq!(stored.connection_uid, projection.connection_uid);
+}
+
+#[tokio::test]
 async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge() {
     // Pins: control-plane discovery fails closed unless provider-owned account identity is unique.
     let db = postgres::bootstrap_test_db()
@@ -133,6 +210,8 @@ async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge(
     connection_b.connector = "connector-b".to_string();
     connection_a.provider_account_id = "shared-account".to_string();
     connection_b.provider_account_id = "shared-account".to_string();
+    insert_connector_parent(&db, &connection_a, "active").await;
+    insert_connector_parent(&db, &connection_b, "active").await;
     repo_a
         .upsert_connection(connection_a.clone())
         .await
@@ -209,6 +288,8 @@ async fn bulk_visibility_changes_bump_each_partition_once_per_statement_db_knowl
     let repo_b = repository(&db, tenant_b);
     let connection_a = connection(tenant_a, "visibility-a");
     let connection_b = connection(tenant_b, "visibility-b");
+    insert_connector_parent(&db, &connection_a, "active").await;
+    insert_connector_parent(&db, &connection_b, "active").await;
     repo_a
         .upsert_connection(connection_a.clone())
         .await
@@ -367,6 +448,8 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
     let mut connection_a = connection(tenant_a, "tenant-a");
     connection_a.last_synced_at = Some(moa_test_support::fixtures::pg_now());
     let connection_b = connection(tenant_b, "tenant-b");
+    insert_connector_parent(&db, &connection_a, "active").await;
+    insert_connector_parent(&db, &connection_b, "active").await;
     repo_a
         .upsert_connection(connection_a.clone())
         .await
@@ -396,6 +479,14 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
             .is_none()
     );
     assert_eq!(updated_connection.last_synced_at, None);
+    set_connector_parent_lifecycle(&db, connection_a.connection_uid, "suspended").await;
+    assert!(
+        repo_a
+            .update_connection_source_selection(connection_a.connection_uid, json!({}))
+            .await
+            .is_err(),
+        "a suspended generic parent must fence provider-calling source selection"
+    );
     assert!(
         repo_a
             .update_connection_source_selection(connection_b.connection_uid, json!({}))
@@ -538,8 +629,9 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
 }
 
 #[tokio::test]
-async fn disable_connection_updates_only_requested_tenant_connection() {
-    // Pins: disconnect flows can disable one tenant knowledge connection without crossing RLS tenants.
+async fn failed_link_compensation_deletes_only_requested_tenant_projection() {
+    // Pins: failed-link compensation can delete its newly-created projection
+    // without crossing the repository tenant boundary.
     let db = postgres::bootstrap_test_db()
         .await
         .expect("bootstrap isolated knowledge DB");
@@ -550,6 +642,8 @@ async fn disable_connection_updates_only_requested_tenant_connection() {
 
     let connection_a = connection(tenant_a, "disable-a");
     let connection_b = connection(tenant_b, "disable-b");
+    insert_connector_parent(&db, &connection_a, "active").await;
+    insert_connector_parent(&db, &connection_b, "active").await;
     repo_a
         .upsert_connection(connection_a.clone())
         .await
@@ -559,39 +653,35 @@ async fn disable_connection_updates_only_requested_tenant_connection() {
         .await
         .expect("insert tenant B connection");
 
-    let disabled = repo_a
-        .disable_connection(tenant_a, connection_a.connection_uid)
+    let removed = repo_a
+        .delete_connection_projection(connection_a.connection_uid)
         .await
-        .expect("tenant A should disable its own connection");
-    assert_eq!(disabled.connection_uid, connection_a.connection_uid);
-    assert_eq!(disabled.status, ConnectionStatus::Disabled);
-
-    let tenant_a_connections = repo_a
-        .list_connections(tenant_a, Some("nango"))
-        .await
-        .expect("tenant A should list its own disabled connection");
-    assert_eq!(tenant_a_connections.len(), 1);
-    assert_eq!(
-        tenant_a_connections[0].connection.status,
-        ConnectionStatus::Disabled
+        .expect("tenant A should delete its own failed projection");
+    assert!(removed);
+    assert!(
+        repo_a
+            .get_connection(connection_a.connection_uid)
+            .await
+            .expect("read compensated projection")
+            .is_none()
     );
 
-    let tenant_b_connections = repo_b
-        .list_connections(tenant_b, Some("nango"))
+    let tenant_b_connection = repo_b
+        .get_connection(connection_b.connection_uid)
         .await
-        .expect("tenant B should list its unchanged connection");
-    assert_eq!(tenant_b_connections.len(), 1);
+        .expect("tenant B should read its unchanged projection")
+        .expect("tenant B projection should remain");
     assert_eq!(
-        tenant_b_connections[0].connection.status,
-        ConnectionStatus::Active
+        tenant_b_connection.connection_uid,
+        connection_b.connection_uid
     );
 
     assert!(
-        repo_a
-            .disable_connection(tenant_a, connection_b.connection_uid)
+        !repo_a
+            .delete_connection_projection(connection_b.connection_uid)
             .await
-            .is_err(),
-        "tenant A must not disable tenant B's connection"
+            .expect("cross-tenant compensation should be a hidden no-op"),
+        "tenant A must not delete tenant B's projection"
     );
 }
 
@@ -704,6 +794,7 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
     let repo = repository(&db, tenant_id);
 
     let connection = connection(tenant_id, "batch");
+    insert_connector_parent(&db, &connection, "active").await;
     repo.upsert_connection(connection.clone())
         .await
         .expect("insert connection");
@@ -861,6 +952,7 @@ async fn unseen_active_objects_for_connection_filters_seen_deleted_and_paginates
     let tenant_id = TenantId::from(Uuid::now_v7());
     let repo = repository(&db, tenant_id);
     let connection = connection(tenant_id, "unseen");
+    insert_connector_parent(&db, &connection, "active").await;
     repo.upsert_connection(connection.clone())
         .await
         .expect("insert connection");

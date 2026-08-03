@@ -27,9 +27,9 @@ pub mod wire;
 
 pub use capability::{
     CapabilitiesListRequest, CapabilitiesListResponse, CapabilityCatalogDiagnostic,
-    CapabilityCatalogDiagnosticCode, CapabilitySource, ExecutionAuthorizationEnvelope,
-    ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate,
-    ExecutionHash,
+    CapabilityCatalogDiagnosticCode, CapabilityPolicyContext, CapabilitySource,
+    ExecutionAuthorizationEnvelope, ExecutionCapability, ExecutionCapabilityCatalog,
+    ExecutionClass, ExecutionEstimate, ExecutionHash,
 };
 pub use compiler::{
     AmendmentValidationOutcome, CanonicalExecutionPlan, CompileExecutionOutcome,
