@@ -56,8 +56,7 @@ governance, and retrieval boundaries without crate-local aliases or re-exports.
 |---|---|
 | `moa-auth/authz-schema` | OpenFGA object, relation, tuple, and model-version constants |
 | `moa-auth/authz` | OpenFGA client, authorization checks, transactional outbox, outbox poller |
-| `moa-auth/providers` | Local API-key auth, disabled auth, builtin approvals, tenant connector credentials, provider bundle construction, first-party OAuth 2.1 authorization server (`oauth_as`) |
-| `moa-auth/auth0` | Optional Auth0 and generic OIDC providers plus CIBA approvals behind the `auth0` feature |
+| `moa-auth/providers` | Local API-key auth, disabled auth, builtin approvals, tenant connector credentials, provider bundle construction, first-party OAuth 2.1 authorization server (`oauth_as`), and optional Auth0/OIDC identity plus CIBA approvals behind the `auth0` feature |
 | `moa-auth/fga-bootstrap` | OpenFGA bootstrap binary |
 
 `moa_core::traits::CredentialVault` is the host-side boundary for named,
@@ -490,3 +489,73 @@ Consequences:
   extracting shared storage again.
 - The lower package and reverse-dependency counts are ratchets, not spare
   capacity; increasing them requires another accepted decision record.
+
+### ADR 0008 - Fold DLP Into Provider Governance
+
+Status: Accepted.
+Date: 2026-08-03.
+
+`moa-dlp` was an implementation detail of the LLM provider-governance
+decorator. It had no independent runtime composition, durable state, or second
+production consumer; `moa-orchestrator` declared but did not use a direct
+dependency on it. The separate package therefore exposed a domain boundary
+that did not exist in the running system.
+
+Decisions:
+
+1. Remove `moa-dlp` and move its request-scoped token vault, provenance, and
+   restoration implementation into a private `moa-providers::governance`
+   submodule without a compatibility re-export.
+2. Keep classification primitives and the reserved DLP delimiters in
+   `moa-memory-pii`; provider governance continues to import them from their
+   canonical privacy owner.
+3. Remove the orchestrator's unused direct dependency. The provider-governance
+   decorator remains the only production entry point to reversible egress
+   tokenization.
+4. Lower the intermediate architecture ratchets to **50 packages**, **47
+   default members**, and `moa-core` reverse dependencies of **43 direct** and
+   **45 transitive**.
+
+Consequences:
+
+- Reversible DLP state stays request-local at the provider egress boundary;
+  irreversible learning sanitization remains a separate memory-privacy
+  mechanism.
+- Extracting DLP again requires a second production owner or an independently
+  composed policy boundary, not merely reusable helper types.
+
+### ADR 0009 - Fold Auth0 Into Auth Providers
+
+Status: Accepted.
+Date: 2026-08-03.
+Supersedes: ADR 0003 decision 1 only where it describes the Auth0 package as a
+separately owned auth-namespace crate.
+
+Auth0/OIDC identity, CIBA approvals, and JWKS caching are optional provider
+implementations selected exclusively by `moa-auth-providers`' runtime bundle.
+The separate `moa-auth-providers-auth0` package had no independent composition
+root or consumer boundary, while its feature already belonged to the parent
+provider crate. Keeping it separate made one feature span two packages without
+establishing a second domain owner.
+
+Decisions:
+
+1. Remove `moa-auth-providers-auth0` and move its implementation and tests into
+   `moa-auth-providers::auth0` without an old-package compatibility layer.
+2. Keep the module and all Auth0-specific construction behind the existing
+   off-by-default `auth0` feature. Default local/API-key authentication does not
+   compile the optional Auth0 module.
+3. Transfer the Auth0 CIBA and user-map table ownership records to
+   `moa-auth/providers`; table names and behavior do not change.
+4. Lower the final architecture ratchets to **49 packages**, **46 default
+   members**, and `moa-core` reverse dependencies of **42 direct** and **44
+   transitive**.
+
+Consequences:
+
+- The auth namespace remains a folder of category-owned crates, but an optional
+  implementation no longer masquerades as an independently owned category.
+- ADR 0002's product decision remains intact: Auth0/OIDC and CIBA are optional,
+  and self-hosted deployments still require no Auth0 dependency at runtime.
+- Extracting a provider package again requires an independently composed
+  consumer or ownership boundary.

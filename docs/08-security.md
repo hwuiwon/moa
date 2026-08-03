@@ -365,14 +365,15 @@ a type with private fields, no raw-string or raw-event constructor, and no
 discouraged.
 
 Sanitization is **irreversible** and is the opposite mechanism from the
-request-scoped tokenization in `moa-dlp`. A DLP token is a placeholder that a
-later restoration step turns back into the original value, scoped to one
-request. Learning sanitization replaces the original bytes with a category
-placeholder and keeps no way back. Mixing them would be a real leak, so text
-carrying the reserved DLP delimiters (`⟦`/`⟧`) is refused before the classifier
-is consulted: a restorable token inside a durable learning artifact would let
-the original value be reconstructed long after the request ended. The delimiters
-are defined once, in `moa-memory-pii`, and `moa-dlp` references them from there.
+request-scoped tokenization in `moa-providers`' provider-governance layer. A DLP
+token is a placeholder that a later restoration step turns back into the
+original value, scoped to one request. Learning sanitization replaces the
+original bytes with a category placeholder and keeps no way back. Mixing them
+would be a real leak, so text carrying the reserved DLP delimiters (`⟦`/`⟧`) is
+refused before the classifier is consulted: a restorable token inside a durable
+learning artifact would let the original value be reconstructed long after the
+request ended. The delimiters are defined once in `moa-memory-pii`, and the
+provider-governance DLP implementation references them from there.
 
 PII and PHI may proceed, but only after irreversible redaction. These refuse
 outright:

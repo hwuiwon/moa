@@ -17,7 +17,6 @@ blake3.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
 moa-config = { workspace = true }
-moa-dlp = { workspace = true }
 moa-memory-pii = { workspace = true }
 moa-runtime-store.workspace = true
 moa-observability = { workspace = true }
@@ -26,7 +25,9 @@ futures-util.workspace = true
 metrics.workspace = true
 moka.workspace = true
 opentelemetry.workspace = true
+rand.workspace = true
 reqwest.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

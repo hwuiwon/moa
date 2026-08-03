@@ -34,7 +34,7 @@ owner = "moa-session"
 name = "users"
 schema = "public"
 owner = "moa-orchestrator"
-readers = ["moa-session", "moa-auth/auth0"]
+readers = ["moa-session", "moa-auth/providers"]
 notes = "Auth0 may provision rows through the orchestrator-owned shape; it does not own users DDL."
 
 [[table]]
@@ -594,12 +594,12 @@ owner = "moa-auth/providers"
 [[table]]
 name = "auth0_ciba_approvals"
 schema = "public"
-owner = "moa-auth/auth0"
+owner = "moa-auth/providers"
 
 [[table]]
 name = "auth0_user_map"
 schema = "public"
-owner = "moa-auth/auth0"
+owner = "moa-auth/providers"
 
 [[table]]
 name = "context_snapshots"

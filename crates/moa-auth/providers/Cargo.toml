@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-auth0 = ["dep:moa-auth-providers-auth0"]
+auth0 = []
 
 [dependencies]
 argon2.workspace = true
@@ -20,7 +20,6 @@ hex.workspace = true
 jsonwebtoken.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
-moa-auth-providers-auth0 = { workspace = true, optional = true }
 moa-core.workspace = true
 moa-config.workspace = true
 moa-crypto.workspace = true
@@ -43,7 +42,9 @@ uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+httpmock.workspace = true
 moa-migrations.workspace = true
 moa-test-support.workspace = true
+rsa = { version = "0.9", features = ["pem"] }
 serde_json.workspace = true
 wiremock.workspace = true

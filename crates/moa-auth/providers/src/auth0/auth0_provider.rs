@@ -4,7 +4,7 @@
 //! The provider maps the external `sub` claim to MOA's internal UUID through
 //! the `auth0_user_map` table, creating a local row on first login.
 
-use crate::jwks_cache::{JwksCache, JwksError};
+use super::jwks_cache::{JwksCache, JwksError};
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
@@ -146,7 +146,7 @@ impl AuthProvider for Auth0AuthProvider {
 /// The common case — an already-provisioned subject — is served from an
 /// in-process cache and, on a miss, a single non-transactional `SELECT`. A
 /// transaction is opened only to provision a first-seen subject.
-pub async fn resolve_or_provision_static(
+pub(super) async fn resolve_or_provision_static(
     pool: &PgPool,
     sub: &str,
     tenant_id: Uuid,
@@ -233,7 +233,7 @@ async fn provision_static(
 /// invalid credential ([`AuthError::Rejected`]); an unreachable or unparseable
 /// JWKS endpoint is a provider-availability failure ([`AuthError::Unavailable`])
 /// so callers do not treat a transient outage as a bad token.
-pub(crate) fn map_jwks_error(error: JwksError) -> AuthError {
+pub(super) fn map_jwks_error(error: JwksError) -> AuthError {
     match error {
         JwksError::UnknownKid(_) => AuthError::Rejected,
         JwksError::Http(_) | JwksError::Parse(_) => {
@@ -242,7 +242,7 @@ pub(crate) fn map_jwks_error(error: JwksError) -> AuthError {
     }
 }
 
-pub(crate) fn parse_identity_type(value: Option<&str>) -> Result<IdentityType, AuthError> {
+pub(super) fn parse_identity_type(value: Option<&str>) -> Result<IdentityType, AuthError> {
     let value = value.unwrap_or("operator");
     let identity_type = value
         .parse::<IdentityType>()

@@ -1,3 +1,5 @@
+#![cfg(feature = "auth0")]
+
 //! Hermetic negative-path tests for Auth0 JWT validation.
 //!
 //! These mirror the live `auth0_live.rs` rejection cases against a fake JWKS
@@ -10,7 +12,7 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use httpmock::{Method::GET, MockServer};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use moa_auth_providers_auth0::Auth0AuthProvider;
+use moa_auth_providers::auth0::Auth0AuthProvider;
 use moa_core::traits::{AuthError, AuthProvider, Credential};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;

@@ -14,14 +14,14 @@ use super::report::{
 };
 use super::source_rules::{ALLOWANCES, SCAN_ROOTS, SENSITIVE_EVENT_CONSUMERS, collect_rust_files};
 
-pub(super) const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 51;
-pub(super) const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 48;
+pub(super) const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 49;
+pub(super) const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 46;
 const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 43,
-    max_transitive: 46,
-    reason: "architecture-policy ADR 0007 folds score storage into its sole Behavior Lab owner, reducing the exact workspace ratchets to 51 packages, 48 default members, and moa-core fan-in to 43 direct and 46 transitive reverse dependencies; further growth requires a new decision record rather than a budget bump",
+    max_direct: 42,
+    max_transitive: 44,
+    reason: "architecture-policy ADRs 0008 and 0009 fold DLP into provider governance and Auth0 into its sole auth-provider owner, reducing the exact workspace ratchets to 49 packages, 46 default members, and moa-core fan-in to 42 direct and 44 transitive reverse dependencies; further growth requires a new decision record rather than a budget bump",
 }];
 
 const LOC_BUDGETS: &[LocBudget] = &[

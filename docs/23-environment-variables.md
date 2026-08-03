@@ -750,9 +750,9 @@ variables. They are listed here as a pointer, not full documentation.
 | Value | Default | Where | Override |
 |---|---|---|---|
 | Authz decision-cache TTL | 2000 ms | `moa-auth/authz` `require.rs` | `MOA_AUTHZ_DECISION_CACHE_TTL_MS` (env) |
-| JWKS refresh cooldown | 10 s | `moa-auth/auth0` `jwks_cache.rs` | constant |
-| JWKS unknown-`kid` negative TTL | 60 s | `moa-auth/auth0` `jwks_cache.rs` | constant |
-| JWKS negative-cache capacity | 1024 | `moa-auth/auth0` `jwks_cache.rs` | constant |
+| JWKS refresh cooldown | 10 s | `moa-auth/providers/src/auth0/jwks_cache.rs` | constant |
+| JWKS unknown-`kid` negative TTL | 60 s | `moa-auth/providers/src/auth0/jwks_cache.rs` | constant |
+| JWKS negative-cache capacity | 1024 | `moa-auth/providers/src/auth0/jwks_cache.rs` | constant |
 | Authz outbox poller interval | 500 ms | `moa-auth/authz` `poller.rs` | constant |
 | Authz outbox poller batch | 64 rows | `moa-auth/authz` `poller.rs` | constant |
 | Authz outbox max delivery attempts | 8 | `moa-auth/authz` `poller.rs` | constant |

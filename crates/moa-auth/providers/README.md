@@ -22,11 +22,13 @@ bundle (auth, contact tokens, approvals) from config.
   storage and audited resolution.
 - `builtin_authz.rs` — builtin async approvals backed by Postgres and Restate
   awakeables.
+- `auth0/` — optional Auth0/OIDC identity, CIBA approvals, JWKS caching, and
+  user provisioning.
 - `disabled.rs` — provider for explicitly unauthenticated deployments.
 - `bundle.rs` — independent builders wiring the configured authentication,
   contact-token, and approvals providers.
 
 ## Features
 
-- `auth0` — pulls in `moa-auth-providers-auth0` and lets `bundle.rs` construct
-  Auth0/OIDC identity and CIBA approval providers. Off by default.
+- `auth0` — compiles the Auth0/OIDC identity and CIBA approval modules and lets
+  `bundle.rs` construct them. Off by default.

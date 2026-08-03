@@ -142,7 +142,7 @@ DB-backed lineage and auth recovery checks are explicit integration lanes. Run
 them directly when touching those surfaces:
 
 ```bash
-cargo test -p moa-auth-providers-auth0 --test auth_providers_auth0_db ciba_db --locked -- --test-threads=1
+cargo test -p moa-auth-providers --features auth0 --test auth_providers_db auth0_ciba_db --locked -- --test-threads=1
 cargo test -p moa-authz --test authz_db authz_poller_db --locked -- --test-threads=1
 cargo test -p moa-lineage-audit --test merkle_publisher_db --locked -- --test-threads=1
 ```

@@ -254,9 +254,10 @@ because a free-form argument map can put caller text in a key.
 
 Sanitization is irreversible. PII and PHI proceed only after redaction leaves a
 category placeholder in place of the original bytes; the original is not
-recoverable from the result. This is deliberately unlike `moa-dlp`, whose
-request-scoped tokens are *reversible* by design so a value can be restored into
-a tool argument later in the same request. The two must never be mixed: text
+recoverable from the result. This is deliberately unlike the DLP implementation
+inside `moa-providers`' provider-governance layer, whose request-scoped tokens
+are *reversible* by design so a value can be restored into a tool argument later
+in the same request. The two must never be mixed: text
 that already carries the reserved DLP delimiters is refused outright, before the
 classifier is even consulted, because a restorable token inside a durable
 learning artifact would let the original value be reconstructed after the fact.

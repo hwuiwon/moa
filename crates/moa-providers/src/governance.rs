@@ -4,9 +4,15 @@
 //! request-local ownership is safe across Kubernetes replicas because no later
 //! request or pod must recover the vault for correctness.
 
+mod dlp;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use self::dlp::{
+    Error as DlpError, Result as DlpResult, TOKEN_CLOSE, TOKEN_OPEN, TokenDestination, TokenSource,
+    TokenSourceRole, TokenVault, TokenVisibility,
+};
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use moa_core::{
@@ -20,10 +26,6 @@ use moa_core::{
     types::model::ModelCapabilities,
     types::security::SensitivityClass,
     types::tools::ToolContent,
-};
-use moa_dlp::{
-    Error as DlpError, TOKEN_CLOSE, TOKEN_OPEN, TokenDestination, TokenSource, TokenSourceRole,
-    TokenVault, TokenVisibility,
 };
 use moa_memory_pii::{PiiClassifier, PiiResult};
 use serde_json::Value;
@@ -131,7 +133,7 @@ impl GovernedLLMProvider {
         text: &str,
         vault: &mut TokenVault,
         source: TokenSource,
-    ) -> moa_dlp::Result<String> {
+    ) -> DlpResult<String> {
         let result = self.classify(text, source.field()).await?;
         if result.class != SensitivityClass::None && result.spans.is_empty() {
             return Err(DlpError::IncompleteSensitiveSpans {
@@ -149,7 +151,7 @@ impl GovernedLLMProvider {
         Ok(tokenized)
     }
 
-    async fn classify(&self, text: &str, field: &str) -> moa_dlp::Result<PiiResult> {
+    async fn classify(&self, text: &str, field: &str) -> DlpResult<PiiResult> {
         let result = self.classifier.classify(text).await.map_err(|source| {
             DlpError::ClassificationFailed {
                 field: field.to_string(),
@@ -171,7 +173,7 @@ impl GovernedLLMProvider {
         role: TokenSourceRole,
         visibility: TokenVisibility,
         field: String,
-    ) -> moa_dlp::Result<Value> {
+    ) -> DlpResult<Value> {
         let tokenized = self
             .tokenize_value(value, vault, role, visibility, field.clone())
             .await?;
@@ -196,7 +198,7 @@ impl GovernedLLMProvider {
         role: TokenSourceRole,
         visibility: TokenVisibility,
         field: String,
-    ) -> BoxFuture<'a, moa_dlp::Result<Value>> {
+    ) -> BoxFuture<'a, DlpResult<Value>> {
         Box::pin(async move {
             match value {
                 Value::String(text) if !text.is_empty() => Ok(Value::String(
@@ -419,7 +421,7 @@ impl StreamDetokenizer {
         }
     }
 
-    fn feed(&mut self, chunk: &str) -> moa_dlp::Result<String> {
+    fn feed(&mut self, chunk: &str) -> DlpResult<String> {
         let mut work = std::mem::take(&mut self.pending);
         work.push_str(chunk);
         let mut out = String::with_capacity(work.len());
@@ -462,7 +464,7 @@ impl StreamDetokenizer {
     fn detokenize_response(
         &self,
         mut response: CompletionResponse,
-    ) -> moa_dlp::Result<CompletionResponse> {
+    ) -> DlpResult<CompletionResponse> {
         response.text = self
             .vault
             .restore(&response.text, TokenDestination::VisibleOutput)?;
@@ -470,11 +472,11 @@ impl StreamDetokenizer {
             .content
             .into_iter()
             .map(|block| self.detokenize_block(block))
-            .collect::<moa_dlp::Result<Vec<_>>>()?;
+            .collect::<DlpResult<Vec<_>>>()?;
         Ok(response)
     }
 
-    fn detokenize_block(&self, block: CompletionContent) -> moa_dlp::Result<CompletionContent> {
+    fn detokenize_block(&self, block: CompletionContent) -> DlpResult<CompletionContent> {
         match block {
             CompletionContent::Text(text) => Ok(CompletionContent::Text(
                 self.vault.restore(&text, TokenDestination::VisibleOutput)?,
@@ -495,18 +497,14 @@ impl StreamDetokenizer {
         }
     }
 
-    fn detokenize_value(
-        &self,
-        value: Value,
-        destination: TokenDestination,
-    ) -> moa_dlp::Result<Value> {
+    fn detokenize_value(&self, value: Value, destination: TokenDestination) -> DlpResult<Value> {
         match value {
             Value::String(text) => Ok(Value::String(self.vault.restore(&text, destination)?)),
             Value::Array(items) => Ok(Value::Array(
                 items
                     .into_iter()
                     .map(|item| self.detokenize_value(item, destination))
-                    .collect::<moa_dlp::Result<Vec<_>>>()?,
+                    .collect::<DlpResult<Vec<_>>>()?,
             )),
             Value::Object(map) => {
                 let mut out = serde_json::Map::with_capacity(map.len());

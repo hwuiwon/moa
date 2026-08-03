@@ -6,7 +6,7 @@ use moa_memory_pii::{PiiCategory, PiiSpan};
 use rand::{RngCore, rngs::OsRng};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::error::{Error, Result};
+use super::error::{Error, Result};
 
 /// Opening delimiter reserved for MOA DLP tokens.
 ///
@@ -69,18 +69,6 @@ impl TokenSource {
             role,
             field: field.into(),
         }
-    }
-
-    /// Returns the source visibility.
-    #[must_use]
-    pub const fn visibility(&self) -> TokenVisibility {
-        self.visibility
-    }
-
-    /// Returns the source message role.
-    #[must_use]
-    pub const fn role(&self) -> TokenSourceRole {
-        self.role
     }
 
     /// Returns the structural source field.
@@ -254,6 +242,7 @@ impl TokenVault {
 
     /// Reports whether no values have been recorded.
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

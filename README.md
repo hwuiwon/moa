@@ -260,13 +260,12 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-observability`](crates/moa-observability/) | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | [`moa-authz-schema`](crates/moa-auth/authz-schema/) | Typed OpenFGA object, relation, and tuple-key constants |
 | [`moa-authz`](crates/moa-auth/authz/) | OpenFGA authorization checks, tuple outbox, and delegated access helpers |
-| [`moa-auth-providers`](crates/moa-auth/providers/) | Local API keys, disabled auth, tenant credential storage, and provider bundle construction |
-| [`moa-auth-providers-auth0`](crates/moa-auth/auth0/) | Auth0 and generic OIDC providers gated by the auth0 feature |
+| [`moa-auth-providers`](crates/moa-auth/providers/) | Local API keys, disabled auth, tenant credential storage, provider bundle construction, and feature-gated Auth0/OIDC identity and CIBA approvals |
 | [`moa-fga-bootstrap`](crates/moa-auth/fga-bootstrap/) | OpenFGA store and authorization model bootstrap binary |
 | [`moa-ocsf`](crates/moa-ocsf/) | OCSF security event types, signing, and persistence helpers |
 | [`moa-edge`](crates/moa-edge/) | Hosted HTTP edge service and public API routing |
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
-| [`moa-providers`](crates/moa-providers/) | LLM, embedding, and rerank providers |
+| [`moa-providers`](crates/moa-providers/) | LLM, embedding, and rerank providers plus provider-egress DLP governance |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
 | [`moa-agents`](crates/moa-agents/) | Tenant-configurable agent resolution and runtime policy locking |
 | [`moa-contacts`](crates/moa-contacts/) | Contact identity domain and persistence helpers |
@@ -275,7 +274,6 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-messaging`](crates/moa-messaging/) | Slack adapter, platform rendering, Postmark email connector, and Twilio SMS connector |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
 | [`moa-kms`](crates/moa-kms/) | Postgres-backed KMS for envelope encryption and crypto-shred |
-| [`moa-dlp`](crates/moa-dlp/) | Request-scoped, provenance-aware PII tokenization for provider egress |
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval-core`](crates/moa-eval/core/) | Shared evaluation engine types and scoring primitives |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |

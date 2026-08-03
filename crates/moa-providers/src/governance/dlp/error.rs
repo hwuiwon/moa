@@ -2,7 +2,7 @@
 
 use moa_memory_pii::Error as PiiError;
 
-use crate::vault::{TokenDestination, TokenSourceRole};
+use super::vault::{TokenDestination, TokenSourceRole};
 
 /// Result type returned by DLP operations.
 pub type Result<T> = std::result::Result<T, Error>;

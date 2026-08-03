@@ -5,7 +5,7 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use httpmock::{Method::GET, MockServer};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use moa_auth_providers_auth0::Auth0AuthProvider;
+use moa_auth_providers::auth0::Auth0AuthProvider;
 use moa_core::traits::{AuthProvider, Credential, IdentityType};
 use moa_core::types::identifiers::TenantId;
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
@@ -14,7 +14,7 @@ use rsa::{RsaPrivateKey, rand_core::OsRng};
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::support;
+use super::auth0_support as support;
 
 #[derive(Debug, Serialize)]
 struct Claims {

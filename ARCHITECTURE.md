@@ -209,13 +209,12 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-observability` | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authz checks, transactional outbox, and poller |
-| `moa-auth/providers` (`moa-auth-providers`) | Local users, sessions, API keys, MOA OAuth, contact tokens, durable connector credentials, builtin approvals, and provider bundle |
-| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0/OIDC identity, CIBA approvals, JWKS caching, and user provisioning |
+| `moa-auth/providers` (`moa-auth-providers`) | Local users, sessions, API keys, MOA OAuth, contact tokens, durable connector credentials, builtin approvals, provider bundle, and feature-gated Auth0/OIDC identity, CIBA approvals, JWKS caching, and user provisioning |
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and model bootstrap binary |
 | `moa-edge` | Public HTTP edge for authn, identity headers, and private connector-credential forwarding |
 | `moa-ocsf` | OCSF v1.3 security-event types, signing, and persistence |
 | `moa-hands` | Tool router and execution adapters |
-| `moa-providers` | Provider core and vendor adapters (LLM, embedding, rerank) |
+| `moa-providers` | Provider core and vendor adapters (LLM, embedding, rerank), including provider-egress DLP governance |
 | `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
 | `moa-agents` | Tenant-configurable agent resolution and runtime policy locking |
 | `moa-contacts` | Contact identity domain and persistence helpers |
@@ -349,8 +348,8 @@ reuse.
 | Memory graph | `moa-memory-graph` | Bitemporal graph records, sidecars, changelog, RLS scope |
 | Vector retrieval | `moa-memory-vector` | pgvector default; Turbopuffer promotion path |
 | Memory ingestion | `moa-memory-ingest` | Slow-path ingestion and deterministic fast writes |
-| Privacy | `moa-memory-pii` | PII classification before memory writes |
-| Identity | `moa-auth/providers`, optional `moa-auth/auth0`, `moa-edge` | API keys by default; disabled mode for local/isolated tests; Auth0/OIDC behind the `auth0` feature |
+| Privacy | `moa-memory-pii`, `moa-providers` | Shared PII classification primitives plus request-scoped provider-egress DLP governance |
+| Identity | `moa-auth/providers`, `moa-edge` | API keys by default; disabled mode for local/isolated tests; Auth0/OIDC modules behind the `auth0` feature |
 | Authorization | `moa-auth/authz`, `moa-auth/authz-schema` | OpenFGA checks and transactional tuple outbox |
 | Security events | `moa-ocsf` | Signed OCSF v1.3 events in Postgres |
 | Lineage | `moa-lineage-*` | Hot lineage, citations, scores, OTel bridge, audit tier |

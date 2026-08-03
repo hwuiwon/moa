@@ -1,12 +1,15 @@
+#![cfg(feature = "auth0")]
+
 //! Live Auth0 validation tests gated behind `MOA_RUN_LIVE_AUTH0_TESTS=1`.
 
 use std::sync::Arc;
 
-use moa_auth_providers_auth0::Auth0AuthProvider;
+use moa_auth_providers::auth0::Auth0AuthProvider;
 use moa_core::traits::{AuthError, AuthProvider, Credential, IdentityType};
 use moa_core::types::identifiers::TenantId;
 use uuid::Uuid;
 
+#[path = "auth0_support/mod.rs"]
 mod support;
 
 #[tokio::test]

@@ -4,8 +4,8 @@
 //! audience, and JWKS URL. Claim names for tenant and identity type are
 //! intentionally simple for P1.7 and can be extended by config later.
 
-use crate::auth0_provider::{map_jwks_error, parse_identity_type, resolve_or_provision_static};
-use crate::jwks_cache::JwksCache;
+use super::auth0_provider::{map_jwks_error, parse_identity_type, resolve_or_provision_static};
+use super::jwks_cache::JwksCache;
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity};

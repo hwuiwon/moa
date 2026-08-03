@@ -15,11 +15,10 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   `moa-memory-types`, `moa-memory-vector`,
   `moa-retrieval` (hybrid graph-memory retrieval engine and query planner).
 - Auth/security/audit: `moa-authz`, `moa-authz-schema`,
-  `moa-auth-providers` (identity and the durable tenant credential owner),
-  `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
+  `moa-auth-providers` (identity, feature-gated Auth0/OIDC and CIBA, and the
+  durable tenant credential owner), `moa-fga-bootstrap`,
   `moa-ocsf`, `moa-security`, `moa-crypto` (envelope encryption and BYOK),
-  `moa-kms` (Postgres-backed key management),
-  `moa-dlp` (provider-egress PII tokenization).
+  `moa-kms` (Postgres-backed key management).
 - Lineage/observability/analytics: `moa-lineage-core`,
   `moa-lineage-citation`, `moa-lineage-sink`,
   `moa-lineage-audit`, `moa-observability`, `moa-analytics`,
@@ -27,7 +26,8 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   [ClickHouse Analytics: Supported, Not Deployed](#clickhouse-analytics-supported-not-deployed)).
 - Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`, `moa-connectors`,
   `moa-experiments`, `moa-messaging`, `moa-skills`.
-- Providers/tools/eval/dev: `moa-hands`, `moa-providers`,
+- Providers/tools/eval/dev: `moa-hands`, `moa-providers` (including
+  provider-egress DLP governance),
   `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`,
   `workspace-hack`, `xtask`.
 

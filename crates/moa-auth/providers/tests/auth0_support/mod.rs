@@ -1,8 +1,11 @@
+//! Shared isolated Postgres fixture for Auth0 live and database tests.
+
 use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+/// Create a migrated Auth0 schema in an isolated Postgres search path.
 pub async fn migrated_auth0_pool() -> sqlx::PgPool {
     let database_url = test_database_url();
     let schema_name = format!("moa_auth0_test_{}", Uuid::new_v4().simple());

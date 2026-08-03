@@ -50,7 +50,7 @@ pub fn build_auth_provider(
                     .ok_or(BuildError::MissingConfig("auth.auth0"))?;
                 Arc::new(HybridAuthProvider::new(
                     Arc::new(crate::LocalAuthProvider::new(pool.clone())),
-                    Arc::new(moa_auth_providers_auth0::Auth0AuthProvider::new(
+                    Arc::new(crate::auth0::Auth0AuthProvider::new(
                         &auth0.domain,
                         &auth0.audience,
                         pool.clone(),
@@ -72,7 +72,7 @@ pub fn build_auth_provider(
                     .ok_or(BuildError::MissingConfig("auth.oidc"))?;
                 Arc::new(HybridAuthProvider::new(
                     Arc::new(crate::LocalAuthProvider::new(pool.clone())),
-                    Arc::new(moa_auth_providers_auth0::OidcAuthProvider::new(
+                    Arc::new(crate::auth0::OidcAuthProvider::new(
                         oidc.issuer.clone(),
                         oidc.audience.clone(),
                         oidc.jwks_url.clone(),
@@ -116,7 +116,7 @@ pub fn build_async_authz_provider(
                 let client_secret =
                     required_config_secret("MOA_AUTH_AUTH0_CLIENT_SECRET", &auth0.client_secret)?;
                 Arc::new(
-                    moa_auth_providers_auth0::Auth0AsyncAuthzProvider::new(
+                    crate::auth0::Auth0AsyncAuthzProvider::new(
                         auth0.domain.clone(),
                         client_id,
                         secrecy::SecretString::new(client_secret.into_boxed_str()),

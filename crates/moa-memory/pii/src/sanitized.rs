@@ -12,13 +12,14 @@
 //! only way to obtain one is [`sanitize_with`], which runs the full rejection
 //! list before it returns.
 //!
-//! This is deliberately *not* the reversible request-scoped tokenization in
-//! `moa-dlp`. A DLP token is a placeholder that a later restoration step can turn
-//! back into the original value; sanitization here is one-way and the original
-//! bytes are never recoverable from the result. Because the two mechanisms must
-//! never be confused, text that already carries the reserved DLP delimiters is
-//! rejected outright rather than sanitized: a reversible token reaching a
-//! learning corpus would smuggle a restorable secret into a durable artifact.
+//! This is deliberately *not* the reversible request-scoped tokenization in the
+//! `moa-providers` provider-governance layer. A DLP token is a placeholder that a
+//! later restoration step can turn back into the original value; sanitization
+//! here is one-way and the original bytes are never recoverable from the result.
+//! Because the two mechanisms must never be confused, text that already carries
+//! the reserved DLP delimiters is rejected outright rather than sanitized: a
+//! reversible token reaching a learning corpus would smuggle a restorable secret
+//! into a durable artifact.
 
 use moa_core::types::security::SensitivityClass;
 
@@ -26,9 +27,9 @@ use crate::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text, redacti
 
 /// Opening delimiter reserved for reversible request-scoped DLP tokens.
 ///
-/// Owned here rather than in `moa-dlp` because `moa-dlp` already depends on this
-/// crate, and the sanitizer must be able to refuse text that carries a reversible
-/// token without the dependency edge running backwards.
+/// Owned here rather than in `moa-providers` because provider governance already
+/// depends on this crate, and the sanitizer must be able to refuse text that
+/// carries a reversible token without the dependency edge running backwards.
 pub const RESERVED_DLP_TOKEN_OPEN: char = '⟦';
 
 /// Closing delimiter reserved for reversible request-scoped DLP tokens.

@@ -3386,8 +3386,8 @@ dependencies = [
  "chrono",
  "crc32fast",
  "hex",
+ "httpmock",
  "jsonwebtoken 9.3.1",
- "moa-auth-providers-auth0",
  "moa-authz",
  "moa-authz-schema",
  "moa-config",
@@ -3400,6 +3400,7 @@ dependencies = [
  "moka",
  "rand 0.8.5",
  "reqwest 0.13.4",
+ "rsa",
  "secrecy",
  "serde",
  "serde_json",
@@ -3412,32 +3413,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
- "workspace-hack",
-]
-
-[[package]]
-name = "moa-auth-providers-auth0"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "httpmock",
- "jsonwebtoken 9.3.1",
- "moa-authz",
- "moa-core",
- "moa-migrations",
- "moka",
- "reqwest 0.13.4",
- "rsa",
- "secrecy",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
  "workspace-hack",
 ]
 
@@ -3643,18 +3618,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "workspace-hack",
-]
-
-[[package]]
-name = "moa-dlp"
-version = "0.1.0"
-dependencies = [
- "moa-memory-pii",
- "rand 0.8.5",
- "secrecy",
- "thiserror 2.0.18",
- "tracing",
  "workspace-hack",
 ]
 
@@ -4350,7 +4313,6 @@ dependencies = [
  "moa-core",
  "moa-crypto",
  "moa-db",
- "moa-dlp",
  "moa-eval",
  "moa-eval-core",
  "moa-execution",
@@ -4414,7 +4376,6 @@ dependencies = [
  "metrics",
  "moa-config",
  "moa-core",
- "moa-dlp",
  "moa-memory-graph",
  "moa-memory-pii",
  "moa-observability",
@@ -4422,7 +4383,9 @@ dependencies = [
  "moka",
  "opentelemetry",
  "opentelemetry_sdk",
+ "rand 0.8.5",
  "reqwest 0.13.4",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

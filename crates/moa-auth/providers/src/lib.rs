@@ -1,6 +1,8 @@
 //! Local and optional authentication provider implementations for MOA.
 
 pub mod api_keys;
+#[cfg(feature = "auth0")]
+pub mod auth0;
 pub mod builtin_authz;
 pub mod bundle;
 pub mod contact_tokens;

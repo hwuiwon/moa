@@ -98,8 +98,7 @@ deletes in the same transaction so stale FGA grants do not survive.
 |---|---|---|
 | `crates/moa-auth/authz-schema` | `moa-authz-schema` | OpenFGA object, relation, tuple, and model constants |
 | `crates/moa-auth/authz` | `moa-authz` | FGA client, `require_authz`, transactional outbox, poller |
-| `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, tenant connector credentials, first-party OAuth 2.1 authorization server (`oauth_as`) |
-| `crates/moa-auth/auth0` | `moa-auth-providers-auth0` | Optional Auth0/OIDC, CIBA, and JWKS |
+| `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, tenant connector credentials, first-party OAuth 2.1 authorization server (`oauth_as`), and feature-gated Auth0/OIDC, CIBA, and JWKS modules |
 | `crates/moa-auth/fga-bootstrap` | `moa-fga-bootstrap` | Idempotent OpenFGA store/model bootstrap |
 | `crates/moa-edge` | `moa-edge` | Public authn/proxy edge and identity header injection |
 | `crates/moa-ocsf` | `moa-ocsf` | OCSF security events, signing, verification, persistence |

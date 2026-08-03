@@ -7,7 +7,6 @@ members = [
     "crates/moa-config",
     "crates/moa-wire",
     "crates/moa-crypto",
-    "crates/moa-dlp",
     "crates/moa-kms",
     "crates/moa-execution",
     "crates/moa-db",
@@ -34,7 +33,6 @@ members = [
     "crates/moa-auth/authz",
     "crates/moa-ocsf",
     "crates/moa-auth/providers",
-    "crates/moa-auth/auth0",
     "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
@@ -60,7 +58,6 @@ default-members = [
     "crates/moa-config",
     "crates/moa-wire",
     "crates/moa-crypto",
-    "crates/moa-dlp",
     "crates/moa-kms",
     "crates/moa-execution",
     "crates/moa-db",
@@ -87,7 +84,6 @@ default-members = [
     "crates/moa-auth/authz",
     "crates/moa-ocsf",
     "crates/moa-auth/providers",
-    "crates/moa-auth/auth0",
     "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
@@ -113,7 +109,6 @@ license = "Apache-2.0"
 moa-analytics = { path = "crates/moa-analytics" }
 moa-analytics-export = { path = "crates/moa-analytics-export" }
 moa-auth-providers = { path = "crates/moa-auth/providers" }
-moa-auth-providers-auth0 = { path = "crates/moa-auth/auth0" }
 moa-authz = { path = "crates/moa-auth/authz" }
 moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-artifacts = { path = "crates/moa-artifacts" }
@@ -126,7 +121,6 @@ moa-core = { path = "crates/moa-core" }
 moa-config = { path = "crates/moa-config" }
 moa-wire = { path = "crates/moa-wire" }
 moa-crypto = { path = "crates/moa-crypto" }
-moa-dlp = { path = "crates/moa-dlp" }
 moa-kms = { path = "crates/moa-kms" }
 moa-db = { path = "crates/moa-db" }
 moa-execution = { path = "crates/moa-execution" }

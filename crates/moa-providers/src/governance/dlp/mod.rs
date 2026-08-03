@@ -1,51 +1,23 @@
 //! Request-scoped, provenance-aware DLP tokenization for provider egress.
-//!
-//! ```
-//! use moa_dlp::{
-//!     TokenDestination, TokenSource, TokenSourceRole, TokenVisibility, detokenize, tokenize,
-//! };
-//! use moa_memory_pii::{PiiCategory, PiiSpan};
-//!
-//! let text = "Email jane@acme.com";
-//! let spans = [PiiSpan::new(6, 19, PiiCategory::Email, 0.9)];
-//! let source = TokenSource::new(
-//!     TokenVisibility::Visible,
-//!     TokenSourceRole::User,
-//!     "messages[0].content",
-//! );
-//! let (tokenized, vault) = tokenize(text, &spans, source)?;
-//! assert_eq!(
-//!     detokenize(&tokenized, &vault, TokenDestination::VisibleOutput)?,
-//!     text
-//! );
-//! # Ok::<(), moa_dlp::Error>(())
-//! ```
 
-pub mod error;
-pub mod vault;
+mod error;
+mod vault;
 
-pub use error::{Error, Result};
-pub use vault::{
+pub(super) use error::{Error, Result};
+pub(super) use vault::{
     TOKEN_CLOSE, TOKEN_OPEN, TokenDestination, TokenSource, TokenSourceRole, TokenVault,
     TokenVisibility,
 };
 
+#[cfg(test)]
 use moa_memory_pii::PiiSpan;
 
 /// Tokenizes one string in a fresh request-scoped vault.
-pub fn tokenize(
-    text: &str,
-    spans: &[PiiSpan],
-    source: TokenSource,
-) -> Result<(String, TokenVault)> {
+#[cfg(test)]
+fn tokenize(text: &str, spans: &[PiiSpan], source: TokenSource) -> Result<(String, TokenVault)> {
     let mut vault = TokenVault::new()?;
     let tokenized = vault.tokenize(text, spans, source)?;
     Ok((tokenized, vault))
-}
-
-/// Restores known tokens according to their provenance and destination.
-pub fn detokenize(text: &str, vault: &TokenVault, destination: TokenDestination) -> Result<String> {
-    vault.restore(text, destination)
 }
 
 #[cfg(test)]

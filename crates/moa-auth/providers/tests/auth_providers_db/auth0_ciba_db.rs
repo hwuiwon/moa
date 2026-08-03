@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use httpmock::{Method::POST, MockServer};
-use moa_auth_providers_auth0::Auth0AsyncAuthzProvider;
+use moa_auth_providers::auth0::Auth0AsyncAuthzProvider;
 use moa_authz::{AwakeableResolveError, AwakeableResolver};
 use moa_core::traits::{ApprovalDecision, ApprovalHandle, ApprovalRequest, AsyncAuthzProvider};
 use secrecy::SecretString;

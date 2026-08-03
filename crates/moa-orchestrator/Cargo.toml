@@ -61,7 +61,6 @@ moa-wire = { workspace = true }
 moa-config = { workspace = true }
 moa-connectors = { workspace = true }
 moa-crypto = { workspace = true }
-moa-dlp = { workspace = true }
 moa-kms = { workspace = true }
 moa-execution = { workspace = true }
 moa-db = { workspace = true }
