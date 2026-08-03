@@ -12,13 +12,14 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
+use moa_eval::fixture_ids::tenant_id_from_storage_partition_id;
 use moa_eval::memory_eval::{
     BootstrapConfig, CorpusProfile, GoldPiiStatus, GoldResolutionStatus, LedgerFact,
     MemoryRetrievalEvalOptions, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
     SyntheticSession, SyntheticTurn, TranscriptStyle, build_cached_embedding_fixtures,
     generate_memory_eval_corpus, read_gold_nodes_jsonl, resolve_gold_nodes,
-    run_memory_retrieval_eval, tenant_id_from_storage_partition_id, write_embeddings_jsonl,
-    write_gold_nodes_jsonl, write_memory_eval_corpus,
+    run_memory_retrieval_eval, write_embeddings_jsonl, write_gold_nodes_jsonl,
+    write_memory_eval_corpus,
 };
 use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{

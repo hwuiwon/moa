@@ -222,6 +222,7 @@ pub struct WorkerImpl {
     session_limits: SessionLimitsConfig,
     providers: Arc<ProviderRegistry>,
     connector_catalogs: ScopedConnectorCatalogProvider,
+    authz: crate::handlers::authz_shim::AuthzEnforcer,
 }
 
 impl WorkerImpl {
@@ -232,12 +233,14 @@ impl WorkerImpl {
         session_limits: SessionLimitsConfig,
         providers: Arc<ProviderRegistry>,
         connector_catalogs: ScopedConnectorCatalogProvider,
+        authz: crate::handlers::authz_shim::AuthzEnforcer,
     ) -> Self {
         Self {
             session_store,
             session_limits,
             providers,
             connector_catalogs,
+            authz,
         }
     }
 }

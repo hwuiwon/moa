@@ -6,8 +6,8 @@
 //!
 //! * [`pkce`] — S256 `code_challenge` verification (RFC 7636).
 //! * [`client`] — startup client validation and client authentication.
-//! * [`store`] — the Postgres-backed authorization-code and token store, under
-//!   the same row-level-security model as the token vault.
+//! * [`store`] — the Postgres-backed authorization-code and token store under
+//!   forced tenant row-level security.
 //! * [`server`] — [`OAuthServer`], which ties the registry and store together
 //!   into the authorize / token / introspect / revoke operations.
 //!

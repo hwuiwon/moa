@@ -25,7 +25,8 @@ use moa_core::{
 };
 use moa_experiments::{
     model::{
-        ExperimentSimulatorConfig, ExperimentTrialRecord, NewExperimentRun, NewExperimentTrial,
+        ExperimentSimulatorConfig, ExperimentTrialRecord, ExperimentVariant, NewExperimentRun,
+        NewExperimentTrial,
     },
     simulator_policy::{
         fidelity::{
@@ -460,6 +461,15 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
         let simulator_policy =
             register_certified_simulator_policy(&pool, tenant_id, SCRIPTED_MODEL, "openai").await?;
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
+        let plan_revision_uid = publish_trial_plan(
+            &pool,
+            &scope,
+            agent_revision_uid,
+            SCRIPTED_MODEL,
+            &simulator_policy,
+        )
+        .await?;
+        let plan_artifact_uid = artifact_uid_for_revision(&pool, &scope, plan_revision_uid).await?;
         let run = store
             .insert_run(
                 &scope,
@@ -469,18 +479,12 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
                     SCRIPTED_MODEL,
                     &simulator_policy,
                     fixture_experiment_envelope(),
+                    plan_artifact_uid,
+                    plan_revision_uid,
                 ),
             )
             .await
             .context("seed parent experiment run")?;
-        let plan_revision_uid = publish_trial_plan(
-            &pool,
-            &scope,
-            agent_revision_uid,
-            SCRIPTED_MODEL,
-            &simulator_policy,
-        )
-        .await?;
         let trial = new_trial(
             run.run_uid,
             plan_revision_uid,
@@ -659,6 +663,7 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
             &simulator_policy,
         )
         .await?;
+        let plan_artifact_uid = artifact_uid_for_revision(&pool, &scope, plan_revision_uid).await?;
         // Agents and execution-template skills are tenant release subjects. The
         // run, trial, internal Session, and ExecutionRun retain the narrower
         // contact scope independently.
@@ -678,6 +683,8 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
                     target.clone(),
                     variant.clone(),
                     &simulator_policy,
+                    plan_artifact_uid,
+                    plan_revision_uid,
                 ),
             )
             .await
@@ -1272,17 +1279,23 @@ fn new_parent_run(
     model: &str,
     simulator_policy: &ResolvedSimulatorPolicy,
     resource_envelope: moa_experiments::model::ExperimentResourceEnvelope,
+    plan_artifact_uid: Uuid,
+    plan_revision_uid: Uuid,
 ) -> NewExperimentRun {
     NewExperimentRun {
-        plan_artifact_uid: None,
+        plan_artifact_uid,
         expected_trials: 1,
         resource_envelope,
-        simulator_policy: Some(simulator_policy.clone()),
+        simulator_policy: simulator_policy.clone(),
         name: "scripted trial workflow".to_string(),
         target: serde_json::from_value(agent_loop_target(agent_revision_uid, model))
             .expect("target fixture should parse"),
-        variant: serde_json::from_value(baseline_variant(model))
-            .expect("variant fixture should parse"),
+        variant: {
+            let mut variant: ExperimentVariant = serde_json::from_value(baseline_variant(model))
+                .expect("variant fixture should parse");
+            variant.metadata["plan_revision_uid"] = json!(plan_revision_uid);
+            variant
+        },
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
@@ -1293,7 +1306,7 @@ fn new_parent_run(
         score_run_id: Uuid::now_v7(),
         session_id: None,
         execution_run_uid: None,
-        artifact_revision_uids: Vec::new(),
+        artifact_revision_uids: vec![plan_revision_uid],
         idempotency_key: Some(format!("trial-parent-{}", Uuid::now_v7())),
         created_by_identity: json!({
             "type": "operator",
@@ -1388,6 +1401,18 @@ definition:
 "#
     );
     publish_artifact_revision(pool, scope, source.as_str(), "trial plan").await
+}
+
+async fn artifact_uid_for_revision(
+    pool: &PgPool,
+    scope: &ActionRuleScope,
+    revision_uid: Uuid,
+) -> Result<Uuid> {
+    ArtifactRegistry::new(pool.clone())
+        .load_revision(scope, revision_uid)
+        .await?
+        .map(|revision| revision.artifact_uid)
+        .with_context(|| format!("load published trial plan revision {revision_uid}"))
 }
 
 async fn publish_artifact_revision(
@@ -1554,15 +1579,22 @@ fn new_execution_template_parent_run(
     target: Value,
     variant: Value,
     simulator_policy: &ResolvedSimulatorPolicy,
+    plan_artifact_uid: Uuid,
+    plan_revision_uid: Uuid,
 ) -> NewExperimentRun {
     NewExperimentRun {
-        plan_artifact_uid: None,
+        plan_artifact_uid,
         expected_trials: 1,
         resource_envelope: fixture_experiment_envelope(),
-        simulator_policy: Some(simulator_policy.clone()),
+        simulator_policy: simulator_policy.clone(),
         name: "execution-template trial workflow".to_string(),
         target: serde_json::from_value(target).expect("execution-template target should parse"),
-        variant: serde_json::from_value(variant).expect("execution-template variant should parse"),
+        variant: {
+            let mut variant: ExperimentVariant =
+                serde_json::from_value(variant).expect("execution-template variant should parse");
+            variant.metadata["plan_revision_uid"] = json!(plan_revision_uid);
+            variant
+        },
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
@@ -1573,7 +1605,7 @@ fn new_execution_template_parent_run(
         score_run_id: Uuid::now_v7(),
         session_id: None,
         execution_run_uid: None,
-        artifact_revision_uids: Vec::new(),
+        artifact_revision_uids: vec![plan_revision_uid],
         idempotency_key: Some(format!("execution-trial-parent-{}", Uuid::now_v7())),
         created_by_identity: json!({
             "type": "operator",
@@ -1943,6 +1975,9 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         let simulator_policy =
             register_certified_simulator_policy(&pool, tenant_id, model, provider).await?;
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
+        let plan_revision_uid =
+            publish_trial_plan(&pool, &scope, agent_revision_uid, model, &simulator_policy).await?;
+        let plan_artifact_uid = artifact_uid_for_revision(&pool, &scope, plan_revision_uid).await?;
         let run = store
             .insert_run(
                 &scope,
@@ -1952,12 +1987,12 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
                     model,
                     &simulator_policy,
                     experiment_envelope(budget_micro_usd),
+                    plan_artifact_uid,
+                    plan_revision_uid,
                 ),
             )
             .await
             .context("seed parent experiment run")?;
-        let plan_revision_uid =
-            publish_trial_plan(&pool, &scope, agent_revision_uid, model, &simulator_policy).await?;
         let trial = new_trial(run.run_uid, plan_revision_uid, model, &simulator_policy);
         let trial_key = trial.trial_key.clone();
         let request = ExperimentTrialRunWorkflowRequest {

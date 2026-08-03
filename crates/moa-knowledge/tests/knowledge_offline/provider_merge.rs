@@ -10,8 +10,8 @@ use moa_knowledge::{
     Error,
     domain::{
         CreateLinkTokenRequest, ExchangePublicTokenRequest, KnowledgeConnection,
-        ListChangedRecordsRequest, ProviderIntegration, RemoteRevokeRequest,
-        StartInitialSyncRequest,
+        LinkedProviderKind, ListChangedRecordsRequest, ProviderIntegration,
+        ProviderRecordMaterialization, RemoteRevokeRequest, StartInitialSyncRequest,
     },
     providers::{LinkedIntegrationProvider, merge::MergeProvider},
 };
@@ -33,7 +33,7 @@ fn connection() -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::from_u128(201),
         tenant_id: tenant_id(),
-        provider: "merge".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Merge,
         // The connection carries the exact Merge product category the link
         // selected; every category-scoped URL is built from it.
         connector: "knowledgebase".to_string(),
@@ -129,7 +129,7 @@ async fn link_token_creation_posts_merge_link_shape() {
         .await
         .expect("create Merge link token through local fixture");
 
-    assert_eq!(token.provider, "merge");
+    assert_eq!(token.provider, LinkedProviderKind::Merge);
     assert_eq!(token.token, "link-token-123");
     assert_eq!(
         token.link_url.as_deref(),
@@ -172,7 +172,7 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
         .await
         .expect("exchange Merge public token through local fixture");
 
-    assert_eq!(account.provider, "merge");
+    assert_eq!(account.provider, LinkedProviderKind::Merge);
     assert_eq!(
         account.connector, "knowledgebase",
         "the linked connection must keep the category the operator selected"
@@ -376,7 +376,7 @@ fn merge_connection(category: &str) -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::from_u128(0x2358_0001),
         tenant_id: tenant_id(),
-        provider: "merge".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Merge,
         connector: category.to_string(),
         provider_account_id: "linked-account-123".to_string(),
         metadata: json!({}),
@@ -456,6 +456,10 @@ async fn changed_records_request_includes_modified_after_and_maps_results() {
         Some(ts("2026-06-26T12:30:00Z"))
     );
     assert!(!page.records[0].deleted);
+    assert_eq!(
+        page.records[0].materialization,
+        ProviderRecordMaterialization::MetadataOnly
+    );
     assert!(page.records[0].payload.get("access_token").is_none());
     assert_eq!(page.records[1].source_id, "article-2");
     assert!(page.records[1].deleted);

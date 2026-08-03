@@ -16,7 +16,7 @@ use moa_knowledge::{
         derive_contact_groups_from_object_with_resolved_members,
     },
     domain::{ContactGroup, ContactGroupMembership, KnowledgeObject, ObjectStatus},
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{PostgresKnowledgeRepository, contact_group::KnowledgeContactGroupRepository},
 };
 use moa_test_support::postgres;
 use serde_json::{Value, json};

@@ -75,7 +75,6 @@ portable-atomic = { version = "1", features = ["critical-section", "float"] }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
 refinery-core = { version = "0.9", features = ["tokio-postgres", "toml"] }
-regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13", default-features = false, features = ["form", "gzip", "http2", "json", "multipart", "rustls", "stream"] }
@@ -153,7 +152,6 @@ quote = { version = "1" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
 refinery-core = { version = "0.9", features = ["tokio-postgres", "toml"] }
-regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 ring = { version = "0.17", features = ["std"] }

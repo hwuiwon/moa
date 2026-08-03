@@ -10,7 +10,7 @@ URL; runtime startup validates that the complete history is already present.
 
 `migrations/postgres/` is a flat, append-only sequence with exactly one regular
 file for every version from `V000001` through the current maximum, currently
-`V000052`. Filenames
+`V000053`. Filenames
 must match `V<six digits>__<lowercase_snake_case>.sql`.
 
 `V000001__contiguous_history_epoch.sql` marks the current fresh-install-only
@@ -19,9 +19,16 @@ history, databases with product relations but no history, and partial or
 checksum-divergent runtime histories are rejected. There is no compatibility
 or translation path:
 
-- Local development must use `make dev-wipe` when adopting this epoch.
+- Local development must use `make dev-wipe` and reset Restate durable state
+  when adopting this epoch. A checksum mismatch is not upgradeable in place.
 - Production rollout must build or reset a database from the complete current
-  sequence before starting runtime services.
+  sequence and start with fresh Restate durable state before runtime services.
+
+The 2026-08-03 hard-reset epoch removes the retired per-user token-vault tables
+from the migrations that originally created them. V29 remains a no-op marker so
+the sequence stays contiguous, and typed connector origins are V53. Any database
+that applied an earlier checksum for the rewritten files must be rebuilt; the
+runner intentionally rejects that divergence before DDL.
 
 Do not rewrite a migration after it has shipped in this epoch. Add the next
 contiguous version (`N + 1`) for every future schema change; never leave gaps,

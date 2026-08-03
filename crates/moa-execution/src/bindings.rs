@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::execution_plan::ExecutionCondition;
+use moa_core::canonical_json::canonical_json_bytes;
 use serde_json::Value;
 
-use crate::{Error, Result, capability::canonical_json_bytes};
+use crate::{Error, Result};
 
 /// Runtime values visible while resolving one plan node or map task input.
 #[derive(Clone, Copy)]

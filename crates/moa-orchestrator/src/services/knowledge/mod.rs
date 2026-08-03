@@ -1,14 +1,11 @@
 //! Restate service for tenant knowledge-base link, sync, webhook, and inspection APIs.
 
-mod ingest;
+pub mod ingest;
 mod inspect;
 mod link;
 mod sync;
 mod webhook;
-mod webhook_verifier;
-
-pub use ingest::{KnowledgeIngestionRunner, ProductionKnowledgeIngestionRunner};
-pub use webhook_verifier::{KnowledgeWebhookVerifier, ParserWebhookVerifier};
+pub mod webhook_verifier;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -37,11 +34,14 @@ use moa_core::{
     types::identifiers::TenantId,
 };
 use moa_knowledge::{
-    domain::{KnowledgeConnection, KnowledgeCredentialOwnership, LinkedAccount},
+    domain::{
+        KnowledgeConnection, KnowledgeCredentialOwnership, LinkedAccount, LinkedProviderKind,
+    },
     providers::{LinkedIntegrationProvider, merge::MergeProvider, nango::NangoProvider},
     repository::{
-        KnowledgeDiscoveryStore, KnowledgeRepository, PostgresKnowledgeDiscoveryStore,
-        PostgresKnowledgeRepository,
+        KnowledgeDiscoveryStore, PostgresKnowledgeDiscoveryStore, PostgresKnowledgeRepository,
+        connection::KnowledgeConnectionRepository, document::KnowledgeIngestionRepository,
+        event::KnowledgeEventRepository, sync::KnowledgeSyncRepository,
     },
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -69,6 +69,10 @@ use crate::workflows::knowledge_sync_ingestion::{
 };
 
 use self::webhook_verifier::LinkedProviderWebhookVerifier;
+use self::{
+    ingest::{KnowledgeIngestionRunner, ProductionKnowledgeIngestionRunner},
+    webhook_verifier::{KnowledgeWebhookVerifier, ParserWebhookVerifier},
+};
 
 /// Restate service surface for tenant knowledge-base operations.
 #[restate_sdk::service]
@@ -144,6 +148,7 @@ pub trait Knowledge {
 #[derive(Clone)]
 pub struct KnowledgeImpl {
     service: KnowledgeService,
+    authz: crate::handlers::authz_shim::AuthzEnforcer,
 }
 
 impl Knowledge for KnowledgeImpl {
@@ -156,7 +161,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "create_link_token");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -179,7 +184,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "exchange_public_token");
         let request = request.into_inner();
-        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&self.authz, &mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         let response = ctx
             .run(|| async move {
@@ -212,7 +217,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_connection");
         let request = request.into_inner();
-        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&self.authz, &mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         let response = ctx
             .run(|| async move {
@@ -240,7 +245,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_status");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -263,7 +268,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_events");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -286,7 +291,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_connections");
         let request = request.into_inner();
-        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&self.authz, &mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -309,7 +314,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_integrations");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -332,7 +337,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "update_connection_source_selection");
         let request = request.into_inner();
-        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&self.authz, &mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         let response = ctx
             .run(|| async move {
@@ -365,7 +370,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "disconnect_connection");
         let request = request.into_inner();
-        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&self.authz, &mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -388,7 +393,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_objects");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -411,7 +416,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "inspect_object");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -434,7 +439,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "query_trace");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -482,8 +487,11 @@ impl Knowledge for KnowledgeImpl {
 impl KnowledgeImpl {
     /// Creates the Restate handler from the existing knowledge application service.
     #[must_use]
-    pub fn new(service: KnowledgeService) -> Self {
-        Self { service }
+    pub fn new(
+        service: KnowledgeService,
+        authz: crate::handlers::authz_shim::AuthzEnforcer,
+    ) -> Self {
+        Self { service, authz }
     }
 
     fn dispatch_knowledge_sync_ingestion(ctx: &Context<'_>, sync_run_uid: Uuid) {
@@ -511,16 +519,28 @@ pub struct KnowledgeService {
 impl KnowledgeService {
     /// Creates a knowledge service with explicit dependencies for tests or alternate runtimes.
     #[must_use]
-    pub fn new(
-        repository: Arc<dyn KnowledgeRepository>,
+    pub fn new<R>(
+        repository: Arc<R>,
         discovery: Arc<dyn KnowledgeDiscoveryStore>,
         providers: Arc<dyn KnowledgeProviderResolver>,
         credentials: Arc<dyn KnowledgeCredentialStore>,
         ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
         max_preview_chars: usize,
-    ) -> Self {
+    ) -> Self
+    where
+        R: KnowledgeConnectionRepository
+            + KnowledgeSyncRepository
+            + KnowledgeIngestionRepository
+            + KnowledgeEventRepository
+            + 'static,
+    {
         Self {
-            repository: KnowledgeRepositorySource::Fixed(repository),
+            repository: KnowledgeRepositorySource::Fixed {
+                connection: repository.clone(),
+                sync: repository.clone(),
+                ingestion: repository.clone(),
+                event: repository,
+            },
             discovery,
             providers,
             credentials,
@@ -626,7 +646,7 @@ impl KnowledgeService {
 
     fn provider(
         &self,
-        provider: &str,
+        provider: LinkedProviderKind,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError> {
         self.providers.provider(provider)
     }
@@ -638,8 +658,20 @@ impl KnowledgeService {
         self.providers.webhook_verifier(provider)
     }
 
-    fn repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeRepository> {
-        self.repository.repository(tenant_id)
+    fn connection_repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeConnectionRepository> {
+        self.repository.connection(tenant_id)
+    }
+
+    fn sync_repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeSyncRepository> {
+        self.repository.sync(tenant_id)
+    }
+
+    fn ingestion_repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeIngestionRepository> {
+        self.repository.ingestion(tenant_id)
+    }
+
+    fn event_repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeEventRepository> {
+        self.repository.event(tenant_id)
     }
 
     fn discovery(&self) -> &dyn KnowledgeDiscoveryStore {
@@ -673,7 +705,7 @@ impl KnowledgeService {
 
     fn postgres_pool(&self) -> Option<sqlx::PgPool> {
         match &self.repository {
-            KnowledgeRepositorySource::Fixed(_) => None,
+            KnowledgeRepositorySource::Fixed { .. } => None,
             KnowledgeRepositorySource::Postgres { pool } => Some(pool.clone()),
         }
     }
@@ -824,14 +856,51 @@ impl KnowledgeConnectorConnections for ConnectorService {
 
 #[derive(Clone)]
 enum KnowledgeRepositorySource {
-    Fixed(Arc<dyn KnowledgeRepository>),
-    Postgres { pool: sqlx::PgPool },
+    Fixed {
+        connection: Arc<dyn KnowledgeConnectionRepository>,
+        sync: Arc<dyn KnowledgeSyncRepository>,
+        ingestion: Arc<dyn KnowledgeIngestionRepository>,
+        event: Arc<dyn KnowledgeEventRepository>,
+    },
+    Postgres {
+        pool: sqlx::PgPool,
+    },
 }
 
 impl KnowledgeRepositorySource {
-    fn repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeRepository> {
+    fn connection(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeConnectionRepository> {
         match self {
-            Self::Fixed(repository) => repository.clone(),
+            Self::Fixed { connection, .. } => connection.clone(),
+            Self::Postgres { pool } => Arc::new(PostgresKnowledgeRepository::scoped(
+                pool.clone(),
+                RlsContext::tenant(tenant_id),
+            )),
+        }
+    }
+
+    fn sync(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeSyncRepository> {
+        match self {
+            Self::Fixed { sync, .. } => sync.clone(),
+            Self::Postgres { pool } => Arc::new(PostgresKnowledgeRepository::scoped(
+                pool.clone(),
+                RlsContext::tenant(tenant_id),
+            )),
+        }
+    }
+
+    fn ingestion(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeIngestionRepository> {
+        match self {
+            Self::Fixed { ingestion, .. } => ingestion.clone(),
+            Self::Postgres { pool } => Arc::new(PostgresKnowledgeRepository::scoped(
+                pool.clone(),
+                RlsContext::tenant(tenant_id),
+            )),
+        }
+    }
+
+    fn event(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeEventRepository> {
+        match self {
+            Self::Fixed { event, .. } => event.clone(),
             Self::Postgres { pool } => Arc::new(PostgresKnowledgeRepository::scoped(
                 pool.clone(),
                 RlsContext::tenant(tenant_id),
@@ -840,16 +909,21 @@ impl KnowledgeRepositorySource {
     }
 }
 
+fn parse_linked_provider(provider: &str) -> Result<LinkedProviderKind, KnowledgeServiceError> {
+    LinkedProviderKind::from_str_exact(provider)
+        .ok_or_else(|| KnowledgeServiceError::UnknownProvider(provider.to_string()))
+}
+
 /// Resolves linked-integration providers by stable provider identifier.
 pub trait KnowledgeProviderResolver: Send + Sync {
     /// Returns the provider implementation for a selected provider identifier.
     fn provider(
         &self,
-        provider: &str,
+        provider: LinkedProviderKind,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError>;
 
     /// Returns the resolvable provider identifiers in deterministic order.
-    fn provider_ids(&self) -> Vec<String>;
+    fn provider_ids(&self) -> Vec<LinkedProviderKind>;
 
     /// Returns the webhook verifier for a selected provider identifier.
     fn webhook_verifier(
@@ -857,7 +931,7 @@ pub trait KnowledgeProviderResolver: Send + Sync {
         provider: &str,
     ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
         Ok(Arc::new(LinkedProviderWebhookVerifier::new(
-            self.provider(provider)?,
+            self.provider(parse_linked_provider(provider)?)?,
         )))
     }
 }
@@ -865,7 +939,7 @@ pub trait KnowledgeProviderResolver: Send + Sync {
 /// Static provider resolver used by offline service tests.
 #[derive(Clone, Default)]
 pub struct StaticKnowledgeProviders {
-    providers: HashMap<String, Arc<dyn LinkedIntegrationProvider>>,
+    providers: HashMap<LinkedProviderKind, Arc<dyn LinkedIntegrationProvider>>,
     webhook_verifiers: HashMap<String, Arc<dyn KnowledgeWebhookVerifier>>,
 }
 
@@ -883,10 +957,10 @@ impl StaticKnowledgeProviders {
     #[must_use]
     pub fn with_provider(
         mut self,
-        provider: impl Into<String>,
+        provider: LinkedProviderKind,
         implementation: Arc<dyn LinkedIntegrationProvider>,
     ) -> Self {
-        self.providers.insert(provider.into(), implementation);
+        self.providers.insert(provider, implementation);
         self
     }
 
@@ -905,17 +979,17 @@ impl StaticKnowledgeProviders {
 impl KnowledgeProviderResolver for StaticKnowledgeProviders {
     fn provider(
         &self,
-        provider: &str,
+        provider: LinkedProviderKind,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError> {
         self.providers
-            .get(provider)
+            .get(&provider)
             .cloned()
             .ok_or_else(|| KnowledgeServiceError::UnknownProvider(provider.to_string()))
     }
 
-    fn provider_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.providers.keys().cloned().collect();
-        ids.sort();
+    fn provider_ids(&self) -> Vec<LinkedProviderKind> {
+        let mut ids: Vec<LinkedProviderKind> = self.providers.keys().copied().collect();
+        ids.sort_by_key(|provider| provider.as_str());
         ids
     }
 
@@ -927,7 +1001,7 @@ impl KnowledgeProviderResolver for StaticKnowledgeProviders {
             return Ok(verifier.clone());
         }
         Ok(Arc::new(LinkedProviderWebhookVerifier::new(
-            self.provider(provider)?,
+            self.provider(parse_linked_provider(provider)?)?,
         )))
     }
 }
@@ -1158,7 +1232,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
         caller: &KnowledgeCaller,
         account: &LinkedAccount,
     ) -> Result<StagedKnowledgeCredential, KnowledgeServiceError> {
-        match ManagedParentDefinition::for_knowledge_provider(&account.provider)? {
+        match ManagedParentDefinition::for_knowledge_provider(account.provider.as_str())? {
             ManagedParentDefinition::KnowledgeNangoV1 => {
                 if account.credential_material.is_some() {
                     return Err(KnowledgeServiceError::InvalidRequest(
@@ -1195,7 +1269,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
                         &connection_uid.to_string(),
                         CredentialKind::ProviderApiKey.as_str(),
                         CredentialSlotName::PRIMARY.as_str(),
-                        &account.provider,
+                        account.provider.as_str(),
                         &account.provider_account_id,
                     ],
                 ),
@@ -1322,7 +1396,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
         if connection.tenant_id != tenant_id {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
-        match ManagedParentDefinition::for_knowledge_provider(&connection.provider)? {
+        match ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())? {
             ManagedParentDefinition::KnowledgeNangoV1 => {
                 return Ok(None);
             }
@@ -1363,7 +1437,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
         if connection.tenant_id != tenant_id {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
-        if ManagedParentDefinition::for_knowledge_provider(&connection.provider)?
+        if ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())?
             == ManagedParentDefinition::KnowledgeNangoV1
         {
             return Ok(false);
@@ -1398,7 +1472,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             if connection.tenant_id != tenant_id {
                 return Err(KnowledgeServiceError::NotFound("knowledge connection"));
             }
-            match ManagedParentDefinition::for_knowledge_provider(&connection.provider)? {
+            match ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())? {
                 ManagedParentDefinition::KnowledgeNangoV1 => {}
                 ManagedParentDefinition::KnowledgeMergeV1 => {
                     identities.push(CredentialIdentity {
@@ -1492,11 +1566,11 @@ impl ConfigKnowledgeProviders {
 impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
     fn provider(
         &self,
-        provider: &str,
+        provider: LinkedProviderKind,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError> {
         match provider {
-            "nango" => {
-                let api_key = self.config.selected_provider_api_key(provider)?;
+            LinkedProviderKind::Nango => {
+                let api_key = self.config.selected_provider_api_key(provider.as_str())?;
                 let mut implementation =
                     NangoProvider::new(self.config.nango.api_base_url.clone(), api_key)?;
                 if let Some(signing_key) =
@@ -1506,8 +1580,8 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 }
                 Ok(Arc::new(implementation))
             }
-            "merge" => {
-                let api_key = self.config.selected_provider_api_key(provider)?;
+            LinkedProviderKind::Merge => {
+                let api_key = self.config.selected_provider_api_key(provider.as_str())?;
                 let mut implementation =
                     MergeProvider::new(self.config.merge.api_base_url.clone(), api_key)?;
                 if let Some(signature_key) =
@@ -1517,14 +1591,20 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 }
                 Ok(Arc::new(implementation))
             }
-            other => Err(KnowledgeServiceError::UnknownProvider(other.to_string())),
         }
     }
 
-    fn provider_ids(&self) -> Vec<String> {
-        let mut ids = self.config.providers.enabled.clone();
-        ids.sort();
-        ids
+    fn provider_ids(&self) -> Vec<LinkedProviderKind> {
+        [LinkedProviderKind::Merge, LinkedProviderKind::Nango]
+            .into_iter()
+            .filter(|provider| {
+                self.config
+                    .providers
+                    .enabled
+                    .iter()
+                    .any(|candidate| candidate == provider.as_str())
+            })
+            .collect()
     }
 
     fn webhook_verifier(
@@ -1533,7 +1613,7 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
     ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
         match provider {
             "nango" | "merge" => Ok(Arc::new(LinkedProviderWebhookVerifier::new(
-                self.provider(provider)?,
+                self.provider(parse_linked_provider(provider)?)?,
             ))),
             "llamaparse" => self.parser_webhook_verifier("llamaparse"),
             "reducto" => self.parser_webhook_verifier("reducto"),
@@ -1616,10 +1696,13 @@ pub enum KnowledgeServiceError {
 }
 
 async fn authorize_tenant(
+    authz: &crate::handlers::authz_shim::AuthzEnforcer,
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
 ) -> Result<Identity, HandlerError> {
-    crate::handlers::authz_shim::authorize_tenant(ctx, tenant_id, Relation::Operator).await
+    authz
+        .authorize_tenant(ctx, tenant_id, Relation::Operator)
+        .await
 }
 
 /// Authorizes the caller for one tenant and binds a replay-stable operation id.
@@ -1628,10 +1711,11 @@ async fn authorize_tenant(
 /// invocation's deterministic RNG rather than `Uuid::now_v7`, so a replayed
 /// handler reuses the same credential audit rows instead of appending new ones.
 async fn authorize_knowledge_caller(
+    authz: &crate::handlers::authz_shim::AuthzEnforcer,
     ctx: &mut Context<'_>,
     tenant_id: TenantId,
 ) -> Result<KnowledgeCaller, HandlerError> {
-    let identity = authorize_tenant(&*ctx, tenant_id).await?;
+    let identity = authorize_tenant(authz, &*ctx, tenant_id).await?;
     Ok(KnowledgeCaller::authorized(
         &identity,
         ctx.rand_uuid().to_string(),
@@ -1699,7 +1783,6 @@ fn connector_terminal_error_code(error: &moa_connectors::Error) -> Option<u16> {
         | Error::ContractHashMismatch { .. }
         | Error::CredentialSlotMissing { .. }
         | Error::ActionPinMismatch { .. }
-        | Error::UnsupportedHttpRuntime
         | Error::SchemaValidation { .. } => Some(400),
         Error::Http { .. }
         | Error::Cancelled { .. }
@@ -1708,7 +1791,6 @@ fn connector_terminal_error_code(error: &moa_connectors::Error) -> Option<u16> {
         | Error::DatabaseScope(_)
         | Error::Authorization(_)
         | Error::AuthorizationUnavailable
-        | Error::ManagedParentRepositoryUnavailable
         | Error::Storage(_) => None,
     }
 }

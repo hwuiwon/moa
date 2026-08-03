@@ -19,7 +19,6 @@ pub(super) async fn run_experiment_plan(
     scope: ActionRuleScope,
     plan_revision_uid: Uuid,
     pool: &sqlx::PgPool,
-    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     persist_run_status(
         ctx,
@@ -41,7 +40,7 @@ pub(super) async fn run_experiment_plan(
         pool,
     )
     .await?;
-    dispatch_plan_trials(ctx, request, scope, expansion, pool, session_store).await
+    dispatch_plan_trials(ctx, request, scope, expansion, pool).await
 }
 
 async fn dispatch_plan_trials(
@@ -50,7 +49,6 @@ async fn dispatch_plan_trials(
     scope: ActionRuleScope,
     expansion: PlanExpansion,
     pool: &sqlx::PgPool,
-    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let parallelism = expansion.parallelism;
     let variants = expansion.variants;
@@ -86,7 +84,6 @@ async fn dispatch_plan_trials(
                     run_uid: request.run_uid,
                 },
                 pool,
-                session_store,
             )
             .await;
         }
@@ -109,7 +106,6 @@ async fn dispatch_plan_trials(
                     run_uid: request.run_uid,
                 },
                 pool,
-                session_store,
             )
             .await;
         }
@@ -203,7 +199,6 @@ async fn dispatch_plan_trials(
                     run_uid: request.run_uid,
                 },
                 pool,
-                session_store,
             )
             .await;
         }
@@ -342,9 +337,7 @@ async fn expand_plan(
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| bad_request("experiment run disappeared before plan expansion"))?;
-    let simulator_policy = run.simulator_policy.ok_or_else(|| {
-        bad_request("plan-backed experiment run has no simulator policy snapshot")
-    })?;
+    let simulator_policy = run.simulator_policy;
     if simulator_policy.reference() != definition.simulator_policy {
         return Err(bad_request(
             "experiment run simulator policy does not match the pinned plan revision",

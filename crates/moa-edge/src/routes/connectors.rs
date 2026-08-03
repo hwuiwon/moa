@@ -11,8 +11,9 @@ use axum::response::{IntoResponse, Response};
 use moa_core::types::credentials::CredentialSlotName;
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
 use moa_wire::connectors::{
-    ConnectorConnectionCreateRequest, ConnectorConnectionMutationRequest,
-    ConnectorConnectionUseRequest,
+    ConnectorConnectionCreateRequest, ConnectorConnectionListRequest,
+    ConnectorConnectionMutationCommand, ConnectorConnectionMutationRequest,
+    ConnectorConnectionSelector, ConnectorConnectionUseCommand, ConnectorConnectionUseRequest,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -25,24 +26,6 @@ use super::{AppState, RouteTranslation, authenticate_direct_request};
 
 const CREDENTIAL_PUBLIC_ROUTE: &str =
     "/v1/connectors/connections/{connection_id}/credentials/{slot_name}";
-
-#[derive(Serialize)]
-struct ConnectionSelector {
-    connection_id: ConnectorConnectionId,
-}
-
-#[derive(Serialize)]
-struct ConnectionMutationCommand {
-    connection_id: ConnectorConnectionId,
-    expected_generation: u64,
-}
-
-#[derive(Serialize)]
-struct ConnectionUseCommand {
-    connection_id: ConnectorConnectionId,
-    #[serde(flatten)]
-    request: ConnectorConnectionUseRequest,
-}
 
 /// Returns whether a path belongs to the exact connector-management subtree.
 pub(super) fn matches_management_path(path: &str) -> bool {
@@ -59,19 +42,18 @@ pub(super) fn translate(
     if !matches_management_path(path) {
         return None;
     }
-    if uri.query().is_some() {
-        return Some(RouteTranslation::BadRequest(
-            "connector routes do not accept query parameters",
-        ));
-    }
-
     if path == "/v1/connectors/connections" {
         return Some(match *method {
-            Method::POST => translate_create(body),
-            Method::GET if body.is_empty() => forward_empty("/ConnectorConnections/list"),
+            Method::POST if uri.query().is_none() => translate_create(body),
+            Method::GET if body.is_empty() => translate_list(uri),
             Method::GET => RouteTranslation::BadRequest("connector list body must be empty"),
             _ => RouteTranslation::NotFound,
         });
+    }
+    if uri.query().is_some() {
+        return Some(RouteTranslation::BadRequest(
+            "connector detail routes do not accept query parameters",
+        ));
     }
 
     let tail = path
@@ -91,13 +73,10 @@ pub(super) fn translate(
     let translation = match children.as_slice() {
         [] if *method == Method::GET && body.is_empty() => serialize_command(
             "/ConnectorConnections/get",
-            &ConnectionSelector { connection_id },
+            &ConnectorConnectionSelector { connection_id },
         ),
         [] if *method == Method::GET => {
             RouteTranslation::BadRequest("connector get body must be empty")
-        }
-        [] if *method == Method::DELETE => {
-            translate_mutation(body, connection_id, "/ConnectorConnections/disconnect")
         }
         [operation @ ("verify" | "activate" | "suspend" | "resume" | "disconnect" | "delete")]
             if *method == Method::POST =>
@@ -126,6 +105,38 @@ pub(super) fn translate(
     Some(translation)
 }
 
+fn translate_list(uri: &Uri) -> RouteTranslation {
+    let mut request = ConnectorConnectionListRequest::default();
+    let mut saw_cursor = false;
+    let mut saw_limit = false;
+    for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "cursor" if !saw_cursor => {
+                saw_cursor = true;
+                let Some(cursor) = parse_connection_id(&value) else {
+                    return RouteTranslation::BadRequest("invalid connector list cursor");
+                };
+                request.cursor = Some(cursor);
+            }
+            "limit" if !saw_limit => {
+                saw_limit = true;
+                let Ok(limit) = value.parse::<u16>() else {
+                    return RouteTranslation::BadRequest("invalid connector list limit");
+                };
+                if !(1..=100).contains(&limit) {
+                    return RouteTranslation::BadRequest("connector list limit must be in 1..=100");
+                }
+                request.limit = Some(limit);
+            }
+            "cursor" | "limit" => {
+                return RouteTranslation::BadRequest("duplicate connector list parameter");
+            }
+            _ => return RouteTranslation::BadRequest("unknown connector list parameter"),
+        }
+    }
+    serialize_command("/ConnectorConnections/list", &request)
+}
+
 fn translate_create(body: &Bytes) -> RouteTranslation {
     let request = match serde_json::from_slice::<ConnectorConnectionCreateRequest>(body) {
         Ok(request) => request,
@@ -145,7 +156,7 @@ fn translate_mutation(
     };
     serialize_command(
         target,
-        &ConnectionMutationCommand {
+        &ConnectorConnectionMutationCommand {
             connection_id,
             expected_generation: request.expected_generation,
         },
@@ -163,19 +174,11 @@ fn translate_use(
     };
     serialize_command(
         target,
-        &ConnectionUseCommand {
+        &ConnectorConnectionUseCommand {
             connection_id,
             request,
         },
     )
-}
-
-fn forward_empty(target: &'static str) -> RouteTranslation {
-    RouteTranslation::Forward {
-        method: Method::POST,
-        path: target.to_string(),
-        body: b"{}".to_vec(),
-    }
 }
 
 fn serialize_command(target: &'static str, command: &impl Serialize) -> RouteTranslation {
@@ -342,9 +345,8 @@ fn connector_rejection_response(status: StatusCode) -> Response {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use moa_wire::connectors::{ConnectorDefinitionReference, ConnectorUseSubject};
+    use moa_wire::connectors::{ConnectorArtifactReference, ConnectorUseSubject};
     use serde_json::{Value, json};
-    use std::num::NonZeroU64;
 
     fn uri(path: &str) -> Uri {
         path.parse().expect("fixture URI should parse")
@@ -392,11 +394,11 @@ mod tests {
         let create = ConnectorConnectionCreateRequest {
             connection_id,
             display_name: "Billing".to_string(),
-            definition_ref: ConnectorDefinitionReference::BuiltIn {
-                key: "billing".to_string(),
-                version: NonZeroU64::new(1).expect("fixture version is positive"),
+            definition_ref: ConnectorArtifactReference {
+                artifact_uid: Uuid::from_u128(0xa471),
+                revision_uid: Uuid::from_u128(0xae71),
             },
-            origin: Some("https://billing.example.test".to_string()),
+            origin: "https://billing.example.test".to_string(),
             non_secret_config: json!({"region": "east"}),
         };
         let create_body = Bytes::from(
@@ -496,9 +498,9 @@ mod tests {
     }
 
     #[test]
-    fn connector_delete_route_is_explicit_and_http_delete_remains_disconnect() {
-        // Pins: destructive deletion requires its explicit child route; the
-        // conventional HTTP DELETE remains the retained-record disconnect.
+    fn connector_delete_and_disconnect_require_explicit_post_routes() {
+        // Pins: deletion and audit-preserving disconnect are distinct explicit
+        // POST operations; DELETE is not a body-bearing lifecycle alias.
         let connection_id = connection_id();
         let body = Bytes::from_static(br#"{"expected_generation":9}"#);
 
@@ -520,17 +522,28 @@ mod tests {
             json!({"connection_id": connection_id, "expected_generation": 9})
         );
 
-        let ordinary_disconnect = translate(
+        let explicit_disconnect = translate(
+            &Method::POST,
+            &uri(&format!(
+                "/v1/connectors/connections/{connection_id}/disconnect"
+            )),
+            &Bytes::from_static(br#"{"expected_generation":9}"#),
+            TenantId::from(Uuid::nil()),
+        )
+        .expect("explicit connector disconnect route should match");
+        let RouteTranslation::Forward { path, .. } = explicit_disconnect else {
+            panic!("explicit connector disconnect should forward")
+        };
+        assert_eq!(path, "/ConnectorConnections/disconnect");
+
+        let delete_alias = translate(
             &Method::DELETE,
             &uri(&format!("/v1/connectors/connections/{connection_id}")),
             &Bytes::from_static(br#"{"expected_generation":9}"#),
             TenantId::from(Uuid::nil()),
         )
-        .expect("ordinary connector HTTP DELETE route should match");
-        let RouteTranslation::Forward { path, .. } = ordinary_disconnect else {
-            panic!("ordinary connector HTTP DELETE should forward")
-        };
-        assert_eq!(path, "/ConnectorConnections/disconnect");
+        .expect("connector management subtree should match");
+        assert_eq!(delete_alias, RouteTranslation::NotFound);
     }
 
     #[test]
@@ -546,7 +559,7 @@ mod tests {
                 TenantId::from(Uuid::nil()),
             ),
             Some(RouteTranslation::BadRequest(
-                "connector routes do not accept query parameters"
+                "unknown connector list parameter"
             ))
         );
         assert_eq!(

@@ -15,8 +15,8 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   `moa-memory-types`, `moa-memory-vector`,
   `moa-retrieval` (hybrid graph-memory retrieval engine and query planner).
 - Auth/security/audit: `moa-authz`, `moa-authz-schema`,
-  `moa-auth-providers` (identity, token vault, and the durable tenant
-  credential owner), `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
+  `moa-auth-providers` (identity and the durable tenant credential owner),
+  `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
   `moa-ocsf`, `moa-security`, `moa-crypto` (envelope encryption and BYOK),
   `moa-kms` (Postgres-backed key management),
   `moa-dlp` (provider-egress PII tokenization).
@@ -41,6 +41,11 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 - scoring and experiment persistence stay in their owning crates; and
 - `moa-memory-lifecycle` has no dependency on `moa-memory-ingest`.
 
+The orchestrator constructs one `RuntimeDeps` graph per process. That graph owns
+one shared `IngestRuntime` and one shared `MemoryRetrievalEngine`; brain context
+retrieval, memory service/tool reads, and fast/slow ingestion adapters receive
+those instances explicitly rather than installing process globals.
+
 ## Core Dependencies
 
 | Area | Crates |
@@ -62,8 +67,8 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
 `moa-migrations` owns the fresh-install-only, contiguous 54-file PostgreSQL
-chain and the central table-ownership manifest. The current 148 table
-families span 151 `CREATE TABLE` declarations and map one-to-one to 148
+chain and the central table-ownership manifest. The current 143 table
+families span 148 `CREATE TABLE` declarations and map one-to-one to 143
 ownership entries. `cargo run -p xtask --locked -- check-migrations` enforces
 this contract.
 
@@ -101,7 +106,7 @@ the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 | Service | Purpose |
 |---|---|
 | Neon branching | Database checkpoint/rollback support |
-| HashiCorp Vault or similar | Cloud credential storage |
+| External secret manager | Deployment-time injection for provider/operator secrets; tenant connector credential series remain in the Postgres/KMS-backed `CredentialVault` |
 | Grafana/Tempo/Mimir stack | Metrics and traces. MOA pushes both signals over OTLP to one collector base URL and exposes no scrape port; `MOA_METRICS_EXPORTER=prometheus` is a development-only mode |
 | Messaging platforms | Slack adapter |
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
@@ -247,7 +252,7 @@ and deployment setup. Key groups:
 | `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, and deadlines |
 | `MOA_CLOUD_*` | remote hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
-| `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
+| `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
 | `MOA_SESSION_ATTACHMENT_*` | session upload object storage backend, bucket, prefix, endpoint, and cloud credentials |
 | `MOA_PRIVACY_*`, `MOA_LINEAGE_AUDIT_*`, and `MOA_PII_VAULT_SECRET_HEX` | privacy approval verification, DSAR/export signing, lineage audit signing, and PII-vault pseudonymization |
@@ -265,9 +270,17 @@ Implemented architectural pillars:
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Constructor-based runtime composition: `RuntimeDeps::build` constructs the
   concrete graph and `build_endpoint` binds it, including the durable
-  `TenantPurge` workflow. Runtime cache is passed explicitly to provider and
-  embedding composition; live handles are not stored inside serializable
-  `MoaConfig`.
+  `TenantPurge` workflow. The graph contains one retrieval engine, one ingestion
+  runtime, and one delivery sink; turn preparation and OpenFGA are injected into
+  their consumers. Runtime cache is passed explicitly to provider and embedding
+  composition; live handles are not stored inside serializable `MoaConfig`.
+- Plan-backed Behavior Lab runs: run admission requires an immutable
+  `experiment_plan` revision, and `PlanTrialPager` is the only trial-expansion
+  path.
+- Nango/Merge-only tenant knowledge sync over six narrow repository capabilities
+  for connections, sync, ingestion, ACLs, contact groups, and provider events.
+- Reviewed custom connectors use one HTTP-only artifact contract; code-owned
+  Nango/Merge parents remain actionless and internal to knowledge linking.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness. A lease carries the exact sandbox policy identity it was provisioned under plus a renewable idle deadline and an immutable hard deadline, and an independent durable reaper destroys expired generations with `SKIP LOCKED` claims rather than waiting for traffic.
 - Redis-backed runtime cache for the production orchestrator; the in-memory implementation is limited to isolated non-orchestrator tests and embeddings.

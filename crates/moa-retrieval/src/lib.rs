@@ -10,5 +10,6 @@
 //! The [`retrieval`] and [`planning`] modules form a cooperating pair: planning
 //! classifies a query and seeds it, and retrieval executes the planned query.
 
+pub mod engine;
 pub mod planning;
 pub mod retrieval;

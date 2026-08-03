@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_artifacts::connector::{RuntimeConnectorDefinitionV1, connection_action_tool_reference};
+use moa_artifacts::connector::ConnectorDefinition;
 use moa_connectors::catalog::{InstalledConnectorCatalogQuery, InstalledConnectorCatalogSnapshot};
 use moa_connectors::domain::{
     CompiledOperationContract, ConnectionDefinitionRef, ConnectionGeneration, ConnectionHealth,
@@ -86,6 +86,7 @@ impl ConnectorActionRuntime for CountingConnectorRuntime {
     async fn invoke(
         &self,
         _invocation: ConnectorActionInvocation,
+        _prepared: moa_connectors::executor::PreparedConnectorAction,
     ) -> moa_connectors::Result<RawConnectorActionResult> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(moa_connectors::Error::Http {
@@ -369,18 +370,21 @@ impl Fixture {
         let revision_uid = Uuid::from_u128(0xa472);
         let generation =
             ConnectionGeneration::new(7).expect("fixture generation should be positive");
-        let definition: RuntimeConnectorDefinitionV1 = serde_json::from_value(json!({
+        let definition: ConnectorDefinition = serde_json::from_value(json!({
             "definition_version": "v1",
             "display_name": "Billing connector",
-            "runtime": {"type": "built_in_managed", "provider": "fixture/v1"},
-            "auth": [{"type": "managed_oauth", "slot": "primary"}],
+            "auth": [{"type": "none"}],
             "actions": [{
                 "id": "create_invoice",
                 "description": "Creates one invoice.",
-                "binding": {
-                    "type": "built_in_managed",
-                    "operation": "fixture.create_invoice",
-                    "contract": {
+                "contract": {
+                    "method": "POST",
+                    "path_template": "/invoices",
+                    "max_request_bytes": 1024,
+                    "max_response_bytes": 1024,
+                    "connect_timeout_ms": 1000,
+                    "total_timeout_ms": 2000,
+                    "policy": {
                         "input_schema": {
                             "type": "object",
                             "properties": {"amount": {"type": "string"}},
@@ -389,9 +393,6 @@ impl Fixture {
                         },
                         "output_schema": {"type": "object"},
                         "data_classes": [],
-                        "action_class": "external_write",
-                        "risk_level": "high",
-                        "minimum_effect": "admin_review",
                         "idempotency": "idempotent"
                     }
                 }
@@ -430,6 +431,7 @@ impl Fixture {
                 artifact_uid,
                 revision_uid,
             },
+            origin: Some("https://api.example.test".parse().expect("fixture origin")),
             non_secret_config: json!({}),
             generation,
             status: ConnectionStatus::Active,
@@ -452,8 +454,9 @@ impl Fixture {
             artifact_uid,
             revision_uid,
         };
-        let tool_name = connection_action_tool_reference(connection_id, "create_invoice")
-            .expect("fixture action ID should produce a model-safe tool name");
+        let tool_name =
+            moa_hands::core::installed_connector_tool_name(connection_id, "create_invoice")
+                .expect("fixture action ID should produce a model-safe tool name");
         Self {
             tenant_id,
             identity,

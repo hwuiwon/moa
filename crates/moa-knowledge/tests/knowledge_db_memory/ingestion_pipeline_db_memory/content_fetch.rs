@@ -2,10 +2,12 @@
 
 use super::*;
 
+use moa_knowledge::Error;
+
 #[tokio::test]
-async fn ingestion_pipeline_fetches_content_for_metadata_only_records_db_memory() {
-    // Pins: a metadata-only provider record (no inline text, no fetchable URL)
-    // has its content downloaded through the content fetcher, and the fetched
+async fn ingestion_pipeline_fetches_content_for_provider_fetch_records_db_memory() {
+    // Pins: a provider-fetch record has its content downloaded through the
+    // authenticated content fetcher, and the fetched
     // bytes are chunked and stored as real content instead of a title stub.
     let db = postgres::bootstrap_test_db()
         .await
@@ -40,6 +42,13 @@ async fn ingestion_pipeline_fetches_content_for_metadata_only_records_db_memory(
         FetchOutcome::Bytes(fetched.clone(), Some("text/plain".to_string())),
     ))));
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(drive_connection(connection_uid, tenant_id))
         .await
@@ -51,12 +60,12 @@ async fn ingestion_pipeline_fetches_content_for_metadata_only_records_db_memory(
             connection_uid,
             tenant_id,
             RecordPage {
-                records: vec![metadata_only_record("doc-1", "v1", "Roadmap")],
+                records: vec![provider_fetch_record("doc-1", "v1", "Roadmap")],
                 next_cursor: None,
             },
         )
         .await
-        .expect("metadata-only record should ingest via fetched content");
+        .expect("provider-fetch record should ingest via fetched content");
     assert_eq!(report.records_ingested, 1);
 
     let object_uid = object_uid(connection_uid);
@@ -96,10 +105,9 @@ async fn ingestion_pipeline_fetches_content_for_metadata_only_records_db_memory(
 }
 
 #[tokio::test]
-async fn ingestion_pipeline_falls_back_to_title_when_content_fetch_fails_db_memory() {
-    // Pins: a failed content fetch keeps the title-only fallback (record still
-    // ingests, run not failed) but records a distinct content_fetch failure code
-    // so it is not confused with a plain metadata-only record.
+async fn ingestion_pipeline_fails_without_indexing_title_when_content_fetch_fails_db_memory() {
+    // Pins: a provider-fetch failure fails closed after object and ACL capture;
+    // a human-facing title never becomes indexed document content.
     let db = postgres::bootstrap_test_db()
         .await
         .expect("bootstrap isolated Postgres");
@@ -128,42 +136,40 @@ async fn ingestion_pipeline_falls_back_to_title_when_content_fetch_fails_db_memo
     )
     .with_content_fetcher(Some(Arc::new(FakeContentFetcher::new(FetchOutcome::Error))));
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(drive_connection(connection_uid, tenant_id))
         .await
         .expect("upsert connection");
     let run = create_run(&repository, tenant_id, connection_uid).await;
-    let report = pipeline
+    let error = pipeline
         .ingest_record_page(
             run,
             connection_uid,
             tenant_id,
             RecordPage {
-                records: vec![metadata_only_record("doc-1", "v1", "Fallback Title")],
+                records: vec![provider_fetch_record("doc-1", "v1", "Fallback Title")],
                 next_cursor: None,
             },
         )
         .await
-        .expect("failed fetch should not fail the page");
-    assert_eq!(report.records_ingested, 1);
+        .expect_err("failed provider fetch must fail the page");
+    assert!(matches!(error, Error::Provider { .. }));
 
     let object_uid = object_uid(connection_uid);
     let version = repository
         .latest_document_version(object_uid)
         .await
-        .expect("load version")
-        .expect("title fallback should create a version");
-    let chunks = repository
-        .chunks_for_version(version.version_uid)
-        .await
-        .expect("load chunks");
+        .expect("load version");
     assert_eq!(
-        chunks
-            .iter()
-            .map(|chunk| chunk.text.clone())
-            .collect::<Vec<_>>(),
-        vec!["Fallback Title".to_string()],
-        "failed fetch should fall back to indexing the record title"
+        version, None,
+        "failed fetch must not create a document version"
     );
 
     let steps = repository
@@ -174,11 +180,11 @@ async fn ingestion_pipeline_falls_back_to_title_when_content_fetch_fails_db_memo
         .iter()
         .find(|step| step.step == "content_fetched")
         .expect("content_fetched step should be recorded");
-    assert_eq!(content_step.status, IngestionStepStatus::Completed);
+    assert_eq!(content_step.status, IngestionStepStatus::Failed);
     assert_eq!(
         content_step.error_code.as_deref(),
-        Some("provider_content_fetch_failed"),
-        "failed fetch must be distinguishable from a plain metadata-only record"
+        Some("provider_error_retryable"),
+        "failed provider fetch must be classified for retry"
     );
 
     let run_row = repository
@@ -186,20 +192,109 @@ async fn ingestion_pipeline_falls_back_to_title_when_content_fetch_fails_db_memo
         .await
         .expect("read run")
         .expect("run should exist");
-    assert_eq!(run_row.records_failed, 0);
+    assert_eq!(run_row.records_failed, 1);
+    assert_eq!(run_row.status, SyncRunStatus::FailedRetryable);
+}
+
+#[tokio::test]
+async fn ingestion_pipeline_captures_and_skips_explicit_metadata_only_record_db_memory() {
+    // Pins: a provider-declared metadata-only record persists its object and ACL
+    // position, records an observable skipped content step, and creates no
+    // document version or provider fetch.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        RlsContext::tenant(tenant_id),
+    ));
+    let fetcher = Arc::new(FakeContentFetcher::new(FetchOutcome::Error));
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(BytesOrTextParagraphParser),
+        Arc::new(CountingEmbedder::default()),
+        Arc::new(FakeGraphWriter::default()),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig::default(),
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    )
+    .with_content_fetcher(Some(fetcher.clone()));
+
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
+    repository
+        .upsert_connection(drive_connection(connection_uid, tenant_id))
+        .await
+        .expect("upsert connection");
+    let run = create_run(&repository, tenant_id, connection_uid).await;
+    let mut record = provider_fetch_record("doc-1", "v1", "Display Title");
+    record.materialization = ProviderRecordMaterialization::MetadataOnly;
+    let report = pipeline
+        .ingest_record_page(
+            run,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("metadata-only record should be captured and skipped");
+    assert_eq!(report.records_skipped, 1);
+    assert_eq!(report.records_ingested, 0);
+    assert_eq!(
+        fetcher.calls(),
+        0,
+        "metadata-only must not invoke the fetcher"
+    );
+
+    let object = repository
+        .get_object_by_source(connection_uid, "doc-1")
+        .await
+        .expect("read captured object")
+        .expect("metadata-only object should exist");
+    assert_eq!(object.status, ObjectStatus::Pending);
     assert!(
-        !matches!(
-            run_row.status,
-            SyncRunStatus::FailedRetryable | SyncRunStatus::FailedTerminal
-        ),
-        "content fetch failure must not fail the run: {:?}",
-        run_row.status
+        object.acl.admits(),
+        "captured object must retain current ACL state"
+    );
+    assert!(
+        repository
+            .latest_document_version(object.object_uid)
+            .await
+            .expect("load version")
+            .is_none(),
+        "metadata-only record must not create a document version"
+    );
+    let steps = repository
+        .sync_run_steps(run, Some(object.object_uid))
+        .await
+        .expect("read object steps");
+    let content_step = steps
+        .iter()
+        .find(|step| step.step == "content_fetched")
+        .expect("metadata-only skip should be observable");
+    assert_eq!(content_step.status, IngestionStepStatus::Skipped);
+    assert_eq!(
+        content_step.summary.as_deref(),
+        Some("metadata-only record has no indexable content")
     );
 }
 
 #[tokio::test]
 async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_db_memory() {
-    // Pins: a metadata-only record whose content came from the fetch hook is not
+    // Pins: a provider-fetch record whose content came from the fetch hook is not
     // re-fetched on an unchanged-change-token sync (no second fetch, no new
     // version), while a changed change token does trigger a re-fetch.
     let db = postgres::bootstrap_test_db()
@@ -234,6 +329,13 @@ async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_d
     )
     .with_content_fetcher(Some(fetcher.clone()));
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(drive_connection(connection_uid, tenant_id))
         .await
@@ -248,7 +350,7 @@ async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_d
             connection_uid,
             tenant_id,
             RecordPage {
-                records: vec![metadata_only_record("doc-1", "v1", "Roadmap")],
+                records: vec![provider_fetch_record("doc-1", "v1", "Roadmap")],
                 next_cursor: None,
             },
         )
@@ -265,7 +367,7 @@ async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_d
             connection_uid,
             tenant_id,
             RecordPage {
-                records: vec![metadata_only_record("doc-1", "v1", "Roadmap")],
+                records: vec![provider_fetch_record("doc-1", "v1", "Roadmap")],
                 next_cursor: None,
             },
         )
@@ -288,7 +390,7 @@ async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_d
             connection_uid,
             tenant_id,
             RecordPage {
-                records: vec![metadata_only_record("doc-1", "v2", "Roadmap")],
+                records: vec![provider_fetch_record("doc-1", "v2", "Roadmap")],
                 next_cursor: None,
             },
         )

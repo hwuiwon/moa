@@ -38,6 +38,16 @@ pub enum ConnectorDefinitionReference {
     },
 }
 
+/// Exact published artifact revision accepted by the public create API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorArtifactReference {
+    /// Stable connector artifact identity.
+    pub artifact_uid: Uuid,
+    /// Exact immutable artifact revision identity.
+    pub revision_uid: Uuid,
+}
+
 /// Request to create one tenant connector connection.
 ///
 /// The tenant and caller identity are intentionally absent. Ingress derives
@@ -50,11 +60,10 @@ pub struct ConnectorConnectionCreateRequest {
     pub connection_id: ConnectorConnectionId,
     /// Operator-visible connection label.
     pub display_name: String,
-    /// Exact immutable artifact or built-in definition reference.
-    pub definition_ref: ConnectorDefinitionReference,
-    /// Fixed HTTP(S) origin for runtimes whose reviewed definition requires one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
+    /// Exact immutable published connector artifact revision.
+    pub definition_ref: ConnectorArtifactReference,
+    /// Fixed HTTP(S) origin for the constrained-HTTP connector.
+    pub origin: String,
     /// Definition-validated configuration that contains no credential material.
     #[serde(default = "empty_json_object")]
     pub non_secret_config: Value,
@@ -64,6 +73,36 @@ pub struct ConnectorConnectionCreateRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorConnectionMutationRequest {
+    /// Generation observed before the requested mutation.
+    pub expected_generation: u64,
+}
+
+/// Exact connection selector shared by edge and Restate adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorConnectionSelector {
+    /// Connection selected by the authenticated public route.
+    pub connection_id: ConnectorConnectionId,
+}
+
+/// Cursor page requested from the public connector connection list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorConnectionListRequest {
+    /// Exclusive connection UUID returned by the preceding page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<ConnectorConnectionId>,
+    /// Requested page size. Omission selects the service default of 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u16>,
+}
+
+/// Exact lifecycle command shared by edge and Restate adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorConnectionMutationCommand {
+    /// Connection selected by the authenticated public route.
+    pub connection_id: ConnectorConnectionId,
     /// Generation observed before the requested mutation.
     pub expected_generation: u64,
 }
@@ -135,6 +174,9 @@ pub struct ConnectorConnectionResponse {
     pub display_name: String,
     /// Exact immutable definition backing the connection.
     pub definition_ref: ConnectorDefinitionReference,
+    /// Fixed canonical HTTP origin for artifact-backed connector actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// Definition-validated configuration containing no credential material.
     pub non_secret_config: Value,
     /// Current optimistic-concurrency and binding generation.
@@ -161,6 +203,9 @@ pub struct ConnectorConnectionResponse {
 pub struct ConnectorConnectionListResponse {
     /// Connections in deterministic connection-identity order.
     pub connections: Vec<ConnectorConnectionResponse>,
+    /// Exclusive cursor for the following page when more rows exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<ConnectorConnectionId>,
 }
 
 /// Sanitized result of connector destination and credential verification.
@@ -207,6 +252,17 @@ pub enum ConnectorUseSubject {
 pub struct ConnectorConnectionUseRequest {
     /// Exact same-tenant subject whose direct relationship changes.
     pub subject: ConnectorUseSubject,
+}
+
+/// Exact direct-use command shared by edge and Restate adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorConnectionUseCommand {
+    /// Connection selected by the authenticated public route.
+    pub connection_id: ConnectorConnectionId,
+    /// Exact same-tenant subject receiving or losing direct use.
+    #[serde(flatten)]
+    pub request: ConnectorConnectionUseRequest,
 }
 
 /// Secret-free metadata accompanying a private credential-ingress write.
@@ -259,7 +315,8 @@ mod tests {
                 artifact_uid,
                 revision_uid,
             },
-            non_secret_config: json!({"origin": "https://billing.example.com"}),
+            origin: Some("https://billing.example.com".to_string()),
+            non_secret_config: json!({}),
             generation: 4,
             status: ConnectorConnectionStatus::Suspended,
             health: ConnectorConnectionHealth::Pending,
@@ -285,7 +342,8 @@ mod tests {
                     "artifact_uid": artifact_uid,
                     "revision_uid": revision_uid,
                 },
-                "non_secret_config": {"origin": "https://billing.example.com"},
+                "origin": "https://billing.example.com",
+                "non_secret_config": {},
                 "generation": 4,
                 "status": "suspended",
                 "health": "pending",
@@ -315,7 +373,6 @@ mod tests {
             "connection_id": ConnectorConnectionId::new(),
             "display_name": "Billing API",
             "definition_ref": {
-                "kind": "artifact",
                 "artifact_uid": Uuid::new_v4(),
                 "revision_uid": Uuid::new_v4(),
             },
@@ -336,6 +393,19 @@ mod tests {
                 "create request must reject forbidden field `{forbidden}`"
             );
         }
+
+        let mut built_in = base;
+        built_in
+            .as_object_mut()
+            .expect("fixture must be an object")
+            .insert(
+                "definition_ref".to_string(),
+                json!({"kind": "built_in", "key": "knowledge:nango", "version": 1}),
+            );
+        assert!(
+            serde_json::from_value::<ConnectorConnectionCreateRequest>(built_in).is_err(),
+            "public creation must reject code-owned managed connector references"
+        );
     }
 
     #[test]

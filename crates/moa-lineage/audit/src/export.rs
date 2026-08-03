@@ -19,7 +19,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::error::{AuditError, Result};
 use crate::signing::SigningKey;
-use moa_lineage_core::chain::canonical_json_bytes;
+use moa_core::canonical_json::canonical_json_bytes;
 
 const PHI_REDACTION_TOKEN: &str = "[redacted:phi]";
 const CLASSIFIED_PHI_VALUE_KEYS: &[&str] = &["field_value", "raw", "text", "value"];

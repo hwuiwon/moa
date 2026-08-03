@@ -62,10 +62,6 @@ const AUTH_SCHEMA_FRAGMENTS: &[SchemaFragment] = &[
         sql: include_str!("../migrations/postgres/V000013__authz_outbox_claims.sql"),
     },
     SchemaFragment {
-        name: "token_vault_connections",
-        sql: include_str!("../migrations/postgres/V000029__token_vault_connections.sql"),
-    },
-    SchemaFragment {
         name: "oauth_authorization_server",
         sql: include_str!("../migrations/postgres/V000032__oauth_authorization_server.sql"),
     },

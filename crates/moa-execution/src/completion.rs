@@ -18,9 +18,9 @@ use crate::{
     schema::validate_instance,
     state::{
         ExecutionLimitStop, ExecutionMapItem, ExecutionMapItemStatus, ExecutionMapOutput,
-        ExecutionNodeStatus, ExecutionProjection, ExecutionTaskFailure, ExecutionTaskProjection,
-        ExecutionTaskStatus, ExecutionTerminalCause, ExecutionTerminalEvidence,
-        ExecutionTerminalReason, TerminalProjection,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionTaskFailure,
+        ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
+        ExecutionTerminalEvidence, ExecutionTerminalReason, TerminalProjection,
     },
 };
 
@@ -76,6 +76,154 @@ pub enum CompletionStatus {
     Unsupported,
     /// No useful required result could be produced.
     Failed,
+}
+
+/// Returns the durable run status represented by one completion evaluation status.
+#[must_use]
+pub const fn run_status_from_completion(status: CompletionStatus) -> ExecutionRunStatus {
+    match status {
+        CompletionStatus::Completed => ExecutionRunStatus::Completed,
+        CompletionStatus::Partial => ExecutionRunStatus::Partial,
+        CompletionStatus::Blocked => ExecutionRunStatus::Blocked,
+        CompletionStatus::Unsupported => ExecutionRunStatus::Unsupported,
+        CompletionStatus::Failed => ExecutionRunStatus::Failed,
+    }
+}
+
+/// Converts deterministic completion evidence into the matching terminal projection.
+pub fn terminal_projection_from_evaluation(
+    evaluation: &CompletionEvaluation,
+    output: Option<Value>,
+    additional_gap: Option<String>,
+    failure: Option<ExecutionTaskFailure>,
+    unsupported_reason: Option<String>,
+) -> Result<TerminalProjection> {
+    let mut gaps = evaluation.gaps.clone();
+    if let Some(gap) = additional_gap {
+        gaps.push(gap);
+        gaps.sort();
+        gaps.dedup();
+    }
+    Ok(match evaluation.status {
+        CompletionStatus::Completed => TerminalProjection::Completed {
+            output: output.ok_or_else(|| Error::InvalidProjection {
+                message: "completed evaluation has no terminal output".to_string(),
+            })?,
+        },
+        CompletionStatus::Partial => TerminalProjection::Partial { output, gaps },
+        CompletionStatus::Blocked => TerminalProjection::Blocked { output, gaps },
+        CompletionStatus::Unsupported => TerminalProjection::Unsupported {
+            reason: unsupported_reason.unwrap_or_else(|| {
+                gaps.first()
+                    .cloned()
+                    .unwrap_or_else(|| "required execution path is unsupported".to_string())
+            }),
+            gaps,
+        },
+        CompletionStatus::Failed => TerminalProjection::Failed {
+            failure: failure.unwrap_or_else(|| ExecutionTaskFailure {
+                class: ExecutionFailureClass::Terminal,
+                message: gaps
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "execution produced no required result".to_string()),
+                capability_ref: None,
+            }),
+        },
+    })
+}
+
+/// Returns whether a terminal projection represents one completion evaluation status.
+#[must_use]
+pub const fn terminal_projection_matches_completion(
+    projection: &TerminalProjection,
+    status: CompletionStatus,
+) -> bool {
+    matches!(
+        (projection, status),
+        (
+            TerminalProjection::Completed { .. },
+            CompletionStatus::Completed
+        ) | (
+            TerminalProjection::Partial { .. },
+            CompletionStatus::Partial
+        ) | (
+            TerminalProjection::Blocked { .. },
+            CompletionStatus::Blocked
+        ) | (
+            TerminalProjection::Unsupported { .. },
+            CompletionStatus::Unsupported
+        ) | (TerminalProjection::Failed { .. }, CompletionStatus::Failed)
+            | (TerminalProjection::Cancelled { .. }, _)
+    )
+}
+
+/// Selects the typed terminal cause from a pure execution projection and budget ledger.
+#[must_use]
+pub fn terminal_cause(
+    projection: &ExecutionProjection,
+    budget_ledger: &BudgetLedger,
+    terminal: &TerminalProjection,
+    now: DateTime<Utc>,
+) -> ExecutionTerminalCause {
+    let deadline_exceeded = budget_ledger
+        .limit
+        .deadline_at
+        .is_some_and(|deadline| now > deadline);
+    let unfinished_work = projection.node_statuses.values().any(|status| {
+        !matches!(
+            status,
+            ExecutionNodeStatus::Completed
+                | ExecutionNodeStatus::Skipped
+                | ExecutionNodeStatus::Failed
+                | ExecutionNodeStatus::Cancelled
+        )
+    });
+    if deadline_exceeded && unfinished_work {
+        return ExecutionTerminalCause::LimitStop {
+            reason: ExecutionLimitStop::DeadlineExceeded,
+        };
+    }
+    if let Some(class) = projection.tasks.iter().find_map(|task| {
+        task.outcome
+            .as_ref()
+            .and_then(|outcome| match &outcome.result {
+                ExecutionTaskResult::Failed { class, .. } => Some(class.clone()),
+                _ => None,
+            })
+    }) {
+        return ExecutionTerminalCause::TaskFailure { class };
+    }
+    let budget_stopped_dispatch = matches!(
+        terminal,
+        TerminalProjection::Failed { failure }
+            if failure.class == ExecutionFailureClass::BudgetExceeded
+    ) || matches!(
+        terminal,
+        TerminalProjection::Partial { gaps, .. }
+            if gaps.iter().any(|gap| gap == "execution budget cannot reserve required work")
+    );
+    if budget_stopped_dispatch {
+        return ExecutionTerminalCause::LimitStop {
+            reason: ExecutionLimitStop::BudgetExceeded,
+        };
+    }
+    if matches!(terminal, TerminalProjection::Cancelled { .. }) {
+        return ExecutionTerminalCause::Cancellation;
+    }
+    if let TerminalProjection::Failed { failure } = terminal {
+        return ExecutionTerminalCause::TaskFailure {
+            class: failure.class.clone(),
+        };
+    }
+    let limit_stop = if deadline_exceeded {
+        Some(ExecutionLimitStop::DeadlineExceeded)
+    } else if budget_ledger.overrun {
+        Some(ExecutionLimitStop::BudgetExceeded)
+    } else {
+        None
+    };
+    ExecutionTerminalCause::Completion { limit_stop }
 }
 
 /// Persisted result of one declared completion check.
@@ -1036,6 +1184,38 @@ mod tests {
                 capability_ref: None,
             },
         }
+    }
+
+    #[test]
+    fn completion_projection_conversion_is_strict_and_preserves_overrides() {
+        // Pins: every scheduler and workflow uses one conversion, completed output cannot be
+        // invented, and interpreter-specific failure evidence remains intact.
+        assert!(
+            terminal_projection_from_evaluation(
+                &evaluation(CompletionStatus::Completed, None),
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        let failure = ExecutionTaskFailure {
+            class: ExecutionFailureClass::InvalidOutput,
+            message: "invalid result".to_string(),
+            capability_ref: None,
+        };
+        assert_eq!(
+            terminal_projection_from_evaluation(
+                &evaluation(CompletionStatus::Failed, None),
+                None,
+                Some("diagnostic gap".to_string()),
+                Some(failure.clone()),
+                None,
+            )
+            .expect("failed projection"),
+            TerminalProjection::Failed { failure }
+        );
     }
 
     #[test]

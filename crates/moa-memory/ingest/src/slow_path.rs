@@ -1,6 +1,5 @@
-//! Restate virtual object for slow-path graph-memory ingestion.
+//! Slow-path graph-memory ingestion algorithms and explicit runtime stages.
 
-use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -10,7 +9,7 @@ use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
     EntityResolutionPlan, EntityResolutionRequest, EntityResolver, Error, ExtractedFact,
     ExtractedFactScopeHint, FactExtractor, HeuristicFactExtractor, IngestApplyReport, IngestCtx,
-    IngestDecision, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
+    IngestDecision, IngestRuntime, RrfPlusJudgeDetector, SessionTurn, TurnChunk, chunk_turn,
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
@@ -26,12 +25,11 @@ use moa_memory_graph::{
 use moa_memory_pii::{PiiClassifier, PiiResult, PiiSpan, redact_text, redaction_replacement};
 use moa_memory_types::{FactEdgeLabel, normalize_entity_name};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
-use restate_sdk::prelude::*;
+use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
-const DONE_KEY_PREFIX: &str = "done";
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;
 /// Maximum concurrent PII classification requests issued for one turn's facts.
@@ -39,193 +37,99 @@ const PII_CLASSIFY_CONCURRENCY: usize = 8;
 /// Maximum concurrent contradiction pipelines evaluated for one turn's facts.
 const CONTRADICTION_CONCURRENCY: usize = 8;
 
-/// Restate virtual object surface for slow-path turn ingestion.
-#[restate_sdk::object]
-pub trait IngestionVO {
-    /// Ingests one finalized session turn into graph memory.
-    async fn ingest_turn(turn: Json<SessionTurn>) -> Result<Json<IngestApplyReport>, HandlerError>;
+/// Cohesive slow-path stage runner over one explicitly owned runtime.
+#[derive(Clone)]
+pub struct SlowPathIngestor {
+    runtime: Arc<IngestRuntime>,
 }
 
-/// Concrete ingestion virtual object implementation.
-pub struct IngestionVOImpl;
-
-impl IngestionVO for IngestionVOImpl {
-    #[tracing::instrument(skip(self, ctx, turn))]
-    async fn ingest_turn(
-        &self,
-        ctx: ObjectContext<'_>,
-        turn: Json<SessionTurn>,
-    ) -> Result<Json<IngestApplyReport>, HandlerError> {
-        moa_observability::adopt_remote_parent(&tracing::Span::current(), |name| {
-            ctx.headers().get(name).cloned()
-        });
-        let turn = turn.into_inner();
-        let done_key = done_key(turn.turn_seq);
-        if ctx
-            .get::<Json<bool>>(&done_key)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(false)
-        {
-            return Ok(Json::from(IngestApplyReport::default()));
-        }
-
-        let runtime = current_runtime().map_err(HandlerError::from)?;
-        let pool = runtime.pool().clone();
-        let pii_classifier = runtime.pii_classifier();
-        let embedder = runtime.embedder();
-        let contradiction_detector = runtime.contradiction_detector();
-        let vector_factory = runtime.vector_store_factory();
-        let kms = runtime.kms();
-        let degraded = storage_partition_degraded(&pool, &turn).await?;
-        if degraded && !should_ingest_degraded(&turn) {
-            ctx.set(&done_key, Json::from(true));
-            return Ok(Json::from(IngestApplyReport {
-                skipped: 1,
-                ..IngestApplyReport::default()
-            }));
-        }
-
-        let turn_for_chunking = turn.clone();
-        let chunks = ctx
-            .run(|| async move {
-                chunk_turn(
-                    &turn_for_chunking,
-                    CHUNK_TARGET_TOKENS,
-                    CHUNK_OVERLAP_TOKENS,
-                )
-                .map(Json::from)
-                .map_err(HandlerError::from)
-            })
-            .name("chunk")
-            .retry_policy(ingest_step_retry_policy())
-            .await?
-            .into_inner();
-
-        let extract_chunks = chunks.clone();
-        let extractor = runtime.extractor();
-        let extracted = ctx
-            .run(|| async move {
-                extractor
-                    .extract(&extract_chunks)
-                    .await
-                    .map(Json::from)
-                    .map_err(HandlerError::from)
-            })
-            .name("extract")
-            .retry_policy(ingest_step_retry_policy())
-            .await?
-            .into_inner();
-
-        let classify_facts_input = extracted.clone();
-        let classify_pii = pii_classifier.clone();
-        let classified = ctx
-            .run(|| async move {
-                classify_facts_with(classify_pii.as_ref(), &classify_facts_input)
-                    .await
-                    .map(Json::from)
-            })
-            .name("classify_pii")
-            .retry_policy(ingest_step_retry_policy())
-            .await?
-            .into_inner();
-
-        let embed_input = classified.clone();
-        let embed_embedder = embedder.clone();
-        let embedded = ctx
-            .run(|| async move {
-                embed_batch_shared(embed_embedder.as_deref(), &embed_input)
-                    .await
-                    .map(Json::from)
-            })
-            .name("embed")
-            .retry_policy(ingest_step_retry_policy())
-            .await?
-            .into_inner();
-
-        let contradiction_turn = turn.clone();
-        let contradiction_input = embedded.clone();
-        let contradiction_pool = pool.clone();
-        let contradiction_detector = contradiction_detector.clone();
-        let contradiction_vector_factory = vector_factory.clone();
-        let decisions = ctx
-            .run(|| async move {
-                detect_contradictions_with(
-                    contradiction_detector.as_ref(),
-                    contradiction_pool,
-                    &contradiction_vector_factory,
-                    &contradiction_turn,
-                    &contradiction_input,
-                )
-                .await
-                .map(Json::from)
-            })
-            .name("contradict")
-            .retry_policy(ingest_step_retry_policy())
-            .await?
-            .into_inner();
-
-        let upsert_turn = turn.clone();
-        let upsert_pool = pool.clone();
-        let upsert_entity_resolver = runtime.entity_resolver();
-        let upsert_entity_blocking_embedder = runtime.entity_blocking_embedder();
-        let upsert_vector_factory = vector_factory.clone();
-        let upsert_kms = kms.clone();
-        let report = ctx
-            .run(|| async move {
-                apply_decisions(
-                    &upsert_pool,
-                    &upsert_kms,
-                    &upsert_vector_factory,
-                    upsert_entity_resolver.as_ref(),
-                    upsert_entity_blocking_embedder,
-                    &upsert_turn,
-                    &decisions,
-                )
-                .await
-                .map(Json::from)
-            })
-            .name("upsert")
-            .retry_policy(ingest_step_retry_policy())
-            .await?
-            .into_inner();
-
-        ctx.set(&done_key, Json::from(true));
-        Ok(Json::from(report))
+impl SlowPathIngestor {
+    /// Creates a stage runner over the runtime owned by the host composition root.
+    #[must_use]
+    pub fn new(runtime: Arc<IngestRuntime>) -> Self {
+        Self { runtime }
     }
-}
 
-/// Runs the slow-path ingestion steps directly in the current process for local/test hosts.
-///
-/// Hosts that call this helper must first install an ingestion runtime with
-/// [`crate::install_runtime_with_pool`]. Restate handlers should continue to use
-/// [`IngestionVO::ingest_turn`] so the step journal remains durable. The helper
-/// takes a transaction-scoped Postgres advisory fence before graph/vector writes
-/// so duplicate direct callers for the same turn serialize across pods.
-pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, HandlerError> {
-    let runtime = current_runtime().map_err(HandlerError::from)?;
-    ingest_turn_direct_with_pool_and_pii(
-        DirectIngestDeps {
-            pool: runtime.pool().clone(),
-            kms: runtime.kms(),
-            pii_classifier: runtime.pii_classifier(),
-            embedder: runtime.embedder(),
-            extractor: runtime.extractor(),
-            entity_resolver: runtime.entity_resolver(),
-            entity_blocking_embedder: runtime.entity_blocking_embedder(),
-            contradiction_detector: runtime.contradiction_detector(),
-            vector_factory: runtime.vector_store_factory(),
-        },
-        turn,
-    )
-    .await
+    /// Returns whether a degraded partition should skip this turn.
+    pub async fn should_skip_degraded(&self, turn: &SessionTurn) -> Result<bool, HandlerError> {
+        Ok(storage_partition_degraded(self.runtime.pool(), turn).await?
+            && !should_ingest_degraded(turn))
+    }
+
+    /// Deterministically chunks one finalized turn.
+    pub fn chunk(&self, turn: &SessionTurn) -> Result<Vec<TurnChunk>, HandlerError> {
+        chunk_turn(turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(HandlerError::from)
+    }
+
+    /// Extracts candidate facts from deterministic turn chunks.
+    pub async fn extract(&self, chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>, HandlerError> {
+        self.runtime
+            .extractor()
+            .extract(chunks)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    /// Classifies and redacts extracted facts before any durable write.
+    pub async fn classify_pii(
+        &self,
+        facts: &[ExtractedFact],
+    ) -> Result<Vec<ClassifiedFact>, HandlerError> {
+        let classifier = self.runtime.pii_classifier();
+        classify_facts_with(classifier.as_ref(), facts).await
+    }
+
+    /// Embeds classified facts, preserving explicit no-vector mode.
+    pub async fn embed(&self, facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, HandlerError> {
+        let embedder = self.runtime.embedder();
+        embed_batch_shared(embedder.as_deref(), facts).await
+    }
+
+    /// Detects contradictions for one turn against its admitted scope.
+    pub async fn contradict(
+        &self,
+        turn: &SessionTurn,
+        facts: &[EmbeddedFact],
+    ) -> Result<Vec<IngestDecision>, HandlerError> {
+        let detector = self.runtime.contradiction_detector();
+        let vector_factory = self.runtime.vector_store_factory();
+        detect_contradictions_with(
+            detector.as_ref(),
+            self.runtime.pool().clone(),
+            &vector_factory,
+            turn,
+            facts,
+        )
+        .await
+    }
+
+    /// Applies decisions atomically and drains configured vector projections.
+    pub async fn apply(
+        &self,
+        turn: &SessionTurn,
+        decisions: &[IngestDecision],
+    ) -> Result<IngestApplyReport, HandlerError> {
+        let kms = self.runtime.kms();
+        let vector_factory = self.runtime.vector_store_factory();
+        let entity_resolver = self.runtime.entity_resolver();
+        apply_decisions(
+            self.runtime.pool(),
+            &kms,
+            &vector_factory,
+            entity_resolver.as_ref(),
+            self.runtime.entity_blocking_embedder(),
+            turn,
+            decisions,
+        )
+        .await
+    }
 }
 
 /// Runs the slow-path ingestion steps directly against an explicit Postgres pool for local/tests.
 ///
 /// This is intended for embedded hosts that own more than one pool in the same
-/// process, such as integration tests. Restate handlers should continue to use
-/// [`IngestionVO::ingest_turn`] so the step journal remains durable. The helper
+/// process, such as integration tests. Restate hosts should use their durable
+/// virtual-object adapter so the step journal remains durable. The helper
 /// takes a transaction-scoped Postgres advisory fence before graph/vector writes
 /// so duplicate direct callers for the same turn serialize across pods.
 pub async fn ingest_turn_direct_with_pool(
@@ -1472,10 +1376,6 @@ fn decision_fact(decision: &IngestDecision) -> Option<&EmbeddedFact> {
     }
 }
 
-fn done_key(turn_seq: u64) -> String {
-    format!("{DONE_KEY_PREFIX}:{turn_seq}")
-}
-
 fn turn_seq_i64(turn: &SessionTurn) -> Result<i64, HandlerError> {
     i64::try_from(turn.turn_seq).map_err(|_| {
         TerminalError::new(format!("turn_seq {} does not fit into i64", turn.turn_seq)).into()
@@ -1484,14 +1384,6 @@ fn turn_seq_i64(turn: &SessionTurn) -> Result<i64, HandlerError> {
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn ingest_step_retry_policy() -> RunRetryPolicy {
-    RunRetryPolicy::new()
-        .initial_delay(Duration::from_millis(250))
-        .exponentiation_factor(2.0)
-        .max_delay(Duration::from_secs(5))
-        .max_attempts(5)
 }
 
 enum ApplyOutcome {

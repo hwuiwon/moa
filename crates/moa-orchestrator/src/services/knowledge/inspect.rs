@@ -25,7 +25,7 @@ impl KnowledgeService {
     ) -> Result<KnowledgeObjectListResponse, KnowledgeServiceError> {
         let limit = request.limit.unwrap_or(100).min(500);
         let objects = self
-            .repository(request.tenant_id)
+            .ingestion_repository(request.tenant_id)
             .list_objects(
                 request.tenant_id,
                 request.connection_uid,
@@ -66,7 +66,7 @@ impl KnowledgeService {
         request: KnowledgeObjectInspectRequest,
     ) -> Result<KnowledgeObjectInspectResponse, KnowledgeServiceError> {
         let inspection = self
-            .repository(request.tenant_id)
+            .ingestion_repository(request.tenant_id)
             .inspect_object(request.object_uid)
             .await?
             .ok_or(KnowledgeServiceError::NotFound("knowledge object"))?;

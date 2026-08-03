@@ -260,7 +260,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-observability`](crates/moa-observability/) | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | [`moa-authz-schema`](crates/moa-auth/authz-schema/) | Typed OpenFGA object, relation, and tuple-key constants |
 | [`moa-authz`](crates/moa-auth/authz/) | OpenFGA authorization checks, tuple outbox, and delegated access helpers |
-| [`moa-auth-providers`](crates/moa-auth/providers/) | Local API keys, disabled auth, token vault, and provider bundle construction |
+| [`moa-auth-providers`](crates/moa-auth/providers/) | Local API keys, disabled auth, tenant credential storage, and provider bundle construction |
 | [`moa-auth-providers-auth0`](crates/moa-auth/auth0/) | Auth0 and generic OIDC providers gated by the auth0 feature |
 | [`moa-fga-bootstrap`](crates/moa-auth/fga-bootstrap/) | OpenFGA store and authorization model bootstrap binary |
 | [`moa-ocsf`](crates/moa-ocsf/) | OCSF security event types, signing, and persistence helpers |

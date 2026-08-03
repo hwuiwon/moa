@@ -28,9 +28,8 @@ use super::types::{ArmRole, DispatchRecord, ProvisionedAttempt};
 ///
 /// Three properties are asserted by construction rather than checked later:
 ///
-/// * `target` is `None`. A plan-backed run builds its own target during
-///   admission, so this request cannot name a caller-owned session, and the
-///   sessions the run creates are eval-owned.
+/// * The request names only an immutable plan revision. Admission projects the
+///   target and cannot accept a caller-supplied target alongside it.
 /// * `idempotency_key` is the dispatch record's key, which is deterministic in
 ///   `(revision, generation, subject digest)`. A Restate replay of the same
 ///   attempt therefore re-admits the same run instead of starting a second one.
@@ -52,14 +51,7 @@ pub fn build_paired_run_request(
             "release:{}:{}:{}",
             attempt.activation_target, record.revision_uid, record.generation
         ),
-        plan_revision_uid: Some(attempt.plan.plan_revision_uid),
-        // Deliberately absent. A plan-backed run derives its own target, so this
-        // request has no way to name a session the caller already owns.
-        target: None,
-        variant: None,
-        // Also absent: a plan-backed run takes its scorecard from the pinned plan
-        // revision, so a submitter cannot declare weaker evidence requirements.
-        scorecard: None,
+        plan_revision_uid: attempt.plan.plan_revision_uid,
         score_run_id: None,
         idempotency_key: Some(record.idempotency_key.clone()),
         agent_revision_variants: Vec::new(),
@@ -182,8 +174,7 @@ mod tests {
         }
     }
 
-    // Pins: a release dispatch is one plan-backed paired run that names no
-    // caller-owned session, declares no scorecard of its own, and carries the
+    // Pins: a release dispatch is one plan-backed paired run and carries the
     // fenced idempotency key so a replay re-admits the same run.
     #[test]
     fn paired_dispatch_shares_one_plan_and_the_fenced_idempotency_key_offline() {
@@ -195,12 +186,7 @@ mod tests {
         let request =
             build_paired_run_request(record.tenant_id, &record, &attempt).expect("paired request");
 
-        assert_eq!(request.plan_revision_uid, Some(Uuid::from_u128(5)));
-        assert!(
-            request.target.is_none(),
-            "a release run must not be able to name a caller-owned session"
-        );
-        assert!(request.scorecard.is_none());
+        assert_eq!(request.plan_revision_uid, Uuid::from_u128(5));
         assert_eq!(request.idempotency_key.as_deref(), Some("release:key"));
         assert!(request.agent_revision_variants.is_empty());
         assert_eq!(

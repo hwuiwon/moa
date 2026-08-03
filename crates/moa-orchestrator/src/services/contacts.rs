@@ -13,9 +13,7 @@ use moa_contacts::repository::{
     complete_contact_verification, create_contact_token_grant, ensure_contact_token_grant_active,
     issue_contact, load_contact_ref, promoted_from_contact, resolve_contact_session_channel,
 };
-use moa_contacts::verification_service::{
-    ContactVerificationStartCommand, ContactVerifier, contact_delivery_error,
-};
+use moa_contacts::verification_service::{ContactVerificationStartCommand, ContactVerifier};
 use moa_core::traits::{Identity, IdentityType, SessionChannelBindingUpdate};
 use moa_core::{error::MoaError, traits::SessionStore};
 use moa_core::{
@@ -41,13 +39,13 @@ use moa_core::{
 };
 use moa_messaging::ProviderDeliverySink;
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
+use moa_wire::turn::{SessionProgress, SessionProgressRequest, StartTurnRequest};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::inner::{
@@ -112,22 +110,28 @@ pub struct ContactsImpl {
     session_store: Arc<moa_session::PostgresSessionStore>,
     config: Arc<MoaConfig>,
     contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
+    delivery_sink: ProviderDeliverySink,
+    authz: AuthzEnforcer,
 }
 
 impl ContactsImpl {
-    /// Creates the contact adapter while preserving the provider-delivery boundary.
+    /// Creates the contact adapter with one process-owned provider delivery sink.
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
         session_store: Arc<moa_session::PostgresSessionStore>,
         config: Arc<MoaConfig>,
         contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
+        delivery_sink: ProviderDeliverySink,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             pool,
             session_store,
             config,
             contact_token_issuer,
+            delivery_sink,
+            authz,
         }
     }
 
@@ -166,7 +170,10 @@ impl Contacts for ContactsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "issue_token");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let tenant_id = request.tenant_id;
         let token_issuer = self.contact_token_issuer()?;
         let pool = self.pool.clone();
@@ -255,7 +262,7 @@ impl Contacts for ContactsImpl {
             .contact_tokens
             .contact_point_hash_key_hex
             .clone();
-        let messaging_config = config.messaging.clone();
+        let delivery_sink = self.delivery_sink.clone();
         let delivery_channel = request.delivery_channel;
         let contact_point = request.contact_point;
         let session_id = request.session_id;
@@ -274,12 +281,7 @@ impl Contacts for ContactsImpl {
                     )
                     .await?;
                 }
-                // Email/SMS transport credentials are deployment-owned, so the
-                // sink is built from the deployment secret source and carries no
-                // tenant scope.
-                let delivery = ProviderDeliverySink::from_env(&messaging_config)
-                    .map_err(|error| contact_error_handler_error(contact_delivery_error(error)))?;
-                ContactVerifier::new(pool, delivery)
+                ContactVerifier::new(pool, delivery_sink)
                     .start_verification(ContactVerificationStartCommand {
                         tenant_id,
                         contact_id,
@@ -709,7 +711,7 @@ impl Contacts for ContactsImpl {
         let identity = contact_identity(contact.contact_id, contact.tenant_id);
         let response = with_identity_headers(
             ctx.object_client::<SessionClient>(session_id.to_string())
-                .queue_message(Json::from(QueueMessageRequest {
+                .start_turn(Json::from(StartTurnRequest {
                     // The contact's own retry identity, reply target, and stream cursor
                     // pass through untouched: this service authenticates and routes the
                     // message, and the Session VO owns the admission decision.
@@ -734,7 +736,7 @@ impl Contacts for ContactsImpl {
         Ok(Json::from(ContactSessionMessageResponse {
             session_id,
             queued: response.queued,
-            started_turn_id: response.started_turn_id,
+            started_turn_id: response.turn_id,
             stream_cursor: response.stream_cursor,
         }))
     }

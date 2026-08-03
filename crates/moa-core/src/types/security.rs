@@ -16,9 +16,9 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use uuid::Uuid;
 
+use crate::canonical_json::canonical_json_bytes;
 use crate::error::MoaError;
 use crate::types::identifiers::{ConnectorConnectionId, SessionId, ToolCallId};
 use crate::types::worker::state::WorkerId;
@@ -780,10 +780,7 @@ pub fn transition_key(input: TransitionKeyInput<'_>) -> String {
         "prior_stage": input.prior_stage.as_str(),
         "reached_stage": input.reached_stage.as_str(),
     });
-    let mut canonical = Vec::new();
-    let mut serializer =
-        serde_json::Serializer::with_formatter(&mut canonical, CanonicalFormatter::new());
-    serde::Serialize::serialize(&payload, &mut serializer)
+    let canonical = canonical_json_bytes(&payload)
         .expect("canonical serialization of owned JSON values cannot fail");
 
     let mut hasher = blake3::Hasher::new();

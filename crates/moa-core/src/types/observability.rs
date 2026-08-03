@@ -185,40 +185,15 @@ where
     let Ok(value) = serde_json::to_value(value) else {
         return 0;
     };
-    let serialized = canonical_json(&value);
+    let Ok(serialized) = crate::canonical_json::canonical_json_bytes(&value) else {
+        return 0;
+    };
+    let Ok(serialized) = String::from_utf8(serialized) else {
+        return 0;
+    };
     let mut hasher = DefaultHasher::new();
     serialized.hash(&mut hasher);
     hasher.finish()
-}
-
-fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).unwrap_or_default(),
-        Value::Array(values) => {
-            let values = values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("[{values}]")
-        }
-        Value::Object(object) => {
-            let mut entries = object.iter().collect::<Vec<_>>();
-            entries.sort_by_key(|(key, _)| *key);
-            let entries = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = serde_json::to_string(key).unwrap_or_default();
-                    format!("{key}:{}", canonical_json(value))
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{entries}}}")
-        }
-    }
 }
 
 fn stable_prefix_byte_len(request: &CompletionRequest) -> usize {

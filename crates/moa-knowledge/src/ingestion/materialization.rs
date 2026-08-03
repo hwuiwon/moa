@@ -3,13 +3,7 @@
 use super::steps::record_span_outcome;
 use super::*;
 
-impl<R, P, E, G> KnowledgeIngestionPipeline<R, P, E, G>
-where
-    R: KnowledgeRepository,
-    P: DocumentParser,
-    E: EmbeddingProvider,
-    G: KnowledgeGraphWriter,
-{
+impl KnowledgeIngestionPipeline {
     pub(super) async fn persist_parsed(
         &self,
         sync_run_uid: Uuid,
@@ -18,11 +12,11 @@ where
     ) -> Result<PersistedIngestion> {
         let content_hash = content_hash(&normalize_text(&parsed.text));
         let latest_version = self
-            .repository
+            .ingestion_repository
             .latest_document_version(object.object_uid)
             .await?;
         let latest_chunks = if let Some(latest) = &latest_version {
-            self.repository
+            self.ingestion_repository
                 .chunks_for_version(latest.version_uid)
                 .await?
         } else {
@@ -31,7 +25,7 @@ where
         let latest_version_completed = if let Some(latest) = &latest_version {
             latest.content_hash == content_hash
                 && self
-                    .repository
+                    .ingestion_repository
                     .object_ingestion_completed_since(object.object_uid, latest.created_at)
                     .await?
         } else {
@@ -75,7 +69,7 @@ where
         // byte-identical text carried over from an older version) are reliably
         // orphaned.
         let previous_chunks = self
-            .repository
+            .ingestion_repository
             .active_chunks_for_object(object.object_uid)
             .await?;
         let version = if let Some(latest) = latest_version
@@ -94,7 +88,7 @@ where
             }
         };
         let (version, claim_token) = match self
-            .repository
+            .ingestion_repository
             .claim_document_version_ingestion(sync_run_uid, version)
             .await?
         {
@@ -130,11 +124,11 @@ where
             .persist_claimed_version(sync_run_uid, object, version, parsed, previous_chunks)
             .await;
         if persisted.is_ok() {
-            self.repository
+            self.ingestion_repository
                 .complete_document_version_ingestion(sync_run_uid, version_uid, claim_token)
                 .await?;
         } else {
-            self.repository
+            self.ingestion_repository
                 .fail_document_version_ingestion(sync_run_uid, version_uid, claim_token)
                 .await?;
         }
@@ -158,7 +152,7 @@ where
         .await?;
 
         let blocks = elements_to_blocks(version.version_uid, &parsed.elements);
-        self.repository
+        self.ingestion_repository
             .replace_blocks(version.version_uid, blocks.clone())
             .await?;
         let old_block_hashes = previous_chunks
@@ -190,7 +184,7 @@ where
         for chunk in &mut chunks {
             chunk.metadata = mark_metadata_active(std::mem::take(&mut chunk.metadata));
         }
-        self.repository
+        self.ingestion_repository
             .replace_chunks(version.version_uid, chunks.clone())
             .await?;
         let old_hashes = previous_chunks
@@ -411,7 +405,9 @@ where
             .iter()
             .map(|chunk| chunk.chunk_uid)
             .collect::<Vec<_>>();
-        self.repository.tombstone_chunks(&tombstones).await?;
+        self.ingestion_repository
+            .tombstone_chunks(&tombstones)
+            .await?;
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -427,7 +423,9 @@ where
         let mut contact_memberships = 0_u64;
         for group in contact_delta.groups {
             let group_uid = group.group_uid;
-            self.repository.upsert_contact_group(group).await?;
+            self.contact_group_repository
+                .upsert_contact_group(group)
+                .await?;
             let memberships = contact_delta
                 .memberships
                 .iter()
@@ -435,7 +433,7 @@ where
                 .cloned()
                 .collect::<Vec<_>>();
             contact_memberships = contact_memberships.saturating_add(memberships.len() as u64);
-            self.repository
+            self.contact_group_repository
                 .replace_contact_group_memberships(group_uid, memberships)
                 .await?;
         }

@@ -14,7 +14,6 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         "require_dual_control_for_erasure" => &["compliance", "require_dual_control_for_erasure"],
         "pii_service_url" => &["memory", "pii_service_url"],
         "auth_oauth_clients_json" => &["auth", "oauth", "clients"],
-        "token_vault_refresh_json" => &["token_vault", "refresh"],
         _ => return None,
     };
     Some(strings(path))
@@ -288,55 +287,5 @@ mod tests {
         let mut config = MoaConfig::default();
 
         assert_config_error_contains(overlay.apply_to(&mut config), "invalid OAuth resource URL");
-    }
-
-    #[test]
-    fn token_vault_refresh_overlay_applies_typed_secrets() {
-        // Pins: replicas receive complete refresh credentials directly from one
-        // typed JSON environment value without secondary environment lookups.
-        let overlay = EnvOverlay::from_iter(env_pairs([(
-            "MOA_TOKEN_VAULT_REFRESH_JSON",
-            r#"{"github":{"token_endpoint":"https://github.com/login/oauth/access_token","client_id":"client-id","client_secret":"client-secret"}}"#,
-        )]))
-        .expect("token-vault refresh overlay parses");
-        let mut config = MoaConfig::default();
-
-        overlay
-            .apply_to(&mut config)
-            .expect("token-vault refresh overlay applies");
-
-        let refresh = config
-            .token_vault
-            .refresh
-            .get("github")
-            .expect("github refresh config");
-        assert_eq!(refresh.client_id, "client-id");
-        assert_eq!(refresh.client_secret.as_deref(), Some("client-secret"));
-    }
-
-    #[test]
-    fn token_vault_refresh_overlay_rejects_invalid_endpoint() {
-        // Pins: invalid refresh endpoints fail startup validation instead of
-        // surfacing only after a token expires.
-        let overlay = EnvOverlay::from_iter(env_pairs([(
-            "MOA_TOKEN_VAULT_REFRESH_JSON",
-            r#"{"github":{"token_endpoint":"github.internal/token","client_id":"client-id"}}"#,
-        )]))
-        .expect("token-vault refresh overlay parses");
-        let mut config = MoaConfig::default();
-
-        assert_config_error_contains(
-            overlay.apply_to(&mut config),
-            "token_vault.refresh.github.token_endpoint",
-        );
-    }
-
-    #[test]
-    fn token_vault_refresh_overlay_rejects_malformed_json() {
-        // Pins: malformed JSON names the deployment environment variable.
-        assert_config_error_contains(
-            EnvOverlay::from_iter(env_pairs([("MOA_TOKEN_VAULT_REFRESH_JSON", "{not-json}")])),
-            "MOA_TOKEN_VAULT_REFRESH_JSON",
-        );
     }
 }

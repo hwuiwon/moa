@@ -74,7 +74,7 @@ impl ToolRouter {
             unmatched_permission_patterns: std::sync::RwLock::new(Vec::new()),
             rule_store: None,
             session_store: None,
-            memory_tool_executor: tokio::sync::RwLock::new(None),
+            memory_tool_executor: None,
             memory_retrieval_executor: tokio::sync::RwLock::new(None),
             lineage: Arc::new(NullLineageHandle),
             sandbox_root: None,
@@ -331,8 +331,13 @@ impl ToolRouter {
         mut self,
         executor: Arc<dyn moa_core::traits::MemoryToolExecutor>,
     ) -> Self {
-        self.memory_tool_executor = tokio::sync::RwLock::new(Some(executor));
+        self.memory_tool_executor = Some(executor);
         self
+    }
+
+    /// Returns the explicitly installed graph-memory executor, when this host enables it.
+    pub fn memory_tool_executor(&self) -> Option<Arc<dyn moa_core::traits::MemoryToolExecutor>> {
+        self.memory_tool_executor.clone()
     }
 
     /// Attaches the read-only retrieval executor backing the agentic memory tools.

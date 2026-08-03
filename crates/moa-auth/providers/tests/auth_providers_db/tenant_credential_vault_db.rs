@@ -7,8 +7,7 @@ use moa_core::traits::CredentialVault;
 use moa_core::types::credentials::{
     CredentialContext, CredentialError, CredentialIdentity, CredentialKind, CredentialOperation,
     CredentialPrincipal, CredentialRef, CredentialServiceActor, CredentialSlotName,
-    CredentialSource, CredentialStagingToken, CredentialVersion, DeploymentSecret,
-    DeploymentSecrets,
+    CredentialStagingToken, CredentialVersion,
 };
 use moa_core::types::identifiers::TenantId;
 use moa_crypto::{EncryptionContext, KeyManagementProvider, LocalKmsProvider};
@@ -70,6 +69,37 @@ fn identity_in_slot(
     }
 }
 
+#[async_trait::async_trait]
+trait CredentialVaultTestExt {
+    /// Stages and activates one fixture version through the production protocol.
+    async fn stage_and_activate(
+        &self,
+        identity: CredentialIdentity,
+        material: SecretString,
+        stage_ctx: &CredentialContext,
+    ) -> Result<CredentialVersion, CredentialError>;
+}
+
+#[async_trait::async_trait]
+impl CredentialVaultTestExt for PostgresCredentialVault {
+    async fn stage_and_activate(
+        &self,
+        identity: CredentialIdentity,
+        material: SecretString,
+        stage_ctx: &CredentialContext,
+    ) -> Result<CredentialVersion, CredentialError> {
+        let staged = self.stage(identity, material, stage_ctx).await?;
+        let activation_ctx = CredentialContext {
+            tenant_id: stage_ctx.tenant_id,
+            principal: stage_ctx.principal,
+            operation: CredentialOperation::Activate,
+            operation_id: format!("fixture-activate:{}", stage_ctx.operation_id),
+            request_hash: format!("fixture-activate:{}", stage_ctx.request_hash),
+        };
+        self.activate_staged(&staged, &activation_ctx).await
+    }
+}
+
 async fn describe_version(
     vault: &PostgresCredentialVault,
     tenant_id: TenantId,
@@ -125,13 +155,13 @@ async fn active_status_is_exact_audited_and_never_returns_a_reference_db() {
             .expect("missing exact series should report false")
     );
     vault
-        .create(
+        .stage_and_activate(
             series.clone(),
             SecretString::from("active_status_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "active-status-create",
                 "active-status-create-hash",
             ),
@@ -229,13 +259,13 @@ async fn active_status_batch_is_tenant_scoped_and_preserves_input_positions_db()
     let missing = identity(tenant_id, Uuid::now_v7());
 
     vault
-        .create(
+        .stage_and_activate(
             active.clone(),
             SecretString::from("batch_active_status_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "active-status-batch-create",
                 "active-status-batch-create-hash",
             ),
@@ -302,13 +332,13 @@ async fn initial_stage_is_inactive_until_replay_safe_activation_db() {
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Revoke,
                 "initial-stage-wrong-operation",
                 "initial-stage-wrong-operation-hash",
             ),
         )
         .await
-        .expect_err("stage must reject a create context");
+        .expect_err("stage must reject a revoke context");
     assert_eq!(wrong_operation, CredentialError::Unauthorized);
 
     let staged = vault
@@ -371,13 +401,13 @@ async fn initial_stage_is_inactive_until_replay_safe_activation_db() {
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
+                CredentialOperation::Revoke,
                 "initial-activate-wrong-operation",
                 "initial-activate-wrong-operation-hash",
             ),
         )
         .await
-        .expect_err("activation must reject a rotate context");
+        .expect_err("activation must reject a revoke context");
     assert_eq!(wrong_activation, CredentialError::Unauthorized);
 
     let activated = vault
@@ -434,13 +464,13 @@ async fn activation_rollback_restores_exact_prior_and_replays_one_audit_db() {
     let owner = Uuid::now_v7();
     let series = identity(tenant_id, connection_uid);
     let oldest = vault
-        .create(
+        .stage_and_activate(
             series.clone(),
             SecretString::from("rollback_oldest_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "rollback-oldest-create",
                 "rollback-oldest-create-hash",
             ),
@@ -448,19 +478,19 @@ async fn activation_rollback_restores_exact_prior_and_replays_one_audit_db() {
         .await
         .expect("create oldest rollback version");
     let prior = vault
-        .rotate(
-            oldest.reference,
+        .stage_and_activate(
+            series.clone(),
             SecretString::from("rollback_prior_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
-                "rollback-prior-rotate",
-                "rollback-prior-rotate-hash",
+                CredentialOperation::Stage,
+                "rollback-prior-replace",
+                "rollback-prior-replace-hash",
             ),
         )
         .await
-        .expect("rotate to exact rollback predecessor");
+        .expect("replace to exact rollback predecessor");
     let staged = vault
         .stage(
             series.clone(),
@@ -740,13 +770,13 @@ async fn revoking_a_losing_stage_keeps_the_prior_active_db() {
     let owner = Uuid::now_v7();
     let series = identity(tenant_id, connection_uid);
     let prior = vault
-        .create(
+        .stage_and_activate(
             series.clone(),
             SecretString::from("prior_active_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "stage-compensation-create",
                 "stage-compensation-create-hash",
             ),
@@ -848,13 +878,13 @@ async fn staged_activation_is_tenant_and_slot_exact_db() {
     let secondary_slot = CredentialSlotName::try_from("secondary").expect("fixture slot is valid");
     let secondary = identity_in_slot(tenant_id, connection_uid, secondary_slot);
     let primary_prior = vault
-        .create(
+        .stage_and_activate(
             primary.clone(),
             SecretString::from("scope_primary_prior".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "stage-scope-create-primary",
                 "stage-scope-create-primary-hash",
             ),
@@ -862,13 +892,13 @@ async fn staged_activation_is_tenant_and_slot_exact_db() {
         .await
         .expect("create primary prior");
     let secondary_prior = vault
-        .create(
+        .stage_and_activate(
             secondary.clone(),
             SecretString::from("scope_secondary_prior".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "stage-scope-create-secondary",
                 "stage-scope-create-secondary-hash",
             ),
@@ -962,13 +992,13 @@ async fn forged_or_stale_predecessor_fails_without_changing_versions_db() {
     let owner = Uuid::now_v7();
     let series = identity(tenant_id, connection_uid);
     let prior = vault
-        .create(
+        .stage_and_activate(
             series.clone(),
             SecretString::from("stale_prior_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "stale-prior-create",
                 "stale-prior-create-hash",
             ),
@@ -1041,13 +1071,13 @@ async fn concurrent_stages_and_activations_leave_exactly_one_active_winner_db() 
     let owner = Uuid::now_v7();
     let series = identity(tenant_id, connection_uid);
     let prior = first_vault
-        .create(
+        .stage_and_activate(
             series.clone(),
             SecretString::from("concurrent_prior".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "concurrent-stage-create",
                 "concurrent-stage-create-hash",
             ),
@@ -1208,13 +1238,13 @@ async fn credential_created_on_one_pool_resolves_through_an_independent_pool_db(
     let connection_uid = Uuid::now_v7();
     let owner = Uuid::now_v7();
     let created = writer
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("merge_live_key_replica_case".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-replica",
                 "hash-create-replica",
             ),
@@ -1223,10 +1253,8 @@ async fn credential_created_on_one_pool_resolves_through_an_independent_pool_db(
         .expect("create credential");
 
     let resolved = reader
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 caller(owner),
@@ -1298,10 +1326,8 @@ async fn migrated_primary_credential_keeps_legacy_encryption_context_db() {
     .expect("insert migrated primary fixture");
 
     let resolved = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: CredentialRef::from_uuid(credential_uid),
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 caller(owner),
@@ -1320,7 +1346,7 @@ async fn migrated_primary_credential_keeps_legacy_encryption_context_db() {
 }
 
 #[tokio::test]
-async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
+async fn named_slots_are_replaced_independently_with_one_active_version_db() {
     // Pins: two slots of one credential kind on one connection are independent
     // series, while a second active version inside either slot is impossible.
     let database = TestDatabase::new("cred_named_slots").await;
@@ -1332,13 +1358,13 @@ async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
         CredentialSlotName::try_from("secondary").expect("fixture slot should be valid");
 
     let primary = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("primary_v1".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "slot-create-primary",
                 "slot-create-primary-hash",
             ),
@@ -1346,13 +1372,13 @@ async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
         .await
         .expect("create primary slot");
     let secondary_v1 = vault
-        .create(
+        .stage_and_activate(
             identity_in_slot(tenant_id, connection_uid, secondary_slot.clone()),
             SecretString::from("secondary_v1".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "slot-create-secondary",
                 "slot-create-secondary-hash",
             ),
@@ -1360,36 +1386,20 @@ async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
         .await
         .expect("create secondary slot");
 
-    let duplicate = vault
-        .create(
-            identity(tenant_id, connection_uid),
-            SecretString::from("forbidden_second_primary".to_string()),
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Create,
-                "slot-create-primary-duplicate",
-                "slot-create-primary-duplicate-hash",
-            ),
-        )
-        .await
-        .expect_err("one slot cannot acquire a second active series");
-    assert_eq!(duplicate, CredentialError::VersionConflict);
-
     let secondary_v2 = vault
-        .rotate(
-            secondary_v1.reference,
+        .stage_and_activate(
+            identity_in_slot(tenant_id, connection_uid, secondary_slot.clone()),
             SecretString::from("secondary_v2".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
-                "slot-rotate-secondary",
-                "slot-rotate-secondary-hash",
+                CredentialOperation::Stage,
+                "slot-replace-secondary",
+                "slot-replace-secondary-hash",
             ),
         )
         .await
-        .expect("rotate only the secondary slot");
+        .expect("replace only the secondary slot");
 
     assert_eq!(primary.identity.slot_name, CredentialSlotName::PRIMARY);
     assert_eq!(primary.version, 1);
@@ -1399,10 +1409,8 @@ async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
     assert_eq!(secondary_v2.version, 2);
 
     let primary_material = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: primary.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 caller(owner),
@@ -1412,31 +1420,12 @@ async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
             ),
         )
         .await
-        .expect("secondary rotation must not stale primary");
+        .expect("secondary replacement must not stale primary");
     assert_eq!(primary_material.expose_for_outbound_request(), "primary_v1");
 
-    let stale = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: secondary_v1.reference,
-            },
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Resolve,
-                "slot-resolve-secondary-stale",
-                "slot-resolve-secondary-stale-hash",
-            ),
-        )
-        .await
-        .expect_err("rotated secondary v1 must be stale");
-    assert_eq!(stale, CredentialError::StaleVersion);
-
     let secondary_material = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: secondary_v2.reference,
-            },
+        .resolve_active(
+            &identity_in_slot(tenant_id, connection_uid, secondary_slot.clone()),
             &context(
                 tenant_id,
                 caller(owner),
@@ -1495,12 +1484,15 @@ async fn named_slots_rotate_independently_and_enforce_one_active_series_db() {
         vec![
             ("slot-create-primary".to_string(), "primary".to_string()),
             ("slot-create-secondary".to_string(), "secondary".to_string()),
+            (
+                "slot-replace-secondary".to_string(),
+                "secondary".to_string()
+            ),
             ("slot-resolve-primary".to_string(), "primary".to_string()),
             (
                 "slot-resolve-secondary-v2".to_string(),
                 "secondary".to_string()
             ),
-            ("slot-rotate-secondary".to_string(), "secondary".to_string()),
         ]
     );
 }
@@ -1520,13 +1512,13 @@ async fn credential_active_resolution_selects_exact_series_and_replays_one_versi
     let secondary_identity = identity_in_slot(tenant_id, connection_uid, secondary_slot.clone());
 
     vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("primary_active_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "active-create-primary",
                 "active-create-primary-hash",
             ),
@@ -1534,13 +1526,13 @@ async fn credential_active_resolution_selects_exact_series_and_replays_one_versi
         .await
         .expect("create primary series");
     let secondary_v1 = vault
-        .create(
+        .stage_and_activate(
             secondary_identity.clone(),
             SecretString::from("secondary_active_v1".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "active-create-secondary",
                 "active-create-secondary-hash",
             ),
@@ -1607,19 +1599,19 @@ async fn credential_active_resolution_selects_exact_series_and_replays_one_versi
     assert_eq!(missing_error, CredentialError::NotFound);
 
     let secondary_v2 = vault
-        .rotate(
-            secondary_v1.reference,
+        .stage_and_activate(
+            secondary_identity.clone(),
             SecretString::from("secondary_active_v2".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
-                "active-rotate-secondary",
-                "active-rotate-secondary-hash",
+                CredentialOperation::Stage,
+                "active-replace-secondary",
+                "active-replace-secondary-hash",
             ),
         )
         .await
-        .expect("rotate secondary series");
+        .expect("replace secondary series");
     assert_eq!(secondary_v2.version, 2);
 
     let resolved_v2 = vault
@@ -1634,7 +1626,7 @@ async fn credential_active_resolution_selects_exact_series_and_replays_one_versi
             ),
         )
         .await
-        .expect("active selector should follow rotation");
+        .expect("active selector should follow replacement");
     assert_eq!(
         resolved_v2.expose_for_outbound_request(),
         "secondary_active_v2"
@@ -1668,13 +1660,13 @@ async fn credential_active_resolution_commits_audit_before_decrypt_db() {
     let owner = Uuid::now_v7();
     let credential_identity = identity(tenant_id, connection_uid);
     let created = vault
-        .create(
+        .stage_and_activate(
             credential_identity.clone(),
             SecretString::from("must_never_escape_the_vault".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "active-audit-create",
                 "active-audit-create-hash",
             ),
@@ -1736,7 +1728,7 @@ async fn named_slot_is_bound_into_authenticated_encryption_context_db() {
     let connection_uid = Uuid::now_v7();
     let owner = Uuid::now_v7();
     let created = vault
-        .create(
+        .stage_and_activate(
             identity_in_slot(
                 tenant_id,
                 connection_uid,
@@ -1746,7 +1738,7 @@ async fn named_slot_is_bound_into_authenticated_encryption_context_db() {
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "slot-bind-create",
                 "slot-bind-create-hash",
             ),
@@ -1763,10 +1755,12 @@ async fn named_slot_is_bound_into_authenticated_encryption_context_db() {
     .expect("relabel slot to model corrupted or moved row");
 
     let error = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
-            },
+        .resolve_active(
+            &identity_in_slot(
+                tenant_id,
+                connection_uid,
+                CredentialSlotName::try_from("tertiary").expect("fixture slot should be valid"),
+            ),
             &context(
                 tenant_id,
                 caller(owner),
@@ -1793,18 +1787,18 @@ async fn credential_batch_describe_returns_only_exact_authorized_pairs_db() {
     let tenant_id = TenantId::from(Uuid::now_v7());
     let owner = Uuid::now_v7();
     let active_connection = Uuid::now_v7();
-    let rotated_connection = Uuid::now_v7();
+    let replaced_connection = Uuid::now_v7();
     let revoked_connection = Uuid::now_v7();
     let missing_connection = Uuid::now_v7();
 
     let active = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, active_connection),
             SecretString::from("active-material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "batch-create-active",
                 "batch-create-active-hash",
             ),
@@ -1812,13 +1806,13 @@ async fn credential_batch_describe_returns_only_exact_authorized_pairs_db() {
         .await
         .expect("create active credential");
     let superseded = vault
-        .create(
-            identity(tenant_id, rotated_connection),
+        .stage_and_activate(
+            identity(tenant_id, replaced_connection),
             SecretString::from("old-material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "batch-create-old",
                 "batch-create-old-hash",
             ),
@@ -1826,27 +1820,27 @@ async fn credential_batch_describe_returns_only_exact_authorized_pairs_db() {
         .await
         .expect("create credential to supersede");
     vault
-        .rotate(
-            superseded.reference,
+        .stage_and_activate(
+            identity(tenant_id, replaced_connection),
             SecretString::from("new-material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
-                "batch-rotate",
-                "batch-rotate-hash",
+                CredentialOperation::Stage,
+                "batch-replace",
+                "batch-replace-hash",
             ),
         )
         .await
         .expect("supersede old credential");
     let revoked = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, revoked_connection),
             SecretString::from("revoked-material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "batch-create-revoked",
                 "batch-create-revoked-hash",
             ),
@@ -1871,7 +1865,7 @@ async fn credential_batch_describe_returns_only_exact_authorized_pairs_db() {
         .describe_batch(
             &[
                 (active_connection, active.reference),
-                (rotated_connection, superseded.reference),
+                (replaced_connection, superseded.reference),
                 (revoked_connection, revoked.reference),
                 (missing_connection, CredentialRef::from_uuid(Uuid::now_v7())),
                 (Uuid::now_v7(), active.reference),
@@ -1901,7 +1895,7 @@ async fn credential_batch_describe_returns_only_exact_authorized_pairs_db() {
     assert!(active.active);
     assert!(!active.revoked);
     let superseded = described
-        .get(&rotated_connection)
+        .get(&replaced_connection)
         .expect("superseded exact pair should be returned");
     assert!(!superseded.active);
     assert!(!superseded.revoked);
@@ -1925,13 +1919,13 @@ async fn replayed_operation_id_returns_one_row_and_a_changed_hash_conflicts_db()
     let ctx = context(
         tenant_id,
         caller(owner),
-        CredentialOperation::Create,
+        CredentialOperation::Stage,
         "op-create-replay",
         "hash-create-replay",
     );
 
     let first = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("first_material".to_string()),
             &ctx,
@@ -1939,7 +1933,7 @@ async fn replayed_operation_id_returns_one_row_and_a_changed_hash_conflicts_db()
         .await
         .expect("first create");
     let replayed = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("first_material".to_string()),
             &ctx,
@@ -1969,7 +1963,7 @@ async fn replayed_operation_id_returns_one_row_and_a_changed_hash_conflicts_db()
     assert_eq!(versions, 1, "replay must not store a second version");
 
     let cross_slot_replay = vault
-        .create(
+        .stage_and_activate(
             identity_in_slot(
                 tenant_id,
                 connection_uid,
@@ -1987,13 +1981,13 @@ async fn replayed_operation_id_returns_one_row_and_a_changed_hash_conflicts_db()
     );
 
     let conflict = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("different_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-replay",
                 "hash-create-DIFFERENT",
             ),
@@ -2004,79 +1998,49 @@ async fn replayed_operation_id_returns_one_row_and_a_changed_hash_conflicts_db()
 }
 
 #[tokio::test]
-async fn rotation_supersedes_under_cas_and_old_versions_stop_resolving_db() {
-    // Pins: rotation is compare-and-swap. The superseded version can no longer be
-    // resolved, a second rotation from the stale reference is refused rather than
-    // silently losing the newer credential, and only one version stays active.
-    let database = TestDatabase::new("cred_rotate").await;
+async fn staged_replacement_leaves_exactly_one_active_version_db() {
+    // Pins: staged activation supersedes exactly its observed predecessor while
+    // retaining the old version as inactive history.
+    let database = TestDatabase::new("cred_replace").await;
     let vault = PostgresCredentialVault::new(database.pool(), kms());
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let owner = Uuid::now_v7();
 
     let first = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("v1_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
-                "op-create-rotate",
-                "hash-create-rotate",
+                CredentialOperation::Stage,
+                "op-create-replace",
+                "hash-create-replace",
             ),
         )
         .await
         .expect("create v1");
 
     let second = vault
-        .rotate(
-            first.reference,
+        .stage_and_activate(
+            identity(tenant_id, connection_uid),
             SecretString::from("v2_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
-                "op-rotate-1",
-                "hash-rotate-1",
+                CredentialOperation::Stage,
+                "op-replace-1",
+                "hash-replace-1",
             ),
         )
         .await
-        .expect("rotate to v2");
+        .expect("replace to v2");
     assert_eq!(second.version, 2);
 
-    let stale = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: first.reference,
-            },
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Resolve,
-                "op-resolve-stale",
-                "hash-resolve-stale",
-            ),
-        )
-        .await
-        .expect_err("the superseded version must not resolve");
-    assert_eq!(stale, CredentialError::StaleVersion);
-
-    let lost_update = vault
-        .rotate(
-            first.reference,
-            SecretString::from("v2_conflicting".to_string()),
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Rotate,
-                "op-rotate-2",
-                "hash-rotate-2",
-            ),
-        )
-        .await
-        .expect_err("rotating from a stale reference must not overwrite the newer version");
-    assert_eq!(lost_update, CredentialError::VersionConflict);
+    let first = describe_version(&vault, tenant_id, owner, connection_uid, first.reference).await;
+    assert!(!first.active, "the predecessor must be inactive");
+    assert!(!first.revoked, "replacement retains predecessor history");
 
     let active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tenant_credential_versions WHERE tenant_id = $1 AND active",
@@ -2088,10 +2052,8 @@ async fn rotation_supersedes_under_cas_and_old_versions_stop_resolving_db() {
     assert_eq!(active, 1, "exactly one version may be active");
 
     let current = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: second.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 caller(owner),
@@ -2106,10 +2068,9 @@ async fn rotation_supersedes_under_cas_and_old_versions_stop_resolving_db() {
 }
 
 #[tokio::test]
-async fn revoked_and_cross_tenant_references_fail_closed_db() {
-    // Pins: a revoked version is unusable, and a reference belonging to another
-    // tenant fails with a typed error before any material is opened — the caller
-    // cannot learn anything about a credential it does not own.
+async fn revoked_and_cross_tenant_series_fail_closed_db() {
+    // Pins: a revoked series is unusable, and a selector belonging to another
+    // tenant fails before any material is opened.
     let database = TestDatabase::new("cred_deny").await;
     let vault = PostgresCredentialVault::new(database.pool(), kms());
     let tenant_id = TenantId::from(Uuid::now_v7());
@@ -2118,13 +2079,13 @@ async fn revoked_and_cross_tenant_references_fail_closed_db() {
     let owner = Uuid::now_v7();
 
     let created = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("revocable_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-deny",
                 "hash-create-deny",
             ),
@@ -2133,10 +2094,8 @@ async fn revoked_and_cross_tenant_references_fail_closed_db() {
         .expect("create credential");
 
     let cross_tenant = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 other_tenant,
                 caller(Uuid::now_v7()),
@@ -2147,7 +2106,7 @@ async fn revoked_and_cross_tenant_references_fail_closed_db() {
         )
         .await
         .expect_err("another tenant must not resolve this credential");
-    assert_eq!(cross_tenant, CredentialError::NotFound);
+    assert_eq!(cross_tenant, CredentialError::WrongTenant);
 
     vault
         .revoke(
@@ -2164,10 +2123,8 @@ async fn revoked_and_cross_tenant_references_fail_closed_db() {
         .expect("revoke credential");
 
     let revoked = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 caller(owner),
@@ -2178,14 +2135,14 @@ async fn revoked_and_cross_tenant_references_fail_closed_db() {
         )
         .await
         .expect_err("a revoked version must not resolve");
-    assert_eq!(revoked, CredentialError::Revoked);
+    assert_eq!(revoked, CredentialError::NotFound);
 }
 
 #[tokio::test]
 async fn service_actors_may_resolve_but_never_mutate_db() {
     // Pins: the durable service-actor allowlist is read-only, so a reconstructed
     // workflow can resolve its own connection's credential without acquiring the
-    // ability to create, rotate, revoke, or delete one.
+    // ability to stage, activate, revoke, or delete one.
     let database = TestDatabase::new("cred_actor").await;
     let vault = PostgresCredentialVault::new(database.pool(), kms());
     let tenant_id = TenantId::from(Uuid::now_v7());
@@ -2196,13 +2153,13 @@ async fn service_actors_may_resolve_but_never_mutate_db() {
     };
 
     let created = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("service_actor_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-actor",
                 "hash-create-actor",
             ),
@@ -2211,10 +2168,8 @@ async fn service_actors_may_resolve_but_never_mutate_db() {
         .expect("create credential");
 
     let resolved = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 service,
@@ -2259,13 +2214,13 @@ async fn forced_rls_denies_missing_and_wrong_tenant_context_as_moa_app_db() {
     let owner = Uuid::now_v7();
 
     vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("rls_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-rls",
                 "hash-create-rls",
             ),
@@ -2306,13 +2261,14 @@ async fn forced_rls_denies_missing_and_wrong_tenant_context_as_moa_app_db() {
         tx.rollback().await.expect("rollback rls probe");
 
         let expected = i64::from(label == "correct");
+        let expected_audit = 2 * expected;
         assert_eq!(
             versions, expected,
             "{label} tenant context must see {expected} credential row(s)"
         );
         assert_eq!(
-            audit, expected,
-            "{label} tenant context must see {expected} audit row(s)"
+            audit, expected_audit,
+            "{label} tenant context must see {expected_audit} audit row(s)"
         );
     }
 }
@@ -2329,13 +2285,13 @@ async fn audit_rows_are_append_only_and_carry_no_secret_material_db() {
     let plaintext = "audit_scan_plaintext_marker";
 
     let created = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from(plaintext.to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-audit",
                 "hash-create-audit",
             ),
@@ -2343,10 +2299,8 @@ async fn audit_rows_are_append_only_and_carry_no_secret_material_db() {
         .await
         .expect("create credential");
     vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
-            },
+        .resolve_active(
+            &identity(tenant_id, connection_uid),
             &context(
                 tenant_id,
                 caller(owner),
@@ -2371,7 +2325,11 @@ async fn audit_rows_are_append_only_and_carry_no_secret_material_db() {
         "audit rows must never contain plaintext"
     );
     assert!(rendered.contains("resolve"), "the resolve must be audited");
-    assert!(rendered.contains("create"), "the create must be audited");
+    assert!(rendered.contains("stage"), "the stage must be audited");
+    assert!(
+        rendered.contains("activate"),
+        "the activation must be audited"
+    );
 
     let sealed: Vec<u8> = sqlx::query_scalar(
         "SELECT material_sealed FROM tenant_credential_versions WHERE credential_uid = $1",
@@ -2423,14 +2381,14 @@ async fn connection_revoke_preserves_rows_and_audit_with_exact_replay_db() {
     let owner = Uuid::now_v7();
     let other_owner = Uuid::now_v7();
 
-    let primary = vault
-        .create(
+    vault
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("disconnect_primary_v1".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "connection-revoke-create-primary",
                 "connection-revoke-create-primary-hash",
             ),
@@ -2438,29 +2396,29 @@ async fn connection_revoke_preserves_rows_and_audit_with_exact_replay_db() {
         .await
         .expect("create primary credential");
     vault
-        .rotate(
-            primary.reference,
+        .stage_and_activate(
+            identity(tenant_id, connection_uid),
             SecretString::from("disconnect_primary_v2".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Rotate,
-                "connection-revoke-rotate-primary",
-                "connection-revoke-rotate-primary-hash",
+                CredentialOperation::Stage,
+                "connection-revoke-replace-primary",
+                "connection-revoke-replace-primary-hash",
             ),
         )
         .await
-        .expect("rotate primary credential");
+        .expect("replace primary credential");
     let secondary_slot =
         CredentialSlotName::try_from("secondary").expect("secondary fixture slot should be valid");
     vault
-        .create(
+        .stage_and_activate(
             identity_in_slot(tenant_id, connection_uid, secondary_slot),
             SecretString::from("disconnect_secondary_v1".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "connection-revoke-create-secondary",
                 "connection-revoke-create-secondary-hash",
             ),
@@ -2468,13 +2426,13 @@ async fn connection_revoke_preserves_rows_and_audit_with_exact_replay_db() {
         .await
         .expect("create secondary credential");
     vault
-        .create(
+        .stage_and_activate(
             identity(other_tenant, connection_uid),
             SecretString::from("other_tenant_same_connection".to_string()),
             &context(
                 other_tenant,
                 caller(other_owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "connection-revoke-create-other-tenant",
                 "connection-revoke-create-other-tenant-hash",
             ),
@@ -2482,13 +2440,13 @@ async fn connection_revoke_preserves_rows_and_audit_with_exact_replay_db() {
         .await
         .expect("create neighboring tenant credential");
     vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, other_connection_uid),
             SecretString::from("same_tenant_other_connection".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "connection-revoke-create-other-connection",
                 "connection-revoke-create-other-connection-hash",
             ),
@@ -2598,159 +2556,7 @@ async fn connection_revoke_preserves_rows_and_audit_with_exact_replay_db() {
 }
 
 #[tokio::test]
-async fn connection_delete_removes_versions_and_audit_and_is_idempotent_db() {
-    // Pins: tenant lifecycle deletion removes every version plus its permitted
-    // audit projection, and repeating the sweep for an already-purged connection
-    // succeeds without removing anything further.
-    let database = TestDatabase::new("cred_purge").await;
-    let vault = PostgresCredentialVault::new(database.pool(), kms());
-    let tenant_id = TenantId::from(Uuid::now_v7());
-    let connection_uid = Uuid::now_v7();
-    let owner = Uuid::now_v7();
-
-    let created = vault
-        .create(
-            identity(tenant_id, connection_uid),
-            SecretString::from("purge_material".to_string()),
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Create,
-                "op-create-purge",
-                "hash-create-purge",
-            ),
-        )
-        .await
-        .expect("create credential");
-    vault
-        .rotate(
-            created.reference,
-            SecretString::from("purge_material_v2".to_string()),
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Rotate,
-                "op-rotate-purge",
-                "hash-rotate-purge",
-            ),
-        )
-        .await
-        .expect("rotate credential");
-
-    let removed = vault
-        .delete_connection(
-            connection_uid,
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Delete,
-                "op-delete-purge",
-                "hash-delete-purge",
-            ),
-        )
-        .await
-        .expect("delete connection credentials");
-    assert_eq!(removed, 2, "both versions must be removed");
-
-    let remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM tenant_credential_versions WHERE tenant_id = $1")
-            .bind(tenant_id.0)
-            .fetch_one(database.raw_pool())
-            .await
-            .expect("count remaining versions");
-    assert_eq!(remaining, 0);
-
-    let remaining_audit: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM tenant_credential_operations
-         WHERE tenant_id = $1 AND connection_uid = $2",
-    )
-    .bind(tenant_id.0)
-    .bind(connection_uid)
-    .fetch_one(database.raw_pool())
-    .await
-    .expect("count remaining audit rows");
-    assert_eq!(remaining_audit, 0);
-
-    let repeated = vault
-        .delete_connection(
-            connection_uid,
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Delete,
-                "op-delete-purge-again",
-                "hash-delete-purge-again",
-            ),
-        )
-        .await
-        .expect("repeating the purge succeeds");
-    assert_eq!(repeated, 0, "an already-purged connection removes nothing");
-}
-
-#[tokio::test]
-async fn deployment_secrets_resolve_outside_tenant_storage_db() {
-    // Pins: deployment-owned transport secrets are a separate typed source. They
-    // resolve without touching tenant credential storage, and an unconfigured one
-    // fails closed instead of falling back to a tenant credential.
-    let database = TestDatabase::new("cred_deployment").await;
-    let vault = PostgresCredentialVault::new(database.pool(), kms()).with_deployment_secrets(
-        DeploymentSecrets::new().with(
-            DeploymentSecret::PostmarkServerToken,
-            Some("postmark-server-token".to_string()),
-        ),
-    );
-    let tenant_id = TenantId::from(Uuid::now_v7());
-    let owner = Uuid::now_v7();
-
-    let resolved = vault
-        .resolve(
-            &CredentialSource::Deployment {
-                secret: DeploymentSecret::PostmarkServerToken,
-            },
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Resolve,
-                "op-resolve-deployment",
-                "hash-resolve-deployment",
-            ),
-        )
-        .await
-        .expect("configured deployment secret resolves");
-    assert_eq!(
-        resolved.expose_for_outbound_request(),
-        "postmark-server-token"
-    );
-
-    let missing = vault
-        .resolve(
-            &CredentialSource::Deployment {
-                secret: DeploymentSecret::TwilioAuthToken,
-            },
-            &context(
-                tenant_id,
-                caller(owner),
-                CredentialOperation::Resolve,
-                "op-resolve-deployment-missing",
-                "hash-resolve-deployment-missing",
-            ),
-        )
-        .await
-        .expect_err("an unconfigured deployment secret must fail closed");
-    assert_eq!(missing, CredentialError::DeploymentSecretMissing);
-
-    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_credential_versions")
-        .fetch_one(database.raw_pool())
-        .await
-        .expect("count tenant credential rows");
-    assert_eq!(
-        stored, 0,
-        "deployment secrets must not create tenant credential rows"
-    );
-}
-
-#[tokio::test]
-async fn wrong_kind_reference_does_not_open_material_db() {
+async fn relabelled_kind_does_not_open_material_db() {
     // Pins: the credential kind is part of the persistence identity and is bound
     // into the ciphertext, so a row relabelled to another kind cannot be opened
     // even by a caller inside the owning tenant.
@@ -2761,13 +2567,13 @@ async fn wrong_kind_reference_does_not_open_material_db() {
     let owner = Uuid::now_v7();
 
     let created = vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, connection_uid),
             SecretString::from("kind_bound_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-kind",
                 "hash-create-kind",
             ),
@@ -2782,9 +2588,10 @@ async fn wrong_kind_reference_does_not_open_material_db() {
         .expect("relabel the stored kind");
 
     let error = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: created.reference,
+        .resolve_active(
+            &CredentialIdentity {
+                kind: CredentialKind::OAuth,
+                ..identity(tenant_id, connection_uid)
             },
             &context(
                 tenant_id,
@@ -2803,18 +2610,16 @@ async fn wrong_kind_reference_does_not_open_material_db() {
 }
 
 #[tokio::test]
-async fn unknown_reference_reports_not_found_without_probing_other_tenants_db() {
-    // Pins: an unknown reference is indistinguishable from another tenant's
-    // reference, so the error surface cannot be used to probe for existence.
+async fn unknown_series_reports_not_found_without_enumeration_db() {
+    // Pins: an unknown complete series selector fails without exposing any
+    // credential reference or tenant enumeration surface.
     let database = TestDatabase::new("cred_unknown").await;
     let vault = PostgresCredentialVault::new(database.pool(), kms());
     let tenant_id = TenantId::from(Uuid::now_v7());
 
     let error = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: CredentialRef::from_uuid(Uuid::now_v7()),
-            },
+        .resolve_active(
+            &identity(tenant_id, Uuid::now_v7()),
             &context(
                 tenant_id,
                 caller(Uuid::now_v7()),
@@ -2843,13 +2648,13 @@ async fn bounded_tenant_purge_loops_to_completion_and_is_resumable_db() {
 
     for index in 0..5 {
         vault
-            .create(
+            .stage_and_activate(
                 identity(tenant_id, Uuid::now_v7()),
                 SecretString::from(format!("material_{index}")),
                 &context(
                     tenant_id,
                     caller(owner),
-                    CredentialOperation::Create,
+                    CredentialOperation::Stage,
                     &format!("op-create-sweep-{index}"),
                     &format!("hash-create-sweep-{index}"),
                 ),
@@ -2858,13 +2663,13 @@ async fn bounded_tenant_purge_loops_to_completion_and_is_resumable_db() {
             .expect("create credential");
     }
     let survivor = vault
-        .create(
+        .stage_and_activate(
             identity(other_tenant, Uuid::now_v7()),
             SecretString::from("other_tenant_material".to_string()),
             &context(
                 other_tenant,
                 caller(Uuid::now_v7()),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-survivor",
                 "hash-create-survivor",
             ),
@@ -2905,8 +2710,8 @@ async fn bounded_tenant_purge_loops_to_completion_and_is_resumable_db() {
     );
     assert_eq!(
         batches.iter().sum::<u64>(),
-        10,
-        "5 versions plus 5 audit rows must all be removed, got {batches:?}"
+        15,
+        "5 versions plus 10 stage/activation audit rows must all be removed, got {batches:?}"
     );
 
     let remaining: i64 =
@@ -2927,10 +2732,8 @@ async fn bounded_tenant_purge_loops_to_completion_and_is_resumable_db() {
     assert_eq!(remaining_audit, 0);
 
     let survivor_resolved = vault
-        .resolve(
-            &CredentialSource::TenantConnection {
-                reference: survivor.reference,
-            },
+        .resolve_active(
+            &survivor.identity,
             &context(
                 other_tenant,
                 caller(Uuid::now_v7()),
@@ -2958,13 +2761,13 @@ async fn tenant_purge_requires_the_delete_scoped_context_db() {
     let owner = Uuid::now_v7();
 
     vault
-        .create(
+        .stage_and_activate(
             identity(tenant_id, Uuid::now_v7()),
             SecretString::from("scoped_material".to_string()),
             &context(
                 tenant_id,
                 caller(owner),
-                CredentialOperation::Create,
+                CredentialOperation::Stage,
                 "op-create-scope",
                 "hash-create-scope",
             ),

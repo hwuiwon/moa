@@ -70,7 +70,7 @@ client or edge
 
 The `Session` VO serializes message admission, queue state, cancellation
 requests, and outcome recording. It starts `TurnExecution` and returns quickly.
-`start_turn` and `queue_message` are the only message-submitting handlers; both pass
+`start_turn` is the only message-submitting handler and passes
 through one admission fence held in the VO's `message_admissions` state key, which records
 each admitted `client_message_id` with the canonical hash of its request and the exact
 response the caller received. The fence is consulted before every side effect — reply

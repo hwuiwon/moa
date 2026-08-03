@@ -228,7 +228,7 @@ async fn provider_webhook_resolves_signed_provider_account_identity() {
     // Pins: signed provider account metadata resolves the local connection without tenant fields.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let mut connection = fixture_connection(tenant_id);
-    connection.provider = "nango".to_string();
+    connection.provider = moa_knowledge::domain::LinkedProviderKind::Nango;
     connection.connector = "google-drive".to_string();
     connection.provider_account_id = "conn_123".to_string();
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
@@ -282,11 +282,11 @@ async fn provider_webhook_rejects_ambiguous_provider_account_before_recording() 
     let first_tenant = TenantId::from(Uuid::now_v7());
     let second_tenant = TenantId::from(Uuid::now_v7());
     let mut first = fixture_connection(first_tenant);
-    first.provider = "merge".to_string();
+    first.provider = moa_knowledge::domain::LinkedProviderKind::Merge;
     first.connector = "merge".to_string();
     first.provider_account_id = "linked-account-123".to_string();
     let mut second = fixture_connection(second_tenant);
-    second.provider = "merge".to_string();
+    second.provider = moa_knowledge::domain::LinkedProviderKind::Merge;
     second.connector = "merge".to_string();
     second.provider_account_id = "linked-account-123".to_string();
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
@@ -422,7 +422,7 @@ async fn provider_webhook_rejects_signed_connection_for_different_provider_befor
     // Pins: signed tenant/connection UUID binding must still match the verified provider.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let mut connection = fixture_connection(tenant_id);
-    connection.provider = "nango".to_string();
+    connection.provider = moa_knowledge::domain::LinkedProviderKind::Nango;
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
         .insert_connection(connection.clone())

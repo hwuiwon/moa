@@ -14,20 +14,19 @@ use crate::services::{
 };
 use crate::workflows::durable_utc_now;
 use moa_artifacts::{
-    canonical::canonical_json_bytes as artifact_canonical_json_bytes,
     execution_plan::{ExecutionGoalContract, GeneratedExecutionCandidate},
     reference::ArtifactRef,
     simulation::MAX_PLAN_DEFINITION_BYTES,
 };
 use moa_config::MoaConfig;
+use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::types::{
     agent::AgentContext,
     contact::{ClientMessageId, ContactId, ContactRef, ContactVerificationState},
     execution_planning::{
         ExecutionAuditViolation, ExecutionCompileOutcome, ExecutionCompileSource,
         ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
-        PinnedExecutionTemplateRef, bounded_audit_report, canonical_json_bytes,
-        execution_planning_hash,
+        PinnedExecutionTemplateRef, bounded_audit_report, execution_planning_hash,
     },
     resource::ResourceAmounts,
 };
@@ -207,15 +206,32 @@ struct CompiledExperimentTemplate {
     source_provenance: ExecutionSourceProvenance,
 }
 
+#[derive(Clone, Copy)]
+/// Runtime services shared by the agent-loop trial path.
+pub(super) struct AgentLoopDependencies<'a> {
+    /// Database connection pool for durable trial state.
+    pub(super) pool: &'a sqlx::PgPool,
+    /// Event store used by the target session.
+    pub(super) session_store: &'a Arc<PostgresSessionStore>,
+    /// Provider registry used to resolve the simulator model.
+    pub(super) providers: &'a Arc<ProviderRegistry>,
+    /// Authorization enforcer used when creating the target session.
+    pub(super) authz: &'a crate::handlers::authz_shim::AuthzEnforcer,
+}
+
 pub(super) async fn run_agent_loop_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
     trial: ExperimentTrialRecord,
     simulator_context: SimulatorContext,
-    pool: &sqlx::PgPool,
-    session_store: &Arc<PostgresSessionStore>,
-    providers: &Arc<ProviderRegistry>,
+    dependencies: AgentLoopDependencies<'_>,
 ) -> Result<TrialTargetOutcome, HandlerError> {
+    let AgentLoopDependencies {
+        pool,
+        session_store,
+        providers,
+        authz: _,
+    } = dependencies;
     // Scope mismatch is decided before the target payload is used for any
     // session read, session write, or simulator provider call.
     if trial.scope.tenant_id() != request.tenant_id {
@@ -241,8 +257,7 @@ pub(super) async fn run_agent_loop_trial(
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
     let (session_id, target_model) =
-        ensure_agent_loop_session(ctx, &request, &trial, target, variant, pool, session_store)
-            .await?;
+        ensure_agent_loop_session(ctx, &request, &trial, target, variant, dependencies).await?;
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
     let score_target = TrialScoreTarget::Session { session_id };
@@ -468,7 +483,7 @@ pub(super) async fn run_agent_loop_trial(
         }
         let simulator_message = simulator_turn.message;
 
-        // Reserve before the target turn is queued. The queue call is the
+        // Reserve before the target turn is admitted. The start call is the
         // side-effecting dispatch: once it lands the target starts billing.
         let target_key = resources::target_reservation_key(trial.trial_uid, turn_index);
         let target_worst_case = resources::target_worst_case(turn_share);
@@ -494,7 +509,7 @@ pub(super) async fn run_agent_loop_trial(
 
         let response = with_identity_headers(
             ctx.object_client::<SessionClient>(session_id.to_string())
-                .queue_message(Json::from(QueueMessageRequest {
+                .start_turn(Json::from(StartTurnRequest {
                     // The trial uid plus this turn's index is the message's stable
                     // durable coordinate, so a replay of the trial workflow resubmits the
                     // same identity rather than starting a second simulated turn.
@@ -537,12 +552,12 @@ pub(super) async fn run_agent_loop_trial(
                 return Err(error.into());
             }
         };
-        let Some(turn_id) = response.started_turn_id else {
+        let Some(turn_id) = response.turn_id else {
             // Nothing was dispatched, so the withheld capacity goes back rather
             // than staying outstanding against every later turn.
             resources::release(ctx, &trial, target_key, pool).await?;
             return Err(TerminalError::new(
-                "target session queued simulator message behind an active turn",
+                "target session queued the simulator message behind an active turn",
             )
             .into());
         };
@@ -829,9 +844,14 @@ async fn ensure_agent_loop_session(
     trial: &ExperimentTrialRecord,
     target: ExperimentTarget,
     variant: ExperimentVariant,
-    pool: &sqlx::PgPool,
-    session_store: &Arc<PostgresSessionStore>,
+    dependencies: AgentLoopDependencies<'_>,
 ) -> Result<(SessionId, Option<ModelId>), HandlerError> {
+    let AgentLoopDependencies {
+        pool,
+        session_store,
+        authz,
+        ..
+    } = dependencies;
     let selection = agent_loop_target_selection(target, trial.target_model.clone(), variant.model)?;
     let target_model = selection.model;
 
@@ -861,6 +881,7 @@ async fn ensure_agent_loop_session(
                 request.release_overlay.clone(),
                 pool,
                 session_store,
+                authz,
             )
             .await?;
             with_identity_headers(
@@ -885,6 +906,7 @@ pub(super) async fn run_execution_template_trial(
     config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
+    authz: &crate::handlers::authz_shim::AuthzEnforcer,
 ) -> Result<TrialTargetOutcome, HandlerError> {
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
@@ -929,6 +951,7 @@ pub(super) async fn run_execution_template_trial(
         config,
         pool,
         session_store,
+        authz,
     )
     .await?;
     ctx.set(K_SESSION_ID, Json(effective.session_id));
@@ -1205,6 +1228,7 @@ async fn ensure_execution_session(
     config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
+    authz: &crate::handlers::authz_shim::AuthzEnforcer,
 ) -> Result<EffectiveExecutionSession, HandlerError> {
     if let Some(session_id) = target_session_id {
         with_identity_headers(
@@ -1266,7 +1290,7 @@ async fn ensure_execution_session(
     let init_pool = pool.clone();
     let init_meta = meta.clone();
     let identity = request.identity.clone();
-    let fga = crate::handlers::authz_shim::require_fga_client()?;
+    let fga = authz.require_fga_client()?;
     let initialized = ctx
         .run(|| async move {
             let initialized = crate::services::session_store::inner::initialize_internal_execution_session_atomic(
@@ -1574,7 +1598,7 @@ fn compile_experiment_template(
         plan: &candidate.plan,
         run_input: &candidate.run_input,
     };
-    let candidate_bytes = artifact_canonical_json_bytes(&candidate_preimage)
+    let candidate_bytes = canonical_json_bytes(&candidate_preimage)
         .map_err(|error| TerminalError::new(error.to_string()))?;
     let candidate_hash =
         execution_planning_hash("moa.execution.compile-candidate", &candidate_bytes);
@@ -1851,6 +1875,7 @@ async fn create_new_session(
     release_overlay: Option<ArtifactReleaseExperimentTrialBinding>,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
+    authz: &crate::handlers::authz_shim::AuthzEnforcer,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
     let prepare_identity = identity.clone();
     let prepare_pool = pool.clone();
@@ -1886,7 +1911,7 @@ async fn create_new_session(
     let store = session_store.clone();
     let pool = pool.clone();
     let identity = identity.clone();
-    let fga = crate::handlers::authz_shim::require_fga_client()?;
+    let fga = authz.require_fga_client()?;
     Ok(ctx
         .run(|| async move {
             let session_id =

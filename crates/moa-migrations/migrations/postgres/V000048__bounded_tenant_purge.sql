@@ -50,7 +50,6 @@ CREATE TABLE moa.tenant_purge_catalog (
         'storage_partition_id',
         'tenant_primary_key',
         'auth0_ciba_approval',
-        'linked_connection',
         'scim_group_member',
         'api_key_revocation',
         'session_event_dedupe',
@@ -69,7 +68,7 @@ CREATE TABLE moa.tenant_purge_catalog (
 );
 
 COMMENT ON TABLE moa.tenant_purge_catalog IS
-    'Closed 129-table tenant-offboarding residue surface. The two nullable-scope simulator certification authority tables are intentionally global and absent.';
+    'Closed 127-table tenant-offboarding residue surface. The two nullable-scope simulator certification authority tables are intentionally global and absent.';
 
 -- This order is the existing proven FK order, made durable.  One catalog row
 -- owns one table; multi-phase pointer clearing is encoded by clear_then_delete.
@@ -79,7 +78,6 @@ VALUES
     (1, 'public.oauth_tokens', 'public', 'oauth_tokens', 'tenant_id', 'delete'),
     (2, 'public.oauth_authorization_codes', 'public', 'oauth_authorization_codes', 'tenant_id', 'delete'),
     (3, 'public.oauth_authorization_transactions', 'public', 'oauth_authorization_transactions', 'tenant_id', 'delete'),
-    (4, 'public.token_vault_connections', 'public', 'token_vault_connections', 'tenant_id', 'delete'),
     (5, 'moa.dual_control_request', 'moa', 'dual_control_request', 'tenant_id', 'delete'),
     (6, 'moa.audit_jti_used', 'moa', 'audit_jti_used', 'tenant_id', 'delete'),
     (7, 'moa.erasure_jobs', 'moa', 'erasure_jobs', 'tenant_id', 'delete'),
@@ -134,7 +132,6 @@ VALUES
     (56, 'public.user_session_tokens', 'public', 'user_session_tokens', 'tenant_id', 'delete'),
     (57, 'public.local_user_credentials', 'public', 'local_user_credentials', 'tenant_id', 'delete'),
     (58, 'public.auth0_user_map', 'public', 'auth0_user_map', 'tenant_id', 'delete'),
-    (59, 'public.linked_connections', 'public', 'linked_connections', 'linked_connection', 'delete'),
     (60, 'public.scim_group_members', 'public', 'scim_group_members', 'scim_group_member', 'delete'),
     (61, 'public.scim_groups', 'public', 'scim_groups', 'tenant_id', 'delete'),
     (62, 'public.agents', 'public', 'agents', 'tenant_id', 'delete'),
@@ -478,12 +475,6 @@ BEGIN
             source_sql,
             source_sql
         );
-    ELSIF TG_ARGV[0] = 'linked_connection' THEN
-        tenant_sql := format(
-            'SELECT DISTINCT user_row.tenant_id FROM (%s) changed '
-            'JOIN public.users user_row ON user_row.id = changed.user_id',
-            source_sql
-        );
     ELSIF TG_ARGV[0] = 'scim_group_member' THEN
         tenant_sql := format(
             'SELECT DISTINCT tenant_id FROM ('
@@ -570,7 +561,6 @@ BEGIN
             'storage_partition_id',
             'tenant_primary_key',
             'auth0_ciba_approval',
-            'linked_connection',
             'scim_group_member',
             'api_key_revocation',
             'session_event_dedupe'
@@ -851,9 +841,6 @@ BEGIN
                 'WHERE session_row.id = target.session_id AND session_row.tenant_id = $1) '
                 'OR EXISTS (SELECT 1 FROM public.users user_row '
                 'WHERE user_row.id = target.deciding_user_id AND user_row.tenant_id = $1))'
-            WHEN 'linked_connection' THEN
-                'EXISTS (SELECT 1 FROM public.users user_row '
-                'WHERE user_row.id = target.user_id AND user_row.tenant_id = $1)'
             WHEN 'scim_group_member' THEN
                 '(EXISTS (SELECT 1 FROM public.users user_row '
                 'WHERE user_row.id = target.user_id AND user_row.tenant_id = $1) '
@@ -1088,8 +1075,8 @@ BEGIN
     END IF;
 
     SELECT count(*) INTO catalog_count FROM moa.tenant_purge_catalog;
-    IF catalog_count <> 129 THEN
-        RAISE EXCEPTION 'tenant purge catalog must contain exactly 129 tables, found %', catalog_count
+    IF catalog_count <> 127 THEN
+        RAISE EXCEPTION 'tenant purge catalog must contain exactly 127 tables, found %', catalog_count
             USING ERRCODE = '55000';
     END IF;
     SELECT array_agg(format('%I.%I', namespace.nspname, table_row.relname) ORDER BY 1)

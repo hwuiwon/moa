@@ -45,13 +45,18 @@ pub(super) fn encode_jsonb(value: &serde_json::Value) -> Result<String> {
 }
 
 pub(super) fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeConnection> {
+    let provider = row
+        .try_get::<String, _>("provider")
+        .map_err(map_sqlx_error)?;
     Ok(KnowledgeConnection {
         connection_uid: row.try_get("connection_uid").map_err(map_sqlx_error)?,
         tenant_id: TenantId::from(
             row.try_get::<Uuid, _>("tenant_id")
                 .map_err(map_sqlx_error)?,
         ),
-        provider: row.try_get("provider").map_err(map_sqlx_error)?,
+        provider: LinkedProviderKind::from_str_exact(&provider).ok_or_else(|| {
+            Error::Repository(format!("unknown linked knowledge provider `{provider}`"))
+        })?,
         connector: row.try_get("connector").map_err(map_sqlx_error)?,
         provider_account_id: row
             .try_get("provider_connection_id")

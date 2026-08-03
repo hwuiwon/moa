@@ -169,28 +169,41 @@ fn cumulative_nonterminal_reconciliation_charges_only_deltas_and_retains_reserve
     let zero = usage(0);
     let first = usage(4);
 
-    let remaining = ledger
+    let reconciliation = ledger
         .reconcile_cumulative(reservation, &zero, &first, false)
         .expect("first nonterminal outcome");
-    assert_eq!(remaining, estimate(6));
+    assert_eq!(reconciliation.remaining_task_reservation, estimate(6));
     assert_eq!(ledger.reserved, estimate(6));
     assert_eq!(ledger.consumed.tokens, 4);
     assert_eq!(ledger.consumed.tasks, 0);
 
     let second = usage(7);
-    let remaining = ledger
-        .reconcile_cumulative(remaining, &first, &second, false)
+    let reconciliation = ledger
+        .reconcile_cumulative(
+            reconciliation.remaining_task_reservation,
+            &first,
+            &second,
+            false,
+        )
         .expect("second nonterminal outcome");
-    assert_eq!(remaining, estimate(3));
+    assert_eq!(reconciliation.remaining_task_reservation, estimate(3));
     assert_eq!(ledger.reserved, estimate(3));
     assert_eq!(ledger.consumed.tokens, 7);
     assert_eq!(ledger.consumed.tasks, 0);
 
     let final_usage = usage(9);
-    let remaining = ledger
-        .reconcile_cumulative(remaining, &second, &final_usage, true)
+    let reconciliation = ledger
+        .reconcile_cumulative(
+            reconciliation.remaining_task_reservation,
+            &second,
+            &final_usage,
+            true,
+        )
         .expect("terminal outcome");
-    assert_eq!(remaining, ExecutionEstimate::default());
+    assert_eq!(
+        reconciliation.remaining_task_reservation,
+        ExecutionEstimate::default()
+    );
     assert_eq!(ledger.reserved, ExecutionEstimate::default());
     assert_eq!(ledger.consumed.tokens, 9);
     assert_eq!(ledger.consumed.tasks, 1);
@@ -212,6 +225,28 @@ fn cumulative_reconciliation_rejects_decreasing_usage_without_mutating_ledger() 
         "invalid budget ledger transition: cumulative tokens usage decreased"
     );
     assert_eq!(ledger, before);
+}
+
+#[test]
+fn persistence_reconciliation_returns_clamped_overrun_evidence_once() {
+    // Pins: the repository can persist a cumulative usage overflow without duplicating budget
+    // arithmetic or attempting to bind a counter above its storage ceiling.
+    let mut ledger = BudgetLedger::new(limit(100));
+    let reservation = estimate(20);
+    ledger.try_reserve(reservation).expect("reserve task");
+
+    let reconciliation = ledger
+        .reconcile_cumulative_with_ceiling(reservation, &usage(0), &usage(11), true, 10)
+        .expect("valid cumulative transition");
+
+    assert_eq!(reconciliation.run_consumed.tokens, 10);
+    assert_eq!(reconciliation.run_consumed.tasks, 1);
+    assert_eq!(
+        reconciliation.remaining_task_reservation,
+        ExecutionEstimate::default()
+    );
+    assert!(reconciliation.budget_overrun);
+    assert_eq!(reconciliation.overrun_dimension, Some("tokens"));
 }
 
 #[test]

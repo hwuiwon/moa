@@ -13,13 +13,7 @@
 use super::*;
 use crate::domain::ProviderAclSnapshot;
 
-impl<R, P, E, G> KnowledgeIngestionPipeline<R, P, E, G>
-where
-    R: KnowledgeRepository,
-    P: DocumentParser,
-    E: EmbeddingProvider,
-    G: KnowledgeGraphWriter,
-{
+impl KnowledgeIngestionPipeline {
     /// Captures one record's provider ACL and atomically makes it current.
     ///
     /// Runs before the change-token and content-hash fences. Returns a typed
@@ -54,7 +48,7 @@ where
         // the object to `incomplete` and hides it; only then does the typed error
         // propagate. Reversing that order would leave a revoked document
         // retrievable for as long as the sync kept failing.
-        self.repository
+        self.acl_repository
             .replace_object_acl_snapshot(snapshot)
             .await?;
 

@@ -70,8 +70,9 @@ impl KnowledgeService {
         caller: &KnowledgeCaller,
         link: Option<&LinkClaim>,
     ) -> Result<KnowledgeSyncResponse, KnowledgeServiceError> {
-        let repository = self.repository(request.tenant_id);
-        let connection = repository
+        let connections = self.connection_repository(request.tenant_id);
+        let repository = self.sync_repository(request.tenant_id);
+        let connection = connections
             .get_connection(request.connection_uid)
             .await?
             .ok_or(KnowledgeServiceError::NotFound("knowledge connection"))?;
@@ -108,7 +109,7 @@ impl KnowledgeService {
                     // Durable *before* dispatch. This is what makes a crash
                     // between claiming the run and calling the provider
                     // recoverable rather than indistinguishable from success.
-                    repository
+                    connections
                         .advance_link_claim(
                             claim.tenant_id,
                             &claim.operation_id,
@@ -159,15 +160,15 @@ impl KnowledgeService {
                 ));
             }
         }
-        let provider_label = connection.provider.clone();
+        let provider_label = connection.provider;
         let current_span = tracing::Span::current();
         current_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
         current_span.record("provider", provider_label.as_str());
         current_span.record("status", run.status.as_str());
         current_span.record("error_code", "none");
-        record_knowledge_sync_run(&provider_label, run.status.as_str());
+        record_knowledge_sync_run(provider_label.as_str(), run.status.as_str());
 
-        let provider = self.provider(&connection.provider)?;
+        let provider = self.provider(connection.provider)?;
         let credential = self
             .resolve_connection_credential(&connection, caller)
             .await?;
@@ -236,7 +237,7 @@ impl KnowledgeService {
                         failed_outcome(classification),
                     ))
                     .await?;
-                record_knowledge_sync_run(&provider_label, run.status.as_str());
+                record_knowledge_sync_run(provider_label.as_str(), run.status.as_str());
                 return Err(error.into());
             }
         };
@@ -254,7 +255,7 @@ impl KnowledgeService {
         repository.update_sync_run(run.clone()).await?;
         current_span.record("status", run.status.as_str());
         current_span.record("error_code", "none");
-        record_knowledge_sync_run(&provider_label, run.status.as_str());
+        record_knowledge_sync_run(provider_label.as_str(), run.status.as_str());
         repository
             .record_ingestion_step(KnowledgeIngestionStep {
                 step_uid: Uuid::now_v7(),
@@ -294,7 +295,7 @@ impl KnowledgeService {
         &self,
         request: KnowledgeSyncStatusRequest,
     ) -> Result<KnowledgeSyncStatusResponse, KnowledgeServiceError> {
-        let repository = self.repository(request.tenant_id);
+        let repository = self.sync_repository(request.tenant_id);
         let run = repository
             .get_sync_run(request.sync_run_uid)
             .await?
@@ -334,7 +335,7 @@ impl KnowledgeService {
         &self,
         request: KnowledgeSyncEventsRequest,
     ) -> Result<KnowledgeSyncEventsResponse, KnowledgeServiceError> {
-        let repository = self.repository(request.tenant_id);
+        let repository = self.sync_repository(request.tenant_id);
         let run = repository
             .get_sync_run(request.sync_run_uid)
             .await?
@@ -364,8 +365,20 @@ impl KnowledgeService {
         caller: &KnowledgeCaller,
     ) -> Result<KnowledgeConnectionListResponse, KnowledgeServiceError> {
         let projections = self
-            .repository(request.tenant_id)
-            .list_connections(request.tenant_id, request.provider.as_deref())
+            .connection_repository(request.tenant_id)
+            .list_connections(
+                request.tenant_id,
+                request
+                    .provider
+                    .as_deref()
+                    .map(|provider| {
+                        moa_knowledge::domain::LinkedProviderKind::from_str_exact(provider)
+                            .ok_or_else(|| {
+                                KnowledgeServiceError::UnknownProvider(provider.to_string())
+                            })
+                    })
+                    .transpose()?,
+            )
             .await?;
         let listed_connections = projections
             .iter()
@@ -385,7 +398,7 @@ impl KnowledgeService {
             connections.push(KnowledgeConnectionSummary {
                 credential_status,
                 connection_uid: projection.connection.connection_uid,
-                provider: projection.connection.provider,
+                provider: projection.connection.provider.to_string(),
                 connector: projection.connection.connector,
                 provider_account_id: projection.connection.provider_account_id,
                 status: projection.parent_lifecycle_status,
@@ -416,17 +429,22 @@ impl KnowledgeService {
         let mut unavailable_providers = Vec::new();
         match request.provider.as_deref() {
             Some(provider_id) => {
+                let provider_id =
+                    moa_knowledge::domain::LinkedProviderKind::from_str_exact(provider_id)
+                        .ok_or_else(|| {
+                            KnowledgeServiceError::UnknownProvider(provider_id.to_string())
+                        })?;
                 let provider = self.provider(provider_id)?;
                 append_provider_integrations(&mut integrations, provider_id, provider.as_ref())
                     .await?;
             }
             None => {
                 for provider_id in self.providers.provider_ids() {
-                    let listing = match self.provider(&provider_id) {
+                    let listing = match self.provider(provider_id) {
                         Ok(provider) => {
                             append_provider_integrations(
                                 &mut integrations,
-                                &provider_id,
+                                provider_id,
                                 provider.as_ref(),
                             )
                             .await
@@ -440,7 +458,7 @@ impl KnowledgeService {
                             "knowledge provider unavailable for integration listing"
                         );
                         unavailable_providers.push(KnowledgeUnavailableProvider {
-                            provider: provider_id,
+                            provider: provider_id.to_string(),
                             reason: error.to_string(),
                         });
                     }
@@ -458,7 +476,7 @@ impl KnowledgeService {
 /// Appends one provider's connectable integrations as wire summaries.
 async fn append_provider_integrations(
     integrations: &mut Vec<KnowledgeIntegrationSummary>,
-    provider_id: &str,
+    provider_id: moa_knowledge::domain::LinkedProviderKind,
     provider: &dyn LinkedIntegrationProvider,
 ) -> Result<(), KnowledgeServiceError> {
     for integration in provider.list_integrations().await? {

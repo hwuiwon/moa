@@ -1578,19 +1578,17 @@ enum TenantWriteScopeMode {
     StoragePartitionId,
     TenantPrimaryKey,
     Auth0CibaApproval,
-    LinkedConnection,
     ScimGroupMember,
     ApiKeyRevocation,
     SessionEventDedupe,
 }
 
 impl TenantWriteScopeMode {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 7] = [
         Self::TenantId,
         Self::StoragePartitionId,
         Self::TenantPrimaryKey,
         Self::Auth0CibaApproval,
-        Self::LinkedConnection,
         Self::ScimGroupMember,
         Self::ApiKeyRevocation,
         Self::SessionEventDedupe,
@@ -1602,7 +1600,6 @@ impl TenantWriteScopeMode {
             Self::StoragePartitionId => "storage_partition_id",
             Self::TenantPrimaryKey => "tenant_primary_key",
             Self::Auth0CibaApproval => "auth0_ciba_approval",
-            Self::LinkedConnection => "linked_connection",
             Self::ScimGroupMember => "scim_group_member",
             Self::ApiKeyRevocation => "api_key_revocation",
             Self::SessionEventDedupe => "session_event_dedupe",
@@ -1717,45 +1714,6 @@ async fn seed_tenant_write_scope_fixture(
                 format!(
                     "SELECT count(*) FROM auth0_ciba_approvals \
                      WHERE {predicate} AND deny_reason = $1"
-                ),
-                3,
-            )
-        }
-        TenantWriteScopeMode::LinkedConnection => {
-            let target_user = seed_scope_users(pool, target_tenant, 1, mode.name()).await[0];
-            let neighbour_user = seed_scope_users(pool, neighbour_tenant, 1, mode.name()).await[0];
-            let rows = [
-                (target_user, format!("{}-a-{target_tenant}", mode.name())),
-                (target_user, format!("{}-b-{target_tenant}", mode.name())),
-                (
-                    neighbour_user,
-                    format!("{}-neighbour-{neighbour_tenant}", mode.name()),
-                ),
-            ];
-            for (user_id, connection_name) in &rows {
-                sqlx::query(
-                    "INSERT INTO linked_connections (user_id, connection_name) VALUES ($1, $2)",
-                )
-                .bind(user_id)
-                .bind(connection_name)
-                .execute(pool)
-                .await
-                .expect("seed linked-connection scope row");
-            }
-            let predicate = rows
-                .iter()
-                .map(|(user_id, connection_name)| {
-                    format!(
-                        "(user_id = '{user_id}'::UUID AND connection_name = '{connection_name}')"
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            (
-                format!("UPDATE linked_connections SET external_sub = $1 WHERE {predicate}"),
-                format!(
-                    "SELECT count(*) FROM linked_connections \
-                     WHERE ({predicate}) AND external_sub = $1"
                 ),
                 3,
             )
@@ -2176,19 +2134,6 @@ async fn seed_purge_families(
     .expect("seed OAuth token");
     sqlx::query(
         r#"
-        INSERT INTO token_vault_connections
-            (tenant_id, user_id, connection_name, provider, access_token_sealed)
-        VALUES ($1, $2, 'calendar', 'example', $3)
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(subject_id)
-    .bind(vec![1_u8, 2, 3])
-    .execute(pool)
-    .await
-    .expect("seed token-vault connection");
-    sqlx::query(
-        r#"
         INSERT INTO moa.dual_control_request
             (tenant_id, operation_type, operation_ref, requested_by)
         VALUES ($1, 'privacy.erase', $2, 'requester')
@@ -2321,7 +2266,7 @@ async fn seed_connector_families(pool: &PgPool, tenant_id: Uuid) {
             connection_uid, tenant_id, display_name, built_in_key, built_in_version,
             lifecycle_status, health_status
         )
-        VALUES ($1, $2, 'purge connector', 'managed:purge-test', 1, 'active', 'ready')
+        VALUES ($1, $2, 'purge connector', 'knowledge:nango', 1, 'active', 'ready')
         "#,
     )
     .bind(connection_uid)
@@ -2716,13 +2661,15 @@ async fn seed_experiment_score_provenance(
         r#"INSERT INTO moa.experiment_run (
              run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
              scorecard, score_run_id, artifact_revision_uids, created_by_identity,
-             resource_envelope
+             plan_artifact_uid, resource_envelope, simulator_policy
          ) VALUES ($1, $2, NULL, 'purge experiment', 'agent_loop', 'completed', '{}'::jsonb,
                    '{}'::jsonb, '{}'::jsonb, $3, '{}', '{}'::jsonb,
+                   '00000000-0000-4000-8000-0000000d74f0',
                    '{"version": 1,
                      "run_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
                      "trial_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
-                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb)"#,
+                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb,
+                   '{}'::jsonb)"#,
     )
     .bind(run_uid)
     .bind(&partition)

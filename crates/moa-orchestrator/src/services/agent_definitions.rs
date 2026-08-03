@@ -30,9 +30,7 @@ use uuid::Uuid;
 
 use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{
-    authorize_tenant, require_fga_client, require_identity, translate_authz_error,
-};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
 use crate::workflows::errors::{bad_request, moa_error_to_handler_error};
 
 const DEFAULT_DEPLOYMENT_LIST_LIMIT: i64 = 50;
@@ -72,15 +70,21 @@ pub trait AgentDefinitions {
 pub struct AgentDefinitionsImpl {
     pool: PgPool,
     connector_catalog: ScopedConnectorCatalogProvider,
+    authz: AuthzEnforcer,
 }
 
 impl AgentDefinitionsImpl {
     /// Creates the agent-definition adapter with its artifact and deployment pool.
     #[must_use]
-    pub(crate) fn new(pool: PgPool, connector_catalog: ScopedConnectorCatalogProvider) -> Self {
+    pub(crate) fn new(
+        pool: PgPool,
+        connector_catalog: ScopedConnectorCatalogProvider,
+        authz: AuthzEnforcer,
+    ) -> Self {
         Self {
             pool,
             connector_catalog,
+            authz,
         }
     }
 }
@@ -94,7 +98,9 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentDefinitionListResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "list_definitions");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -111,9 +117,12 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentInstallResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "install");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         if let Some(agent_id) = request.agent_id {
-            authorize_agent_operator(&ctx, agent_id).await?;
+            authorize_agent_operator(&self.authz, &ctx, agent_id).await?;
         }
         let pool = self.pool.clone();
 
@@ -131,7 +140,9 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentInstallationListResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "list_installations");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -152,7 +163,10 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentDeployResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "deploy");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let binding_pool = self.pool.clone();
         let binding_scope = tenant_scope(request.tenant_id);
         let installation_uid = request.installation_uid;
@@ -172,7 +186,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
             .await?
             .into_inner();
         if let Some(agent_id) = expected_agent_id {
-            authorize_agent_operator(&ctx, agent_id).await?;
+            authorize_agent_operator(&self.authz, &ctx, agent_id).await?;
         }
         let pool = self.pool.clone();
         let connector_catalog = self.connector_catalog.clone();
@@ -212,7 +226,9 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentDeploymentListResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "list_deployments");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -709,11 +725,12 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
 }
 
 async fn authorize_agent_operator(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     agent_id: Uuid,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
+    let fga = authz.require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,

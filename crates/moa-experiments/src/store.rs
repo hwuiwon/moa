@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::memory::RlsContext;
-use moa_core::types::resource::{ReconcileOutcome, ResourceAmounts, ResourceError, ResourceKind};
+use moa_core::types::resource::{ReconcileOutcome, ResourceAmounts, ResourceError};
 use moa_core::{
     error::MoaError,
     error::Result as MoaResult,
@@ -22,9 +22,8 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    ExperimentComponentUsage, ExperimentResourceAdmission, ExperimentResourceComponent,
-    ExperimentResourceDenial, ExperimentResourceEnvelope, ExperimentResourceLedgerState,
-    ExperimentResourceLimitScope, ExperimentResourceReservationRecord,
+    ExperimentResourceAdmission, ExperimentResourceComponent, ExperimentResourceEnvelope,
+    ExperimentResourceLedger, ExperimentResourceLedgerState, ExperimentResourceReservationRecord,
     ExperimentResourceReservationRequest, ExperimentResourceReservationState,
     ExperimentResourceUsage, ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig,
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
@@ -150,7 +149,7 @@ impl ExperimentStore {
                 "experiment expected trial count exceeds Postgres BIGINT".to_string(),
             )
         })?;
-        let simulator_policy = run.simulator_policy.as_ref().map(to_json).transpose()?;
+        let simulator_policy = to_json(&run.simulator_policy)?;
         run.resource_envelope
             .validate()
             .map_err(map_resource_error)?;
@@ -924,7 +923,7 @@ impl ExperimentStore {
     ) -> MoaResult<ExperimentResourceAdmission> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let ledger = match lock_run_ledger(conn.as_mut(), scope, request.run_uid).await {
+        let mut ledger = match lock_run_ledger(conn.as_mut(), scope, request.run_uid).await {
             Ok(ledger) => ledger,
             Err(error) => {
                 let _ = conn.rollback().await;
@@ -958,67 +957,20 @@ impl ExperimentStore {
             });
         }
 
-        if let Err(error) = ledger.envelope.validate() {
-            let _ = conn.rollback().await;
-            return Ok(denied(&error, ExperimentResourceLimitScope::Run));
-        }
-        if request.worst_case.is_zero() {
-            let _ = conn.rollback().await;
-            return Ok(denied(
-                &ResourceError::EmptyReservation,
-                ExperimentResourceLimitScope::Run,
-            ));
-        }
-        if now >= ledger.envelope.deadline_at {
-            let _ = conn.rollback().await;
-            return Ok(denied(
-                &ResourceError::DeadlineExceeded {
-                    deadline: ledger.envelope.deadline_at,
-                },
-                ExperimentResourceLimitScope::Run,
-            ));
-        }
-
-        let run_used = match checked_sum(ledger.committed, ledger.outstanding) {
-            Ok(used) => used,
-            Err(error) => {
-                let _ = conn.rollback().await;
-                return Ok(denied(&error, ExperimentResourceLimitScope::Run));
-            }
-        };
-        if let Err(error) = project_within(run_used, request.worst_case, ledger.envelope.run_limits)
-        {
-            let _ = conn.rollback().await;
-            return Ok(denied(&error, ExperimentResourceLimitScope::Run));
-        }
-
-        if let Some(trial_uid) = request.trial_uid {
-            let trial_used =
-                match load_trial_resource_use(conn.as_mut(), scope, request.run_uid, trial_uid)
-                    .await
-                {
-                    Ok(used) => used,
-                    Err(error) => {
-                        let _ = conn.rollback().await;
-                        return Err(error);
-                    }
-                };
-            if let Err(error) =
-                project_within(trial_used, request.worst_case, ledger.envelope.trial_limits)
+        let trial_used =
+            match load_trial_resource_use(conn.as_mut(), scope, request.run_uid, request.trial_uid)
+                .await
             {
-                let _ = conn.rollback().await;
-                return Ok(denied(&error, ExperimentResourceLimitScope::Trial));
-            }
+                Ok(used) => used,
+                Err(error) => {
+                    let _ = conn.rollback().await;
+                    return Err(error);
+                }
+            };
+        if let Err(denial) = ledger.try_reserve(request.worst_case, trial_used, now) {
+            let _ = conn.rollback().await;
+            return Ok(ExperimentResourceAdmission::Denied(denial));
         }
-
-        let outstanding = ledger
-            .outstanding
-            .checked_add(&request.worst_case)
-            .ok_or_else(|| {
-                MoaError::StorageError(
-                    "experiment resource outstanding projection overflowed".to_string(),
-                )
-            })?;
         let reserved = to_json(request.worst_case)?;
         let row = sqlx::query(&format!(
             r#"
@@ -1050,8 +1002,8 @@ impl ExperimentStore {
             conn.as_mut(),
             scope,
             request.run_uid,
-            ledger.committed,
-            outstanding,
+            ledger.committed(),
+            ledger.outstanding(),
         )
         .await?;
         conn.commit().await?;
@@ -1082,7 +1034,7 @@ impl ExperimentStore {
             .validate()
             .map_err(|error| MoaError::ValidationError(error.to_string()))?;
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let ledger = match lock_run_ledger(conn.as_mut(), scope, run_uid).await {
+        let mut ledger = match lock_run_ledger(conn.as_mut(), scope, run_uid).await {
             Ok(ledger) => ledger,
             Err(error) => {
                 let _ = conn.rollback().await;
@@ -1098,18 +1050,15 @@ impl ExperimentStore {
         };
         if record.state != ExperimentResourceReservationState::Open {
             conn.commit().await?;
-            let settled = record.actual.unwrap_or(ExperimentResourceUsage::ZERO);
-            return Ok(reconcile_outcome(record.reserved, settled.amounts));
+            return Ok(record.reconcile_outcome());
         }
 
-        let outstanding = ledger.outstanding.saturating_sub(&record.reserved);
-        let committed = ledger
-            .committed
-            .checked_add(&actual.amounts)
-            .ok_or_else(|| {
-                MoaError::StorageError(
-                    "experiment resource committed projection overflowed".to_string(),
-                )
+        let outcome = ledger
+            .reconcile(record.reserved, actual.amounts)
+            .map_err(|error| {
+                MoaError::StorageError(format!(
+                    "experiment resource reconciliation failed: {error}"
+                ))
             })?;
         let actual_json = to_json(actual)?;
         sqlx::query(
@@ -1129,9 +1078,16 @@ impl ExperimentStore {
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
-        write_run_ledger(conn.as_mut(), scope, run_uid, committed, outstanding).await?;
+        write_run_ledger(
+            conn.as_mut(),
+            scope,
+            run_uid,
+            ledger.committed(),
+            ledger.outstanding(),
+        )
+        .await?;
         conn.commit().await?;
-        Ok(reconcile_outcome(record.reserved, actual.amounts))
+        Ok(outcome)
     }
 
     /// Returns a reservation to the envelope without committing any usage.
@@ -1146,7 +1102,7 @@ impl ExperimentStore {
         reservation_key: &str,
     ) -> MoaResult<()> {
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let ledger = match lock_run_ledger(conn.as_mut(), scope, run_uid).await {
+        let mut ledger = match lock_run_ledger(conn.as_mut(), scope, run_uid).await {
             Ok(ledger) => ledger,
             Err(error) => {
                 let _ = conn.rollback().await;
@@ -1162,7 +1118,7 @@ impl ExperimentStore {
             conn.commit().await?;
             return Ok(());
         }
-        let outstanding = ledger.outstanding.saturating_sub(&record.reserved);
+        ledger.release(record.reserved);
         sqlx::query(
             r#"
             UPDATE moa.experiment_resource_reservation
@@ -1179,7 +1135,14 @@ impl ExperimentStore {
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
-        write_run_ledger(conn.as_mut(), scope, run_uid, ledger.committed, outstanding).await?;
+        write_run_ledger(
+            conn.as_mut(),
+            scope,
+            run_uid,
+            ledger.committed(),
+            ledger.outstanding(),
+        )
+        .await?;
         conn.commit().await?;
         Ok(())
     }
@@ -1226,35 +1189,10 @@ impl ExperimentStore {
             .iter()
             .map(reservation_from_row)
             .collect::<MoaResult<Vec<_>>>()?;
-        let open_reservations = reservations
-            .iter()
-            .filter(|record| record.state == ExperimentResourceReservationState::Open)
-            .count() as u64;
-        let by_component = ExperimentResourceComponent::ALL
-            .into_iter()
-            .map(|component| ExperimentComponentUsage {
-                component,
-                usage: reservations
-                    .iter()
-                    .filter(|record| record.component == component)
-                    .filter_map(|record| record.actual)
-                    .fold(ExperimentResourceUsage::ZERO, |total, usage| {
-                        total.saturating_add(&usage)
-                    }),
-            })
-            .collect();
-        let used = ledger
-            .committed
-            .checked_add(&ledger.outstanding)
-            .unwrap_or(ledger.envelope.run_limits);
-        Ok(ExperimentResourceLedgerState {
-            remaining: ledger.envelope.run_limits.saturating_sub(&used),
-            envelope: ledger.envelope,
-            committed: ledger.committed,
-            outstanding: ledger.outstanding,
-            open_reservations,
-            by_component,
-        })
+        Ok(ExperimentResourceLedgerState::from_ledger(
+            ledger,
+            &reservations,
+        ))
     }
 
     async fn update_trial_links(
@@ -1568,19 +1506,12 @@ async fn ensure_artifact_revisions_visible(
 const RESERVATION_COLUMNS: &str = "reservation_uid, run_uid, trial_uid, reservation_key, \
      component, state, reserved, actual, created_at, updated_at";
 
-/// Persisted ledger state for one run.
-struct RunLedgerRow {
-    envelope: ExperimentResourceEnvelope,
-    committed: ResourceAmounts,
-    outstanding: ResourceAmounts,
-}
-
 /// Reads a run's ledger under a row lock, serializing concurrent reservations.
 async fn lock_run_ledger(
     conn: &mut PgConnection,
     scope: &ActionRuleScope,
     run_uid: Uuid,
-) -> MoaResult<RunLedgerRow> {
+) -> MoaResult<ExperimentResourceLedger> {
     load_run_ledger_row(conn, scope, run_uid, true).await
 }
 
@@ -1589,7 +1520,7 @@ async fn load_run_ledger_row(
     scope: &ActionRuleScope,
     run_uid: Uuid,
     lock: bool,
-) -> MoaResult<RunLedgerRow> {
+) -> MoaResult<ExperimentResourceLedger> {
     let parts = ScopeParts::from_scope(scope);
     let locking = if lock { "FOR UPDATE" } else { "" };
     let row = sqlx::query(&format!(
@@ -1615,11 +1546,11 @@ async fn load_run_ledger_row(
             "experiment run `{run_uid}` is not visible in the requested experiment scope"
         ))
     })?;
-    Ok(RunLedgerRow {
-        envelope: from_json("resource_envelope", row.col("resource_envelope")?)?,
-        committed: from_json("resource_committed", row.col("resource_committed")?)?,
-        outstanding: from_json("resource_outstanding", row.col("resource_outstanding")?)?,
-    })
+    Ok(ExperimentResourceLedger::from_persisted(
+        from_json("resource_envelope", row.col("resource_envelope")?)?,
+        from_json("resource_committed", row.col("resource_committed")?)?,
+        from_json("resource_outstanding", row.col("resource_outstanding")?)?,
+    ))
 }
 
 /// Reads only the authored envelope of a run.
@@ -1630,7 +1561,8 @@ async fn load_run_resource_envelope(
 ) -> MoaResult<ExperimentResourceEnvelope> {
     Ok(load_run_ledger_row(conn, scope, run_uid, false)
         .await?
-        .envelope)
+        .envelope()
+        .clone())
 }
 
 async fn write_run_ledger(
@@ -1723,24 +1655,13 @@ async fn load_trial_resource_use(
     .await
     .map_err(map_sqlx_error)?;
 
-    let mut used = ResourceAmounts::ZERO;
-    for row in &rows {
-        let record = reservation_from_row(row)?;
-        let amounts = match record.state {
-            ExperimentResourceReservationState::Open => record.reserved,
-            ExperimentResourceReservationState::Reconciled => {
-                record
-                    .actual
-                    .unwrap_or(ExperimentResourceUsage::ZERO)
-                    .amounts
-            }
-            ExperimentResourceReservationState::Released => ResourceAmounts::ZERO,
-        };
-        used = used.checked_add(&amounts).ok_or_else(|| {
-            MoaError::StorageError("experiment trial resource use overflowed".to_string())
-        })?;
-    }
-    Ok(used)
+    let reservations = rows
+        .iter()
+        .map(reservation_from_row)
+        .collect::<MoaResult<Vec<_>>>()?;
+    ExperimentResourceLedger::trial_use(&reservations).map_err(|error| {
+        MoaError::StorageError(format!("experiment trial resource use overflowed: {error}"))
+    })
 }
 
 /// Reads the three-scope admission snapshot for one prospective run.
@@ -1750,7 +1671,7 @@ async fn load_trial_resource_use(
 async fn load_admission_usage(
     conn: &mut PgConnection,
     storage_partition_id: Option<&str>,
-    plan_artifact_uid: Option<Uuid>,
+    plan_artifact_uid: Uuid,
 ) -> MoaResult<ExperimentAdmissionUsage> {
     let row = sqlx::query(
         r#"
@@ -1805,52 +1726,6 @@ fn reservation_from_row(
         created_at: row.col("created_at")?,
         updated_at: row.col("updated_at")?,
     })
-}
-
-fn checked_sum(
-    left: ResourceAmounts,
-    right: ResourceAmounts,
-) -> Result<ResourceAmounts, ResourceError> {
-    left.checked_add(&right).ok_or(ResourceError::Overflow {
-        kind: ResourceKind::CostMicroUsd,
-    })
-}
-
-/// Returns `Ok` only when `used + request` stays inside every limit.
-fn project_within(
-    used: ResourceAmounts,
-    request: ResourceAmounts,
-    limits: ResourceAmounts,
-) -> Result<(), ResourceError> {
-    let projected = checked_sum(used, request)?;
-    match projected.first_exceeding(&limits) {
-        None => Ok(()),
-        Some(kind) => Err(ResourceError::Exhausted {
-            kind,
-            requested: request.get(kind),
-            remaining: limits.get(kind).saturating_sub(used.get(kind)),
-            limit: limits.get(kind),
-        }),
-    }
-}
-
-fn denied(
-    error: &ResourceError,
-    limit_scope: ExperimentResourceLimitScope,
-) -> ExperimentResourceAdmission {
-    ExperimentResourceAdmission::Denied(ExperimentResourceDenial::from_resource_error(
-        error,
-        limit_scope,
-    ))
-}
-
-fn reconcile_outcome(reserved: ResourceAmounts, actual: ResourceAmounts) -> ReconcileOutcome {
-    let overrun = actual.saturating_sub(&reserved);
-    if overrun.is_zero() {
-        ReconcileOutcome::WithinReservation
-    } else {
-        ReconcileOutcome::Overrun(overrun)
-    }
 }
 
 fn from_json<T: serde::de::DeserializeOwned>(field: &'static str, value: Value) -> MoaResult<T> {
@@ -1946,10 +1821,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
             MoaError::StorageError("experiment expected_trials is negative".to_string())
         })?,
         resource_envelope: from_json("resource_envelope", row.col("resource_envelope")?)?,
-        simulator_policy: row
-            .col::<Option<Value>>("simulator_policy")?
-            .map(|value| from_json("simulator_policy", value))
-            .transpose()?,
+        simulator_policy: from_json("simulator_policy", row.col("simulator_policy")?)?,
         error: row.col("error")?,
         created_at: row.col("created_at")?,
         started_at: row.col("started_at")?,

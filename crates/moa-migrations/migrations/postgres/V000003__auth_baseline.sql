@@ -147,21 +147,6 @@ CREATE TABLE IF NOT EXISTS auth0_user_map (
 
 CREATE INDEX IF NOT EXISTS idx_auth0_user_map_user ON auth0_user_map(user_id);
 
--- Per-user record of Auth0 connected accounts available through Token Vault.
---
--- MOA never stores the third-party access or refresh tokens. Auth0 stores
--- those in Token Vault; this table only tracks which connection names a MOA
--- user has linked and the scopes most recently observed for that connection.
-
-CREATE TABLE IF NOT EXISTS linked_connections (
-    user_id          UUID        NOT NULL,
-    connection_name  TEXT        NOT NULL,
-    linked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    scopes_granted   TEXT[]      NOT NULL DEFAULT '{}',
-    external_sub     TEXT,
-    PRIMARY KEY (user_id, connection_name)
-);
-
 -- Queue reclaim index.
 CREATE INDEX IF NOT EXISTS idx_authz_outbox_in_flight_reclaim
     ON authz_outbox(next_attempt_at, updated_at)

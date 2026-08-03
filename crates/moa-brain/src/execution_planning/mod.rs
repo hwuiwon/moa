@@ -3,21 +3,20 @@
 use std::{str::FromStr, time::Instant};
 
 use moa_artifacts::{
-    canonical::canonical_json_bytes as artifact_canonical_json_bytes,
     execution_plan::{
         ExecutionGoalContract, GeneratedAmendmentCandidate, GeneratedExecutionCandidate,
     },
     reference::ArtifactRef,
 };
 use moa_core::{
+    canonical_json::canonical_json_bytes,
     error::{MoaError, Result},
     traits::LLMProvider,
     types::execution_planning::{
         ExecutionAuditReport, ExecutionAuditViolation, ExecutionCompileOutcome,
         ExecutionCompileSource, ExecutionPlannerCallKind, ExecutionPlannerOutcome,
-        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
-        ExecutionSourceProvenance, ExecutionStrategy, GeneratedPlanPlannerProvenance,
-        bounded_audit_report, canonical_json_bytes, execution_planning_hash,
+        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
+        GeneratedPlanPlannerProvenance, bounded_audit_report, execution_planning_hash,
     },
 };
 use moa_execution::{
@@ -523,7 +522,7 @@ fn compile_candidate(
     };
     let candidate_hash = execution_planning_hash(
         "moa.execution.compile-candidate",
-        &artifact_canonical_json_bytes(&preimage)
+        &canonical_json_bytes(&preimage)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
     );
     let started = Instant::now();
@@ -877,7 +876,8 @@ fn generated_operation_key(request: &ExecutionPlanningRequest, ordinal: u8) -> S
 }
 
 fn canonical_string<T: Serialize>(value: &T) -> Result<String> {
-    let bytes = canonical_json_bytes(value).map_err(contract_error)?;
+    let bytes = canonical_json_bytes(value)
+        .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     String::from_utf8(bytes).map_err(|error| MoaError::SerializationError(error.to_string()))
 }
 
@@ -889,40 +889,6 @@ fn contract_error(
     error: moa_core::types::execution_planning::ExecutionPlanningContractError,
 ) -> MoaError {
     MoaError::ValidationError(error.to_string())
-}
-
-/// Returns whether a rejected pinned template may safely fall back to Inline Execute.
-#[must_use]
-pub fn pinned_template_may_fallback_to_inline(
-    independent_route: &ExecutionRouteDecision,
-    report: &ExecutionValidationReport,
-) -> bool {
-    if !matches!(
-        independent_route,
-        ExecutionRouteDecision::Execute {
-            strategy: ExecutionStrategy::Inline,
-            ..
-        }
-    ) {
-        return false;
-    }
-    !report.issues.iter().any(|issue| {
-        if issue.severity != ExecutionValidationSeverity::Error {
-            return false;
-        }
-        let code = issue.code.as_str();
-        code.contains("input")
-            || code.contains("capability")
-            || code.contains("authorization")
-            || code.contains("budget")
-            || code.contains("fanout")
-            || code.contains("fan_out")
-            || code.contains("review")
-            || code.contains("signal")
-            || code.contains("durable")
-            || code.contains("resum")
-            || code == "skill_not_authorized"
-    })
 }
 
 /// Generates and validates one restricted plan amendment with at most one repair call.
@@ -1201,7 +1167,7 @@ fn compile_amendment_candidate(
     };
     let compile_candidate_hash = execution_planning_hash(
         "moa.execution.compile-candidate",
-        &artifact_canonical_json_bytes(&preimage)
+        &canonical_json_bytes(&preimage)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
     );
     let started = Instant::now();
@@ -1410,51 +1376,5 @@ fn amendment_provider_failure(
             message: message.into(),
         },
         audits,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn execution_planning_pinned_template_fallback_is_gap_closed() {
-        // Pins: Inline fallback is disallowed for every authority/input/execution-shape gap.
-        let inline = ExecutionRouteDecision::Execute {
-            strategy: ExecutionStrategy::Inline,
-            rationale: "This request can finish in a bounded interactive loop.".to_string(),
-        };
-        let structural = ExecutionValidationReport {
-            issues: vec![moa_execution::ExecutionValidationIssue {
-                severity: ExecutionValidationSeverity::Error,
-                code: "plan_structure".to_string(),
-                path: "plan".to_string(),
-                message: "invalid".to_string(),
-            }],
-        };
-        assert!(pinned_template_may_fallback_to_inline(&inline, &structural));
-        for code in [
-            "invalid_run_input",
-            "capability_not_in_catalog",
-            "capability_not_authorized",
-            "approved_budget_exceeded",
-            "review_gap",
-            "signal_gap",
-            "durable_gap",
-            "resumability_gap",
-        ] {
-            let report = ExecutionValidationReport {
-                issues: vec![moa_execution::ExecutionValidationIssue {
-                    severity: ExecutionValidationSeverity::Error,
-                    code: code.to_string(),
-                    path: "plan".to_string(),
-                    message: "invalid".to_string(),
-                }],
-            };
-            assert!(
-                !pinned_template_may_fallback_to_inline(&inline, &report),
-                "{code}"
-            );
-        }
     }
 }

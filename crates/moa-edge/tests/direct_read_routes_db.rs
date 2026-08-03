@@ -268,10 +268,12 @@ async fn start_edge_with_auth_upstream_and_connector_management(
             pool.clone(),
         )),
         fga: fga.map(Arc::new),
-        auth0_webhook_secret: None,
         knowledge_webhooks: KnowledgeWebhookEdgeConfig::default(),
         pool,
         session_store: Arc::new(store.clone()),
+        delivery: Arc::new(moa_messaging::ProviderDeliverySink::empty(
+            "edge-tests@example.invalid",
+        )),
         proxy: Arc::new(
             OrchestratorProxy::new(upstream).expect("proxy URL should be syntactically valid"),
         ),
@@ -1694,16 +1696,9 @@ async fn disabled_connector_management_is_dark_before_auth_body_and_proxy_db() {
 }
 
 #[tokio::test]
-#[cfg_attr(
-    feature = "auth0",
-    ignore = "asserts the auth0-disabled arm; the feature is on in this build"
-)]
-async fn the_auth0_webhook_stays_registered_and_refuses_when_the_feature_is_off_db() {
-    // Pins: the one remaining 501 at the edge is a deliberate compile-time
-    // feature gate, not an unbuilt contract. Deleting this route because "it
-    // returns 501 too" would silently turn a build-configuration refusal into
-    // an indistinguishable 404, and an operator who forgot `--features auth0`
-    // would read that as a bad URL instead of a missing feature.
+async fn auth0_connection_linking_webhook_is_not_exposed_db() {
+    // Pins: Auth0 remains an identity provider, but its removed token-vault
+    // connection-linking webhook is not part of the public edge contract.
     let (store, database_url, schema_name) = create_test_store().await;
     let tenant_id = TenantId::new();
     let edge = start_edge(
@@ -1725,17 +1720,10 @@ async fn the_auth0_webhook_stays_registered_and_refuses_when_the_feature_is_off_
         .await
         .expect("send auth0 connection-linked webhook");
 
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
     assert_eq!(
-        status,
-        StatusCode::NOT_IMPLEMENTED,
-        "a feature-disabled webhook must refuse explicitly rather than look absent; \
-         observed status {status} with body {body:?}"
-    );
-    assert!(
-        body.contains("auth0 feature"),
-        "the refusal must name the feature an operator has to enable; observed body {body:?}"
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the deleted token-vault webhook must stay absent"
     );
 
     stop_server(edge.server).await;

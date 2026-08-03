@@ -2276,50 +2276,11 @@ fn canonical_self_hash<T: Serialize>(domain: &[u8], value: &T, field: &str) -> R
             "calibration self-hash field `{field}` is missing"
         )));
     }
-    let mut canonical = Vec::new();
-    write_canonical_json(&value, &mut canonical)?;
+    let canonical = moa_core::canonical_json::canonical_json_bytes(&value)?;
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(canonical);
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> Result<()> {
-    match value {
-        serde_json::Value::Null => output.extend_from_slice(b"null"),
-        serde_json::Value::Bool(value) => {
-            output.extend_from_slice(if *value { &b"true"[..] } else { &b"false"[..] });
-        }
-        serde_json::Value::Number(value) => output.extend_from_slice(value.to_string().as_bytes()),
-        serde_json::Value::String(value) => {
-            output.extend_from_slice(serde_json::to_string(value)?.as_bytes());
-        }
-        serde_json::Value::Array(values) => {
-            output.push(b'[');
-            for (index, value) in values.iter().enumerate() {
-                if index > 0 {
-                    output.push(b',');
-                }
-                write_canonical_json(value, output)?;
-            }
-            output.push(b']');
-        }
-        serde_json::Value::Object(values) => {
-            output.push(b'{');
-            let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_unstable_by_key(|(key, _)| *key);
-            for (index, (key, value)) in entries.into_iter().enumerate() {
-                if index > 0 {
-                    output.push(b',');
-                }
-                output.extend_from_slice(serde_json::to_string(key)?.as_bytes());
-                output.push(b':');
-                write_canonical_json(value, output)?;
-            }
-            output.push(b'}');
-        }
-    }
-    Ok(())
 }
 
 fn exact_sha256(bytes: &[u8]) -> String {
@@ -3041,8 +3002,6 @@ mod judge_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn external_memory_calibration_canonical_json_sorts_nested_keys_and_renders_floats() {
         // Pins: calibration self-hashes use compact recursive scalar-key ordering, serde_json
@@ -3051,8 +3010,8 @@ mod tests {
             "z": [0.9, {"zebra": "quoted \"value\"", "alpha": 1.25}],
             "alpha": "line\nbreak"
         });
-        let mut bytes = Vec::new();
-        write_canonical_json(&value, &mut bytes).expect("canonicalize finite nested JSON");
+        let bytes = moa_core::canonical_json::canonical_json_bytes(&value)
+            .expect("canonicalize finite nested JSON");
         assert_eq!(
             bytes,
             br#"{"alpha":"line\nbreak","z":[0.9,{"alpha":1.25,"zebra":"quoted \"value\""}]}"#

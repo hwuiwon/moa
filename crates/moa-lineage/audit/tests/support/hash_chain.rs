@@ -1,8 +1,9 @@
 //! Hash-chain fixtures for lineage audit tests.
 
 use blake3::Hash;
+use moa_core::canonical_json::canonical_json_bytes;
 use moa_lineage_core::chain::{
-    HashChain, Result, canonical_json_bytes, canonical_payload_hash, genesis_hash, next_chain_hash,
+    HashChain, Result, canonical_payload_hash, genesis_hash, next_chain_hash,
 };
 use serde_json::Value;
 

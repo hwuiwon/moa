@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::services::skill_regression::{
     SkillRegressionExecution, SkillRegressionGate, skill_acceptance_regression_report,
 };
@@ -80,6 +80,7 @@ pub struct LearningReviewImpl {
     config: Arc<MoaConfig>,
     providers: Arc<ProviderRegistry>,
     router: Arc<ToolRouter>,
+    authz: AuthzEnforcer,
 }
 
 impl LearningReviewImpl {
@@ -91,6 +92,7 @@ impl LearningReviewImpl {
         config: Arc<MoaConfig>,
         providers: Arc<ProviderRegistry>,
         router: Arc<ToolRouter>,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             store,
@@ -98,6 +100,7 @@ impl LearningReviewImpl {
             config,
             providers,
             router,
+            authz,
         }
     }
 }
@@ -111,7 +114,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidate>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "get");
         let request = request.into_inner();
-        authorize_tenant_operator(&ctx, request.tenant_id).await?;
+        authorize_tenant_operator(&self.authz, &ctx, request.tenant_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -132,7 +135,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "accept_skill");
         let mut request = request.into_inner();
-        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
+        let identity = authorize_tenant_operator(&self.authz, &ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let store = self.store.clone();
         let pool = self.pool.clone();
@@ -160,7 +163,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "accept_rollback");
         let mut request = request.into_inner();
-        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
+        let identity = authorize_tenant_operator(&self.authz, &ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let store = self.store.clone();
         let pool = self.pool.clone();
@@ -185,7 +188,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "reject");
         let mut request = request.into_inner();
-        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
+        let identity = authorize_tenant_operator(&self.authz, &ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let store = self.store.clone();
 
@@ -207,7 +210,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "dismiss");
         let mut request = request.into_inner();
-        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
+        let identity = authorize_tenant_operator(&self.authz, &ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let store = self.store.clone();
 
@@ -1254,10 +1257,13 @@ pub async fn reject_learning_candidate_after_authz(
 }
 
 async fn authorize_tenant_operator(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
 ) -> Result<moa_core::traits::Identity, HandlerError> {
-    authorize_tenant(ctx, tenant_id, Relation::Operator).await
+    authz
+        .authorize_tenant(ctx, tenant_id, Relation::Operator)
+        .await
 }
 
 fn ensure_requested_action(

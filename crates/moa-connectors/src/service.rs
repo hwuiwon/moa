@@ -4,9 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_artifacts::connector::{
-    RuntimeConnectorAuthRequirementV1, RuntimeConnectorDefinitionV1, RuntimeConnectorKindV1,
-};
+use moa_artifacts::connector::{ConnectorDefinition, RuntimeConnectorAuthRequirementV1};
+use moa_core::types::action_policy::ActionPolicyEffect;
 use moa_core::types::credentials::{CredentialKind, CredentialSlotName};
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
 use serde_json::{Map, Value};
@@ -18,7 +17,10 @@ use crate::domain::{
     InstalledActionBindingId, ManagedParentClaim, ManagedParentDefinition,
     ManagedParentDeleteOutcome, OperationContractHash,
 };
-use crate::repository::{ConnectionActivation, ConnectionRepository, NewConnectorConnection};
+use crate::repository::{
+    ConnectionActivation, ConnectionLifecycleRepository, ConnectionListPage, ConnectionListRequest,
+    ManagedParentRepository, NewConnectorConnection,
+};
 use crate::{Error, Result};
 
 /// One exact credential series that must be active before a connection can activate.
@@ -41,22 +43,47 @@ pub struct CredentialSlotReadiness {
     pub ready: bool,
 }
 
+/// One connection-qualified credential series requested by a batch readiness read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionCredentialSlot {
+    /// Connection owning the credential series.
+    pub connection_id: ConnectorConnectionId,
+    /// Logical connector slot.
+    pub slot: CredentialSlotName,
+    /// Material kind required in that slot.
+    pub kind: CredentialKind,
+}
+
+/// Connection-qualified readiness returned in exact request order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionCredentialSlotReadiness {
+    /// Connection owning the credential series.
+    pub connection_id: ConnectorConnectionId,
+    /// Logical connector slot.
+    pub slot: CredentialSlotName,
+    /// Material kind required in that slot.
+    pub kind: CredentialKind,
+    /// Whether an active credential version is available.
+    pub ready: bool,
+}
+
 /// Host-owned status boundary for connector credential slots.
 ///
 /// The port verifies availability only. It never returns plaintext and does not
 /// open the vault's intentionally absent enumeration surface.
 #[async_trait]
 pub trait CredentialSlotVerifier: Send + Sync {
-    /// Returns secret-free availability for the exact requested slots.
-    async fn credential_slot_readiness(
+    /// Returns secret-free availability in exact request order using one set-based read.
+    async fn credential_slot_readiness_batch(
         &self,
         tenant_id: TenantId,
-        connection_id: ConnectorConnectionId,
-        slots: &[RequiredCredentialSlot],
-    ) -> Result<Vec<CredentialSlotReadiness>>;
+        slots: &[ConnectionCredentialSlot],
+    ) -> Result<Vec<ConnectionCredentialSlotReadiness>>;
 }
 
 const ACTION_BINDING_NAMESPACE: &str = "https://moa.ai/connector/action-binding/v1";
+/// Maximum action bindings accepted for one connector connection generation.
+pub const MAX_CONNECTOR_ACTION_BINDINGS: usize = 64;
 
 /// Typed connection-create request that cannot carry an unparsed origin URL.
 #[derive(Clone, Debug)]
@@ -67,12 +94,10 @@ pub struct CreateConnectionRequest {
     pub tenant_id: TenantId,
     /// Operator-visible connection label.
     pub display_name: String,
-    /// Exact immutable artifact or built-in definition reference.
+    /// Exact immutable artifact definition reference.
     pub definition_ref: ConnectionDefinitionRef,
-    /// Definition being installed; its runtime decides whether an origin is required.
-    pub definition: RuntimeConnectorDefinitionV1,
-    /// Syntactically validated fixed origin for HTTP runtimes.
-    pub origin: Option<ConnectionOrigin>,
+    /// Syntactically validated fixed HTTP origin.
+    pub origin: ConnectionOrigin,
     /// Additional secret-free configuration fields.
     pub non_secret_config: Map<String, Value>,
     /// Identity initiating installation, when durable.
@@ -93,7 +118,16 @@ pub struct ActivateConnectionRequest {
     /// Exact definition reference expected on the connection row.
     pub definition_ref: ConnectionDefinitionRef,
     /// Validated runtime definition compiled into immutable bindings.
-    pub definition: RuntimeConnectorDefinitionV1,
+    pub definition: ConnectorDefinition,
+}
+
+/// Successful activation plus the readiness observation that admitted it.
+#[derive(Clone, Debug)]
+pub struct ActivatedConnection {
+    /// Connection after the atomic generation transition.
+    pub connection: ConnectorConnection,
+    /// Exact credential readiness used to admit the activation.
+    pub credential_readiness: Vec<CredentialSlotReadiness>,
 }
 
 /// Generation-fenced notification that a credential write has committed.
@@ -126,12 +160,6 @@ pub struct ManagedParentClaimRequest {
     pub definition: ManagedParentDefinition,
     /// Operator-visible label persisted on the generic parent.
     pub display_name: String,
-    /// Immutable provider integration/configuration selector.
-    pub provider_config_key: String,
-    /// Immutable provider-native linked-account selector.
-    pub provider_connection_id: String,
-    /// Immutable knowledge connector/category selected within the provider account.
-    pub connector: String,
     /// Authenticated operator owner; required only when this operation creates the parent.
     pub owner_identity_id: Option<Uuid>,
 }
@@ -165,7 +193,8 @@ pub struct ManagedParentDeleteRequest {
 /// Connector connection lifecycle application service.
 #[derive(Clone)]
 pub struct ConnectorService {
-    repository: Arc<dyn ConnectionRepository>,
+    lifecycle: Arc<dyn ConnectionLifecycleRepository>,
+    managed_parents: Arc<dyn ManagedParentRepository>,
     credentials: Arc<dyn CredentialSlotVerifier>,
 }
 
@@ -173,58 +202,45 @@ impl ConnectorService {
     /// Creates the service with explicit persistence and credential-status ports.
     #[must_use]
     pub fn new(
-        repository: Arc<dyn ConnectionRepository>,
+        lifecycle: Arc<dyn ConnectionLifecycleRepository>,
+        managed_parents: Arc<dyn ManagedParentRepository>,
         credentials: Arc<dyn CredentialSlotVerifier>,
     ) -> Self {
         Self {
-            repository,
+            lifecycle,
+            managed_parents,
             credentials,
         }
     }
 
     /// Creates one pending connection after building its secret-free configuration.
     pub async fn create(&self, request: CreateConnectionRequest) -> Result<ConnectorConnection> {
-        match &request.definition.runtime {
-            RuntimeConnectorKindV1::ConstrainedHttp => {
-                if request.origin.is_none() {
-                    return Err(Error::InvalidConnectionOrigin {
-                        reason: "constrained HTTP runtime requires a fixed HTTP(S) origin",
-                    });
-                }
-            }
-            RuntimeConnectorKindV1::BuiltInManaged { .. } => {
-                if request.origin.is_some() {
-                    return Err(Error::InvalidConnectionOrigin {
-                        reason: "managed connector runtime does not accept an origin",
-                    });
-                }
-            }
-        }
         if request.non_secret_config.contains_key("origin") {
             return Err(Error::InvalidContract {
                 message: "connector origin must use its typed field".to_string(),
             });
         }
-        let mut config = request.non_secret_config;
-        if let Some(origin) = request.origin {
-            config.insert("origin".to_string(), Value::String(origin.to_string()));
-        }
-        self.repository
+        self.lifecycle
             .create(NewConnectorConnection {
                 connection_id: request.connection_id,
                 tenant_id: request.tenant_id,
                 display_name: request.display_name,
                 definition_ref: request.definition_ref,
-                non_secret_config: Value::Object(config),
+                origin: Some(request.origin),
+                non_secret_config: Value::Object(request.non_secret_config),
                 created_by_identity_id: request.created_by_identity_id,
                 owner_identity_id: request.owner_identity_id,
             })
             .await
     }
 
-    /// Lists every connection in one already-authorized tenant scope.
-    pub async fn list(&self, tenant_id: TenantId) -> Result<Vec<ConnectorConnection>> {
-        self.repository.list(tenant_id).await
+    /// Lists one deterministic page of non-deleted connections in an authorized tenant scope.
+    pub async fn list(
+        &self,
+        tenant_id: TenantId,
+        request: ConnectionListRequest,
+    ) -> Result<ConnectionListPage> {
+        self.lifecycle.list(tenant_id, request).await
     }
 
     /// Loads one connection from an already-authorized tenant scope.
@@ -233,7 +249,7 @@ impl ConnectorService {
         tenant_id: TenantId,
         connection_id: ConnectorConnectionId,
     ) -> Result<Option<ConnectorConnection>> {
-        self.repository.load(tenant_id, connection_id).await
+        self.lifecycle.load(tenant_id, connection_id).await
     }
 
     /// Claims or exactly resumes the generic parent of one linked knowledge account.
@@ -241,16 +257,21 @@ impl ConnectorService {
         &self,
         request: ManagedParentClaimRequest,
     ) -> Result<ManagedParentClaim> {
-        self.repository.claim_managed_parent(request).await
+        self.managed_parents.claim_managed_parent(request).await
     }
 
     /// Verifies required slots, compiles deterministic bindings, and atomically activates.
     pub async fn activate(
         &self,
         request: ActivateConnectionRequest,
-    ) -> Result<ConnectorConnection> {
+    ) -> Result<ActivatedConnection> {
+        if request.definition.actions.len() > MAX_CONNECTOR_ACTION_BINDINGS {
+            return Err(Error::InvalidContract {
+                message: "connector activation accepts at most 64 action bindings".to_string(),
+            });
+        }
         let connection = self
-            .repository
+            .lifecycle
             .load(request.tenant_id, request.connection_id)
             .await?
             .ok_or(Error::ConnectionNotFound {
@@ -290,7 +311,7 @@ impl ConnectorService {
                     &request.definition_ref,
                     contract_hash,
                 ),
-                minimum_effect: action.policy().minimum_effect,
+                minimum_effect: ActionPolicyEffect::AdminReview,
                 enabled: true,
             });
         }
@@ -307,14 +328,19 @@ impl ConnectorService {
             });
         }
 
-        self.repository
+        let connection = self
+            .lifecycle
             .activate(ConnectionActivation {
                 tenant_id: request.tenant_id,
                 connection_id: request.connection_id,
                 expected_generation: request.expected_generation,
                 bindings,
             })
-            .await
+            .await?;
+        Ok(ActivatedConnection {
+            connection,
+            credential_readiness: readiness,
+        })
     }
 
     /// Activates a managed knowledge-only parent without inventing an action binding.
@@ -327,7 +353,7 @@ impl ConnectorService {
         request: ManagedParentActivationRequest,
     ) -> Result<ConnectorConnection> {
         let connection = self
-            .repository
+            .lifecycle
             .load(request.tenant_id, request.connection_id)
             .await?
             .ok_or(Error::ConnectionNotFound {
@@ -345,21 +371,23 @@ impl ConnectorService {
                 field: "definition",
             });
         }
-        let definition = request.definition.runtime_definition();
-        let required = required_credential_slots(&definition)?;
+        let auth = request.definition.credential_requirements();
+        let required = required_credential_slots_for_requirements(&auth)?;
         if !required.is_empty() {
             let readiness = self
-                .credentials
-                .credential_slot_readiness(request.tenant_id, request.connection_id, &required)
+                .credential_slot_readiness_for_requirements(
+                    request.tenant_id,
+                    request.connection_id,
+                    &auth,
+                )
                 .await?;
-            let readiness = normalize_slot_readiness(&required, readiness)?;
             if let Some(missing) = readiness.iter().find(|reported| !reported.ready) {
                 return Err(Error::CredentialSlotMissing {
                     slot: missing.slot.clone(),
                 });
             }
         }
-        self.repository
+        self.managed_parents
             .activate_managed_knowledge_parent(request)
             .await
     }
@@ -369,7 +397,7 @@ impl ConnectorService {
         &self,
         request: ManagedParentDeleteRequest,
     ) -> Result<ManagedParentDeleteOutcome> {
-        self.repository
+        self.managed_parents
             .delete_managed_parent_if_unused(request)
             .await
     }
@@ -379,14 +407,73 @@ impl ConnectorService {
         &self,
         tenant_id: TenantId,
         connection_id: ConnectorConnectionId,
-        definition: &RuntimeConnectorDefinitionV1,
+        definition: &ConnectorDefinition,
     ) -> Result<Vec<CredentialSlotReadiness>> {
-        let required = required_credential_slots(definition)?;
+        self.credential_slot_readiness_for_requirements(tenant_id, connection_id, &definition.auth)
+            .await
+    }
+
+    /// Returns deterministic readiness for one closed set of credential requirements.
+    pub async fn credential_slot_readiness_for_requirements(
+        &self,
+        tenant_id: TenantId,
+        connection_id: ConnectorConnectionId,
+        auth: &[RuntimeConnectorAuthRequirementV1],
+    ) -> Result<Vec<CredentialSlotReadiness>> {
+        let required = required_credential_slots_for_requirements(auth)?;
         let reported = self
             .credentials
-            .credential_slot_readiness(tenant_id, connection_id, &required)
+            .credential_slot_readiness_batch(
+                tenant_id,
+                &required
+                    .iter()
+                    .map(|slot| ConnectionCredentialSlot {
+                        connection_id,
+                        slot: slot.slot.clone(),
+                        kind: slot.kind,
+                    })
+                    .collect::<Vec<_>>(),
+            )
             .await?;
-        normalize_slot_readiness(&required, reported)
+        normalize_slot_readiness(
+            &required,
+            reported
+                .into_iter()
+                .map(|slot| CredentialSlotReadiness {
+                    slot: slot.slot,
+                    kind: slot.kind,
+                    ready: slot.ready,
+                })
+                .collect(),
+        )
+    }
+
+    /// Returns connection-qualified readiness in exact request order using one vault read.
+    pub async fn credential_slot_readiness_batch(
+        &self,
+        tenant_id: TenantId,
+        requested: &[ConnectionCredentialSlot],
+    ) -> Result<Vec<ConnectionCredentialSlotReadiness>> {
+        let reported = self
+            .credentials
+            .credential_slot_readiness_batch(tenant_id, requested)
+            .await?;
+        if reported.len() != requested.len() {
+            return Err(Error::InvalidContract {
+                message: "credential readiness batch returned a different result count".to_string(),
+            });
+        }
+        for (expected, actual) in requested.iter().zip(&reported) {
+            if expected.connection_id != actual.connection_id
+                || expected.slot != actual.slot
+                || expected.kind != actual.kind
+            {
+                return Err(Error::InvalidContract {
+                    message: "credential readiness batch changed request identity".to_string(),
+                });
+            }
+        }
+        Ok(reported)
     }
 
     /// Advances the connection generation after a credential write commits.
@@ -399,7 +486,7 @@ impl ConnectorService {
         &self,
         request: CredentialGenerationFenceRequest,
     ) -> Result<ConnectorConnection> {
-        self.repository
+        self.lifecycle
             .advance_credential_generation(
                 request.tenant_id,
                 request.connection_id,
@@ -415,7 +502,7 @@ impl ConnectorService {
         connection_id: ConnectorConnectionId,
         expected_generation: ConnectionGeneration,
     ) -> Result<ConnectorConnection> {
-        self.repository
+        self.lifecycle
             .transition(
                 tenant_id,
                 connection_id,
@@ -432,7 +519,7 @@ impl ConnectorService {
         connection_id: ConnectorConnectionId,
         expected_generation: ConnectionGeneration,
     ) -> Result<ConnectorConnection> {
-        self.repository
+        self.lifecycle
             .transition(
                 tenant_id,
                 connection_id,
@@ -449,7 +536,7 @@ impl ConnectorService {
         connection_id: ConnectorConnectionId,
         expected_generation: ConnectionGeneration,
     ) -> Result<ConnectorConnection> {
-        self.repository
+        self.lifecycle
             .transition(
                 tenant_id,
                 connection_id,
@@ -459,14 +546,14 @@ impl ConnectorService {
             .await
     }
 
-    /// Marks a pending-auth or disconnecting connection deleted and revokes its authz tuples.
+    /// Marks a disconnecting connection deleted and revokes its authz tuples.
     pub async fn delete(
         &self,
         tenant_id: TenantId,
         connection_id: ConnectorConnectionId,
         expected_generation: ConnectionGeneration,
     ) -> Result<ConnectorConnection> {
-        self.repository
+        self.lifecycle
             .transition(
                 tenant_id,
                 connection_id,
@@ -485,7 +572,7 @@ impl ConnectorService {
         health: ConnectionHealth,
         reason: Option<String>,
     ) -> Result<ConnectorConnection> {
-        self.repository
+        self.lifecycle
             .update_health(
                 tenant_id,
                 connection_id,
@@ -502,10 +589,17 @@ impl ConnectorService {
 /// This is the authoritative mapping from connector authentication contracts
 /// to vault material kinds for both activation and management projections.
 pub fn required_credential_slots(
-    definition: &RuntimeConnectorDefinitionV1,
+    definition: &ConnectorDefinition,
+) -> Result<Vec<RequiredCredentialSlot>> {
+    required_credential_slots_for_requirements(&definition.auth)
+}
+
+/// Derives the unique credential series declared by closed auth requirements.
+pub fn required_credential_slots_for_requirements(
+    auth: &[RuntimeConnectorAuthRequirementV1],
 ) -> Result<Vec<RequiredCredentialSlot>> {
     let mut slots = BTreeMap::<CredentialSlotName, CredentialKind>::new();
-    for requirement in &definition.auth {
+    for requirement in auth {
         let pair = match requirement {
             RuntimeConnectorAuthRequirementV1::None => None,
             RuntimeConnectorAuthRequirementV1::Bearer { slot }

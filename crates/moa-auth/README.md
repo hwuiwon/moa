@@ -10,8 +10,8 @@ an independent crate with its existing package name.
 | --- | --- | --- |
 | `authz-schema/` | `moa-authz-schema` | Typed OpenFGA object, relation, tuple, and model-version constants. |
 | `authz/` | `moa-authz` | OpenFGA client, authorization checks, transactional outbox, and outbox poller. |
-| `providers/` | `moa-auth-providers` | Local API-key auth, disabled auth, builtin approvals, null token vault, and provider bundle construction. |
-| `auth0/` | `moa-auth-providers-auth0` | Optional Auth0 and generic OIDC providers, Token Vault, CIBA, and JWKS. |
+| `providers/` | `moa-auth-providers` | Local API-key auth, disabled auth, builtin approvals, tenant connector credentials, and provider bundle construction. |
+| `auth0/` | `moa-auth-providers-auth0` | Optional Auth0 and generic OIDC providers, CIBA, and JWKS. |
 | `fga-bootstrap/` | `moa-fga-bootstrap` | OpenFGA store/model bootstrap binary. |
 
 ## Public Surface

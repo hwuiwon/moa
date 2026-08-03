@@ -35,55 +35,6 @@ fn connector_backed_actions_require_a_named_backing_tool() {
     );
 }
 
-#[test]
-fn connector_actions_reject_blank_tools_and_non_object_schemas() {
-    // Pins: connector catalog entries cannot publish ambiguous dispatch or malformed schemas.
-    let document = connector_document(
-        r#"actions:
-      - id: refund
-        tool_name: "   "
-        input_schema: []
-        output_schema: true"#,
-    );
-
-    assert_eq!(
-        validate_for_status(&document, ArtifactStatus::Draft).errors,
-        vec![
-            ValidationError {
-                path: "definition.spec.actions[0].tool_name".to_string(),
-                message: "connector action tool_name must not be empty".to_string(),
-            },
-            ValidationError {
-                path: "definition.spec.actions[0].input_schema".to_string(),
-                message: "JSON schema must be an object".to_string(),
-            },
-            ValidationError {
-                path: "definition.spec.actions[0].output_schema".to_string(),
-                message: "JSON schema must be an object".to_string(),
-            },
-        ],
-        "connector action validation must report every malformed governed field"
-    );
-}
-
-#[test]
-fn connector_actions_allow_omitted_tools_with_object_schemas() {
-    // Pins: an absent optional backing tool remains distinct from a present-but-blank name.
-    let document = connector_document(
-        r#"actions:
-      - id: read-orders
-        input_schema: { type: object }
-        output_schema: { type: object }"#,
-    );
-
-    let report = validate_for_status(&document, ArtifactStatus::Draft);
-    assert!(
-        report.is_ok(),
-        "connector actions with object schemas and no optional backing tool should validate: {:?}",
-        report.errors
-    );
-}
-
 fn action_document(binding: &str) -> ArtifactDocument {
     ArtifactDocument::from_yaml(&format!(
         r#"api_version: moa.artifact/v1
@@ -98,19 +49,4 @@ definition:
 "#
     ))
     .expect("fixture: action artifact YAML should parse")
-}
-
-fn connector_document(actions: &str) -> ArtifactDocument {
-    ArtifactDocument::from_yaml(&format!(
-        r#"api_version: moa.artifact/v1
-kind: connector
-metadata:
-  name: orders
-definition:
-  type: connector
-  spec:
-    {actions}
-"#
-    ))
-    .expect("fixture: connector artifact YAML should parse")
 }

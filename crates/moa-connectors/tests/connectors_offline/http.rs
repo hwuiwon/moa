@@ -7,10 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_artifacts::connector::RuntimeConnectorDefinitionV1;
-use moa_connectors::catalog::{
-    InstalledConnectorCatalog, InstalledConnectorCatalogQuery, InstalledConnectorCatalogSnapshot,
-};
+use moa_artifacts::connector::ConnectorDefinition;
+use moa_connectors::catalog::{InstalledConnectorCatalogQuery, InstalledConnectorCatalogSnapshot};
 use moa_connectors::domain::{
     ConnectionDefinitionRef, ConnectionGeneration, ConnectionHealth, ConnectionStatus,
     ConnectorConnection, ConnectorInvocationId, ConnectorInvocationRecord,
@@ -19,18 +17,18 @@ use moa_connectors::domain::{
 };
 use moa_connectors::executor::{
     ConnectorActionInvocation, ConnectorActionRuntime, ConnectorInvocationCompletionService,
-    InstalledConnectorActionPin, SecuredConnectorOutputMetadata,
+    InstalledConnectorActionPin, PreparedConnectorAction, SecuredConnectorOutputMetadata,
 };
 use moa_connectors::http::HttpConnectorRuntime;
 use moa_connectors::repository::{
-    ConnectionActivation, ConnectionRepository, InvocationReservation,
-    InvocationReservationRequest, NewConnectorConnection,
+    ConnectionActivation, ConnectionLifecycleRepository, ConnectorInvocationRepository,
+    InvocationReservation, InvocationReservationRequest, NewConnectorConnection,
 };
 use moa_connectors::{Error, Result};
 use moa_core::traits::{CredentialVault, Identity, IdentityType};
 use moa_core::types::credentials::{
-    CredentialContext, CredentialError, CredentialIdentity, CredentialRef, CredentialSource,
-    CredentialStagingToken, CredentialVersion, RedactedSecret,
+    CredentialContext, CredentialError, CredentialIdentity, CredentialRef, CredentialStagingToken,
+    CredentialVersion, RedactedSecret,
 };
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId, ToolCallId};
 use moa_core::types::security::ToolOutputAssessment;
@@ -45,27 +43,6 @@ use secrecy::SecretString;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-#[derive(Clone)]
-struct StaticCatalog {
-    connection: ConnectorConnection,
-    binding: InstalledActionBinding,
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl InstalledConnectorCatalog for StaticCatalog {
-    async fn snapshot(
-        &self,
-        query: InstalledConnectorCatalogQuery,
-    ) -> Result<InstalledConnectorCatalogSnapshot> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        InstalledConnectorCatalogSnapshot::from_candidates(
-            &query,
-            [(self.connection.clone(), self.binding.clone())],
-        )
-    }
-}
 
 #[derive(Clone)]
 struct InMemoryRepository {
@@ -108,7 +85,7 @@ impl InMemoryRepository {
 }
 
 #[async_trait]
-impl ConnectionRepository for InMemoryRepository {
+impl ConnectionLifecycleRepository for InMemoryRepository {
     async fn create(&self, _request: NewConnectorConnection) -> Result<ConnectorConnection> {
         Err(Self::unavailable())
     }
@@ -125,21 +102,31 @@ impl ConnectionRepository for InMemoryRepository {
         )
     }
 
-    async fn list(&self, _tenant_id: TenantId) -> Result<Vec<ConnectorConnection>> {
+    async fn list(
+        &self,
+        _tenant_id: TenantId,
+        _request: moa_connectors::repository::ConnectionListRequest,
+    ) -> Result<moa_connectors::repository::ConnectionListPage> {
         Err(Self::unavailable())
     }
 
-    async fn load_binding(
+    async fn load_pinned_action(
         &self,
         tenant_id: TenantId,
         connection_id: ConnectorConnectionId,
         binding_id: InstalledActionBindingId,
-    ) -> Result<Option<InstalledActionBinding>> {
+    ) -> Result<Option<moa_connectors::repository::PinnedConnectorAction>> {
+        let connection = lock(&self.connection).clone();
         let binding = lock(&self.binding).clone();
-        Ok((binding.tenant_id == tenant_id
+        Ok((connection.tenant_id == tenant_id
+            && connection.connection_id == connection_id
+            && binding.tenant_id == tenant_id
             && binding.connection_id == connection_id
             && binding.binding_id == binding_id)
-            .then_some(binding))
+            .then_some(moa_connectors::repository::PinnedConnectorAction {
+                connection,
+                binding,
+            }))
     }
 
     async fn transition(
@@ -175,7 +162,10 @@ impl ConnectionRepository for InMemoryRepository {
     async fn activate(&self, _request: ConnectionActivation) -> Result<ConnectorConnection> {
         Err(Self::unavailable())
     }
+}
 
+#[async_trait]
+impl ConnectorInvocationRepository for InMemoryRepository {
     async fn reserve_invocation(
         &self,
         request: InvocationReservationRequest,
@@ -316,15 +306,6 @@ impl StaticVault {
 
 #[async_trait]
 impl CredentialVault for StaticVault {
-    async fn create(
-        &self,
-        _identity: CredentialIdentity,
-        _material: SecretString,
-        _ctx: &CredentialContext,
-    ) -> std::result::Result<CredentialVersion, CredentialError> {
-        Err(CredentialError::NotFound)
-    }
-
     async fn stage(
         &self,
         _identity: CredentialIdentity,
@@ -348,14 +329,6 @@ impl CredentialVault for StaticVault {
         _prior_active: Option<CredentialRef>,
         _ctx: &CredentialContext,
     ) -> std::result::Result<CredentialVersion, CredentialError> {
-        Err(CredentialError::NotFound)
-    }
-
-    async fn resolve(
-        &self,
-        _source: &CredentialSource,
-        _ctx: &CredentialContext,
-    ) -> std::result::Result<RedactedSecret, CredentialError> {
         Err(CredentialError::NotFound)
     }
 
@@ -397,15 +370,6 @@ impl CredentialVault for StaticVault {
         Err(CredentialError::NotFound)
     }
 
-    async fn rotate(
-        &self,
-        _current: CredentialRef,
-        _material: SecretString,
-        _ctx: &CredentialContext,
-    ) -> std::result::Result<CredentialVersion, CredentialError> {
-        Err(CredentialError::NotFound)
-    }
-
     async fn revoke(
         &self,
         _reference: CredentialRef,
@@ -415,14 +379,6 @@ impl CredentialVault for StaticVault {
     }
 
     async fn revoke_connection(
-        &self,
-        _connection_uid: Uuid,
-        _ctx: &CredentialContext,
-    ) -> std::result::Result<u64, CredentialError> {
-        Err(CredentialError::NotFound)
-    }
-
-    async fn delete_connection(
         &self,
         _connection_uid: Uuid,
         _ctx: &CredentialContext,
@@ -466,14 +422,14 @@ async fn http_runtime_pins_transport_and_requires_post_security_completion_offli
     )
     .await
     .expect("connector fixture should start");
-    let (runtime, repository, vault, invocation) = runtime_fixture(
+    let (runtime, repository, vault, invocation, prepared) = runtime_fixture(
         fixture.origin(),
         Arc::new(StaticVault::with_secret(fixture_secret)),
         loopback_policy(),
     );
 
     let result = runtime
-        .invoke(invocation.clone())
+        .invoke(invocation.clone(), prepared.clone())
         .await
         .expect("reviewed connector request should succeed");
     assert_eq!(result.output(), &json!({"accepted": true}));
@@ -522,7 +478,7 @@ async fn http_runtime_pins_transport_and_requires_post_security_completion_offli
     assert_eq!(identities[0].slot_name.as_str(), "primary");
 
     let replay_error = runtime
-        .invoke(invocation.clone())
+        .invoke(invocation.clone(), prepared.clone())
         .await
         .expect_err("transmitting invocation must never be sent again");
     assert!(matches!(
@@ -562,14 +518,14 @@ async fn denied_destination_fails_before_credentials_or_transmission_offline() {
     // Pins: a production-denied loopback destination is rejected before the
     // vault is opened and before a durable invocation can reach transmission.
     let vault = Arc::new(StaticVault::with_secret("must-not-be-resolved"));
-    let (runtime, repository, _, invocation) = runtime_fixture(
+    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
         "https://127.0.0.1:443",
         vault.clone(),
         OutboundHttpPolicy::production(Arc::new(UnusedResolver)),
     );
 
     let error = runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared)
         .await
         .expect_err("loopback production destination must fail closed");
     assert!(matches!(
@@ -612,13 +568,13 @@ async fn response_redirect_content_type_and_stream_limit_fail_closed_offline() {
         let fixture = FixtureConnectorApi::start(FixtureConnectorScript::new(vec![response]))
             .await
             .expect("response-policy fixture should start");
-        let (runtime, repository, _, invocation) = runtime_fixture(
+        let (runtime, repository, _, invocation, prepared) = runtime_fixture(
             fixture.origin(),
             Arc::new(StaticVault::with_secret("response-policy-secret")),
             loopback_policy(),
         );
         let error = runtime
-            .invoke(invocation)
+            .invoke(invocation, prepared)
             .await
             .expect_err("unsafe response should fail closed");
         let code = match error {
@@ -648,11 +604,11 @@ async fn request_body_and_total_timeout_limits_preserve_send_boundary_offline() 
     // reservation or vault access, while timeout before headers is uncertain
     // and timeout while streaming a known response is a known failed outcome.
     let vault = Arc::new(StaticVault::with_secret("request-limit-secret"));
-    let (runtime, repository, _, mut invocation) =
+    let (runtime, repository, _, mut invocation, prepared) =
         runtime_fixture("http://127.0.0.1:9", vault.clone(), loopback_policy());
     invocation.input["payload"] = json!({"data": "x".repeat(256)});
     let error = runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared)
         .await
         .expect_err("oversized request body should fail before transmission");
     assert!(matches!(
@@ -670,13 +626,13 @@ async fn request_body_and_total_timeout_limits_preserve_send_boundary_offline() 
     ]))
     .await
     .expect("preheader timeout fixture should start");
-    let (runtime, repository, _, invocation) = runtime_fixture(
+    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
         before_headers.origin(),
         Arc::new(StaticVault::with_secret("preheader-timeout-secret")),
         loopback_policy(),
     );
     let error = runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared)
         .await
         .expect_err("timeout before response headers should be uncertain");
     assert!(
@@ -699,13 +655,13 @@ async fn request_body_and_total_timeout_limits_preserve_send_boundary_offline() 
     ]))
     .await
     .expect("stream timeout fixture should start");
-    let (runtime, repository, _, invocation) = runtime_fixture(
+    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
         streamed.origin(),
         Arc::new(StaticVault::with_secret("stream-timeout-secret")),
         loopback_policy(),
     );
     let error = runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared)
         .await
         .expect_err("timeout after response headers should fail closed");
     assert!(
@@ -729,10 +685,10 @@ async fn credential_failure_is_before_send_and_preheader_loss_is_unknown_offline
     // retry-classified, while connection loss after the send boundary is sticky
     // unknown outcome and is never retransmitted.
     let no_secret = Arc::new(StaticVault::default());
-    let (fixture_runtime, before_send_repository, _, invocation) =
+    let (fixture_runtime, before_send_repository, _, invocation, prepared) =
         runtime_fixture("http://127.0.0.1:9", no_secret, loopback_policy());
     let credential_error = fixture_runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared)
         .await
         .expect_err("missing credential should fail before send");
     assert!(matches!(
@@ -745,13 +701,13 @@ async fn credential_failure_is_before_send_and_preheader_loss_is_unknown_offline
     );
 
     let invalid_secret = "leaky-secret\nheader";
-    let (runtime, repository, _, invocation) = runtime_fixture(
+    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
         "http://127.0.0.1:9",
         Arc::new(StaticVault::with_secret(invalid_secret)),
         loopback_policy(),
     );
     let error = runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared)
         .await
         .expect_err("invalid credential bytes should fail before send");
     assert!(matches!(
@@ -777,14 +733,14 @@ async fn credential_failure_is_before_send_and_preheader_loss_is_unknown_offline
     ]))
     .await
     .expect("preheader-loss fixture should start");
-    let (runtime, repository, _, invocation) = runtime_fixture(
+    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
         fixture.origin(),
         Arc::new(StaticVault::with_secret("unknown-outcome-secret")),
         loopback_policy(),
     );
     let replay = invocation.clone();
     let error = runtime
-        .invoke(invocation)
+        .invoke(invocation, prepared.clone())
         .await
         .expect_err("connection loss before response headers should be uncertain");
     assert!(matches!(
@@ -800,7 +756,7 @@ async fn credential_failure_is_before_send_and_preheader_loss_is_unknown_offline
     assert_eq!(fixture.controller().requests().len(), 1);
 
     let replay_error = runtime
-        .invoke(replay)
+        .invoke(replay, prepared)
         .await
         .expect_err("unknown outcome must never retransmit automatically");
     assert!(matches!(
@@ -821,14 +777,14 @@ fn runtime_fixture(
     Arc<InMemoryRepository>,
     Arc<StaticVault>,
     ConnectorActionInvocation,
+    PreparedConnectorAction,
 ) {
     let tenant_id = TenantId::new();
     let connection_id = ConnectorConnectionId::new();
     let generation = ConnectionGeneration::new(2).expect("fixture generation should be valid");
-    let definition: RuntimeConnectorDefinitionV1 = serde_json::from_value(json!({
+    let definition: ConnectorDefinition = serde_json::from_value(json!({
         "definition_version": "v1",
         "display_name": "HTTP fixture",
-        "runtime": {"type": "constrained_http"},
         "auth": [{
             "type": "api_key_header",
             "slot": "primary",
@@ -837,9 +793,7 @@ fn runtime_fixture(
         "actions": [{
             "id": "create_item",
             "description": "Create one item",
-            "binding": {
-                "type": "http",
-                "contract": {
+            "contract": {
                     "method": "POST",
                     "path_template": "/v1/accounts/{account}",
                     "path_inputs": [{
@@ -874,13 +828,9 @@ fn runtime_fixture(
                             "properties": {"accepted": {"type": "boolean"}}
                         },
                         "data_classes": [],
-                        "action_class": "external_write",
-                        "risk_level": "medium",
-                        "minimum_effect": "admin_review",
                         "idempotency": "idempotent"
                     }
                 }
-            }
         }]
     }))
     .expect("HTTP connector fixture should deserialize");
@@ -894,14 +844,17 @@ fn runtime_fixture(
     let contract_hash = compiled_contract
         .hash()
         .expect("HTTP fixture contract should hash");
-    let definition_ref = ConnectionDefinitionRef::built_in("test/http", 1)
-        .expect("fixture definition reference should be valid");
+    let definition_ref = ConnectionDefinitionRef::Artifact {
+        artifact_uid: Uuid::new_v4(),
+        revision_uid: Uuid::new_v4(),
+    };
     let connection = ConnectorConnection {
         connection_id,
         tenant_id,
         display_name: "HTTP fixture".to_string(),
         definition: definition_ref.clone(),
-        non_secret_config: json!({"origin": origin}),
+        origin: Some(origin.parse().expect("fixture origin should be canonical")),
+        non_secret_config: json!({}),
         generation,
         status: ConnectionStatus::Active,
         health: ConnectionHealth::Ready,
@@ -920,7 +873,7 @@ fn runtime_fixture(
         compiled_contract,
         contract_hash,
         governed_contract_revision: "test/http/create-item/v1".to_string(),
-        minimum_effect: action.policy().minimum_effect,
+        minimum_effect: moa_core::types::action_policy::ActionPolicyEffect::AdminReview,
         enabled: true,
     };
     let pin = InstalledConnectorActionPin {
@@ -932,13 +885,13 @@ fn runtime_fixture(
         contract_hash,
         governed_contract_revision: binding.governed_contract_revision.clone(),
     };
-    let catalog = Arc::new(StaticCatalog {
-        connection: connection.clone(),
-        binding: binding.clone(),
-        calls: Arc::new(AtomicUsize::new(0)),
-    });
     let repository = Arc::new(InMemoryRepository::new(connection, binding));
-    let runtime = HttpConnectorRuntime::new(catalog, repository.clone(), vault.clone(), policy);
+    let runtime = HttpConnectorRuntime::new(
+        repository.clone(),
+        repository.clone(),
+        vault.clone(),
+        policy,
+    );
     let invocation = ConnectorActionInvocation {
         caller: Identity {
             identity_type: IdentityType::Operator,
@@ -960,7 +913,17 @@ fn runtime_fixture(
         }),
         cancellation_token: CancellationToken::new(),
     };
-    (runtime, repository, vault, invocation)
+    let query = InstalledConnectorCatalogQuery::new(
+        invocation.caller.clone(),
+        [invocation.action.connection_id],
+    );
+    let connection = lock(&repository.connection).clone();
+    let binding = lock(&repository.binding).clone();
+    let snapshot =
+        InstalledConnectorCatalogSnapshot::from_candidates(&query, [(connection, binding)])
+            .expect("fixture catalog admission should succeed");
+    let prepared = snapshot.actions()[0].prepared();
+    (runtime, repository, vault, invocation, prepared)
 }
 
 fn loopback_policy() -> OutboundHttpPolicy {

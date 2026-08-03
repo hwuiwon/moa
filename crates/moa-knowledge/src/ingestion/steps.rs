@@ -2,13 +2,7 @@
 
 use super::*;
 
-impl<R, P, E, G> KnowledgeIngestionPipeline<R, P, E, G>
-where
-    R: KnowledgeRepository,
-    P: DocumentParser,
-    E: EmbeddingProvider,
-    G: KnowledgeGraphWriter,
-{
+impl KnowledgeIngestionPipeline {
     pub(super) async fn handle_deleted_record(
         &self,
         sync_run_uid: Uuid,
@@ -28,7 +22,9 @@ where
             deleted_at: None,
             ..object.clone()
         };
-        self.repository.upsert_object(pre_cleanup_object).await?;
+        self.ingestion_repository
+            .upsert_object(pre_cleanup_object)
+            .await?;
         self.delete_object(
             sync_run_uid,
             object,
@@ -93,7 +89,7 @@ where
         // content for a deleted source object. The graph uid is each chunk's
         // persisted occurrence identity.
         let chunks = self
-            .repository
+            .ingestion_repository
             .active_chunks_for_object(object.object_uid)
             .await?;
         let graph_uids = chunks
@@ -145,7 +141,9 @@ where
             .iter()
             .map(|chunk| chunk.chunk_uid)
             .collect::<Vec<_>>();
-        self.repository.tombstone_chunks(&chunk_uids).await?;
+        self.ingestion_repository
+            .tombstone_chunks(&chunk_uids)
+            .await?;
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -165,7 +163,7 @@ where
         // Terminal state written last: only now that invalidation and tombstoning
         // have both succeeded is it safe to mark the object `deleted` and remove it
         // from the prune/retry-eligible set.
-        self.repository
+        self.ingestion_repository
             .mark_object_deleted(object.object_uid, Utc::now())
             .await?;
         Ok(1)
@@ -234,11 +232,11 @@ where
         record_step_observability(labels, &outcome);
         let step = build_step_row(sync_run_uid, object_uid, stage, outcome);
         if let Some(counter_delta) = counter_delta {
-            self.repository
+            self.sync_repository
                 .record_ingestion_step_once(step, counter_delta)
                 .await
         } else {
-            self.repository
+            self.sync_repository
                 .record_ingestion_step(step)
                 .await
                 .map(|()| true)
@@ -264,7 +262,7 @@ where
             },
         )
         .await?;
-        if let Some(mut run) = self.repository.get_sync_run(sync_run_uid).await? {
+        if let Some(mut run) = self.sync_repository.get_sync_run(sync_run_uid).await? {
             run.status = if classification.retryable {
                 SyncRunStatus::FailedRetryable
             } else {
@@ -272,7 +270,7 @@ where
             };
             run.error_code = Some(classification.error_code.to_string());
             run.finished_at = Some(Utc::now());
-            self.repository.update_sync_run(run).await?;
+            self.sync_repository.update_sync_run(run).await?;
         }
         let object_id = object_uid
             .map(|uid| uid.to_string())

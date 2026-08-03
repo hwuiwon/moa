@@ -46,9 +46,6 @@ pub enum Error {
         /// Model or serving version that produced the abstaining result.
         model_version: String,
     },
-    /// The process-local ingestion runtime was not installed.
-    #[error("ingestion runtime has not been installed")]
-    RuntimeNotInstalled,
     /// A scoped Postgres helper failed.
     #[error("scope transaction: {0}")]
     Scope(#[from] moa_core::error::MoaError),

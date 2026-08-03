@@ -180,103 +180,144 @@ pub async fn require_authz_with_delegation(
     object_id: impl fmt::Display,
     relation: Relation,
 ) -> Result<(), AuthzCheckError> {
-    let Some(user_id) = identity.acting_on_behalf_of else {
+    if identity.acting_on_behalf_of.is_none() {
         return require_authz(fga, identity, object_type, object_id, relation).await;
+    }
+
+    require_authz_with_delegation_batch(
+        fga,
+        identity,
+        object_type,
+        &[object_id.to_string()],
+        relation,
+    )
+    .await
+}
+
+/// Verifies one relation across several objects in one OpenFGA batch request.
+///
+/// Delegated agents add their single `can_act_as` tuple to the same request.
+/// Positive cache entries are omitted from the batch, denials remain uncached,
+/// and every decision retains the normal security-audit behavior.
+pub async fn require_authz_with_delegation_batch(
+    fga: &FgaClient,
+    identity: &Identity,
+    object_type: ObjectType,
+    object_ids: &[String],
+    relation: Relation,
+) -> Result<(), AuthzCheckError> {
+    if object_ids.is_empty() {
+        return Ok(());
+    }
+    let subject = fga_subject(identity);
+    let relation_str = relation.to_string();
+    let objects = object_ids
+        .iter()
+        .map(|object_id| format!("{object_type}:{object_id}"))
+        .collect::<Vec<_>>();
+    let mut allowed = vec![false; objects.len()];
+    let mut checks = Vec::new();
+    let mut check_targets = Vec::new();
+
+    let delegation = if let Some(user_id) = identity.acting_on_behalf_of {
+        let agent_object_id = identity.id.to_string();
+        let agent_object = format!("{}:{agent_object_id}", ObjectType::Agent);
+        if identity.identity_type != IdentityType::Agent {
+            emit_authz_audit(
+                fga,
+                identity,
+                &agent_object,
+                ObjectType::Agent,
+                &Relation::CanActAs,
+                false,
+            )
+            .await?;
+            return Err(AuthzCheckError::Forbidden {
+                subject,
+                object_type: ObjectType::Agent,
+                object_id: agent_object_id,
+                relation: Relation::CanActAs,
+            });
+        }
+        let delegated_operator = format!("operator:{user_id}");
+        let can_act_as = Relation::CanActAs.to_string();
+        let key = decision_key(&delegated_operator, &can_act_as, &agent_object);
+        let cached = decision_cache().get(&key).await.is_some();
+        if !cached {
+            checks.push((delegated_operator, can_act_as, agent_object.clone()));
+            check_targets.push(None);
+        }
+        Some((agent_object_id, agent_object, key, cached))
+    } else {
+        None
     };
 
-    let agent_object_id = identity.id.to_string();
-    let agent_object = format!("{}:{agent_object_id}", ObjectType::Agent);
-    if identity.identity_type != IdentityType::Agent {
+    for (index, object) in objects.iter().enumerate() {
+        let key = decision_key(&subject, &relation_str, object);
+        if decision_cache().get(&key).await.is_some() {
+            allowed[index] = true;
+        } else {
+            checks.push((subject.clone(), relation_str.clone(), object.clone()));
+            check_targets.push(Some((index, key)));
+        }
+    }
+
+    let mut delegation_allowed = delegation.as_ref().is_none_or(|entry| entry.3);
+    if !checks.is_empty() {
+        let results = fga.batch_check(&checks).await?;
+        if results.len() != checks.len() {
+            return Err(AuthzCheckError::Engine(AuthzError::Ambiguous(
+                "BatchCheck returned a different result count".to_string(),
+            )));
+        }
+        for (target, decision) in check_targets.into_iter().zip(results) {
+            match target {
+                None => {
+                    delegation_allowed = decision;
+                    if decision && let Some((_, _, key, _)) = delegation.as_ref() {
+                        decision_cache().insert(key.clone(), ()).await;
+                    }
+                }
+                Some((index, key)) => {
+                    allowed[index] = decision;
+                    if decision {
+                        decision_cache().insert(key, ()).await;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some((agent_object_id, agent_object, _, _)) = delegation {
         emit_authz_audit(
             fga,
             identity,
             &agent_object,
             ObjectType::Agent,
             &Relation::CanActAs,
-            false,
+            delegation_allowed,
         )
         .await?;
-        return Err(AuthzCheckError::Forbidden {
-            subject: fga_subject(identity),
-            object_type: ObjectType::Agent,
-            object_id: agent_object_id,
-            relation: Relation::CanActAs,
-        });
+        if !delegation_allowed {
+            return Err(AuthzCheckError::Forbidden {
+                subject: format!("agent:{}", identity.id),
+                object_type: ObjectType::Agent,
+                object_id: agent_object_id,
+                relation: Relation::CanActAs,
+            });
+        }
     }
 
-    // Delegated agent call: verify `can_act_as` and the resource relation. Both
-    // tuples are resolved in a single OpenFGA batch-check when either misses the
-    // decision cache, collapsing what used to be two sequential round trips.
-    let object_id = object_id.to_string();
-    let subject = fga_subject(identity);
-    let object = format!("{object_type}:{object_id}");
-    let relation_str = relation.to_string();
-    let delegated_operator = format!("operator:{user_id}");
-    let can_act_as = Relation::CanActAs.to_string();
-
-    let delegation_key = decision_key(&delegated_operator, &can_act_as, &agent_object);
-    let resource_key = decision_key(&subject, &relation_str, &object);
-    let delegation_cached = decision_cache().get(&delegation_key).await.is_some();
-    let resource_cached = decision_cache().get(&resource_key).await.is_some();
-
-    let (delegation_allowed, resource_allowed) = if delegation_cached && resource_cached {
-        (true, true)
-    } else {
-        let results = fga
-            .batch_check(&[
-                (
-                    delegated_operator.clone(),
-                    can_act_as.clone(),
-                    agent_object.clone(),
-                ),
-                (subject.clone(), relation_str.clone(), object.clone()),
-            ])
-            .await?;
-        let delegation_allowed = results.first().copied().unwrap_or(false);
-        let resource_allowed = results.get(1).copied().unwrap_or(false);
-        if delegation_allowed {
-            decision_cache().insert(delegation_key, ()).await;
+    for ((object_id, object), decision) in object_ids.iter().zip(&objects).zip(allowed) {
+        emit_authz_audit(fga, identity, object, object_type, &relation, decision).await?;
+        if !decision {
+            return Err(AuthzCheckError::Forbidden {
+                subject: subject.clone(),
+                object_type,
+                object_id: object_id.clone(),
+                relation,
+            });
         }
-        if resource_allowed {
-            decision_cache().insert(resource_key, ()).await;
-        }
-        (delegation_allowed, resource_allowed)
-    };
-
-    emit_authz_audit(
-        fga,
-        identity,
-        &agent_object,
-        ObjectType::Agent,
-        &Relation::CanActAs,
-        delegation_allowed,
-    )
-    .await?;
-    if !delegation_allowed {
-        return Err(AuthzCheckError::Forbidden {
-            subject: format!("agent:{}", identity.id),
-            object_type: ObjectType::Agent,
-            object_id: agent_object_id,
-            relation: Relation::CanActAs,
-        });
-    }
-
-    emit_authz_audit(
-        fga,
-        identity,
-        &object,
-        object_type,
-        &relation,
-        resource_allowed,
-    )
-    .await?;
-    if !resource_allowed {
-        return Err(AuthzCheckError::Forbidden {
-            subject,
-            object_type,
-            object_id,
-            relation,
-        });
     }
     Ok(())
 }

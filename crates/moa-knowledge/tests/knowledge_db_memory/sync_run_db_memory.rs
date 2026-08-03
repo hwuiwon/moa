@@ -9,8 +9,9 @@ use moa_knowledge::{
         KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
     },
     repository::{
-        DocumentVersionIngestionClaim, KnowledgeDiscoveryStore, KnowledgeRepository,
-        PostgresKnowledgeDiscoveryStore, PostgresKnowledgeRepository, SyncRunClaim,
+        DocumentVersionIngestionClaim, KnowledgeDiscoveryStore, PostgresKnowledgeDiscoveryStore,
+        PostgresKnowledgeRepository, SyncRunClaim, connection::KnowledgeConnectionRepository,
+        document::KnowledgeIngestionRepository, sync::KnowledgeSyncRepository,
     },
 };
 use moa_test_support::postgres;
@@ -33,7 +34,7 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
-        provider: "merge".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Merge,
         connector: format!("crm-{label}"),
         provider_account_id: format!("linked-account-{label}"),
         metadata: json!({ "safe_label": label }),

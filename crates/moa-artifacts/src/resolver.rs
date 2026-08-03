@@ -90,7 +90,8 @@ impl ArtifactResolver {
             return Ok(false);
         };
         Ok(definition
-            .actions()
-            .any(|candidate| candidate.id() == action))
+            .actions
+            .iter()
+            .any(|candidate| candidate.id == *action))
     }
 }

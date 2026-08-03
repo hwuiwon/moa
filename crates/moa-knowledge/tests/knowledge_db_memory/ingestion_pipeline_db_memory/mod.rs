@@ -25,7 +25,8 @@ use moa_knowledge::{
         DocumentElement, DocumentElementKind, DocumentVersion, FetchedRecordContent,
         IngestionStepStatus, KnowledgeChunk, KnowledgeConnection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, ParsedDocument,
-        ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
+        ProviderRecord, ProviderRecordAcl, ProviderRecordMaterialization, RecordPage,
+        SyncRunStatus,
     },
     graph_delta::KnowledgeGraphDelta,
     ingestion::{
@@ -35,12 +36,17 @@ use moa_knowledge::{
     normalize::normalize_text,
     parser::DocumentParser,
     providers::RecordContentFetcher,
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        PostgresKnowledgeRepository, connection::KnowledgeConnectionRepository,
+        document::KnowledgeIngestionRepository, sync::KnowledgeSyncRepository,
+    },
 };
 use moa_test_support::postgres;
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
 use uuid::Uuid;
+
+use crate::support::insert_managed_connector_parent;
 
 fn provider_record_acl() -> ProviderRecordAcl {
     ProviderRecordAcl {
@@ -444,7 +450,7 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
     KnowledgeConnection {
         connection_uid,
         tenant_id,
-        provider: "test_provider".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: "google-drive".to_string(),
         provider_account_id: "acct_fetch".to_string(),
         metadata: json!({}),
@@ -456,7 +462,7 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
     }
 }
 
-fn metadata_only_record(source_id: &str, change_token: &str, title: &str) -> ProviderRecord {
+fn provider_fetch_record(source_id: &str, change_token: &str, title: &str) -> ProviderRecord {
     ProviderRecord {
         acl: provider_record_acl(),
         source_id: source_id.to_string(),
@@ -467,6 +473,9 @@ fn metadata_only_record(source_id: &str, change_token: &str, title: &str) -> Pro
         change_token: Some(change_token.to_string()),
         deleted: false,
         source_updated_at: Some(moa_test_support::fixtures::pg_now()),
+        materialization: ProviderRecordMaterialization::ProviderFetch {
+            mime_type: Some("text/plain".to_string()),
+        },
         metadata: json!({ "safe": true }),
         payload: json!({ "mimeType": "text/plain", "name": format!("{title}.txt") }),
     }
@@ -529,6 +538,10 @@ fn record_with_source(
         change_token: Some(change_token.to_string()),
         deleted,
         source_updated_at: Some(moa_test_support::fixtures::pg_now()),
+        materialization: ProviderRecordMaterialization::InlineText {
+            text: text.to_string(),
+            mime_type: Some("text/plain".to_string()),
+        },
         metadata: credentialish_metadata(),
         payload: json!({
             "text": text,

@@ -5,18 +5,13 @@ use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_core::traits::{Identity, LearningCandidateStore};
-use moa_core::{
-    types::action_policy::ActionRuleScope, types::identifiers::SessionId,
-    types::identifiers::TenantId,
-};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_repair_request, plan_generation_request, propose_improvement_candidate, scores,
     store_generated_plan, trial_status,
 };
-use moa_experiments::model::{
-    ExperimentRunStatus, ExperimentTarget, ExperimentTrialStatus, ExperimentVariant,
-};
+use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus, ExperimentVariant};
 use moa_experiments::scores::{
     ExperimentRunScoreRef, TrialScoreSummary, experiment_score_breakdown_for_tenant,
 };
@@ -46,9 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::handlers::authz_shim::{
-    authorize_session_participant, authorize_tenant_operator_or_admin,
-};
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
@@ -135,6 +128,7 @@ pub struct ExperimentsImpl {
     pool: sqlx::PgPool,
     providers: Arc<ProviderRegistry>,
     learning_candidate_store: Arc<dyn LearningCandidateStore>,
+    authz: AuthzEnforcer,
 }
 
 impl ExperimentsImpl {
@@ -144,11 +138,13 @@ impl ExperimentsImpl {
         pool: sqlx::PgPool,
         providers: Arc<ProviderRegistry>,
         learning_candidate_store: Arc<dyn LearningCandidateStore>,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             pool,
             providers,
             learning_candidate_store,
+            authz,
         }
     }
 }
@@ -163,7 +159,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "generate_plan");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
         let gateway = LLMGatewayImpl::new(self.providers.clone());
 
@@ -186,11 +184,10 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "run");
         let request = request.into_inner();
-        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        // A caller-named target session is authorized as a Session participant
-        // before admission, so a session the caller cannot reach never reaches
-        // the admission write, a provider call, or a durable event read.
-        let authorized_session = authorize_target_session(&ctx, request.target.as_ref()).await?;
+        let identity = self
+            .authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         let accepted = ctx
@@ -198,12 +195,13 @@ impl Experiments for ExperimentsImpl {
             .name("experiments_run")
             .await?
             .into_inner();
-        // Plan-backed runs build their target during admission, so the admitted
-        // payload is held to the same rule before any workflow is dispatched.
-        let admitted_session = target_session_requiring_authorization(Some(&accepted.target));
-        if admitted_session != authorized_session
-            && let Some(session_id) = admitted_session
-            && let Err(auth_error) = authorize_session_participant(&ctx, session_id).await
+        // The immutable plan may attach an execution-template target to a
+        // caller-owned session. Authorize that projected target before dispatch.
+        if let Some(session_id) = accepted.target.attached_session_id()
+            && let Err(auth_error) = self
+                .authz
+                .authorize_session_participant(&ctx, session_id)
+                .await
         {
             let pool = self.pool.clone();
             let tenant_id = accepted.response.tenant_id;
@@ -220,9 +218,6 @@ impl Experiments for ExperimentsImpl {
         let workflow_request = ExperimentRunWorkflowRequest {
             tenant_id: accepted.response.tenant_id,
             run_uid: accepted.run_uid,
-            target: accepted.target,
-            variant: accepted.variant,
-            plan_revision_uid: accepted.plan_revision_uid,
             identity: accepted.identity,
             score_run_id: accepted.score_run_id,
             agent_revision_variants: accepted.agent_revision_variants,
@@ -245,7 +240,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "status");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
 
         crate::restate_identity::replay_safe_request(
             ctx.workflow_client::<ExperimentRunClient>(request.run_uid.to_string())
@@ -265,7 +262,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "list");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -283,7 +282,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "list_plans");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -301,7 +302,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "trials");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -319,7 +322,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "trial_status");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -337,7 +342,10 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
-        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        let identity = self
+            .authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
         let run_uid = request.run_uid;
         let persist_identity = identity.clone();
@@ -379,7 +387,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "propose_improvements");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
         let session_store = self.learning_candidate_store.clone();
 
@@ -402,7 +412,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "scores");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -420,7 +432,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "compare");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -438,7 +452,10 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "run_agent_revision_simulation");
         let request = request.into_inner();
-        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        let identity = self
+            .authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         let accepted = ctx
@@ -467,7 +484,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "compare_agent_revision_simulation");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -489,7 +508,9 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "compare_agent_revisions");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        self.authz
+            .authorize_tenant_operator_or_admin(&ctx, request.tenant_id)
+            .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -538,56 +559,20 @@ async fn generate_plan_inner(
     }
 }
 
-/// Authorizes a caller-named experiment target session before admission.
-///
-/// A wrong-tenant or otherwise unreachable session id fails here rather than
-/// after a run row, a provider call, or a durable event read.
-async fn authorize_target_session(
-    ctx: &Context<'_>,
-    target: Option<&serde_json::Value>,
-) -> Result<Option<SessionId>, HandlerError> {
-    let session_id = target_session_requiring_authorization(target);
-    if let Some(session_id) = session_id {
-        authorize_session_participant(ctx, session_id).await?;
-    }
-    Ok(session_id)
-}
-
-/// Returns the caller-named session an experiment target may attach to.
-///
-/// Only an execution-template target can name one, and naming it is what
-/// requires the authorization. Agent-loop targets carry no session field at
-/// all — the simulator drives live turns and reads the durable event log, so
-/// every agent-loop run gets an eval-owned session created for it — which is
-/// why this returns `None` for them without needing a rejection.
-fn target_session_requiring_authorization(target: Option<&serde_json::Value>) -> Option<SessionId> {
-    // A target that does not parse is rejected by admission with the same code;
-    // parsing here only decides whether a session must be authorized first.
-    let target = serde_json::from_value::<ExperimentTarget>(target?.clone()).ok()?;
-    target.attached_session_id()
-}
-
 async fn run_inner(
     pool: sqlx::PgPool,
     request: ExperimentRunRequest,
     identity: Identity,
 ) -> Result<moa_experiments::app::AdmittedExperimentRun, HandlerError> {
     if let Some(binding) = request.release_evaluation.as_ref() {
-        if request.target.is_some()
-            || request.variant.is_some()
-            || request.scorecard.is_some()
-            || request.score_run_id.is_some()
-            || !request.agent_revision_variants.is_empty()
-        {
+        if request.score_run_id.is_some() || !request.agent_revision_variants.is_empty() {
             return Err(TerminalError::new_with_code(
                 400,
                 "release evaluation must be an unmodified plan-backed run",
             )
             .into());
         }
-        let plan_revision_uid = request.plan_revision_uid.ok_or_else(|| {
-            TerminalError::new_with_code(400, "release evaluation requires an approved plan")
-        })?;
+        let plan_revision_uid = request.plan_revision_uid;
         let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
             TerminalError::new_with_code(
                 400,
@@ -762,8 +747,6 @@ pub struct AgentRevisionSimulationAccepted {
     tenant_id: TenantId,
     /// Durable experiment run identifier.
     run_uid: uuid::Uuid,
-    /// Experiment-plan revision expanded by the run.
-    plan_revision_uid: uuid::Uuid,
     /// Identity that admitted the run.
     identity: Identity,
     /// Run-level score run identifier.
@@ -781,9 +764,6 @@ impl AgentRevisionSimulationAccepted {
         ExperimentRunWorkflowRequest {
             tenant_id: self.tenant_id,
             run_uid: self.run_uid,
-            target: serde_json::json!({}),
-            variant: serde_json::json!({}),
-            plan_revision_uid: Some(self.plan_revision_uid),
             identity: self.identity.clone(),
             score_run_id: self.score_run_id,
             agent_revision_variants: self.variants.clone(),
@@ -804,12 +784,7 @@ pub async fn run_agent_revision_simulation_inner(
         ExperimentRunRequest {
             tenant_id: request.tenant_id,
             name: request.name,
-            plan_revision_uid: Some(request.plan_revision_uid),
-            target: None,
-            variant: None,
-            // Plan-backed: the pinned plan revision owns the scorecard, so this
-            // path must not supply one that would compete with it.
-            scorecard: None,
+            plan_revision_uid: request.plan_revision_uid,
             score_run_id: None,
             idempotency_key: request.idempotency_key,
             agent_revision_variants: variants.clone(),
@@ -821,7 +796,6 @@ pub async fn run_agent_revision_simulation_inner(
     Ok(AgentRevisionSimulationAccepted {
         tenant_id: request.tenant_id,
         run_uid: admitted.run_uid,
-        plan_revision_uid: request.plan_revision_uid,
         identity,
         score_run_id: admitted.score_run_id,
         variants: variants.clone(),
@@ -1279,46 +1253,7 @@ mod tests {
     use moa_wire::experiments::AgentDependencyChange;
     use uuid::Uuid;
 
-    use super::{
-        compare_artifact_dependencies, compare_tool_dependencies,
-        target_session_requiring_authorization,
-    };
-
-    #[test]
-    fn run_admission_never_attaches_an_agent_loop_target_to_a_named_session() {
-        // Pins: an agent-loop target payload cannot carry a session at all, so a
-        // wire payload naming one attaches nothing, while an execution-template
-        // session is still surfaced for authorization before the admission write.
-        let session_id = uuid::Uuid::now_v7();
-        assert_eq!(
-            target_session_requiring_authorization(Some(&serde_json::json!({
-                "kind": "agent_loop",
-                "prompt": "continue this production conversation",
-                "session_id": session_id,
-                "model": "gpt-5.1",
-                "attachments": [],
-            }))),
-            None,
-            "an agent-loop target must never resolve a caller-named session"
-        );
-
-        assert_eq!(
-            target_session_requiring_authorization(Some(&serde_json::json!({
-                "kind": "execution_template",
-                "template": {
-                    "skill_ref": "skill://durable-report",
-                    "revision_uid": uuid::Uuid::now_v7(),
-                },
-                "objective": "produce the durable report",
-                "input": {},
-                "session_id": session_id,
-                "idempotency_key": serde_json::Value::Null,
-            }))),
-            Some(moa_core::types::identifiers::SessionId(session_id))
-        );
-
-        assert_eq!(target_session_requiring_authorization(None), None);
-    }
+    use super::{compare_artifact_dependencies, compare_tool_dependencies};
 
     #[test]
     fn agent_revision_compare_reports_exact_dependency_deltas() {

@@ -49,7 +49,7 @@ use restate_sdk::prelude::*;
 use sqlx::PgPool;
 
 use crate::connector_catalog::{ScopedConnectorCatalogError, ScopedConnectorCatalogProvider};
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::workflows::artifact_release_evaluation::repository::{
     ReleaseEvaluationRepository, ReleaseSubjectEnvironment,
 };
@@ -91,15 +91,21 @@ pub trait ArtifactRelease {
 pub struct ArtifactReleaseImpl {
     pool: PgPool,
     connector_catalog: ScopedConnectorCatalogProvider,
+    authz: AuthzEnforcer,
 }
 
 impl ArtifactReleaseImpl {
     /// Creates the release adapter with its artifact pool.
     #[must_use]
-    pub(crate) fn new(pool: PgPool, connector_catalog: ScopedConnectorCatalogProvider) -> Self {
+    pub(crate) fn new(
+        pool: PgPool,
+        connector_catalog: ScopedConnectorCatalogProvider,
+        authz: AuthzEnforcer,
+    ) -> Self {
         Self {
             pool,
             connector_catalog,
+            authz,
         }
     }
 }
@@ -114,7 +120,10 @@ impl ArtifactRelease for ArtifactReleaseImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ArtifactRelease", "submit");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let pool = self.pool.clone();
         let connector_catalog = self.connector_catalog.clone();
         let submitted = ctx
@@ -161,7 +170,10 @@ impl ArtifactRelease for ArtifactReleaseImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ArtifactRelease", "activate");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let pool = self.pool.clone();
         let connector_catalog = self.connector_catalog.clone();
         Ok(ctx
@@ -183,7 +195,9 @@ impl ArtifactRelease for ArtifactReleaseImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ArtifactRelease", "list_attempts");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let pool = self.pool.clone();
         Ok(ctx
             .run(|| async move { list_attempts_inner(pool, request).await.map(Json::from) })
@@ -202,7 +216,10 @@ impl ArtifactRelease for ArtifactReleaseImpl {
         let request = request.into_inner();
         // `Admin`, matching `record_decision`: reviewing the evidence that minted a
         // permission to serve is part of the same authority that minted it.
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.pool.clone();
         Ok(ctx
             .run(|| {

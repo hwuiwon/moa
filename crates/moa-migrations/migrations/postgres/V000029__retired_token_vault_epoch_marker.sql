@@ -1,0 +1,5 @@
+-- The per-user token vault was removed by the 2026-08-03 fresh-install epoch.
+--
+-- This version remains as an explicit no-op so the canonical migration sequence
+-- stays contiguous without recreating the retired persistence model. Adopting
+-- this rewritten epoch requires resetting Postgres and Restate durable state.

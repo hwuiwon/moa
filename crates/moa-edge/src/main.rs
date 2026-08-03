@@ -15,6 +15,7 @@ use moa_edge::connector_credential_proxy::ConnectorCredentialProxy;
 use moa_edge::mcp::{self, McpHttpConfig};
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{AppState, KnowledgeWebhookEdgeConfig};
+use moa_messaging::ProviderDeliverySink;
 use tokio_util::sync::CancellationToken;
 
 /// Process arguments for `moa-edge`.
@@ -122,6 +123,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("build edge session store")?;
+    let delivery = Arc::new(
+        ProviderDeliverySink::from_env(&moa_config.messaging)
+            .context("build edge delivery sink")?,
+    );
 
     let state = AppState {
         connector_management_enabled: args.connector_management_enabled,
@@ -132,11 +137,11 @@ async fn main() -> anyhow::Result<()> {
             pool.clone(),
         )),
         fga: fga.map(Arc::new),
-        auth0_webhook_secret: moa_config.auth.auth0_webhook_secret.clone(),
         knowledge_webhooks: knowledge_webhook_edge_config(&moa_config)
             .context("load knowledge webhook verifier secrets")?,
         pool: pool.clone(),
         session_store: Arc::new(session_store),
+        delivery,
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
         connector_credentials: Arc::new(
             ConnectorCredentialProxy::new(&args.connector_credential_upstream)

@@ -12,8 +12,8 @@ use crate::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
         LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        RecordPage, RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest,
-        TriggeredSync, WebhookEvent,
+        ProviderRecordMaterialization, RecordPage, RemoteRevokeRequest, StartInitialSyncRequest,
+        TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::Result,
 };
@@ -21,6 +21,57 @@ use crate::{
 pub(crate) mod acl_normalize;
 pub mod merge;
 pub mod nango;
+
+const PROVIDER_MIME_TYPE_FIELDS: &[&str] =
+    &["mime_type", "mimeType", "content_type", "contentType"];
+
+/// Reads a provider-reported MIME type from the supported payload aliases.
+pub(crate) fn provider_mime_type(payload: &serde_json::Value) -> Option<String> {
+    http::string_field(payload, PROVIDER_MIME_TYPE_FIELDS)
+}
+
+/// Derives a provider-record fallback ID from canonical JSON bytes.
+///
+/// Provider-native IDs remain authoritative. This fallback is used only when a provider omits
+/// one, and therefore must not change when the same object arrives with a different key order.
+pub(crate) fn stable_provider_record_id(value: &serde_json::Value) -> serde_json::Result<String> {
+    let canonical = moa_core::canonical_json::canonical_json_bytes(value)?;
+    Ok(blake3::hash(&canonical).to_hex().to_string())
+}
+
+/// Normalizes provider payload fields into one explicit ingestion intent.
+///
+/// Field-name knowledge belongs at the adapter boundary. Integrations that can
+/// fetch otherwise metadata-only records may promote the returned
+/// [`ProviderRecordMaterialization::MetadataOnly`] intent to `ProviderFetch`.
+pub(crate) fn materialization_from_payload(
+    payload: &serde_json::Value,
+) -> ProviderRecordMaterialization {
+    const INLINE_TEXT_FIELDS: &[&str] = &[
+        "text",
+        "content",
+        "body",
+        "plain_text",
+        "plaintext",
+        "markdown",
+        "html",
+    ];
+    const FETCHABLE_URL_FIELDS: &[&str] = &[
+        "download_url",
+        "file_url",
+        "content_url",
+        "web_content_link",
+        "webContentLink",
+    ];
+    let mime_type = provider_mime_type(payload);
+    if let Some(text) = http::string_field(payload, INLINE_TEXT_FIELDS) {
+        return ProviderRecordMaterialization::InlineText { text, mime_type };
+    }
+    if let Some(url) = http::string_field(payload, FETCHABLE_URL_FIELDS) {
+        return ProviderRecordMaterialization::FetchableUrl { url, mime_type };
+    }
+    ProviderRecordMaterialization::MetadataOnly
+}
 
 /// Tenant knowledge linked-account provider seam.
 #[async_trait]
@@ -80,21 +131,20 @@ pub trait LinkedIntegrationProvider: Send + Sync {
     /// Fetches the byte content of one provider record when the provider can
     /// download it directly.
     ///
-    /// Providers whose record catalog is metadata-only (no inline text and no
-    /// directly fetchable URL) implement this so document bytes reach the
-    /// ingestion pipeline. The default returns `Ok(None)`, meaning the provider
-    /// does not support direct content fetch and the pipeline keeps its
-    /// title-only fallback. Merge filestorage would implement this same hook to
-    /// download file content through its proxy.
+    /// Providers that emit
+    /// [`ProviderRecordMaterialization::ProviderFetch`] implement this so
+    /// authenticated document bytes reach the ingestion pipeline. The default
+    /// returns `Ok(None)`, which is an error for a record that explicitly
+    /// requires provider fetch. Metadata-only records never call this hook.
     ///
     /// # Errors
     ///
     /// Returns an error when a supported fetch is attempted but the download
-    /// fails (transport or non-success status). The ingestion pipeline treats
-    /// such errors as a soft, title-only fallback rather than failing the run.
+    /// fails (transport or non-success status). The ingestion pipeline records
+    /// that failure and never substitutes record metadata for content.
     async fn fetch_record_content(
         &self,
-        _req: FetchRecordContentRequest,
+        _req: FetchRecordContentRequest<'_>,
     ) -> Result<Option<FetchedRecordContent>> {
         Ok(None)
     }
@@ -123,25 +173,25 @@ pub trait RecordContentFetcher: Send + Sync {
 }
 
 /// Adapts a [`LinkedIntegrationProvider`] and one [`KnowledgeConnection`] into a
-/// per-run [`RecordContentFetcher`] for the ingestion pipeline.
+/// page-scoped [`RecordContentFetcher`] for the ingestion pipeline.
 pub struct LinkedProviderContentFetcher {
     provider: Arc<dyn LinkedIntegrationProvider>,
     connection: KnowledgeConnection,
-    credentials: Arc<dyn ConnectionCredentialResolver>,
+    credential: Option<RedactedSecret>,
 }
 
 impl LinkedProviderContentFetcher {
-    /// Binds a provider to a connection for record content fetches.
+    /// Binds a provider, connection, and resolved page credential for content fetches.
     #[must_use]
     pub fn new(
         provider: Arc<dyn LinkedIntegrationProvider>,
         connection: KnowledgeConnection,
-        credentials: Arc<dyn ConnectionCredentialResolver>,
+        credential: Option<RedactedSecret>,
     ) -> Self {
         Self {
             provider,
             connection,
-            credentials,
+            credential,
         }
     }
 }
@@ -152,29 +202,14 @@ impl RecordContentFetcher for LinkedProviderContentFetcher {
         &self,
         record: &ProviderRecord,
     ) -> Result<Option<FetchedRecordContent>> {
-        // Resolved per fetch, immediately before the outbound request, so a
-        // rotation or revocation takes effect on the very next record and no
-        // plaintext is held across the run.
-        let credential = self.credentials.resolve(&self.connection).await?;
         self.provider
             .fetch_record_content(FetchRecordContentRequest {
                 connection: self.connection.clone(),
-                credential,
+                credential: self.credential.as_ref(),
                 record: record.clone(),
             })
             .await
     }
-}
-
-/// Resolves one connection's provider credential immediately before a request.
-///
-/// Kept as a narrow trait so this crate never depends on credential storage: the
-/// orchestrator implements it over the single durable credential owner under a
-/// closed service-actor identity, and tests implement it with a fixed value.
-#[async_trait]
-pub trait ConnectionCredentialResolver: Send + Sync {
-    /// Resolves the tenant credential authorizing requests for `connection`, when required.
-    async fn resolve(&self, connection: &KnowledgeConnection) -> Result<Option<RedactedSecret>>;
 }
 
 pub(crate) mod http {
@@ -364,5 +399,30 @@ pub(crate) mod http {
     /// Returns whether a parse/partition status denotes an in-progress job.
     pub(crate) fn status_pending(status: &str) -> bool {
         matches!(status, "pending" | "queued" | "running" | "processing")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for provider-neutral identity helpers.
+
+    use super::stable_provider_record_id;
+
+    #[test]
+    fn provider_record_fallback_id_ignores_object_key_order() {
+        // Pins: Nango and Merge cannot reintroduce one provider object as a new record solely
+        // because the provider changed JSON object insertion order.
+        let forward = serde_json::json!({
+            "alpha": 1,
+            "nested": {"first": true, "second": "value"}
+        });
+        let reverse: serde_json::Value =
+            serde_json::from_str(r#"{"nested":{"second":"value","first":true},"alpha":1}"#)
+                .expect("reordered provider fixture decodes");
+
+        assert_eq!(
+            stable_provider_record_id(&forward).expect("hash forward record"),
+            stable_provider_record_id(&reverse).expect("hash reordered record")
+        );
     }
 }

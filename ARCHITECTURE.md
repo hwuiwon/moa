@@ -101,9 +101,9 @@ sequenceDiagram
     participant DB as Postgres / Neon
     participant Audit as moa-ocsf
 
-    Client->>Edge: Request with API key or Auth0/OIDC bearer
+    Client->>Edge: Request with API key, local session, MOA OAuth token, or Auth0/OIDC bearer
     Edge->>Auth: authenticate(credential)
-    Auth->>DB: Read api_keys, auth0_user_map, users, linked_connections
+    Auth->>DB: Read first-party auth tables or auth0_user_map + users
     Auth-->>Edge: Identity
     Edge->>Audit: emit authn security event
     Edge->>Restate: Forward with X-Moa-* identity headers
@@ -177,9 +177,8 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
 | `ChannelAdapter` | Messaging normalization/rendering | Slack |
 | `ContextProcessor` | Ordered context-pipeline stage | identity, agent instructions, instructions, tools, query rewrite, history, skills, digest, memory, runtime context |
-| `CredentialVault` | Secret storage abstraction | environment-backed MCP vault, environment-backed delivery vault |
-| `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |
-| `TokenVaultProvider` | Retrieve third-party OAuth tokens for linked user connections | null provider, optional Auth0 Token Vault |
+| `CredentialVault` | Versioned tenant connector credentials: staged activation, audited resolution, readiness, revocation, and bounded purge | `PostgresCredentialVault` in `moa-auth-providers` |
+| `AuthProvider` | Resolve API keys, local sessions, MOA OAuth tokens, or bearer JWTs to MOA identities | local first-party auth, disabled local/test mode, optional Auth0/OIDC |
 | `AsyncAuthzProvider` | Request durable human approvals | builtin approvals, optional Auth0 CIBA |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink/OTel bridge |
 
@@ -210,10 +209,10 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-observability` | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authz checks, transactional outbox, and poller |
-| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin approvals, null token vault, and provider bundle |
-| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0/OIDC, Token Vault, CIBA, JWKS, and group sync |
+| `moa-auth/providers` (`moa-auth-providers`) | Local users, sessions, API keys, MOA OAuth, contact tokens, durable connector credentials, builtin approvals, and provider bundle |
+| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0/OIDC identity, CIBA approvals, JWKS caching, and user provisioning |
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and model bootstrap binary |
-| `moa-edge` | Public HTTP edge for authn, identity headers, and Auth0 webhooks |
+| `moa-edge` | Public HTTP edge for authn, identity headers, and private connector-credential forwarding |
 | `moa-ocsf` | OCSF v1.3 security-event types, signing, and persistence |
 | `moa-hands` | Tool router and execution adapters |
 | `moa-providers` | Provider core and vendor adapters (LLM, embedding, rerank) |
@@ -224,7 +223,7 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-experiments` | Domain types for experiment runs and scorecard configuration |
 | `moa-scoring` | Shared score-run storage and score summary queries |
 | `moa-messaging` | Messaging adapters, platform renderers, and notification connectors |
-| `moa-security` | Vaults, MCP credential proxy, policies, prompt-injection controls |
+| `moa-security` | MCP credential handling, outbound destination policy, and prompt-injection controls |
 | `moa-skills` | Agent Skills parsing, distillation, improvement, and regression generation |
 | `moa-eval/core` (`moa-eval-core`) | Shared evaluation engine types and scoring primitives |
 | `moa-eval` | Evaluation harness |

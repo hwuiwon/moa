@@ -231,8 +231,6 @@ fn from_iter_applies_flat_single_underscore_env() {
         ("MOA_AUTHZ_OPENFGA_STORE_ID", "store-1"),
         ("MOA_AUTHZ_OPENFGA_MODEL_ID", "model-1"),
         ("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "2500"),
-        ("MOA_AUTH_AUTH0_WEBHOOK_SECRET", "webhook-secret"),
-        ("MOA_TOKEN_VAULT_PROVIDER", "auth0"),
         ("MOA_KMS_PROVIDER", "postgres"),
         ("MOA_KMS_ROOT_KEY_DIR", "/var/run/secrets/test-root-keys"),
         ("MOA_KMS_REQUIRED_GENERATION", "generation-2"),
@@ -322,10 +320,6 @@ fn from_iter_applies_flat_single_underscore_env() {
     assert_eq!(config.database.background_max_connections, 3);
     assert!(config.session.direct_turn_event_append);
     assert_eq!(config.auth.provider, AuthProviderKind::Oidc);
-    assert_eq!(
-        config.auth.auth0_webhook_secret.as_deref(),
-        Some("webhook-secret")
-    );
     assert_eq!(config.authz.engine, AuthzEngine::Openfga);
     let openfga = config.authz.openfga.expect("openfga config");
     assert_eq!(openfga.url, "http://openfga.example");
@@ -333,7 +327,6 @@ fn from_iter_applies_flat_single_underscore_env() {
     assert_eq!(openfga.store_id, "store-1");
     assert_eq!(openfga.model_id, "model-1");
     assert_eq!(openfga.timeout_ms, 2500);
-    assert_eq!(config.token_vault.provider, TokenVaultKind::Auth0);
     assert_eq!(config.kms.provider, KmsProviderKind::Postgres);
     assert_eq!(
         config.kms.root_key_dir,

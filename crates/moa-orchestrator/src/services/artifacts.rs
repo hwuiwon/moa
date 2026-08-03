@@ -20,7 +20,7 @@ use moa_wire::artifacts::{
 use restate_sdk::prelude::*;
 
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::workflows::errors::moa_error_to_status_handler_error;
 
 /// Restate service surface for protected artifact operations.
@@ -60,13 +60,14 @@ pub trait Artifacts {
 #[derive(Clone)]
 pub struct ArtifactsImpl {
     registry: ArtifactRegistry,
+    authz: AuthzEnforcer,
 }
 
 impl ArtifactsImpl {
     /// Creates the artifact adapter with its persistent registry.
     #[must_use]
-    pub fn new(registry: ArtifactRegistry) -> Self {
-        Self { registry }
+    pub fn new(registry: ArtifactRegistry, authz: AuthzEnforcer) -> Self {
+        Self { registry, authz }
     }
 }
 
@@ -79,7 +80,7 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactImportResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "import");
         let request = request.into_inner();
-        let scope = authorized_write_scope(&ctx, request.scope).await?;
+        let scope = authorized_write_scope(&self.authz, &ctx, request.scope).await?;
 
         let registry = self.registry.clone();
         Ok(ctx
@@ -99,7 +100,7 @@ impl Artifacts for ArtifactsImpl {
         let scope = request.scope.unwrap_or(ActionRuleScope::Tenant {
             tenant_id: request.tenant_id,
         });
-        authorize_read_scope(&ctx, &scope).await?;
+        authorize_read_scope(&self.authz, &ctx, &scope).await?;
 
         let registry = self.registry.clone();
         Ok(ctx
@@ -119,7 +120,7 @@ impl Artifacts for ArtifactsImpl {
         let scope = request.scope.unwrap_or(ActionRuleScope::Tenant {
             tenant_id: request.tenant_id,
         });
-        authorize_read_scope(&ctx, &scope).await?;
+        authorize_read_scope(&self.authz, &ctx, &scope).await?;
 
         let registry = self.registry.clone();
         Ok(ctx
@@ -136,7 +137,9 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactValidateResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "validate");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
 
         Ok(ctx
             .run(|| async move { validate_inner(request).map(Json::from) })
@@ -152,7 +155,7 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactPublishResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "publish");
         let request = request.into_inner();
-        let scope = authorized_write_scope(&ctx, request.scope).await?;
+        let scope = authorized_write_scope(&self.authz, &ctx, request.scope).await?;
 
         let registry = self.registry.clone();
         Ok(ctx
@@ -390,24 +393,30 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
 }
 
 async fn authorized_write_scope(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     scope: ActionRuleScope,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
         ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
-            authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
+            authz
+                .authorize_tenant(ctx, tenant_id, Relation::Operator)
+                .await?;
         }
     }
     Ok(scope)
 }
 
 async fn authorize_read_scope(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     scope: &ActionRuleScope,
 ) -> Result<(), HandlerError> {
     match scope {
         ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
-            authorize_tenant(ctx, *tenant_id, Relation::Operator).await?;
+            authz
+                .authorize_tenant(ctx, *tenant_id, Relation::Operator)
+                .await?;
         }
     }
     Ok(())

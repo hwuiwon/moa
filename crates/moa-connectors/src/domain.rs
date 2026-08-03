@@ -7,16 +7,15 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::connector::{
-    ConnectorDefinitionVersionV1, RuntimeConnectorActionV1, RuntimeConnectorAuthRequirementV1,
-    RuntimeConnectorDefinitionV1, RuntimeConnectorKindV1, RuntimeOperationBindingV1,
-    connection_action_tool_reference,
+    ConnectorDefinition, HttpOperationContract, RuntimeConnectorActionV1,
+    RuntimeConnectorAuthRequirementV1, validate_connector_action_id,
 };
+use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::types::action_policy::ActionPolicyEffect;
 use moa_core::types::credentials::CredentialSlotName;
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_canonical_json::CanonicalFormatter;
 use serde_json::Value;
 use url::{Origin, Url};
 use uuid::Uuid;
@@ -104,7 +103,7 @@ impl ConnectionStatus {
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::PendingAuth, Self::Active | Self::Deleted)
+            (Self::PendingAuth, Self::Active | Self::Disconnecting)
                 | (Self::Active, Self::Suspended | Self::Disconnecting)
                 | (Self::Suspended, Self::Active | Self::Disconnecting)
                 | (Self::Disconnecting, Self::Deleted)
@@ -349,35 +348,16 @@ impl ManagedParentDefinition {
         }
     }
 
-    /// Returns the complete secret-free runtime definition for this managed parent.
-    ///
-    /// These definitions are resolved only for already-installed code-owned
-    /// parents. They are not a public installation surface and expose no action.
+    /// Returns the closed credential requirements for this knowledge parent.
     #[must_use]
-    pub fn runtime_definition(self) -> RuntimeConnectorDefinitionV1 {
-        let (display_name, description, auth) = match self {
-            Self::KnowledgeNangoV1 => (
-                "Nango knowledge",
-                "Knowledge synchronization through the deployment-owned Nango integration.",
-                vec![RuntimeConnectorAuthRequirementV1::None],
-            ),
-            Self::KnowledgeMergeV1 => (
-                "Merge knowledge",
-                "Knowledge synchronization through a tenant-linked Merge account.",
+    pub fn credential_requirements(self) -> Vec<RuntimeConnectorAuthRequirementV1> {
+        match self {
+            Self::KnowledgeNangoV1 => vec![RuntimeConnectorAuthRequirementV1::None],
+            Self::KnowledgeMergeV1 => {
                 vec![RuntimeConnectorAuthRequirementV1::Bearer {
                     slot: CredentialSlotName::PRIMARY,
-                }],
-            ),
-        };
-        RuntimeConnectorDefinitionV1 {
-            definition_version: ConnectorDefinitionVersionV1::V1,
-            display_name: display_name.to_string(),
-            description: description.to_string(),
-            runtime: RuntimeConnectorKindV1::BuiltInManaged {
-                provider: self.key().to_string(),
-            },
-            auth,
-            actions: Vec::new(),
+                }]
+            }
         }
     }
 }
@@ -394,6 +374,12 @@ pub struct ConnectorConnection {
     pub display_name: String,
     /// Exact artifact or code-owned definition backing the connection.
     pub definition: ConnectionDefinitionRef,
+    /// Fixed canonical HTTP origin for artifact-backed actions.
+    ///
+    /// Closed managed knowledge parents have no HTTP origin because they never
+    /// expose connector actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ConnectionOrigin>,
     /// Secret-free connection configuration. Credential values are never represented here.
     pub non_secret_config: Value,
     /// Current optimistic-concurrency and binding generation.
@@ -537,25 +523,21 @@ pub struct CompiledOperationContract {
     pub schema_version: u32,
     /// Stable action identifier from the connector definition.
     pub action_id: String,
-    /// Definition-wide runtime class, including managed-provider identity.
-    pub runtime: RuntimeConnectorKindV1,
     /// Complete secret-free connection authentication contract.
     pub auth: Vec<RuntimeConnectorAuthRequirementV1>,
-    /// Fixed transport binding plus governed policy contract.
-    pub operation: RuntimeOperationBindingV1,
+    /// Fixed constrained-HTTP transport and governed policy contract.
+    pub operation: HttpOperationContract,
 }
 
 impl CompiledOperationContract {
     /// Compiles the normalized persisted contract for one validated runtime action.
     pub fn compile(
-        definition: &RuntimeConnectorDefinitionV1,
+        definition: &ConnectorDefinition,
         action: &RuntimeConnectorActionV1,
     ) -> Result<Self> {
-        connection_action_tool_reference(ConnectorConnectionId(Uuid::nil()), &action.id).map_err(
-            |_| Error::InvalidContract {
-                message: "connector action id must match [A-Za-z][A-Za-z0-9_-]{0,23}".to_string(),
-            },
-        )?;
+        validate_connector_action_id(&action.id).map_err(|_| Error::InvalidContract {
+            message: "connector action id must match [A-Za-z][A-Za-z0-9_-]{0,23}".to_string(),
+        })?;
         if definition.auth.is_empty() {
             return Err(Error::InvalidContract {
                 message: "connector auth requirements must not be empty".to_string(),
@@ -586,23 +568,7 @@ impl CompiledOperationContract {
                 });
             }
         }
-        let runtime_matches = matches!(
-            (&definition.runtime, &action.binding),
-            (
-                RuntimeConnectorKindV1::ConstrainedHttp,
-                RuntimeOperationBindingV1::Http { .. }
-            ) | (
-                RuntimeConnectorKindV1::BuiltInManaged { .. },
-                RuntimeOperationBindingV1::BuiltInManaged { .. }
-            )
-        );
-        if !runtime_matches {
-            return Err(Error::InvalidContract {
-                message: "connector runtime does not match the action operation binding"
-                    .to_string(),
-            });
-        }
-        if let Some(slot) = action.binding.credential_slot()
+        if let Some(slot) = action.contract.credential_slot.as_ref()
             && !declared_slots.contains(slot.as_str())
         {
             return Err(Error::CredentialSlotMissing { slot: slot.clone() });
@@ -612,9 +578,8 @@ impl CompiledOperationContract {
         Ok(Self {
             schema_version: 1,
             action_id: action.id.clone(),
-            runtime: definition.runtime.clone(),
             auth,
-            operation: action.binding.clone(),
+            operation: action.contract.clone(),
         })
     }
 
@@ -625,10 +590,7 @@ impl CompiledOperationContract {
                 message: "compiled operation contract schema_version must be 1".to_string(),
             });
         }
-        let mut serializer =
-            serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-        self.serialize(&mut serializer)?;
-        Ok(serializer.into_inner())
+        canonical_json_bytes(self).map_err(Error::from)
     }
 
     /// Returns the domain-separated hash of the canonical contract bytes.
@@ -724,9 +686,9 @@ impl InstalledActionBinding {
                 message: "governed contract revision must be non-empty".to_string(),
             });
         }
-        if self.minimum_effect != self.compiled_contract.operation.policy().minimum_effect {
+        if self.minimum_effect != ActionPolicyEffect::AdminReview {
             return Err(Error::InvalidContract {
-                message: "binding minimum effect differs from compiled operation policy"
+                message: "HTTP connector binding minimum effect must require admin review"
                     .to_string(),
             });
         }

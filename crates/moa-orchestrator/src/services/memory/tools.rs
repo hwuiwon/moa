@@ -12,17 +12,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError,
     error::Result,
-    traits::{Identity, MemoryRetrievalExecutor, RuntimeCacheStore},
+    traits::{Identity, MemoryRetrievalExecutor},
     types::memory::InformationBarrierClearances,
     types::session::SessionMeta,
     types::tools::ToolOutput,
 };
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::EdgeLabel;
+use moa_retrieval::engine::MemoryRetrievalEngine;
 use moa_retrieval::retrieval::{MemoryAdmissionPolicy, RetrievalHit};
 use restate_sdk::prelude::HandlerError;
 use serde::Deserialize;
@@ -49,24 +49,21 @@ const MAX_NAVIGATE_HOPS: u8 = 3;
 pub struct OrchestratorMemoryRetrievalExecutor {
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
-    config: Arc<MoaConfig>,
-    runtime_cache: Arc<dyn RuntimeCacheStore>,
+    retrieval_engine: Arc<MemoryRetrievalEngine>,
 }
 
 impl OrchestratorMemoryRetrievalExecutor {
-    /// Creates the production memory-tool executor with its graph and retrieval configuration.
+    /// Creates the memory-tool executor from a process-wide retrieval engine.
     #[must_use]
-    pub fn new(
+    pub fn from_retrieval_engine(
         pool: sqlx::PgPool,
         kms: Arc<dyn KeyManagementProvider>,
-        config: Arc<MoaConfig>,
-        runtime_cache: Arc<dyn RuntimeCacheStore>,
+        retrieval_engine: Arc<MemoryRetrievalEngine>,
     ) -> Self {
         Self {
             pool,
             kms,
-            config,
-            runtime_cache,
+            retrieval_engine,
         }
     }
 
@@ -85,14 +82,17 @@ impl OrchestratorMemoryRetrievalExecutor {
             ));
         }
         let clearances = session_clearances(session)?;
-        let policy = resolved_policy(&self.pool, session)
-            .await
-            .map_err(handler_error_to_tool_error)?;
+        let policy = if tool_name == "memory_navigate" {
+            resolved_policy(&self.pool, session)
+                .await
+                .map_err(handler_error_to_tool_error)?
+        } else {
+            MemoryAdmissionPolicy::from_session(session)?
+        };
         let context = MemoryToolInvocation {
             pool: &self.pool,
             kms: &self.kms,
-            config: self.config.as_ref(),
-            runtime_cache: &self.runtime_cache,
+            retrieval_engine: &self.retrieval_engine,
             session,
             identity: caller_identity,
             retrieval_operation_id,
@@ -134,8 +134,7 @@ impl MemoryRetrievalExecutor for OrchestratorMemoryRetrievalExecutor {
 struct MemoryToolInvocation<'a> {
     pool: &'a sqlx::PgPool,
     kms: &'a Arc<dyn KeyManagementProvider>,
-    config: &'a MoaConfig,
-    runtime_cache: &'a Arc<dyn RuntimeCacheStore>,
+    retrieval_engine: &'a Arc<MemoryRetrievalEngine>,
     session: &'a SessionMeta,
     identity: &'a Identity,
     retrieval_operation_id: &'a str,
@@ -187,11 +186,10 @@ async fn memory_search_tool(
     let deps = MemoryServiceDeps {
         pool: context.pool,
         kms: context.kms,
-        runtime_cache: context.runtime_cache,
+        retrieval_engine: context.retrieval_engine,
     };
     let hits = search_hits_for_tool(
         &deps,
-        context.config,
         context.policy,
         query,
         MEMORY_SEARCH_LIMIT,

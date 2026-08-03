@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::action_reviews::app as action_review_app;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::SessionClient;
 use crate::objects::worker::WorkerClient;
 use crate::services::session_store::RestateSessionStoreClient;
@@ -135,6 +135,7 @@ pub struct ActionReviewsImpl {
     pool: sqlx::PgPool,
     session_events: Arc<dyn SessionEventLookupStore>,
     review_timeout_secs: i64,
+    authz: AuthzEnforcer,
 }
 
 impl ActionReviewsImpl {
@@ -147,11 +148,13 @@ impl ActionReviewsImpl {
         pool: sqlx::PgPool,
         session_events: Arc<dyn SessionEventLookupStore>,
         review_timeout_secs: i64,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             pool,
             session_events,
             review_timeout_secs,
+            authz,
         }
     }
 }
@@ -248,7 +251,9 @@ impl ActionReviews for ActionReviewsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ActionReviews", "list_pending");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.pool.clone();
         let storage_partition_id = storage_partition_id(request.tenant_id);
 
@@ -274,7 +279,10 @@ impl ActionReviews for ActionReviewsImpl {
         let request = request.into_inner();
         let tenant_id = request.tenant_id;
         let review_id = request.review_id;
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.pool.clone();
         let decision_trace_context = resolution_trace_context.clone();
         let mut decided = ctx

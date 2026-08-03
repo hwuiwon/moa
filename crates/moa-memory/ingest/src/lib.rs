@@ -18,10 +18,7 @@ pub use chunking::chunk_turn;
 pub use contradiction::{
     Conflict, ContradictionContext, ContradictionDetector, RrfPlusJudgeDetector,
 };
-pub use ctx::{
-    IngestCtx, IngestRuntime, current_runtime, install_runtime, install_runtime_with_config,
-    install_runtime_with_pool,
-};
+pub use ctx::{IngestCtx, IngestRuntime};
 pub use entity_resolution::{
     DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionPlan,
     EntityResolutionRequest, EntityResolver, ResolvedEntity,
@@ -53,7 +50,6 @@ pub use recorded::{
     chunk_hash,
 };
 pub use slow_path::{
-    IngestionVO, IngestionVOClient, IngestionVOImpl, ingest_turn_direct,
-    ingest_turn_direct_with_ctx, ingest_turn_direct_with_pool, ingestion_object_key,
-    turn_transcript,
+    SlowPathIngestor, ingest_turn_direct_with_ctx, ingest_turn_direct_with_pool,
+    ingestion_object_key, turn_transcript,
 };

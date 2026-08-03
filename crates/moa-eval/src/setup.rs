@@ -34,7 +34,7 @@ use sqlx::PgPool;
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::memory_eval::tenant_id_from_label;
+use crate::fixture_ids::tenant_id_from_label;
 
 const DEFAULT_EVAL_USER: &str = "eval-runner";
 

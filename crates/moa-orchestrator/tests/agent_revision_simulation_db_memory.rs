@@ -43,7 +43,7 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
     let experiment_store = ExperimentStore::new(pool.clone());
     let tenant_id = TenantId::new();
     let scope = ActionRuleScope::Tenant { tenant_id };
-    let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let (plan_artifact_uid, plan_revision_uid) = insert_artifact_revision(&pool, &scope).await?;
     let base_revision_uid = Uuid::now_v7();
     let candidate_revision_uid = Uuid::now_v7();
 
@@ -52,6 +52,7 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
             &scope,
             new_experiment(
                 "agent revision comparison",
+                plan_artifact_uid,
                 plan_revision_uid,
                 base_revision_uid,
                 candidate_revision_uid,
@@ -258,13 +259,16 @@ async fn run_preserves_agent_revision_variants_for_workflow_db_memory() -> Resul
     let variants = vec![base, candidate];
 
     assert_eq!(workflow_request.tenant_id, tenant_id);
-    assert_eq!(workflow_request.plan_revision_uid, Some(plan.revision_uid));
     assert_eq!(workflow_request.agent_revision_variants, variants);
 
     let run = experiment_store
         .load_run(&scope, workflow_request.run_uid)
         .await?
         .expect("accepted simulation run should be persisted");
+    assert_eq!(
+        run.variant.metadata["plan_revision_uid"],
+        plan.revision_uid.to_string()
+    );
     assert_eq!(
         run.variant.metadata["agent_revision_variants"],
         serde_json::to_value(&workflow_request.agent_revision_variants)?
@@ -285,6 +289,7 @@ async fn run_preserves_agent_revision_variants_for_workflow_db_memory() -> Resul
 
 fn new_experiment(
     name: &str,
+    plan_artifact_uid: Uuid,
     plan_revision_uid: Uuid,
     base_revision_uid: Uuid,
     candidate_revision_uid: Uuid,
@@ -300,7 +305,7 @@ fn new_experiment(
         },
     ];
     NewExperiment {
-        plan_artifact_uid: None,
+        plan_artifact_uid,
         expected_trials: 1,
         resource_envelope: fixture_experiment_envelope(),
         name: name.to_string(),
@@ -316,7 +321,10 @@ fn new_experiment(
             artifact_revision_uids: vec![plan_revision_uid],
             skill_refs: Vec::new(),
             execution_template: None,
-            metadata: json!({ "agent_revision_variants": variants }),
+            metadata: json!({
+                "agent_revision_variants": variants,
+                "plan_revision_uid": plan_revision_uid,
+            }),
         },
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
@@ -331,7 +339,7 @@ fn new_experiment(
         artifact_revision_uids: vec![plan_revision_uid],
         idempotency_key: None,
         created_by_identity: identity_json(),
-        simulator_policy: None,
+        simulator_policy: support::simulator_policy::fixture("gpt-5.1"),
     }
 }
 
@@ -363,7 +371,10 @@ fn new_trial(
     }
 }
 
-async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
+async fn insert_artifact_revision(
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+) -> Result<(Uuid, Uuid)> {
     let tenant_id = scope.tenant_id();
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
@@ -413,7 +424,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     .await
     .map_err(|error| anyhow::anyhow!(error))?;
     conn.commit().await?;
-    Ok(revision_uid)
+    Ok((artifact_uid, revision_uid))
 }
 
 async fn create_draft_artifact(

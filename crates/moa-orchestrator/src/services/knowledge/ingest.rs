@@ -89,16 +89,18 @@ impl ProductionKnowledgeIngestionRunner {
         self.content_fetcher = content_fetcher;
         self
     }
-}
 
-#[async_trait]
-impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
-    async fn ingest_record_page(
+    /// Builds the immutable ingestion dependency graph for one stored sync run.
+    ///
+    /// The returned runtime is cheap to clone across bounded Restate page
+    /// closures. Page-scoped content fetchers are attached only to the clone
+    /// used for that page, so resolved credentials never enter this reusable
+    /// runtime.
+    pub(crate) fn prepare_run(
         &self,
         run: &KnowledgeSyncRun,
         provider: &str,
-        page: RecordPage,
-    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+    ) -> Result<ProductionKnowledgeIngestionRuntime, KnowledgeServiceError> {
         let parser_label = selected_parser_label(&self.config, run);
         let pipeline = build_ingestion_pipeline(
             self.pool.clone(),
@@ -109,37 +111,40 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             provider.to_string(),
             parser_label,
             run.information_barrier.clone(),
-            self.content_fetcher.clone(),
-        )
-        .await?;
-        pipeline
+        )?;
+        Ok(ProductionKnowledgeIngestionRuntime { pipeline })
+    }
+}
+
+/// Reusable immutable ingestion graph prepared for one stored sync run.
+#[derive(Clone)]
+pub(crate) struct ProductionKnowledgeIngestionRuntime {
+    pipeline: KnowledgeIngestionPipeline,
+}
+
+impl ProductionKnowledgeIngestionRuntime {
+    /// Applies one provider page with content-fetch capability scoped to that page.
+    pub(crate) async fn ingest_record_page(
+        &self,
+        run: &KnowledgeSyncRun,
+        page: RecordPage,
+        content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+        self.pipeline
+            .clone()
+            .with_content_fetcher(content_fetcher)
             .ingest_record_page(run.sync_run_uid, run.connection_uid, run.tenant_id, page)
             .await
             .map_err(KnowledgeServiceError::from)
     }
 
-    async fn prune_unseen_objects(
+    /// Tombstones active local objects absent from an exhaustive selected-source sync.
+    pub(crate) async fn prune_unseen_objects(
         &self,
         run: &KnowledgeSyncRun,
-        provider: &str,
         seen_source_ids: &HashSet<String>,
     ) -> Result<PageIngestionReport, KnowledgeServiceError> {
-        let parser_label = selected_parser_label(&self.config, run);
-        // Pruning never materializes record content, so no content fetcher is
-        // needed for this pipeline.
-        let pipeline = build_ingestion_pipeline(
-            self.pool.clone(),
-            self.kms.clone(),
-            run.tenant_id,
-            &self.config,
-            Arc::clone(&self.runtime_cache),
-            provider.to_string(),
-            parser_label,
-            run.information_barrier.clone(),
-            None,
-        )
-        .await?;
-        pipeline
+        self.pipeline
             .prune_unseen_objects(
                 run.sync_run_uid,
                 run.connection_uid,
@@ -151,18 +156,36 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
     }
 }
 
-type ProductionKnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
-    PostgresKnowledgeRepository,
-    ProductionDocumentParser,
-    SharedEmbeddingProvider,
-    MemoryKnowledgeGraphWriter<PostgresGraphStore>,
->;
+#[async_trait]
+impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
+    async fn ingest_record_page(
+        &self,
+        run: &KnowledgeSyncRun,
+        provider: &str,
+        page: RecordPage,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+        self.prepare_run(run, provider)?
+            .ingest_record_page(run, page, self.content_fetcher.clone())
+            .await
+    }
+
+    async fn prune_unseen_objects(
+        &self,
+        run: &KnowledgeSyncRun,
+        provider: &str,
+        seen_source_ids: &HashSet<String>,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+        self.prepare_run(run, provider)?
+            .prune_unseen_objects(run, seen_source_ids)
+            .await
+    }
+}
 
 #[allow(
     clippy::too_many_arguments,
     reason = "the production factory keeps storage, KMS, scope, parser, and content dependencies explicit"
 )]
-async fn build_ingestion_pipeline(
+fn build_ingestion_pipeline(
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
@@ -171,8 +194,7 @@ async fn build_ingestion_pipeline(
     provider: String,
     parser_label: String,
     information_barrier: Option<InformationBarrierId>,
-    content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
-) -> Result<ProductionKnowledgeIngestionPipeline, KnowledgeServiceError> {
+) -> Result<KnowledgeIngestionPipeline, KnowledgeServiceError> {
     let scope = RlsContext::tenant(tenant_id);
     let graph_scope = scope
         .clone()
@@ -215,8 +237,7 @@ async fn build_ingestion_pipeline(
             provider,
             parser_label,
         },
-    )
-    .with_content_fetcher(content_fetcher))
+    ))
 }
 
 fn build_document_parser(

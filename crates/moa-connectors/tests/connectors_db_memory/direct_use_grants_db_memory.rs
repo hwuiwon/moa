@@ -4,8 +4,8 @@ use moa_authz_schema::MODEL_VERSION;
 use moa_connectors::Error;
 use moa_connectors::domain::{ConnectionDefinitionRef, ConnectionGeneration, ConnectionStatus};
 use moa_connectors::repository::{
-    ConnectionRepository, ConnectionUseGrantRepository, ConnectionUseRequest, ConnectorUseSubject,
-    NewConnectorConnection, PostgresConnectionRepository,
+    ConnectionLifecycleRepository, ConnectionUseGrantRepository, ConnectionUseRequest,
+    ConnectorUseSubject, NewConnectorConnection, PostgresConnectionRepository,
 };
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
 use serde_json::json;
@@ -209,10 +209,19 @@ async fn grant_rejects_inactive_cross_tenant_and_teardown_subjects_db_memory() {
             tenant_id,
             deleted_connection,
             generation(1),
+            ConnectionStatus::Disconnecting,
+        )
+        .await
+        .expect("pending fixture should enter disconnecting state");
+    repository
+        .transition(
+            tenant_id,
+            deleted_connection,
+            generation(1),
             ConnectionStatus::Deleted,
         )
         .await
-        .expect("pending fixture should enter retained deleted state");
+        .expect("disconnecting fixture should enter retained deleted state");
     assert_teardown_rejects_grant(
         &repository,
         tenant_id,
@@ -337,6 +346,15 @@ async fn deleted_transition_inverts_all_direct_use_grants_atomically_db_memory()
             .expect("deletion fixture direct Use should be registered");
     }
 
+    repository
+        .transition(
+            tenant_id,
+            connection_id,
+            generation(1),
+            ConnectionStatus::Disconnecting,
+        )
+        .await
+        .expect("deletion fixture should enter disconnecting state");
     let deleted = repository
         .transition(
             tenant_id,
@@ -345,7 +363,7 @@ async fn deleted_transition_inverts_all_direct_use_grants_atomically_db_memory()
             ConnectionStatus::Deleted,
         )
         .await
-        .expect("pending connection should delete with exact relationship inverses");
+        .expect("disconnecting connection should delete with exact relationship inverses");
     assert_eq!(deleted.status, ConnectionStatus::Deleted);
     assert!(grant_rows(&pool, tenant_id, connection_id).await.is_empty());
 
@@ -445,8 +463,8 @@ async fn outbox_failure_rolls_back_direct_use_registry_db_memory() {
 
 #[tokio::test]
 async fn inverse_outbox_failure_rolls_back_deletion_and_registry_cleanup_db_memory() {
-    // Pins: a failed direct-Use inverse rolls back the lifecycle edge, registry
-    // removal, and earlier tenant/owner inverse upserts as one atomic deletion.
+    // Pins: a failed direct-Use inverse rolls back the terminal lifecycle edge,
+    // registry removal, and earlier tenant/owner inverse upserts atomically.
     let test_db = moa_test_support::postgres::bootstrap_test_db()
         .await
         .expect("bootstrap connector direct-Use inverse rollback database");
@@ -468,6 +486,15 @@ async fn inverse_outbox_failure_rolls_back_deletion_and_registry_cleanup_db_memo
         })
         .await
         .expect("inverse rollback fixture direct Use should be registered");
+    repository
+        .transition(
+            tenant_id,
+            connection_id,
+            generation(1),
+            ConnectionStatus::Disconnecting,
+        )
+        .await
+        .expect("inverse rollback fixture should enter disconnecting state");
     install_use_outbox_rejection(&pool).await;
 
     let error = repository
@@ -488,7 +515,7 @@ async fn inverse_outbox_failure_rolls_back_deletion_and_registry_cleanup_db_memo
         .await
         .expect("connection should remain readable after rolled-back deletion")
         .expect("rolled-back deletion must retain the connection");
-    assert_eq!(retained.status, ConnectionStatus::PendingAuth);
+    assert_eq!(retained.status, ConnectionStatus::Disconnecting);
     assert_eq!(
         grant_rows(&pool, tenant_id, connection_id).await,
         vec![("operator".to_string(), operator_id)]
@@ -616,8 +643,9 @@ fn new_connection(
         connection_id,
         tenant_id,
         display_name: "Direct Use fixture".to_string(),
-        definition_ref: ConnectionDefinitionRef::built_in("direct-use-fixture", 1)
+        definition_ref: ConnectionDefinitionRef::built_in("knowledge:nango", 1)
             .expect("fixture built-in definition should be valid"),
+        origin: None,
         non_secret_config: json!({}),
         created_by_identity_id: None,
         owner_identity_id,

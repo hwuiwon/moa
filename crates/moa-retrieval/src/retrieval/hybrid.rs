@@ -1105,7 +1105,6 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         // invariants: retrying or degrading would hide a real misconfiguration.
         VectorError::DimensionMismatch { .. }
         | VectorError::InvalidSensitivityClass(_)
-        | VectorError::EmbedderConfig(_)
         | VectorError::InvalidQueryEmbedding(_)
         | VectorError::EmbedderMismatch { .. }
         | VectorError::StoragePartitionEmbedderStateMissing { .. }
@@ -1123,9 +1122,7 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         | VectorError::UnsupportedVectorBackend { .. }
         | VectorError::UnsupportedQueryFeature { .. } => true,
         // Transient backend/provider/network/response failures degrade the leg.
-        VectorError::EmbeddingResponseLength { .. }
-        | VectorError::ProviderStatus { .. }
-        | VectorError::VectorProviderStatus { .. }
+        VectorError::VectorProviderStatus { .. }
         | VectorError::TurbopufferResponse(_)
         | VectorError::Core(_)
         | VectorError::Sqlx(_)

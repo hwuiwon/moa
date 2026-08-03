@@ -24,9 +24,8 @@ use moa_core::{
     types::contact::ContactSessionMessageResponse, types::identifiers::SessionAttachmentId,
     types::identifiers::SessionId, types::identifiers::TenantId,
 };
+use moa_messaging::ProviderDeliverySink;
 use moa_session::PostgresSessionStore;
-#[cfg(feature = "auth0")]
-use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,8 +61,6 @@ use self::contact_messages::{
 use self::session_stream::{
     initial_stream_sequence, last_event_id_sequence, session_message_stream_response,
 };
-#[cfg(feature = "auth0")]
-use self::webhook_verification::verify_auth0_signature;
 use self::webhook_verification::verify_knowledge_webhook_at_edge;
 
 /// Shared edge application state.
@@ -84,14 +81,14 @@ pub struct AppState {
     pub oauth_access_tokens: Arc<moa_auth_providers::OAuthAccessTokenProvider>,
     /// OpenFGA client used for direct edge authorization checks.
     pub fga: Option<Arc<FgaClient>>,
-    /// Shared secret used to verify Auth0 connection-linked webhooks.
-    pub auth0_webhook_secret: Option<String>,
     /// Secrets used to verify public tenant-knowledge webhooks at the edge.
     pub knowledge_webhooks: KnowledgeWebhookEdgeConfig,
-    /// Postgres pool used by unauthenticated webhooks that update auth metadata.
+    /// Postgres pool used by direct edge reads and writes.
     pub pool: Arc<sqlx::PgPool>,
     /// Postgres-backed session store used by direct edge media reads and writes.
     pub session_store: Arc<PostgresSessionStore>,
+    /// Deployment-owned account delivery clients.
+    pub delivery: Arc<ProviderDeliverySink>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
     /// Exact-path proxy to private orchestrator credential ingress.
@@ -208,10 +205,6 @@ pub(crate) fn base_router(state: AppState) -> Router {
         .route("/v1/lineage/query", post(lineage::handle_query))
         .route("/v1/lineage/verify", post(lineage::handle_verify))
         .merge(dashboard::router())
-        .route(
-            "/v1/webhooks/auth0/connection-linked",
-            post(handle_auth0_connection_webhook),
-        )
         .route(
             "/v1/knowledge/webhooks/llamaparse",
             post(handle_knowledge_llamaparse_webhook)
@@ -1063,111 +1056,6 @@ where
         });
     }
     serde_json::from_slice(&body).map_err(|error| EdgeJsonError::Decode(error.to_string()))
-}
-
-#[cfg(feature = "auth0")]
-async fn handle_auth0_connection_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> axum::response::Response {
-    let secret = match state.auth0_webhook_secret.as_deref() {
-        Some(secret) if !secret.trim().is_empty() => secret,
-        None | Some(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "webhook secret not configured",
-            )
-                .into_response();
-        }
-    };
-    if !verify_auth0_signature(&headers, &body, secret) {
-        return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
-    }
-    let payload: Auth0ConnectionLinkedWebhook = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => return (StatusCode::BAD_REQUEST, "bad webhook body").into_response(),
-    };
-    let user_id = match payload.user_id {
-        Some(user_id) => user_id,
-        None => {
-            let Some(auth0_sub) = payload.auth0_sub.as_deref() else {
-                return (StatusCode::BAD_REQUEST, "user_id or auth0_sub required").into_response();
-            };
-            match lookup_auth0_user_id(&state.pool, auth0_sub).await {
-                Ok(Some(user_id)) => user_id,
-                Ok(None) => {
-                    return (StatusCode::NOT_FOUND, "auth0 user mapping not found").into_response();
-                }
-                Err(error) => {
-                    tracing::error!(error = %error, "lookup auth0 user for connection webhook failed");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
-                }
-            }
-        }
-    };
-
-    let result = sqlx::query(
-        r#"
-        INSERT INTO linked_connections
-            (user_id, connection_name, scopes_granted, external_sub)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (user_id, connection_name)
-        DO UPDATE SET
-            scopes_granted = EXCLUDED.scopes_granted,
-            external_sub = EXCLUDED.external_sub,
-            linked_at = NOW()
-        "#,
-    )
-    .bind(user_id)
-    .bind(&payload.connection_name)
-    .bind(&payload.scopes_granted)
-    .bind(payload.external_sub.as_deref())
-    .execute(&*state.pool)
-    .await;
-    match result {
-        Ok(_) => (StatusCode::OK, "ok").into_response(),
-        Err(error) => {
-            tracing::error!(error = %error, "upsert linked connection failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
-        }
-    }
-}
-
-#[cfg(not(feature = "auth0"))]
-async fn handle_auth0_connection_webhook() -> axum::response::Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "Auth0 connection webhooks require the auth0 feature",
-    )
-        .into_response()
-}
-
-#[cfg(feature = "auth0")]
-#[derive(Debug, Deserialize)]
-struct Auth0ConnectionLinkedWebhook {
-    #[serde(default)]
-    user_id: Option<Uuid>,
-    #[serde(default)]
-    auth0_sub: Option<String>,
-    connection_name: String,
-    #[serde(default)]
-    scopes_granted: Vec<String>,
-    #[serde(default)]
-    external_sub: Option<String>,
-}
-
-#[cfg(feature = "auth0")]
-async fn lookup_auth0_user_id(
-    pool: &sqlx::PgPool,
-    auth0_sub: &str,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as("SELECT user_id FROM auth0_user_map WHERE sub = $1 LIMIT 1")
-            .bind(auth0_sub)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|(user_id,)| user_id))
 }
 
 fn source_ip(headers: &HeaderMap) -> Option<&str> {

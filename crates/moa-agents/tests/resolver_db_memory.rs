@@ -307,14 +307,14 @@ async fn published_runtime_connector_bindings_pin_canonical_deployment_policy_co
         &registry,
         &artifact_resolver,
         &scope,
-        runtime_mcp_connector_doc(&alpha_name, "Alpha Billing"),
+        runtime_http_connector_doc(&alpha_name, "Alpha Billing"),
     )
     .await?;
     let zeta_revision = serve_document(
         &registry,
         &artifact_resolver,
         &scope,
-        runtime_mcp_connector_doc(&zeta_name, "Zeta CRM"),
+        runtime_http_connector_doc(&zeta_name, "Zeta CRM"),
     )
     .await?;
     assert_eq!(alpha_revision.status, ArtifactStatus::Published);
@@ -679,7 +679,7 @@ fn agent_doc(name: &str, skill_name: &str) -> ArtifactDocument {
     .expect("agent artifact fixture is valid")
 }
 
-fn runtime_mcp_connector_doc(name: &str, display_name: &str) -> ArtifactDocument {
+fn runtime_http_connector_doc(name: &str, display_name: &str) -> ArtifactDocument {
     serde_json::from_value(json!({
         "api_version": "moa.artifact/v1",
         "kind": "connector",
@@ -693,29 +693,33 @@ fn runtime_mcp_connector_doc(name: &str, display_name: &str) -> ArtifactDocument
                 "definition_version": "v1",
                 "display_name": display_name,
                 "description": "Invoke one fixed remote operation.",
-                "runtime": {"type": "mcp"},
                 "auth": [{"type": "none"}],
                 "actions": [{
                     "id": "Execute",
                     "description": "Execute the governed remote operation.",
-                    "binding": {
-                        "type": "mcp",
-                        "remote_operation": "records.execute",
-                        "contract": {
-                            "input_schema": {"type": "object"},
-                            "output_schema": {"type": "object"},
-                            "data_classes": ["none"],
-                            "action_class": "external_write",
-                            "risk_level": "high",
-                            "minimum_effect": "admin_review",
-                            "idempotency": "non_idempotent"
+                    "contract": {
+                            "method": "POST",
+                            "path_template": "/records/execute",
+                            "body_input": {"input_pointer": "/payload"},
+                            "max_request_bytes": 1024,
+                            "max_response_bytes": 16384,
+                            "connect_timeout_ms": 1000,
+                            "total_timeout_ms": 5000,
+                            "policy": {
+                                "input_schema": {
+                                    "type": "object",
+                                    "properties": {"payload": {"type": "object"}}
+                                },
+                                "output_schema": {"type": "object"},
+                                "data_classes": ["none"],
+                                "idempotency": "non_idempotent"
+                            }
                         }
-                    }
                 }]
             }
         }
     }))
-    .expect("runtime MCP connector fixture is valid")
+    .expect("runtime HTTP connector fixture is valid")
 }
 
 fn bound_connector_agent_doc(

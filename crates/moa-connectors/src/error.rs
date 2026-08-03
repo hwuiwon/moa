@@ -80,9 +80,6 @@ pub enum Error {
         /// Shared connection requiring ordinary action-capable activation.
         connection_id: ConnectorConnectionId,
     },
-    /// A repository adapter does not provide the managed-parent persistence contract.
-    #[error("managed connector parent persistence is unavailable")]
-    ManagedParentRepositoryUnavailable,
     /// A direct `Use` grant targeted a connection already in teardown.
     #[error("connector connection {connection_id} cannot change Use grants while {status}")]
     UseGrantConnectionUnavailable {
@@ -155,9 +152,6 @@ pub enum Error {
         /// Stable pin field that changed; never contains caller or endpoint data.
         field: &'static str,
     },
-    /// The pinned connector action is not a constrained HTTP operation.
-    #[error("connector action is not executable by the constrained HTTP runtime")]
-    UnsupportedHttpRuntime,
     /// Schema validation rejected connector input or output.
     #[error("connector {direction} schema validation failed")]
     SchemaValidation {

@@ -33,11 +33,18 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
         },
     );
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_structure_audit".to_string(),
             metadata: json!({}),

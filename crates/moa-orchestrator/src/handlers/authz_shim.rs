@@ -6,7 +6,71 @@ use moa_core::traits::Identity;
 use moa_core::types::identifiers::{SessionId, TenantId};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 
-use crate::ctx::{self, IdentityHeaderError, OrchestratorCtx, RequestHeaders};
+use crate::ctx::{self, IdentityHeaderError, RequestHeaders};
+
+/// Explicit authorization dependency shared by Restate handler implementations.
+#[derive(Clone)]
+pub struct AuthzEnforcer {
+    fga_client: Option<FgaClient>,
+}
+
+impl AuthzEnforcer {
+    /// Creates an enforcer from the runtime's configured OpenFGA client.
+    #[must_use]
+    pub fn new(fga_client: Option<FgaClient>) -> Self {
+        Self { fga_client }
+    }
+
+    /// Returns the configured FGA client or fails closed.
+    pub fn require_fga_client(&self) -> Result<FgaClient, HandlerError> {
+        require_configured_fga_client(self.fga_client.clone())
+    }
+
+    /// Authorizes the caller against a tenant for a specific relation.
+    pub async fn authorize_tenant(
+        &self,
+        ctx: &impl RequestHeaders,
+        tenant_id: TenantId,
+        relation: Relation,
+    ) -> Result<Identity, HandlerError> {
+        let identity = require_identity(ctx)?;
+        let fga = self.require_fga_client()?;
+        require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+            .await
+            .map_err(translate_authz_error)?;
+        Ok(identity)
+    }
+
+    /// Authorizes the caller as a participant of one parent session.
+    pub async fn authorize_session_participant(
+        &self,
+        ctx: &impl RequestHeaders,
+        session_id: SessionId,
+    ) -> Result<Identity, HandlerError> {
+        let identity = require_identity(ctx)?;
+        let fga = self.require_fga_client()?;
+        require_authz_with_delegation(
+            &fga,
+            &identity,
+            ObjectType::Session,
+            session_id,
+            Relation::Participant,
+        )
+        .await
+        .map_err(translate_authz_error)?;
+        Ok(identity)
+    }
+
+    /// Authorizes tenant operators and admins for product control-plane work.
+    pub async fn authorize_tenant_operator_or_admin(
+        &self,
+        ctx: &impl RequestHeaders,
+        tenant_id: TenantId,
+    ) -> Result<Identity, HandlerError> {
+        self.authorize_tenant(ctx, tenant_id, Relation::Operator)
+            .await
+    }
+}
 
 /// Load the required caller identity from a Restate context.
 pub fn require_identity(ctx: &impl RequestHeaders) -> Result<Identity, HandlerError> {
@@ -20,73 +84,12 @@ pub fn require_identity(ctx: &impl RequestHeaders) -> Result<Identity, HandlerEr
     }
 }
 
-/// Return the process-wide FGA client or fail closed.
-pub fn require_fga_client() -> Result<FgaClient, HandlerError> {
-    require_configured_fga_client(OrchestratorCtx::current().fga_client())
-}
-
 /// Return an explicitly configured FGA client or fail closed.
 pub fn require_configured_fga_client(
     fga_client: Option<FgaClient>,
 ) -> Result<FgaClient, HandlerError> {
     fga_client
         .ok_or_else(|| TerminalError::new_with_code(503, "authorization engine unavailable").into())
-}
-
-/// Authorize the caller against a tenant for a specific relation.
-///
-/// Composes identity loading, FGA client lookup, and a delegation-aware
-/// authorization check on `(Tenant, tenant_id, relation)`, returning the
-/// validated caller identity for downstream use.
-pub async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
-/// Authorize the caller as a participant of one parent session.
-///
-/// Execution handlers use this parent-object check before reading run data;
-/// delegated agent identities are admitted by the same delegation-aware helper.
-pub async fn authorize_session_participant(
-    ctx: &impl RequestHeaders,
-    session_id: SessionId,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Session,
-        session_id,
-        Relation::Participant,
-    )
-    .await
-    .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
-/// Authorize tenant operators and admins for product control-plane work.
-///
-/// The OpenFGA tenant model defines `operator` as the union of direct operators
-/// and tenant admins, so one `Operator` check admits tenant operators, tenant
-/// admins, and workspace admins.
-///
-/// Workspace-admin access is represented in OpenFGA as `workspace#admin`
-/// inherited into `tenant#admin`, which is then inherited into
-/// `tenant#operator`.
-pub async fn authorize_tenant_operator_or_admin(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-) -> Result<Identity, HandlerError> {
-    authorize_tenant(ctx, tenant_id, Relation::Operator).await
 }
 
 /// Translate identity-header failures into handler errors.

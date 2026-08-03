@@ -826,13 +826,15 @@ async fn seed_experiment_fixture(
         r#"INSERT INTO moa.experiment_run (
              run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
              scorecard, score_run_id, artifact_revision_uids, created_by_identity,
-             resource_envelope
+             plan_artifact_uid, resource_envelope, simulator_policy
          ) VALUES ($1, $2, NULL, 'sink fixture', 'agent_loop', 'running', '{}'::jsonb, '{}'::jsonb,
                    '{}'::jsonb, $3, '{}', '{}'::jsonb,
+                   '00000000-0000-4000-8000-0000000d74f0',
                    '{"version": 1,
                      "run_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
                      "trial_limits": {"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0},
-                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb)"#,
+                     "deadline_at": "1970-01-01T00:00:00Z"}'::jsonb,
+                   '{}'::jsonb)"#,
     )
     .bind(fixture.run_uid)
     .bind(&fixture.storage_partition_id)

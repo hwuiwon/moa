@@ -320,10 +320,10 @@ fn record_for_target(
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::from(Uuid::now_v7()),
         },
-        plan_artifact_uid: None,
+        plan_artifact_uid: Uuid::now_v7(),
         expected_trials: 0,
         resource_envelope: fixture_run_envelope(),
-        simulator_policy: None,
+        simulator_policy: support::simulator_policy("gpt-5.1"),
         run_uid: Uuid::now_v7(),
         name: "experiment run".to_string(),
         target_kind,

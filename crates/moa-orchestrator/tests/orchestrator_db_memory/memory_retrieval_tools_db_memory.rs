@@ -18,6 +18,7 @@ use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_orchestrator::services::memory::OrchestratorMemoryRetrievalExecutor;
+use moa_retrieval::engine::MemoryRetrievalEngine;
 use moa_session::testing;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -128,11 +129,21 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
     };
     let mut config = MoaConfig::default();
     config.memory.vector.embedder.name = "disabled".to_string();
-    let executor = OrchestratorMemoryRetrievalExecutor::new(
+    // This test isolates admission. Production evidence-score abstention is
+    // covered separately and must not discard a correctly admitted fixture row.
+    config
+        .memory
+        .retrieval
+        .ranking
+        .abstain_below_window_evidence = 0.0;
+    let retrieval_engine = Arc::new(
+        MemoryRetrievalEngine::new(config, pool.clone(), kms.clone(), None)
+            .with_assume_app_role(true),
+    );
+    let executor = OrchestratorMemoryRetrievalExecutor::from_retrieval_engine(
         pool.clone(),
         kms,
-        Arc::new(config),
-        Arc::new(moa_runtime_store::MemoryRuntimeCacheStore::new()),
+        retrieval_engine,
     );
     let search = executor
         .execute_retrieval_tool(

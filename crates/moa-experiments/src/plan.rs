@@ -805,16 +805,8 @@ pub fn selected_plan_matrix_shape(
     prepare_selected_cases(definition, selections).map(|(shape, _)| shape)
 }
 
-/// Expands a plan into every deterministic trial row it declares.
-///
-/// Collects [`PlanTrialPager`] pages, so the returned vector is bounded by
-/// [`MAX_PLAN_TOTAL_TRIALS`]. Callers that persist or dispatch trials should
-/// drive the pager directly and keep only one page resident.
-///
-/// # Errors
-///
-/// Returns the first [`PlanExpansionError`] the plan violates.
-pub fn expand_plan_trials(
+#[cfg(test)]
+fn collect_pager_trials(
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     definition: &ExperimentPlanDefinition,
@@ -1375,7 +1367,7 @@ mod tests {
             "scenario_outcome"
         );
 
-        let expansion = expand_plan_trials(
+        let expansion = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1389,11 +1381,11 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_uses_ids_without_copying_simulation_blocks_offline() {
+    fn plan_trial_pager_uses_ids_without_copying_simulation_blocks_offline() {
         // Pins: plan fanout stores plan-local IDs and leaves simulator metadata semantic-free.
         let plan_revision_uid = fixture_uuid(1);
         let definition = fixture_plan();
-        let trials = expand_plan_trials(
+        let trials = collect_pager_trials(
             fixture_uuid(2),
             plan_revision_uid,
             &definition,
@@ -1430,16 +1422,18 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_derives_stable_score_run_ids_offline() {
+    fn plan_trial_pager_derives_stable_score_run_ids_offline() {
         // Pins: plan re-expansion cannot mint different score-run IDs for the same trial key.
         let plan_revision_uid = fixture_uuid(1);
         let run_uid = fixture_uuid(2);
         let definition = fixture_plan();
 
-        let first = expand_plan_trials(run_uid, plan_revision_uid, &definition, &fixture_policy())
-            .expect("valid plan matrix expands");
-        let second = expand_plan_trials(run_uid, plan_revision_uid, &definition, &fixture_policy())
-            .expect("valid plan matrix expands again");
+        let first =
+            collect_pager_trials(run_uid, plan_revision_uid, &definition, &fixture_policy())
+                .expect("valid plan matrix expands");
+        let second =
+            collect_pager_trials(run_uid, plan_revision_uid, &definition, &fixture_policy())
+                .expect("valid plan matrix expands again");
 
         let first_ids = first
             .iter()
@@ -1453,12 +1447,12 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_empty_matrix_dimensions_offline() {
+    fn plan_trial_pager_rejects_empty_matrix_dimensions_offline() {
         // Pins: empty plan dimensions fail before the run enters the polling loop.
         let mut definition = fixture_plan();
         definition.simulation.scenarios.clear();
 
-        let error = expand_plan_trials(
+        let error = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1558,12 +1552,12 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_agent_loop_without_target_model_offline() {
+    fn plan_trial_pager_rejects_agent_loop_without_target_model_offline() {
         // Pins: agent-loop plan fanout refuses to admit trials with no target model to drive.
         let mut definition = fixture_plan();
         definition.target_model = None;
 
-        let error = expand_plan_trials(
+        let error = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1575,13 +1569,13 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_execution_template_variant_without_exact_template_offline() {
+    fn plan_trial_pager_rejects_execution_template_variant_without_exact_template_offline() {
         // Pins: execution-template variants cannot expand without an exact immutable revision.
         let mut definition = fixture_plan();
         definition.target_variants[0].kind = ExperimentTargetKind::ExecutionTemplate;
         definition.target_variants[0].config = json!({"objective": "Run the template."});
 
-        let error = expand_plan_trials(
+        let error = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1596,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_blank_execution_template_objective_offline() {
+    fn plan_trial_pager_rejects_blank_execution_template_objective_offline() {
         // Pins: execution-template plan fanout requires a meaningful explicit objective.
         let mut definition = fixture_plan();
         definition.target_variants[0].kind = ExperimentTargetKind::ExecutionTemplate;
@@ -1608,7 +1602,7 @@ mod tests {
             "objective": "  \n",
         });
 
-        let error = expand_plan_trials(
+        let error = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1672,13 +1666,13 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_does_not_allow_variant_config_to_override_policy_decoding_offline() {
+    fn plan_trial_pager_does_not_allow_variant_config_to_override_policy_decoding_offline() {
         // Pins: simulator decoding is certified policy state, not mutable target-variant config.
         let mut definition = fixture_plan();
         definition.target_variants[0].config =
             json!({"prompt": "start", "simulator_temperature": 1e40});
 
-        let trials = expand_plan_trials(
+        let trials = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1699,14 +1693,14 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_unparsable_agent_selector_offline() {
+    fn plan_trial_pager_rejects_unparsable_agent_selector_offline() {
         // Pins: a malformed `agent` selector in variant config surfaces as a validation error,
         // not a panic or a silently dropped selector.
         let mut definition = fixture_plan();
         definition.target_variants[0].config =
             json!({"prompt": "start", "agent": "not-a-selector"});
 
-        let error = expand_plan_trials(
+        let error = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -1985,7 +1979,7 @@ mod tests {
         let unique = keys.iter().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), keys.len(), "trial keys must stay unique");
 
-        let eager = expand_plan_trials(
+        let eager = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,
@@ -2004,7 +1998,7 @@ mod tests {
         // test. Their simulator randomness is paired by matrix coordinates and
         // cannot drift merely because the variant key differs.
         let definition = fixture_matrix(1, 1, 1, 2, 2);
-        let trials = expand_plan_trials(
+        let trials = collect_pager_trials(
             fixture_uuid(2),
             fixture_uuid(1),
             &definition,

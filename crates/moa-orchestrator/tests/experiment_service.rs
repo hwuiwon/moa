@@ -73,18 +73,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
     assert_has_tenant_id(ExperimentRunRequest {
         tenant_id,
         name: "live behavior smoke".to_string(),
-        plan_revision_uid: None,
-        target: Some(json!({"kind": "agent_loop", "prompt": "summarize"})),
-        variant: Some(json!({"name": "candidate"})),
-        scorecard: Some(
-            ExperimentScorecard::new(vec![ScorecardRequirement {
-                evaluator_id: "target_completed".to_string(),
-                evaluator_version: "v1".to_string(),
-                config: json!({}),
-                effect: ScorecardEffect::Blocking,
-            }])
-            .expect("fixture scorecard is valid"),
-        ),
+        plan_revision_uid: fixture_uuid(2),
         score_run_id: None,
         idempotency_key: Some("run-key".to_string()),
         agent_revision_variants: Vec::new(),
@@ -469,13 +458,6 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
     assert_eq!(encoded["variant_deltas"][0]["delta"], 0.2);
 }
 
-// Authorization for the Experiments service is exercised behaviorally, not by source-grep:
-// `experiment_agent_loop_e2e::experiments_run_denies_caller_without_tenant_operator` calls
-// `Experiments/run` over the real Restate + OpenFGA stack as a caller with no Tenant:Operator
-// grant and asserts a 403 denial. Every Experiments handler authorizes tenant
-// operator/admin access as its first statement, so that e2e is the template for
-// the remaining read/mutate handlers.
-
 #[test]
 fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     // Pins: proposal candidates preserve experiment evidence without promoting learned state.
@@ -672,10 +654,10 @@ fn score_row(
 fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentRunRecord {
     let template = pinned_execution_template(22);
     ExperimentRunRecord {
-        plan_artifact_uid: None,
+        plan_artifact_uid: fixture_uuid(19),
         expected_trials: 0,
         resource_envelope: fixture_experiment_envelope(),
-        simulator_policy: None,
+        simulator_policy: support::simulator_policy::fixture("gpt-5.4"),
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::new(),
         },

@@ -7,8 +7,8 @@ use moa_connectors::domain::{
     ManagedParentPreservationReason,
 };
 use moa_connectors::repository::{
-    ConnectionActivation, ConnectionRepository, NewConnectorConnection,
-    PostgresConnectionRepository,
+    ConnectionActivation, ConnectionLifecycleRepository, ManagedParentRepository,
+    NewConnectorConnection, PostgresConnectionRepository,
 };
 use moa_connectors::service::{
     ManagedParentActivationRequest, ManagedParentClaimRequest, ManagedParentDeleteRequest,
@@ -151,9 +151,9 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
             tenant_id,
             connection_id,
             ManagedParentDefinition::KnowledgeNangoV1,
-            "github-config",
-            "acct-1",
-            "github",
+            "",
+            "",
+            "",
         ))
         .await
         .expect("exact pre-existing managed parent should be seeded");
@@ -253,42 +253,34 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
             None,
         ))
         .await
-        .expect_err("provider account drift must fail closed");
+        .expect_err("knowledge metadata on a generic parent must fail closed");
     assert!(matches!(
         mismatch,
         Error::ManagedParentMismatch {
             connection_id: actual,
-            field: "provider_connection_id",
+            field: "non_secret_config",
         } if actual == mismatch_id
     ));
 
-    let arbitrary_id = ConnectorConnectionId::new();
+    let wrong_definition_id = ConnectorConnectionId::new();
     repository
-        .create(NewConnectorConnection {
-            connection_id: arbitrary_id,
+        .create(existing_managed_parent(
             tenant_id,
-            display_name: "github".to_string(),
-            definition_ref: moa_connectors::domain::ConnectionDefinitionRef::built_in(
-                "knowledge:custom",
-                1,
-            )
-            .expect("arbitrary fixture reference is structurally valid"),
-            non_secret_config: json!({
-                "provider_config_key": "github",
-                "provider_connection_id": "acct-1",
-                "connector": "github",
-            }),
-            created_by_identity_id: None,
-            owner_identity_id: Uuid::new_v4(),
-        })
+            wrong_definition_id,
+            ManagedParentDefinition::KnowledgeMergeV1,
+            "",
+            "",
+            "",
+        ))
         .await
-        .expect("arbitrary built-in fixture should be seeded through ordinary create");
+        .expect("wrong managed definition fixture should be seeded");
+    set_connection_active(&pool, tenant_id, wrong_definition_id).await;
     assert!(matches!(
         repository
             .claim_managed_parent(claim_request(
                 tenant_id,
-                arbitrary_id,
-                "arbitrary-built-in",
+                wrong_definition_id,
+                "wrong-managed-definition",
                 &"f".repeat(64),
                 ManagedParentDefinition::KnowledgeNangoV1,
                 None,
@@ -297,7 +289,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
         Err(Error::ManagedParentMismatch {
             connection_id: actual,
             field: "definition",
-        }) if actual == arbitrary_id
+        }) if actual == wrong_definition_id
     ));
 }
 
@@ -403,13 +395,11 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
         authz_rows(&pool, connection_id)
             .await
             .into_iter()
-            .map(|row| (row.op, row.tuple_relation))
+            .map(|row| (row.op, row.tuple_relation, row.generation))
             .collect::<Vec<_>>(),
         vec![
-            ("delete".to_string(), "owner".to_string()),
-            ("write".to_string(), "owner".to_string()),
-            ("delete".to_string(), "tenant".to_string()),
-            ("write".to_string(), "tenant".to_string()),
+            ("delete".to_string(), "owner".to_string(), 2),
+            ("delete".to_string(), "tenant".to_string(), 2),
         ]
     );
 
@@ -503,11 +493,9 @@ fn claim_request(
     definition: ManagedParentDefinition,
     owner_identity_id: Option<Uuid>,
 ) -> ManagedParentClaimRequest {
-    let (display_name, provider_config_key, provider_connection_id, connector) = match definition {
-        ManagedParentDefinition::KnowledgeNangoV1 => {
-            ("github", "github-config", "acct-1", "github")
-        }
-        ManagedParentDefinition::KnowledgeMergeV1 => ("ats", "merge-config", "acct-merge-1", "ats"),
+    let display_name = match definition {
+        ManagedParentDefinition::KnowledgeNangoV1 => "github",
+        ManagedParentDefinition::KnowledgeMergeV1 => "ats",
     };
     ManagedParentClaimRequest {
         tenant_id,
@@ -516,9 +504,6 @@ fn claim_request(
         connection_id,
         definition,
         display_name: display_name.to_string(),
-        provider_config_key: provider_config_key.to_string(),
-        provider_connection_id: provider_connection_id.to_string(),
-        connector: connector.to_string(),
         owner_identity_id,
     }
 }
@@ -536,12 +521,19 @@ fn existing_managed_parent(
         tenant_id,
         display_name: "Renamed by operator".to_string(),
         definition_ref: definition.definition_ref(),
-        non_secret_config: json!({
-            "provider_config_key": provider_config_key,
-            "provider_connection_id": provider_connection_id,
-            "connector": connector,
-            "source_selection": {},
-        }),
+        origin: None,
+        non_secret_config: if provider_config_key.is_empty()
+            && provider_connection_id.is_empty()
+            && connector.is_empty()
+        {
+            json!({})
+        } else {
+            json!({
+                "provider_config_key": provider_config_key,
+                "provider_connection_id": provider_connection_id,
+                "connector": connector,
+            })
+        },
         created_by_identity_id: None,
         owner_identity_id: Uuid::new_v4(),
     }

@@ -12,8 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use moa_artifacts::connector::{
-    HttpMethodV1, HttpOperationContract, RuntimeConnectorAuthRequirementV1, RuntimeConnectorKindV1,
-    RuntimeOperationBindingV1,
+    HttpMethodV1, HttpOperationContract, RuntimeConnectorAuthRequirementV1,
 };
 use moa_core::traits::CredentialVault;
 use moa_core::types::credentials::{
@@ -31,7 +30,6 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::catalog::InstalledConnectorCatalog;
 use crate::domain::{
     ConnectionOrigin, ConnectorConnection, InstalledActionBinding, OperationContractHash,
 };
@@ -39,7 +37,7 @@ use crate::executor::{
     AuthorizedConnectorInvocation, ConnectorActionInvocation, ConnectorActionRuntime,
     ConnectorInvocationCoordinator, RawConnectorActionResult, ReservedConnectorInvocation,
 };
-use crate::repository::ConnectionRepository;
+use crate::repository::{ConnectionLifecycleRepository, ConnectorInvocationRepository};
 use crate::{Error, Result};
 
 const MAX_COMPLETE_URL_BYTES: usize = 8 * 1024;
@@ -56,17 +54,17 @@ pub struct HttpConnectorRuntime {
 }
 
 impl HttpConnectorRuntime {
-    /// Composes the authorization catalog, durable replay ledger, credential
-    /// vault, and outbound destination policy used by every HTTP attempt.
+    /// Composes lifecycle state, the durable replay ledger, the credential vault,
+    /// and outbound destination policy used by every HTTP attempt.
     #[must_use]
     pub fn new(
-        catalog: Arc<dyn InstalledConnectorCatalog>,
-        repository: Arc<dyn ConnectionRepository>,
+        lifecycle: Arc<dyn ConnectionLifecycleRepository>,
+        invocations: Arc<dyn ConnectorInvocationRepository>,
         credential_vault: Arc<dyn CredentialVault>,
         destination_policy: OutboundHttpPolicy,
     ) -> Self {
         Self::with_coordinator(
-            ConnectorInvocationCoordinator::new(catalog, repository),
+            ConnectorInvocationCoordinator::new(lifecycle, invocations),
             credential_vault,
             destination_policy,
         )
@@ -95,8 +93,9 @@ impl HttpConnectorRuntime {
     async fn invoke_inner(
         &self,
         invocation: ConnectorActionInvocation,
+        prepared: crate::executor::PreparedConnectorAction,
     ) -> Result<RawConnectorActionResult> {
-        let authorized = self.coordinator.authorize(invocation).await?;
+        let authorized = self.coordinator.authorize(invocation, prepared).await?;
         self.invoke_authorized(authorized).await
     }
 
@@ -109,16 +108,7 @@ impl HttpConnectorRuntime {
         authorized: AuthorizedConnectorInvocation,
     ) -> Result<RawConnectorActionResult> {
         let started = Instant::now();
-        if !matches!(
-            authorized.runtime(),
-            RuntimeConnectorKindV1::ConstrainedHttp
-        ) {
-            return Err(Error::UnsupportedHttpRuntime);
-        }
-        let RuntimeOperationBindingV1::Http { contract } = authorized.operation() else {
-            return Err(Error::UnsupportedHttpRuntime);
-        };
-        let contract = contract.clone();
+        let contract = authorized.operation().clone();
         let deadline = started + Duration::from_millis(u64::from(contract.total_timeout_ms));
         let cancellation = authorized.invocation().cancellation_token.clone();
 
@@ -361,8 +351,9 @@ impl ConnectorActionRuntime for HttpConnectorRuntime {
     async fn invoke(
         &self,
         invocation: ConnectorActionInvocation,
+        prepared: crate::executor::PreparedConnectorAction,
     ) -> Result<RawConnectorActionResult> {
-        self.invoke_inner(invocation).await
+        self.invoke_inner(invocation, prepared).await
     }
 }
 
@@ -379,13 +370,11 @@ enum SelectedAuth {
 
 fn connection_origin(connection: &ConnectorConnection) -> Result<ConnectionOrigin> {
     connection
-        .non_secret_config
-        .get("origin")
-        .and_then(Value::as_str)
+        .origin
+        .clone()
         .ok_or(Error::InvalidConnectionOrigin {
             reason: "active constrained HTTP connection requires an origin",
-        })?
-        .parse()
+        })
 }
 
 fn bounded_connect_timeout(

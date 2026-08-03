@@ -1,4 +1,4 @@
-//! Independent builders for authentication, token vault, and approvals.
+//! Independent builders for authentication and approvals.
 
 use std::sync::Arc;
 
@@ -6,8 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_authz::AwakeableResolver;
 use moa_config::MoaConfig;
-use moa_config::{AsyncAuthzKind, AuthProviderKind, TokenVaultKind};
-use moa_core::traits::{AsyncAuthzProvider, AuthProvider, TokenVaultProvider};
+use moa_config::{AsyncAuthzKind, AuthProviderKind};
+use moa_core::traits::{AsyncAuthzProvider, AuthProvider};
 #[cfg(feature = "auth0")]
 use moa_core::traits::{AuthError, Credential, Identity};
 use thiserror::Error;
@@ -18,9 +18,6 @@ pub enum BuildError {
     /// Auth provider requires an unavailable feature.
     #[error("auth provider '{0:?}' selected but feature not enabled")]
     AuthFeatureMissing(AuthProviderKind),
-    /// Token vault provider requires an unavailable feature.
-    #[error("token vault '{0:?}' selected but feature not enabled")]
-    VaultFeatureMissing(TokenVaultKind),
     /// Async authorization provider requires an unavailable feature.
     #[error("async authz '{0:?}' selected but feature not enabled")]
     AsyncAuthzFeatureMissing(AsyncAuthzKind),
@@ -94,59 +91,6 @@ pub fn build_auth_provider(
 
     tracing::info!(auth = auth.name(), "authentication provider constructed");
     Ok(auth)
-}
-
-/// Construct only the configured third-party token-vault provider.
-pub fn build_token_vault_provider(
-    cfg: &MoaConfig,
-    pool: Arc<sqlx::PgPool>,
-    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
-) -> Result<Arc<dyn TokenVaultProvider>, BuildError> {
-    cfg.token_vault
-        .validate()
-        .map_err(|error| BuildError::Provider(error.to_string()))?;
-    let token_vault: Arc<dyn TokenVaultProvider> = match cfg.token_vault.provider {
-        TokenVaultKind::None => Arc::new(crate::NullTokenVaultProvider),
-        TokenVaultKind::Postgres => {
-            let mut vault = crate::PostgresTokenVaultProvider::new(pool.clone(), kms);
-            if let Some(refresher) = build_token_refresher(&cfg.token_vault)? {
-                vault = vault.with_refresher(refresher);
-            }
-            Arc::new(vault)
-        }
-        TokenVaultKind::Auth0 => {
-            #[cfg(feature = "auth0")]
-            {
-                let auth0 = cfg.auth.auth0.as_ref().ok_or(BuildError::MissingConfig(
-                    "auth.auth0 (required for token vault)",
-                ))?;
-                let client_id =
-                    required_config_secret("MOA_AUTH_AUTH0_CLIENT_ID", &auth0.client_id)?;
-                let client_secret =
-                    required_config_secret("MOA_AUTH_AUTH0_CLIENT_SECRET", &auth0.client_secret)?;
-                Arc::new(
-                    moa_auth_providers_auth0::Auth0TokenVaultProvider::new(
-                        auth0.domain.clone(),
-                        client_id,
-                        secrecy::SecretString::new(client_secret.into_boxed_str()),
-                        format!("https://{}/api/v2/", auth0.domain.trim_end_matches('/')),
-                        pool.clone(),
-                    )
-                    .map_err(|error| BuildError::Provider(error.to_string()))?,
-                )
-            }
-            #[cfg(not(feature = "auth0"))]
-            {
-                return Err(BuildError::VaultFeatureMissing(TokenVaultKind::Auth0));
-            }
-        }
-    };
-
-    tracing::info!(
-        vault = token_vault.name(),
-        "token-vault provider constructed"
-    );
-    Ok(token_vault)
 }
 
 /// Construct only the configured asynchronous authorization provider.
@@ -227,37 +171,6 @@ fn required_config_secret(env_name: &'static str, value: &str) -> Result<String,
         .map_err(|_| BuildError::MissingEnv(env_name.to_string()))
 }
 
-/// Build the optional OAuth refresher for the self-hosted token vault.
-///
-/// Returns `Ok(None)` when no connection has refresh settings, preserving the
-/// expired-token-fails-closed behavior. Otherwise resolves each connection's
-/// client secret directly from typed config and constructs the refresher.
-fn build_token_refresher(
-    cfg: &moa_config::TokenVaultConfig,
-) -> Result<Option<Arc<crate::TokenRefresher>>, BuildError> {
-    if cfg.refresh.is_empty() {
-        return Ok(None);
-    }
-    let mut endpoints = std::collections::HashMap::with_capacity(cfg.refresh.len());
-    for (connection, refresh) in &cfg.refresh {
-        let client_secret = refresh
-            .client_secret
-            .as_ref()
-            .map(|secret| secrecy::SecretString::new(secret.clone().into_boxed_str()));
-        endpoints.insert(
-            connection.clone(),
-            crate::OAuthRefreshEndpoint {
-                token_endpoint: refresh.token_endpoint.trim().to_string(),
-                client_id: refresh.client_id.trim().to_string(),
-                client_secret,
-            },
-        );
-    }
-    let refresher = crate::TokenRefresher::new(endpoints)
-        .map_err(|error| BuildError::Provider(error.to_string()))?;
-    Ok(Some(Arc::new(refresher)))
-}
-
 #[cfg(feature = "auth0")]
 struct HybridAuthProvider {
     local: Arc<dyn AuthProvider>,
@@ -336,26 +249,5 @@ mod tests {
             moa_core::types::identifiers::TenantId::from(uuid::Uuid::nil())
         );
         assert_eq!(identity.api_key_id, None);
-    }
-
-    #[test]
-    fn token_refresher_accepts_direct_client_secret() {
-        // Pins: refresh credentials are consumed directly from typed config;
-        // construction does not depend on a second environment-variable name.
-        let mut config = moa_config::TokenVaultConfig::default();
-        config.refresh.insert(
-            "github".to_string(),
-            moa_config::OAuthRefreshConfig {
-                token_endpoint: "https://github.com/login/oauth/access_token".to_string(),
-                client_id: "client-id".to_string(),
-                client_secret: Some("client-secret".to_string()),
-            },
-        );
-
-        assert!(
-            build_token_refresher(&config)
-                .expect("direct refresh config builds")
-                .is_some()
-        );
     }
 }

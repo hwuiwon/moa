@@ -46,7 +46,7 @@ use moa_observability::{
 };
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
-use moa_wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
+use moa_wire::turn::{StartTurnRequest, TurnOutcome, TurnOutcomeKind};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -85,8 +85,8 @@ use status::{
     trial_status_response,
 };
 use target_execution::{
-    TrialTargetOutcome, capture_release_assertion_evidence, run_agent_loop_trial,
-    run_execution_template_trial,
+    AgentLoopDependencies, TrialTargetOutcome, capture_release_assertion_evidence,
+    run_agent_loop_trial, run_execution_template_trial,
 };
 use trial_simulator::load_simulator_context;
 
@@ -185,6 +185,7 @@ pub struct ExperimentTrialRunImpl {
     providers: Arc<ProviderRegistry>,
     score_lineage: Option<ScoreLineageHandle>,
     config: Arc<MoaConfig>,
+    authz: crate::handlers::authz_shim::AuthzEnforcer,
 }
 
 impl ExperimentTrialRunImpl {
@@ -200,6 +201,7 @@ impl ExperimentTrialRunImpl {
         providers: Arc<ProviderRegistry>,
         score_lineage: Option<ScoreLineageHandle>,
         config: Arc<MoaConfig>,
+        authz: crate::handlers::authz_shim::AuthzEnforcer,
     ) -> Self {
         Self {
             pool,
@@ -207,6 +209,7 @@ impl ExperimentTrialRunImpl {
             providers,
             score_lineage,
             config,
+            authz,
         }
     }
 }
@@ -239,6 +242,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
             &self.session_store,
             &self.providers,
             self.score_lineage.as_ref(),
+            &self.authz,
         )
         .await
         {
@@ -346,6 +350,7 @@ async fn run_trial(
     session_store: &Arc<PostgresSessionStore>,
     providers: &Arc<ProviderRegistry>,
     score_lineage: Option<&ScoreLineageHandle>,
+    authz: &crate::handlers::authz_shim::AuthzEnforcer,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let trial = insert_or_load_trial(ctx, request.tenant_id, request.trial.clone(), pool).await?;
     ctx.set(K_TRIAL_UID, Json(trial.trial_uid));
@@ -379,15 +384,26 @@ async fn run_trial(
                 request,
                 trial.clone(),
                 simulator_context,
-                pool,
-                session_store,
-                providers,
+                AgentLoopDependencies {
+                    pool,
+                    session_store,
+                    providers,
+                    authz,
+                },
             )
             .await?
         }
         ExperimentTargetKind::ExecutionTemplate => {
-            run_execution_template_trial(ctx, request, trial.clone(), config, pool, session_store)
-                .await?
+            run_execution_template_trial(
+                ctx,
+                request,
+                trial.clone(),
+                config,
+                pool,
+                session_store,
+                authz,
+            )
+            .await?
         }
     };
     capture_release_assertion_evidence(ctx, &mut outcome, session_store).await?;

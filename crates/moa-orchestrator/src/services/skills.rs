@@ -12,7 +12,7 @@ use moa_wire::skills::{
 };
 use restate_sdk::prelude::*;
 
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::workflows::errors::moa_error_to_status_handler_error;
 
 /// Restate service surface for protected skill operations.
@@ -33,13 +33,14 @@ pub trait Skills {
 #[derive(Clone)]
 pub struct SkillsImpl {
     pool: sqlx::PgPool,
+    authz: AuthzEnforcer,
 }
 
 impl SkillsImpl {
     /// Creates the skills adapter with its artifact, skill, and knowledge pool.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: sqlx::PgPool, authz: AuthzEnforcer) -> Self {
+        Self { pool, authz }
     }
 }
 
@@ -53,7 +54,9 @@ impl Skills for SkillsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Skills", "export");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
 
         let pool = self.pool.clone();
         Ok(ctx
@@ -71,7 +74,9 @@ impl Skills for SkillsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Skills", "list");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
 
         let pool = self.pool.clone();
         Ok(ctx

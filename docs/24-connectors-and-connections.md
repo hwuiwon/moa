@@ -28,7 +28,7 @@ The design keeps three concerns separate:
 
 | Term or concern | Meaning | Canonical owner |
 |---|---|---|
-| Connector definition | Immutable `RuntimeConnectorDefinitionV1` inside one exact released artifact revision | `moa-artifacts` |
+| Connector definition | Immutable HTTP-only `ConnectorDefinition` inside one exact released artifact revision | `moa-artifacts` |
 | Connector connection | Tenant-scoped definition reference, fixed HTTP origin/configuration, generation, lifecycle, health, and creator/owner | `moa-connectors` |
 | Installed action binding | Exact connection generation, action ID, compiled HTTP contract/hash, governed revision, policy minimum, and enabled state | `moa-connectors` |
 | Connection repository and invocation ledger | Tenant-RLS persistence, generation compare-and-swap, HTTP send boundary, and terminal outcome | `moa-connectors` |
@@ -48,14 +48,14 @@ owned services; it does not duplicate connector or knowledge domain policy.
 
 ## Definitions And Actions
 
-An authored connector definition uses the `constrained_http` runtime and must
-declare at least one action. Each action contract fixes:
+An authored connector definition is HTTP-only and must declare between one and
+64 actions. Each action contract fixes:
 
 - a reviewed HTTP method and origin-relative path template;
 - closed path, query, and JSON body mappings from schema-validated input;
 - input and output JSON schemas;
 - request, response, and timeout bounds;
-- declared data classes, action class, risk level, and minimum policy effect;
+- declared data classes and retry semantics;
 - explicit idempotency behavior and, when applicable, a reviewed idempotency
   header; and
 - at most the named credential slot declared by the definition.
@@ -64,6 +64,9 @@ Authentication is `none`, a named bearer slot, a named safe API-key header, or
 a platform-managed OAuth slot supported by trusted host code. The definition
 contains no credential material. A Draft artifact is never executable;
 artifact release and connection activation are separate reviewed boundaries.
+Connector authors do not repeat policy constants: compilation and tool
+projection supply `external_write`, `high`, and `admin_review` for every custom
+HTTP action.
 
 Custom connector definitions do not describe MCP operations or knowledge
 sources. Operator-owned deployment MCP remains configured independently in
@@ -78,7 +81,7 @@ Lifecycle is an operator-controlled, generation-fenced state machine:
 stateDiagram-v2
     [*] --> PendingAuth: create
     PendingAuth --> Active: activate
-    PendingAuth --> Deleted: delete
+    PendingAuth --> Disconnecting: disconnect
     Active --> Suspended: suspend
     Suspended --> Active: resume
     Active --> Disconnecting: disconnect
@@ -226,22 +229,31 @@ and cannot be mutated through generic connector management. Nango/Merge link,
 sync, webhook, source selection, ACL capture, content fetch, and disconnect
 remain provider-owned knowledge operations.
 
+The tenant-scoped knowledge repository is exposed through six separate
+`moa-knowledge` ports: connection/link, sync, ingestion, ACL, contact-group, and
+provider-event persistence. Provider records carry a typed materialization
+intent (inline, provider fetch, URL fetch, or metadata-only) so ingestion never
+guesses from arbitrary provider JSON or silently substitutes title-only content.
+
 ## Public Management API
 
-All routes derive tenant and caller identity from authentication, reject query
-parameters, and are dark unless
+All routes derive tenant and caller identity from authentication and are dark unless
 `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED=true`.
+Detail and mutation routes reject query parameters. The list route accepts only
+an exclusive UUID `cursor` and a `limit` in `1..=100`; it defaults to 50,
+orders by UUID ascending, omits deleted records, and returns the last visible
+UUID as `next_cursor` only when another page exists.
 
 | Route | Purpose |
 |---|---|
 | `POST /v1/connectors/connections` | Create a pending connection to one exact released HTTP connector definition |
-| `GET /v1/connectors/connections` | List authorized tenant connections |
+| `GET /v1/connectors/connections?cursor=<uuid>&limit=<1..100>` | List one page of authorized non-deleted tenant connections |
 | `GET /v1/connectors/connections/{connection_id}` | Read secret-free state, health, generation, and slot readiness |
 | `POST /v1/connectors/connections/{connection_id}/verify` | Run destination and credential readiness plus an explicitly reviewed remote verification contract, when present |
 | `POST /v1/connectors/connections/{connection_id}/activate` | Install reviewed HTTP action bindings and activate the expected generation |
 | `POST /v1/connectors/connections/{connection_id}/suspend` | Fence new work while retaining configuration, credentials, bindings, and audit |
 | `POST /v1/connectors/connections/{connection_id}/resume` | Return a suspended expected generation to Active |
-| `DELETE /v1/connectors/connections/{connection_id}` or `POST /v1/connectors/connections/{connection_id}/disconnect` | Begin audit-preserving teardown |
+| `POST /v1/connectors/connections/{connection_id}/disconnect` | Begin audit-preserving teardown |
 | `POST /v1/connectors/connections/{connection_id}/delete` | Complete the allowed terminal deletion transition |
 | `POST /v1/connectors/connections/{connection_id}/use/grant` | Grant direct same-tenant `Use` to an operator, agent, or contact |
 | `POST /v1/connectors/connections/{connection_id}/use/revoke` | Revoke one direct `Use` relationship |
@@ -277,20 +289,19 @@ rolling `moa-edge`; no database write is required.
 Use the management response, credential audit, action invocation rows, and
 structured connector traces as evidence.
 
-### Release checkpoints
+### Development reset checkpoint
 
-1. Apply V50 and V51, then deploy connection-aware writers with edge management
-   dark.
-2. Before V52, verify that every existing Nango/Merge knowledge connection has
-   its same-tenant generic parent.
-3. Apply V52 and verify Nango/Merge link, sync, webhook, ACL, and disconnect
-   behavior.
-4. Enable reviewed constrained HTTP actions with one canary and require zero
-   destination-policy bypasses, secret-redaction incidents, cross-tenant
-   mismatches, or incorrectly classified unknown outcomes.
-
-PostgreSQL migrations are a forward-only, fresh-install-contiguous history.
-Schema contraction is not a normal application rollback.
+This refactor is a hard reset with no compatibility decoder for legacy connector
+artifacts, direct experiment requests, old Restate journals, or pre-refactor
+knowledge state. Rebuild local Postgres from the complete `V000001..V000053`
+chain and start with fresh Restate durable state before live validation. The
+fresh-install epoch omits the unused per-user token-vault tables entirely; V29
+is a no-op marker preserving contiguous numbering, and V53 moves
+constrained-HTTP origin out of untyped JSON into the connector connection column
+and enforces definition-kind/origin consistency. Any checksum divergence
+requires rebuilding Postgres and resetting Restate rather than an in-place
+upgrade. Production migration of old artifacts or durable journals would
+require a separate reviewed rollout.
 
 ### Safe rollback
 
@@ -301,5 +312,6 @@ prevents installed connections from starting new work.
 
 Rollback does not delete action bindings, credentials, credential audit, or
 invocation evidence. In-flight actions retain their exact
-definition/binding/generation/contract pins. Destructive schema removal requires
-a later reviewed migration after retention and binary downgrade windows expire.
+definition/binding/generation/contract pins. Restoring binaries from before the
+hard-reset epoch requires restoring matching Postgres and Restate snapshots;
+mixed migration checksums are rejected.

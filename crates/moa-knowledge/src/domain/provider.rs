@@ -30,6 +30,22 @@ impl LinkedProviderKind {
             Self::Merge => "merge",
         }
     }
+
+    /// Parses one exact linked-provider identifier.
+    #[must_use]
+    pub fn from_str_exact(value: &str) -> Option<Self> {
+        match value {
+            "nango" => Some(Self::Nango),
+            "merge" => Some(Self::Merge),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for LinkedProviderKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Parser provider identifier.
@@ -109,7 +125,7 @@ pub struct CreateLinkTokenRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkToken {
     /// Provider identifier.
-    pub provider: String,
+    pub provider: LinkedProviderKind,
     /// Short-lived token.
     pub token: String,
     /// Optional hosted link URL.
@@ -150,7 +166,7 @@ pub struct ApplySourceSelectionRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkedAccount {
     /// Provider identifier.
-    pub provider: String,
+    pub provider: LinkedProviderKind,
     /// Provider connector.
     pub connector: String,
     /// Provider account identifier.
@@ -232,7 +248,7 @@ impl fmt::Debug for RemoteRevokeRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitialSyncStarted {
     /// Provider identifier.
-    pub provider: String,
+    pub provider: LinkedProviderKind,
     /// Provider sync identifier, when the provider reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_sync_id: Option<String>,
@@ -251,7 +267,7 @@ pub struct InitialSyncStarted {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggeredSync {
     /// Provider identifier.
-    pub provider: String,
+    pub provider: LinkedProviderKind,
     /// Provider sync identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_sync_id: Option<String>,
@@ -299,6 +315,83 @@ pub struct RecordPage {
     pub next_cursor: Option<String>,
 }
 
+/// Explicit content-materialization contract chosen by a provider adapter.
+///
+/// Provider payloads are normalized into this type before they enter the
+/// ingestion pipeline. Ingestion therefore never guesses which arbitrary JSON
+/// field contains content and never substitutes a display title for content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderRecordMaterialization {
+    /// Text already returned by the provider record listing.
+    InlineText {
+        /// Normalized document text.
+        text: String,
+        /// Provider-reported MIME type, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+    /// Content that must be fetched through the linked provider's authenticated hook.
+    ProviderFetch {
+        /// Provider-reported MIME type used when the fetch response omits one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+    /// Content available at a reviewed, directly fetchable URL.
+    FetchableUrl {
+        /// URL handed to the configured document parser.
+        url: String,
+        /// Provider-reported MIME type, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+    /// Metadata and ACL state only; this record intentionally has no indexable content.
+    MetadataOnly,
+}
+
+impl ProviderRecordMaterialization {
+    /// Returns whether this record intentionally carries no indexable content.
+    #[must_use]
+    pub fn is_metadata_only(&self) -> bool {
+        matches!(self, Self::MetadataOnly)
+    }
+
+    /// Returns whether content must be fetched through the authenticated provider hook.
+    #[must_use]
+    pub fn requires_provider_fetch(&self) -> bool {
+        matches!(self, Self::ProviderFetch { .. })
+    }
+
+    /// Returns text already materialized by the provider record listing.
+    #[must_use]
+    pub fn inline_text(&self) -> Option<&str> {
+        match self {
+            Self::InlineText { text, .. } => Some(text),
+            Self::ProviderFetch { .. } | Self::FetchableUrl { .. } | Self::MetadataOnly => None,
+        }
+    }
+
+    /// Returns a reviewed URL that can be handed directly to the document parser.
+    #[must_use]
+    pub fn fetchable_url(&self) -> Option<&str> {
+        match self {
+            Self::FetchableUrl { url, .. } => Some(url),
+            Self::InlineText { .. } | Self::ProviderFetch { .. } | Self::MetadataOnly => None,
+        }
+    }
+
+    /// Returns the provider-reported MIME type attached to this materialization intent.
+    #[must_use]
+    pub fn mime_type(&self) -> Option<&str> {
+        match self {
+            Self::InlineText { mime_type, .. }
+            | Self::ProviderFetch { mime_type }
+            | Self::FetchableUrl { mime_type, .. } => mime_type.as_deref(),
+            Self::MetadataOnly => None,
+        }
+    }
+}
+
 /// Provider record before normalization into a knowledge object.
 ///
 /// Serializable — and safely so. [`ProviderRecord::acl`] holds principals that
@@ -327,6 +420,8 @@ pub struct ProviderRecord {
     /// Source update timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_updated_at: Option<DateTime<Utc>>,
+    /// Provider-normalized content materialization intent.
+    pub materialization: ProviderRecordMaterialization,
     /// Safe metadata.
     #[serde(default)]
     pub metadata: Value,
@@ -343,18 +438,18 @@ pub struct ProviderRecord {
 
 /// Request to fetch the byte content of one provider record.
 ///
-/// Mirrors the owned-request shape of [`ListChangedRecordsRequest`] and
-/// [`TriggerSyncRequest`]: the connection carries the provider account identity
-/// and connector needed to authorize the fetch, the resolved credential
-/// authenticates it, and the record identifies the specific source object whose
-/// content should be downloaded. Carrying credential material makes this type
-/// deliberately non-serializable.
+/// The connection carries the provider account identity and connector needed to
+/// authorize the fetch, the resolved credential authenticates it, and the
+/// record identifies the specific source object whose content should be
+/// downloaded. The credential is borrowed so one non-cloneable secret can
+/// authorize the bounded requests in one page without being serialized or
+/// copied once per record.
 #[derive(Debug)]
-pub struct FetchRecordContentRequest {
+pub struct FetchRecordContentRequest<'credential> {
     /// Connection whose provider account authorizes the fetch.
     pub connection: KnowledgeConnection,
     /// Resolved tenant credential, when the provider requires one.
-    pub credential: Option<RedactedSecret>,
+    pub credential: Option<&'credential RedactedSecret>,
     /// Normalized record whose byte content should be downloaded.
     pub record: ProviderRecord,
 }

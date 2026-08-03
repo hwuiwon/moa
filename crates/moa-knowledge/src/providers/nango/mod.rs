@@ -12,9 +12,10 @@ use crate::{
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
-        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        RecordPage, RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest,
-        TriggeredSync, WebhookEvent,
+        LinkToken, LinkedAccount, LinkedProviderKind, ListChangedRecordsRequest,
+        ProviderIntegration, ProviderRecord, ProviderRecordMaterialization, RecordPage,
+        RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync,
+        WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -22,6 +23,7 @@ use crate::{
         LinkedIntegrationProvider,
         acl_normalize::principal_namespace,
         http::{self, string_field, trim_base_url},
+        materialization_from_payload, provider_mime_type,
     },
 };
 
@@ -56,9 +58,9 @@ struct ProxyFetchPlan {
 /// This is the integration registry. **Adding an integration = a new sibling
 /// module (like [`google_drive`]) exposing `content_fetch_plan`, plus one match
 /// arm below** — nothing else keys on the integration id. Unregistered
-/// integrations return `None`, so the pipeline keeps its title-only fallback
-/// rather than erroring. Records that already carry inline text never reach here
-/// because the pipeline materializes them without a fetch.
+/// integrations return `None`. Adapters must classify those records as
+/// metadata-only; a record explicitly classified for provider fetch fails if a
+/// strategy unexpectedly cannot produce a request.
 fn integration_content_fetch_plan(
     connector: &str,
     record: &ProviderRecord,
@@ -250,7 +252,7 @@ impl LinkedIntegrationProvider for NangoProvider {
             .and_then(|data| data.expires_at)
             .or(response.expires_at);
         Ok(LinkToken {
-            provider: "nango".to_string(),
+            provider: LinkedProviderKind::Nango,
             token,
             link_url,
             expires_at,
@@ -285,7 +287,7 @@ impl LinkedIntegrationProvider for NangoProvider {
             .connection_id
             .ok_or_else(|| Error::provider("nango", "exchange response missing connection_id"))?;
         Ok(LinkedAccount {
-            provider: "nango".to_string(),
+            provider: LinkedProviderKind::Nango,
             connector: response
                 .provider_config_key
                 .or(response.provider)
@@ -322,7 +324,7 @@ impl LinkedIntegrationProvider for NangoProvider {
             .map_err(|error| Error::provider("nango", format!("sync trigger failed: {error}")))?;
         let value: Value = http::json_response(response).await?;
         Ok(TriggeredSync {
-            provider: "nango".to_string(),
+            provider: LinkedProviderKind::Nango,
             provider_sync_id: string_field(&value, &["sync_id", "id"]),
             status: string_field(&value, &["status"])
                 .or_else(|| match value.get("success").and_then(Value::as_bool) {
@@ -363,7 +365,7 @@ impl LinkedIntegrationProvider for NangoProvider {
             ));
         }
         Ok(InitialSyncStarted {
-            provider: "nango".to_string(),
+            provider: LinkedProviderKind::Nango,
             provider_sync_id: string_field(&value, &["sync_id", "id"]),
             // Nango starts the sync asynchronously and reports completion
             // through its webhook, so a successful start never proves the
@@ -517,23 +519,24 @@ impl LinkedIntegrationProvider for NangoProvider {
         // Connection identity is part of the namespace because provider-local
         // principal ids may be reused by two linked accounts of the same
         // connector.
-        Ok(page.into_record_page(
+        page.into_record_page(
+            &req.connection.connector,
             &principal_namespace(
                 "nango",
                 &req.connection.connector,
                 req.connection.connection_uid,
             ),
             &req.acl_key,
-        ))
+        )
     }
 
     async fn fetch_record_content(
         &self,
-        req: FetchRecordContentRequest,
+        req: FetchRecordContentRequest<'_>,
     ) -> Result<Option<FetchedRecordContent>> {
-        // Resolve the integration-specific fetch strategy. Unregistered
-        // integrations, and records with no fetchable content, yield None so the
-        // pipeline keeps its title-only fallback instead of erroring.
+        // Resolve the integration-specific fetch strategy. Normalization marks
+        // unregistered integrations and non-fetchable objects metadata-only, so
+        // None here means a provider-fetch contract drift and ingestion fails.
         let Some(plan) = integration_content_fetch_plan(&req.connection.connector, &req.record)
         else {
             return Ok(None);
@@ -733,15 +736,20 @@ struct NangoRecordPage {
 }
 
 impl NangoRecordPage {
-    fn into_record_page(self, namespace: &str, acl_key: &SourceAclKey) -> RecordPage {
-        RecordPage {
+    fn into_record_page(
+        self,
+        connector: &str,
+        namespace: &str,
+        acl_key: &SourceAclKey,
+    ) -> Result<RecordPage> {
+        Ok(RecordPage {
             records: self
                 .data
                 .into_iter()
-                .map(|record| record.into_provider_record(namespace, acl_key))
-                .collect(),
+                .map(|record| record.into_provider_record(connector, namespace, acl_key))
+                .collect::<Result<Vec<_>>>()?,
             next_cursor: self.next_cursor,
-        }
+        })
     }
 }
 
@@ -767,12 +775,26 @@ impl NangoRecord {
     /// `namespace` scopes the resulting principals to this connector's identity
     /// domain, so a Drive user and a same-named identity in another connector
     /// are never treated as the same principal.
-    fn into_provider_record(self, namespace: &str, acl_key: &SourceAclKey) -> ProviderRecord {
+    fn into_provider_record(
+        self,
+        connector: &str,
+        namespace: &str,
+        acl_key: &SourceAclKey,
+    ) -> Result<ProviderRecord> {
         let payload = redact_provider_metadata(self.payload);
         let acl =
             crate::providers::acl_normalize::record_acl_from_payload(namespace, &payload, acl_key);
-        ProviderRecord {
-            source_id: self.id.unwrap_or_else(|| stable_payload_id(&payload)),
+        let source_id = match self.id {
+            Some(source_id) => source_id,
+            None => crate::providers::stable_provider_record_id(&payload).map_err(|error| {
+                Error::provider(
+                    "nango",
+                    format!("record fallback identity serialization failed: {error}"),
+                )
+            })?,
+        };
+        let mut record = ProviderRecord {
+            source_id,
             object_type: self.model.unwrap_or_else(|| "record".to_string()),
             title: string_field(&payload, &["title", "name", "subject"]),
             source_uri: string_field(&payload, &["url", "web_url", "html_url"]),
@@ -782,25 +804,28 @@ impl NangoRecord {
             ),
             deleted: self.deleted,
             source_updated_at: self.modified_at,
+            materialization: materialization_from_payload(&payload),
             metadata: crate::providers::acl_normalize::strip_acl_principal_carriers(
                 redact_provider_metadata(self.metadata),
             ),
             payload: crate::providers::acl_normalize::strip_acl_principal_carriers(payload),
             acl,
+        };
+        if record.materialization.is_metadata_only()
+            && integration_content_fetch_plan(connector, &record).is_some()
+        {
+            let mime_type = provider_mime_type(&record.payload)
+                .or_else(|| provider_mime_type(&record.metadata));
+            record.materialization = ProviderRecordMaterialization::ProviderFetch { mime_type };
         }
+        Ok(record)
     }
-}
-
-fn stable_payload_id(value: &Value) -> String {
-    blake3::hash(value.to_string().as_bytes())
-        .to_hex()
-        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{NangoRecord, nango_metadata};
-    use crate::acl_key::SourceAclKey;
+    use crate::{acl_key::SourceAclKey, domain::ProviderRecordMaterialization};
     use serde_json::json;
 
     #[test]
@@ -829,10 +854,13 @@ mod tests {
             "permissionIds": ["provider-readable-id"]
         }))
         .expect("fixture record decodes");
-        let converted = record.into_provider_record(
-            "nango:google-drive:connection-1",
-            &SourceAclKey::new(1, vec![7; 32]),
-        );
+        let converted = record
+            .into_provider_record(
+                "google-drive",
+                "nango:google-drive:connection-1",
+                &SourceAclKey::new(1, vec![7; 32]),
+            )
+            .expect("provider record converts");
 
         assert!(converted.acl.complete);
         assert_eq!(converted.acl.entries.len(), 1);
@@ -841,6 +869,10 @@ mod tests {
         assert!(!serialized.contains("finance@example.com"));
         assert!(!serialized.contains("provider-readable-id"));
         assert_eq!(converted.metadata["safe"], "kept");
+        assert!(matches!(
+            converted.materialization,
+            ProviderRecordMaterialization::InlineText { ref text, .. } if text == "Quarterly plan"
+        ));
         assert!(serialized.contains("Quarterly plan"));
     }
 

@@ -43,7 +43,11 @@ use crate::{
     },
     parser::DocumentParser,
     providers::RecordContentFetcher,
-    repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
+    repository::{
+        DocumentVersionIngestionClaim, acl::KnowledgeAclRepository,
+        contact_group::KnowledgeContactGroupRepository, document::KnowledgeIngestionRepository,
+        sync::KnowledgeSyncRepository,
+    },
 };
 
 /// Maximum objects fetched and tombstoned per source-selection prune page.
@@ -71,11 +75,15 @@ pub struct PageIngestionReport {
 }
 
 /// Dependency-injected ingestion service free of Restate service types.
-pub struct KnowledgeIngestionPipeline<R, P, E, G> {
-    repository: Arc<R>,
-    parser: Arc<P>,
-    embedder: Arc<E>,
-    graph: Arc<G>,
+#[derive(Clone)]
+pub struct KnowledgeIngestionPipeline {
+    sync_repository: Arc<dyn KnowledgeSyncRepository>,
+    ingestion_repository: Arc<dyn KnowledgeIngestionRepository>,
+    acl_repository: Arc<dyn KnowledgeAclRepository>,
+    contact_group_repository: Arc<dyn KnowledgeContactGroupRepository>,
+    parser: Arc<dyn DocumentParser>,
+    embedder: Arc<dyn EmbeddingProvider>,
+    graph: Arc<dyn KnowledgeGraphWriter>,
     chunking: ChunkingConfig,
     provider: String,
     parser_label: String,

@@ -29,7 +29,7 @@ use moa_wire::privacy::{
 use restate_sdk::prelude::*;
 use std::sync::Arc;
 
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::AuthzEnforcer;
 
 /// Restate service surface for protected privacy administration.
 #[restate_sdk::service]
@@ -73,6 +73,7 @@ pub struct PrivacyImpl {
     background_pool: sqlx::PgPool,
     compliance: ComplianceConfig,
     kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+    authz: AuthzEnforcer,
 }
 
 impl PrivacyImpl {
@@ -83,12 +84,14 @@ impl PrivacyImpl {
         background_pool: sqlx::PgPool,
         compliance: ComplianceConfig,
         kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             foreground_pool,
             background_pool,
             compliance,
             kms,
+            authz,
         }
     }
 }
@@ -102,7 +105,9 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyExportResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "export");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let subject_user_id = request.subject_user_id.to_string();
         let claims = ApprovalTokenVerifier::from_config(&self.compliance)?.verify(
             &request.approval_token,
@@ -139,7 +144,9 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyEraseResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "erase");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let subject_user_id = request.subject_user_id.to_string();
         let claims = ApprovalTokenVerifier::from_config(&self.compliance)?.verify(
             &request.approval_token,
@@ -173,7 +180,10 @@ impl Privacy for PrivacyImpl {
         // Raising a dual-control request is privileged; gate it on tenant admin,
         // exactly like the erasure it guards. The distinct-approver (SoD) rule is
         // enforced at approval time, not here.
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.foreground_pool.clone();
         let requested_by = identity.id.to_string();
         let operation_ref = erase_operation_ref(
@@ -211,7 +221,10 @@ impl Privacy for PrivacyImpl {
         // Approving is privileged; gate it on tenant admin. The dual-control
         // registry additionally rejects an approver that is the requester
         // (segregation of duties).
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.foreground_pool.clone();
         let approver = identity.id.to_string();
 
@@ -241,7 +254,10 @@ impl Privacy for PrivacyImpl {
         let request = request.into_inner();
         // Placing a legal hold is a privileged compliance mutation; the registry
         // performs no authorization, so gate it on tenant admin here.
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.foreground_pool.clone();
         let placed_by = identity.id.to_string();
 
@@ -275,7 +291,10 @@ impl Privacy for PrivacyImpl {
         annotate_restate_handler_span("Privacy", "release_legal_hold");
         let request = request.into_inner();
         // Releasing a legal hold is privileged; gate it on tenant admin.
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
         let pool = self.foreground_pool.clone();
         let released_by = identity.id.to_string();
 

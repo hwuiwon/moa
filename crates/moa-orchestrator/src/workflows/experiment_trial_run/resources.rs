@@ -24,7 +24,7 @@ use crate::workflows::durable_utc_now;
 use moa_core::types::resource::{ResourceAmounts, ResourceEnvelope};
 use moa_experiments::model::{
     ExperimentResourceAdmission, ExperimentResourceComponent, ExperimentResourceDenial,
-    ExperimentResourceReservationRequest, ExperimentResourceUsage,
+    ExperimentResourceReservationRequest, ExperimentResourceUsage, ExperimentTurnResourceShares,
 };
 
 /// Splits a trial envelope into the worst case one simulated turn may consume.
@@ -35,14 +35,7 @@ use moa_experiments::model::{
 /// would push past it is refused before it dispatches rather than after it
 /// bills.
 pub(super) fn per_turn_worst_case(limits: ResourceAmounts) -> ResourceAmounts {
-    let turns = limits.turns.max(1);
-    ResourceAmounts {
-        cost_micro_usd: limits.cost_micro_usd / turns,
-        tokens: limits.tokens / turns,
-        turns: 1,
-        model_calls: (limits.model_calls / turns).max(1),
-        tool_calls: limits.tool_calls / turns,
-    }
+    ExperimentTurnResourceShares::from_trial_limits(limits).turn
 }
 
 /// The simulator's share of one turn.
@@ -51,25 +44,12 @@ pub(super) fn per_turn_worst_case(limits: ResourceAmounts) -> ResourceAmounts {
 /// not consume a target turn. It takes half the turn's money and tokens; the
 /// target keeps the rest.
 pub(super) fn simulator_worst_case(turn: ResourceAmounts) -> ResourceAmounts {
-    ResourceAmounts {
-        cost_micro_usd: (turn.cost_micro_usd / 2).max(1),
-        tokens: (turn.tokens / 2).max(1),
-        turns: 0,
-        model_calls: 1,
-        tool_calls: 0,
-    }
+    ExperimentTurnResourceShares::from_turn(turn).simulator
 }
 
 /// The target's share of one turn: everything the simulator did not take.
 pub(super) fn target_worst_case(turn: ResourceAmounts) -> ResourceAmounts {
-    let simulator = simulator_worst_case(turn);
-    ResourceAmounts {
-        cost_micro_usd: turn.cost_micro_usd.saturating_sub(simulator.cost_micro_usd),
-        tokens: turn.tokens.saturating_sub(simulator.tokens),
-        turns: 1,
-        model_calls: turn.model_calls.saturating_sub(1).max(1),
-        tool_calls: turn.tool_calls,
-    }
+    ExperimentTurnResourceShares::from_turn(turn).target
 }
 
 /// Deterministic reservation key for one simulator model call.
@@ -90,11 +70,6 @@ pub(super) fn execution_reservation_key(trial_uid: Uuid) -> String {
     format!("trial:{trial_uid}:target:execution")
 }
 
-/// Deterministic reservation key for one direct run target.
-pub(crate) fn direct_target_reservation_key(run_uid: Uuid) -> String {
-    format!("run:{run_uid}:target")
-}
-
 /// Withholds capacity on the run ledger for one upcoming dispatch.
 ///
 /// The caller must dispatch only on [`ExperimentResourceAdmission::Granted`].
@@ -106,67 +81,15 @@ pub(super) async fn reserve(
     worst_case: ResourceAmounts,
     pool: &sqlx::PgPool,
 ) -> Result<ExperimentResourceAdmission, HandlerError> {
-    reserve_for(
-        ctx,
-        trial.scope,
-        trial.run_uid,
-        Some(trial.trial_uid),
-        component,
-        reservation_key,
-        worst_case,
-        "experiment_trial_reserve_resources",
-        pool,
-    )
-    .await
-}
-
-/// Withholds capacity for one direct run target before it dispatches.
-pub(crate) async fn reserve_run(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    run_uid: Uuid,
-    component: ExperimentResourceComponent,
-    reservation_key: String,
-    worst_case: ResourceAmounts,
-    pool: &sqlx::PgPool,
-) -> Result<ExperimentResourceAdmission, HandlerError> {
-    reserve_for(
-        ctx,
-        scope,
-        run_uid,
-        None,
-        component,
-        reservation_key,
-        worst_case,
-        "experiment_run_reserve_resources",
-        pool,
-    )
-    .await
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the durable reservation coordinate is intentionally explicit"
-)]
-async fn reserve_for(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    run_uid: Uuid,
-    trial_uid: Option<Uuid>,
-    component: ExperimentResourceComponent,
-    reservation_key: String,
-    worst_case: ResourceAmounts,
-    operation_name: &'static str,
-    pool: &sqlx::PgPool,
-) -> Result<ExperimentResourceAdmission, HandlerError> {
     let pool = pool.clone();
     let request = ExperimentResourceReservationRequest {
-        run_uid,
-        trial_uid,
+        run_uid: trial.run_uid,
+        trial_uid: trial.trial_uid,
         reservation_key,
         component,
         worst_case,
     };
+    let scope = trial.scope;
     Ok(ctx
         .run(|| {
             let pool = pool.clone();
@@ -182,7 +105,7 @@ async fn reserve_for(
                     .map_err(moa_error_to_handler_error)
             }
         })
-        .name(operation_name)
+        .name("experiment_trial_reserve_resources")
         .await?
         .into_inner())
 }
@@ -214,49 +137,9 @@ pub(super) async fn reconcile(
     actual: ExperimentResourceUsage,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    reconcile_for(
-        ctx,
-        trial.scope,
-        trial.run_uid,
-        reservation_key,
-        actual,
-        "experiment_trial_reconcile_resources",
-        pool,
-    )
-    .await
-}
-
-/// Commits actual usage for one direct run target reservation.
-pub(crate) async fn reconcile_run(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    run_uid: Uuid,
-    reservation_key: String,
-    actual: ExperimentResourceUsage,
-    pool: &sqlx::PgPool,
-) -> Result<(), HandlerError> {
-    reconcile_for(
-        ctx,
-        scope,
-        run_uid,
-        reservation_key,
-        actual,
-        "experiment_run_reconcile_resources",
-        pool,
-    )
-    .await
-}
-
-async fn reconcile_for(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    run_uid: Uuid,
-    reservation_key: String,
-    actual: ExperimentResourceUsage,
-    operation_name: &'static str,
-    pool: &sqlx::PgPool,
-) -> Result<(), HandlerError> {
     let pool = pool.clone();
+    let scope = trial.scope;
+    let run_uid = trial.run_uid;
     ctx.run(|| {
         let pool = pool.clone();
         let reservation_key = reservation_key.clone();
@@ -268,7 +151,7 @@ async fn reconcile_for(
                 .map_err(moa_error_to_handler_error)
         }
     })
-    .name(operation_name)
+    .name("experiment_trial_reconcile_resources")
     .await?;
     Ok(())
 }
@@ -280,45 +163,9 @@ pub(super) async fn release(
     reservation_key: String,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    release_for(
-        ctx,
-        trial.scope,
-        trial.run_uid,
-        reservation_key,
-        "experiment_trial_release_resources",
-        pool,
-    )
-    .await
-}
-
-/// Returns a direct-run reservation whose target never dispatched.
-pub(crate) async fn release_run(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    run_uid: Uuid,
-    reservation_key: String,
-    pool: &sqlx::PgPool,
-) -> Result<(), HandlerError> {
-    release_for(
-        ctx,
-        scope,
-        run_uid,
-        reservation_key,
-        "experiment_run_release_resources",
-        pool,
-    )
-    .await
-}
-
-async fn release_for(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    run_uid: Uuid,
-    reservation_key: String,
-    operation_name: &'static str,
-    pool: &sqlx::PgPool,
-) -> Result<(), HandlerError> {
     let pool = pool.clone();
+    let scope = trial.scope;
+    let run_uid = trial.run_uid;
     ctx.run(|| {
         let pool = pool.clone();
         let reservation_key = reservation_key.clone();
@@ -330,7 +177,7 @@ async fn release_for(
                 .map_err(moa_error_to_handler_error)
         }
     })
-    .name(operation_name)
+    .name("experiment_trial_release_resources")
     .await?;
     Ok(())
 }
@@ -440,17 +287,6 @@ mod tests {
             model_calls,
             tool_calls,
         }
-    }
-
-    #[test]
-    fn direct_target_reservation_key_is_run_scoped_offline() {
-        // Pins: a direct run has one deterministic root-level reservation and
-        // never masquerades as a synthetic trial reservation.
-        let run_uid = Uuid::from_u128(17);
-        assert_eq!(
-            direct_target_reservation_key(run_uid),
-            format!("run:{run_uid}:target")
-        );
     }
 
     #[test]

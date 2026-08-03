@@ -9,7 +9,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::error::{AuditError, Result};
-use moa_lineage_core::chain::canonical_json_bytes;
+use moa_core::canonical_json::canonical_json_bytes;
 
 /// Stable `key_id()` reported by the per-tenant signer as a whole. Individual
 /// roots carry a partition-specific label from [`per_tenant_key_label`].

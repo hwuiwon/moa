@@ -37,11 +37,18 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
         },
     );
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
             metadata: credentialish_metadata(),
@@ -258,11 +265,18 @@ async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidatio
             parser_label: "test_parser".to_string(),
         },
     );
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
             metadata: credentialish_metadata(),
@@ -381,11 +395,18 @@ async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh()
         },
     );
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_prune".to_string(),
             metadata: json!({}),

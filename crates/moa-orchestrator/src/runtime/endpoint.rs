@@ -21,22 +21,14 @@ use crate::workflows::knowledge_sync_ingestion::{
 };
 use crate::workflows::tenant_purge::{TenantPurge, TenantPurgeImpl};
 use moa_artifacts::registry::ArtifactRegistry;
-use moa_authz::FgaClient;
 use moa_config::MoaConfig;
-use moa_config::SessionLimitsConfig;
-use moa_core::{
-    traits::ChannelAdapter, traits::EmbeddingProvider, traits::LineageHandle,
-    types::channel::Channel,
-};
-use moa_hands::ToolRouter;
-use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
-use moa_providers::ProviderRegistry;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::runtime::deps::RuntimeDeps;
-use crate::services::connectors::{ConnectorConnections, ConnectorConnectionsImpl};
+use crate::services::connectors::restate::{ConnectorConnections, ConnectorConnectionsImpl};
 use crate::services::experiments::{Experiments, ExperimentsImpl};
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
@@ -44,6 +36,7 @@ use crate::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
 use crate::{
     objects::{
         cron_job::{CronJob, CronJobImpl},
+        ingestion::{IngestionVO, IngestionVOImpl},
         session::{Session, SessionImpl},
         tenant::{TenantImpl, TenantObject},
         worker::{Worker, WorkerImpl},
@@ -152,31 +145,26 @@ pub struct RegisteredService {
 }
 
 /// Builds the Restate endpoint with the production binding order.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the composition root keeps service dependencies explicit instead of hiding them in a dependency bag"
-)]
-pub fn build_endpoint(
-    session_store: Arc<moa_session::PostgresSessionStore>,
-    pool: sqlx::PgPool,
-    background_pool: sqlx::PgPool,
-    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
-    fga_client: Option<FgaClient>,
-    providers: Arc<ProviderRegistry>,
-    tool_router: Arc<ToolRouter>,
-    runtime_deps: &RuntimeDeps,
-    session_limits: SessionLimitsConfig,
-    config: Arc<MoaConfig>,
-    contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
-    credential_vault: Arc<dyn moa_core::traits::CredentialVault>,
-    lineage: Arc<dyn LineageHandle>,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
-    runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
-    score_lineage: Option<crate::lineage::ScoreLineageHandle>,
-) -> Endpoint {
+pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
+    let session_store = runtime_deps.session_store.clone();
+    let pool = runtime_deps.pool.clone();
+    let background_pool = runtime_deps.background_pool.clone();
+    let kms = runtime_deps.kms.provider();
+    let fga_client = runtime_deps.fga_client.clone();
+    let providers = runtime_deps.providers.clone();
+    let tool_router = runtime_deps.tool_router.clone();
+    let config = runtime_deps.config.clone();
+    let session_limits = config.session_limits.clone();
+    let contact_token_issuer = runtime_deps.contact_token_issuer.clone();
+    let credential_vault = runtime_deps.credential_vault.clone();
+    let lineage = runtime_deps.lineage.handle.clone();
+    let embedding_provider = runtime_deps.embedding_provider.clone();
+    let channel_adapters = Arc::new(runtime_deps.channel_adapters.clone());
+    let runtime_cache = runtime_deps.runtime_cache.clone();
+    let score_lineage = runtime_deps.lineage.score_handle();
     let connector_catalogs = runtime_deps.connector_catalogs.clone();
     let connector_completion = runtime_deps.connector_completion.clone();
+    let authz = AuthzEnforcer::new(fga_client.clone());
     let mut builder = Endpoint::builder()
         .bind(
             SessionStoreImpl::new(
@@ -184,6 +172,7 @@ pub fn build_endpoint(
                 pool.clone(),
                 config.clone(),
                 runtime_cache.clone(),
+                authz.clone(),
             )
             .serve(),
         )
@@ -192,21 +181,28 @@ pub fn build_endpoint(
                 .with_session_limits(session_limits.clone())
                 .serve(),
         )
-        .bind(AgentDefinitionsImpl::new(pool.clone(), connector_catalogs.clone()).serve())
+        .bind(
+            AgentDefinitionsImpl::new(pool.clone(), connector_catalogs.clone(), authz.clone())
+                .serve(),
+        )
         .bind(AgentsImpl::new(pool.clone(), fga_client.clone()).serve())
-        .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone()).serve())
-        .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone())).serve())
-        .bind(ArtifactReleaseImpl::new(pool.clone(), connector_catalogs.clone()).serve())
+        .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone(), authz.clone()).serve())
+        .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone()), authz.clone()).serve())
+        .bind(
+            ArtifactReleaseImpl::new(pool.clone(), connector_catalogs.clone(), authz.clone())
+                .serve(),
+        )
         .bind(
             ActionReviewsImpl::new(
                 pool.clone(),
                 session_store.clone(),
                 action_review_timeout_secs(&config),
+                authz.clone(),
             )
             .serve(),
         )
         .bind(ApiKeysImpl::new(pool.clone(), fga_client.clone()).serve())
-        .bind(AuthzImpl::new(pool.clone()).serve())
+        .bind(AuthzImpl::new(pool.clone(), authz.clone()).serve())
         .bind(AuthzChallengesImpl::new(pool.clone()).serve())
         .bind(
             ContactsImpl::new(
@@ -214,6 +210,8 @@ pub fn build_endpoint(
                 session_store.clone(),
                 config.clone(),
                 contact_token_issuer,
+                runtime_deps.delivery_sink.clone(),
+                authz.clone(),
             )
             .serve(),
         );
@@ -221,22 +219,34 @@ pub fn build_endpoint(
     builder = builder
         .bind(ConnectorConnectionsImpl::new(runtime_deps.connector_management.clone()).serve());
 
-    builder = builder
-        .bind(ExperimentsImpl::new(pool.clone(), providers.clone(), session_store.clone()).serve());
+    builder = builder.bind(
+        ExperimentsImpl::new(
+            pool.clone(),
+            providers.clone(),
+            session_store.clone(),
+            authz.clone(),
+        )
+        .serve(),
+    );
 
     builder = builder
-        .bind(IngestionVOImpl.serve())
+        .bind(IngestionVOImpl::new(runtime_deps.ingest_runtime.clone()).serve())
         .bind(
-            ToolExecutorImpl::new(tool_router.clone())
-                .with_session_store(session_store.clone(), session_store.clone())
-                .with_connectors(connector_catalogs.clone(), connector_completion)
-                .serve(),
+            ToolExecutorImpl::new(
+                tool_router.clone(),
+                connector_catalogs.clone(),
+                connector_completion,
+                session_store.clone(),
+                session_store.clone(),
+            )
+            .serve(),
         )
         .bind(
             ActionPolicyImpl::new(
                 tool_router.clone(),
                 connector_catalogs.clone(),
                 session_store.clone(),
+                authz.clone(),
             )
             .serve(),
         )
@@ -246,6 +256,7 @@ pub fn build_endpoint(
                 connector_catalogs.clone(),
                 config.execution.clone(),
                 session_store.clone(),
+                authz.clone(),
             )
             .serve(),
         )
@@ -261,6 +272,7 @@ pub fn build_endpoint(
                     runtime_cache.clone(),
                 )
                 .with_connector_connections(runtime_deps.connector_connections.clone()),
+                authz.clone(),
             )
             .serve(),
         )
@@ -271,16 +283,17 @@ pub fn build_endpoint(
                 config.clone(),
                 providers.clone(),
                 tool_router.clone(),
+                authz.clone(),
             )
             .serve(),
         )
         .bind(
-            MemoryImpl::new(
+            MemoryImpl::from_retrieval_engine(
                 pool.clone(),
                 kms.clone(),
-                config.clone(),
                 session_store.clone(),
-                runtime_cache.clone(),
+                runtime_deps.retrieval_engine.clone(),
+                authz.clone(),
             )
             .serve(),
         )
@@ -291,10 +304,11 @@ pub fn build_endpoint(
                 background_pool,
                 config.compliance.clone(),
                 kms.clone(),
+                authz.clone(),
             )
             .serve(),
         )
-        .bind(SkillsImpl::new(pool.clone()).serve())
+        .bind(SkillsImpl::new(pool.clone(), authz.clone()).serve())
         .bind(CronJobImpl.serve())
         .bind(
             SessionImpl::new(
@@ -303,6 +317,7 @@ pub fn build_endpoint(
                 config.clone(),
                 session_limits.clone(),
                 runtime_cache.clone(),
+                authz.clone(),
             )
             .serve(),
         )
@@ -312,6 +327,7 @@ pub fn build_endpoint(
                 session_limits.clone(),
                 providers.clone(),
                 connector_catalogs.clone(),
+                authz.clone(),
             )
             .serve(),
         )
@@ -368,7 +384,7 @@ pub fn build_endpoint(
 
     builder = builder
         .bind(ArtifactReleaseEvaluationImpl::new(pool.clone()).serve())
-        .bind(ExperimentRunImpl::new(pool.clone(), session_store.clone(), config.clone()).serve())
+        .bind(ExperimentRunImpl::new(pool.clone()).serve())
         .bind(
             ExperimentTrialRunImpl::new(
                 pool.clone(),
@@ -376,6 +392,7 @@ pub fn build_endpoint(
                 providers.clone(),
                 score_lineage,
                 config.clone(),
+                authz,
             )
             .serve(),
         );
@@ -405,6 +422,7 @@ pub fn build_endpoint(
                 lineage,
                 channel_adapters,
                 event_appender,
+                runtime_deps.turn_request_preparer.clone(),
             )
             .serve(),
         )

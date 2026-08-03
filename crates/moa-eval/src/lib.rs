@@ -6,6 +6,7 @@ pub mod controls;
 pub mod engine;
 pub mod execution;
 pub mod external_memory;
+pub mod fixture_ids;
 pub mod golden;
 pub mod kernel;
 pub mod long_conversation;

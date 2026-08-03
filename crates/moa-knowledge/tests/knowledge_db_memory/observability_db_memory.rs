@@ -13,7 +13,8 @@ use moa_knowledge::{
     domain::{
         DocumentElement, DocumentElementKind, IngestionStepStatus, KnowledgeConnection,
         KnowledgeIngestionStep, KnowledgeSyncCounters, KnowledgeSyncRun, ParsedDocument,
-        ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
+        ProviderRecord, ProviderRecordAcl, ProviderRecordMaterialization, RecordPage,
+        SyncRunStatus,
     },
     error::Error,
     graph_delta::KnowledgeGraphDelta,
@@ -22,11 +23,16 @@ use moa_knowledge::{
         KnowledgeIngestionPipelineConfig,
     },
     parser::DocumentParser,
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        PostgresKnowledgeRepository, connection::KnowledgeConnectionRepository,
+        sync::KnowledgeSyncRepository,
+    },
 };
 use moa_test_support::postgres;
 use serde_json::json;
 use uuid::Uuid;
+
+use crate::support::insert_managed_connector_parent;
 
 const SECRET_TOKEN: &str = "raw-provider-secret-token";
 const RAW_DOCUMENT: &str = "RAW_DOCUMENT_TEXT_SHOULD_NOT_BE_IN_STEPS";
@@ -189,11 +195,18 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
         RlsContext::tenant(tenant_id),
     ));
     let connection_uid = Uuid::now_v7();
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "account-observability".to_string(),
             metadata: json!({ "safe": "connection", "access_token": SECRET_TOKEN }),
@@ -271,8 +284,8 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     assert_failed_steps(
         &repository,
         provider_failure,
-        SyncRunStatus::FailedTerminal,
-        "provider_record_missing_text",
+        SyncRunStatus::FailedRetryable,
+        "provider_error_retryable",
         &[
             (
                 "provider_records_listed",
@@ -288,7 +301,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
             (
                 "content_fetched",
                 IngestionStepStatus::Failed,
-                Some("provider_record_missing_text"),
+                Some("provider_error_retryable"),
             ),
         ],
     )
@@ -650,6 +663,7 @@ fn provider_failure_record() -> ProviderRecord {
         change_token: Some("provider-v1".to_string()),
         deleted: false,
         source_updated_at: Some(moa_test_support::fixtures::pg_now()),
+        materialization: ProviderRecordMaterialization::ProviderFetch { mime_type: None },
         metadata: json!({ "safe": "metadata", "access_token": SECRET_TOKEN }),
         payload: json!({ "safe": "payload", "access_token": SECRET_TOKEN }),
     }
@@ -665,6 +679,10 @@ fn content_record(label: &str) -> ProviderRecord {
         change_token: Some(format!("{label}-v1")),
         deleted: false,
         source_updated_at: Some(moa_test_support::fixtures::pg_now()),
+        materialization: ProviderRecordMaterialization::InlineText {
+            text: format!("Safe fixture text for {label}. {RAW_DOCUMENT}"),
+            mime_type: None,
+        },
         metadata: json!({ "safe": "metadata", "access_token": SECRET_TOKEN }),
         payload: json!({
             "text": format!("Safe fixture text for {label}. {RAW_DOCUMENT}"),

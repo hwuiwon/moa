@@ -1,12 +1,8 @@
 //! Stage 7: graph memory retrieval and prompt injection.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures_util::future::try_join_all;
-use moa_core::types::memory::{RlsContext, SourceAclContext};
-use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
     traits::LineageHandle, traits::NullLineageHandle, traits::StageApply,
@@ -15,31 +11,15 @@ use moa_core::{
     types::context::WorkingContext, types::identifiers::SessionId,
 };
 use moa_crypto::KeyManagementProvider;
-use moa_memory_graph::{GraphStore, PostgresGraphStore};
-use moa_memory_types::MemoryScope;
-use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
 
 use crate::query_rewrite::QueryRewriteResult;
-use moa_retrieval::planning::{PlannedQuery, Strategy};
-use moa_retrieval::retrieval::{
-    MemoryAdmissionPolicy, PlannedRetriever, RetrievalHit, RetrievalOutput, RetrievalProvenance,
-    RetrievalRequest, RetrievalScopePlan, RetrievalStrategy, decompose_query, dedupe_and_rank_hits,
-    route_query,
+#[cfg(test)]
+use moa_retrieval::engine::SourceAclContextResolver;
+use moa_retrieval::engine::{
+    MemoryRetrievalEngine, MemoryRetrievalRequest, ScopedRetrievalRuntimeFactory,
 };
-
-/// Maximum number of scope-keyed retrieval runtimes retained process-wide.
-const SCOPED_RUNTIME_CACHE_CAPACITY: u64 = 512;
-/// Idle lifetime for a cached scope retrieval runtime before it is rebuilt.
-const SCOPED_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(300);
-
-/// Builds the capacity- and time-bounded cache of per-scope retrieval runtimes.
-fn build_scoped_runtime_cache() -> moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>> {
-    moka::future::Cache::builder()
-        .max_capacity(SCOPED_RUNTIME_CACHE_CAPACITY)
-        .time_to_live(SCOPED_RUNTIME_CACHE_TTL)
-        .build()
-}
+use moa_retrieval::retrieval::{MemoryAdmissionPolicy, RetrievalHit, RetrievalStrategy};
 
 mod lineage;
 mod rendering;
@@ -153,14 +133,6 @@ fn should_offer_retrieval_tools(strategy: RetrievalStrategy, hits_empty: bool) -
     }
 }
 
-/// One planned scope together with the outcome of its pre-embedding cache probe.
-struct ScopeProbe<'a> {
-    scope_plan: &'a RetrievalScopePlan,
-    planned: PlannedQuery,
-    runtime: Arc<ScopedRetrievalRuntime>,
-    cached_hits: Option<Vec<RetrievalHit>>,
-}
-
 #[async_trait]
 trait MemoryAccessAuditor: Send + Sync {
     async fn emit(
@@ -170,36 +142,6 @@ trait MemoryAccessAuditor: Send + Sync {
         policy: &MemoryAdmissionPolicy,
         hits: &[RetrievalHit],
     ) -> Result<()>;
-}
-
-#[async_trait]
-trait SourceAclContextResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        pool: &PgPool,
-        ctx: &WorkingContext,
-        assume_app_role: bool,
-    ) -> Result<SourceAclContext>;
-}
-
-struct DurableSourceAclContextResolver;
-
-#[async_trait]
-impl SourceAclContextResolver for DurableSourceAclContextResolver {
-    async fn resolve(
-        &self,
-        pool: &PgPool,
-        ctx: &WorkingContext,
-        assume_app_role: bool,
-    ) -> Result<SourceAclContext> {
-        moa_db::resolve_source_acl_context(
-            pool,
-            ctx.tenant_id,
-            ctx.contact.as_ref().map(|contact| contact.contact_id),
-            assume_app_role,
-        )
-        .await
-    }
 }
 
 struct DurableMemoryAccessAuditor;
@@ -220,15 +162,9 @@ impl MemoryAccessAuditor for DurableMemoryAccessAuditor {
 /// Injects graph-memory retrieval hits into the active turn context.
 pub struct GraphMemoryRetriever {
     pool: PgPool,
-    embedder: Option<Arc<dyn EmbeddingProvider>>,
-    config: moa_config::MoaConfig,
-    assume_app_role: bool,
+    engine: MemoryRetrievalEngine,
     lineage: Arc<dyn LineageHandle>,
     result_limit: usize,
-    planner: moa_retrieval::planning::QueryPlanner,
-    scoped_runtimes: moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>>,
-    runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
-    source_acl_resolver: Arc<dyn SourceAclContextResolver>,
     access_auditor: Arc<dyn MemoryAccessAuditor>,
 }
 
@@ -269,90 +205,19 @@ impl ContextProcessor for SharedGraphMemoryRetriever {
     }
 }
 
-/// Runtime backends for one graph-memory scope.
-pub struct ScopedRetrievalRuntime {
-    graph: Arc<dyn GraphStore>,
-    hybrid: Arc<dyn PlannedRetriever>,
-}
-
-impl ScopedRetrievalRuntime {
-    /// Creates a scoped runtime from graph planning and retrieval backends.
-    #[must_use]
-    pub fn new(graph: Arc<dyn GraphStore>, hybrid: Arc<dyn PlannedRetriever>) -> Self {
-        Self { graph, hybrid }
-    }
-}
-
-/// Factory for building graph-memory retrieval runtimes for individual scopes.
-#[async_trait]
-pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
-    /// Builds graph-memory backends for one memory scope.
-    async fn build_runtime(
-        &self,
-        scope: &MemoryScope,
-        config: &moa_config::MoaConfig,
-        pool: &PgPool,
-        assume_app_role: bool,
-    ) -> Result<ScopedRetrievalRuntime>;
-}
-
-struct PostgresScopedRetrievalRuntimeFactory {
-    kms: Arc<dyn KeyManagementProvider>,
-    /// Shared bounded enrichment worker handle, cloned into each scoped
-    /// [`HybridRetriever`]. `None` when constructed outside a Tokio runtime.
-    enrichment: Option<moa_retrieval::retrieval::enrichment::EnrichmentHandle>,
-}
-
-#[async_trait]
-impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
-    async fn build_runtime(
-        &self,
-        scope: &MemoryScope,
-        config: &moa_config::MoaConfig,
-        pool: &PgPool,
-        assume_app_role: bool,
-    ) -> Result<ScopedRetrievalRuntime> {
-        let scope_context = RlsContext::from(scope.clone());
-        let vector_factory = VectorStoreFactory::from_config(config);
-        let pgvector_source = if assume_app_role {
-            vector_factory.pgvector_source_for_app_role(pool.clone(), scope_context.clone())
-        } else {
-            vector_factory.pgvector_source(pool.clone(), scope_context.clone())
-        };
-        let graph_store = if assume_app_role {
-            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context, self.kms.clone())
-        } else {
-            PostgresGraphStore::scoped(pool.clone(), scope_context, self.kms.clone())
-        };
-        let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
-        let hybrid = Arc::new(
-            moa_retrieval::retrieval::HybridRetriever::from_config(
-                config,
-                pool.clone(),
-                graph.clone(),
-                pgvector_source,
-            )
-            .with_assume_app_role(assume_app_role)
-            .with_enrichment(self.enrichment.clone()),
-        );
-        let cached: Arc<dyn PlannedRetriever> = if assume_app_role {
-            Arc::new(
-                moa_retrieval::retrieval::CachedHybridRetriever::new_for_app_role(
-                    hybrid,
-                    pool.clone(),
-                ),
-            )
-        } else {
-            Arc::new(moa_retrieval::retrieval::CachedHybridRetriever::new(
-                hybrid,
-                pool.clone(),
-            ))
-        };
-        Ok(ScopedRetrievalRuntime::new(graph, cached))
-    }
-}
-
 impl GraphMemoryRetriever {
+    /// Creates the stage-7 adapter around an explicitly composed retrieval engine.
+    #[must_use]
+    pub fn from_engine(pool: PgPool, engine: MemoryRetrievalEngine) -> Self {
+        Self {
+            pool,
+            engine,
+            lineage: Arc::new(NullLineageHandle),
+            result_limit: GRAPH_MEMORY_RESULTS,
+            access_auditor: Arc::new(DurableMemoryAccessAuditor),
+        }
+    }
+
     /// Creates a graph-memory retriever backed by the shared Postgres pool.
     #[must_use]
     pub fn new(
@@ -371,31 +236,14 @@ impl GraphMemoryRetriever {
         kms: Arc<dyn KeyManagementProvider>,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> Self {
-        // F20: spawn the single shared bounded enrichment worker when a Tokio
-        // runtime is available (production and async tests). Sync callers
-        // (eval/unit setup) get no worker and skip best-effort enrichment.
-        let enrichment = tokio::runtime::Handle::try_current()
-            .ok()
-            .map(|_| moa_retrieval::retrieval::enrichment::spawn_enrichment_worker(pool.clone()));
-        Self {
-            pool,
-            embedder,
-            config,
-            assume_app_role: false,
-            lineage: Arc::new(NullLineageHandle),
-            result_limit: GRAPH_MEMORY_RESULTS,
-            planner: moa_retrieval::planning::QueryPlanner::new(),
-            scoped_runtimes: build_scoped_runtime_cache(),
-            runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory { kms, enrichment }),
-            source_acl_resolver: Arc::new(DurableSourceAclContextResolver),
-            access_auditor: Arc::new(DurableMemoryAccessAuditor),
-        }
+        let engine = MemoryRetrievalEngine::new(config, pool.clone(), kms, embedder);
+        Self::from_engine(pool, engine)
     }
 
     /// Configures owner-role tests to assume the production app role during scoped reads.
     #[must_use]
     pub fn with_assume_app_role(mut self, assume_app_role: bool) -> Self {
-        self.assume_app_role = assume_app_role;
+        self.engine = self.engine.with_assume_app_role(assume_app_role);
         self
     }
 
@@ -419,8 +267,7 @@ impl GraphMemoryRetriever {
         mut self,
         runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
     ) -> Self {
-        self.runtime_factory = runtime_factory;
-        self.scoped_runtimes = build_scoped_runtime_cache();
+        self.engine = self.engine.with_runtime_factory(runtime_factory);
         self
     }
 
@@ -435,14 +282,14 @@ impl GraphMemoryRetriever {
         mut self,
         source_acl_resolver: Arc<dyn SourceAclContextResolver>,
     ) -> Self {
-        self.source_acl_resolver = source_acl_resolver;
+        self.engine = self.engine.with_source_acl_resolver(source_acl_resolver);
         self
     }
 
     /// Returns whether this retriever can run the vector leg.
     #[must_use]
     pub fn has_vector_retrieval(&self) -> bool {
-        self.embedder.is_some()
+        self.engine.has_vector_retrieval()
     }
 
     /// Retrieves admitted graph-memory evidence through the production stage-7 path.
@@ -491,349 +338,7 @@ impl GraphMemoryRetriever {
         policy: &MemoryAdmissionPolicy,
         result_limit: usize,
     ) -> Result<(RetrievalStrategy, Vec<RetrievalHit>)> {
-        let strategy = route_query(query);
-        if strategy == RetrievalStrategy::Skip {
-            return Ok((strategy, Vec::new()));
-        }
-
-        // Resolve the caller's provider-source principals ONCE per turn, from
-        // durable bindings keyed by the authenticated session identity. No leg
-        // re-reads them, and nothing in the request payload can influence them.
-        let source_acl = self
-            .source_acl_resolver
-            .resolve(&self.pool, ctx, self.assume_app_role)
-            .await?;
-        let policy = &policy.clone().with_source_acl(source_acl);
-
-        let retrieval_started = Instant::now();
-        let (hits, provenance) = match strategy {
-            RetrievalStrategy::Deep => {
-                self.retrieve_hits_deep(ctx, query, policy, result_limit)
-                    .await?
-            }
-            RetrievalStrategy::Fast | RetrievalStrategy::Agentic => {
-                self.retrieve_hits(ctx, query.to_string(), policy, result_limit)
-                    .await?
-            }
-            RetrievalStrategy::Skip => (Vec::new(), RetrievalProvenance::default()),
-        };
-        self.access_auditor
-            .emit(&self.pool, ctx, policy, &hits)
-            .await?;
-        lineage::emit_retrieval_lineage(
-            self.lineage.as_ref(),
-            ctx,
-            query,
-            &hits,
-            retrieval_started.elapsed(),
-            &self.embedder_provenance(),
-            &provenance,
-        )
-        .await;
-        Ok((strategy, hits))
-    }
-
-    /// Resolves the real embedder model and dimensionality for retrieval lineage.
-    ///
-    /// Prefers the installed embedding provider's resolved identity; falls back to
-    /// the configured selector and the default vector dimension when no provider
-    /// is installed.
-    fn embedder_provenance(&self) -> lineage::EmbedderProvenance {
-        match self.embedder.as_deref() {
-            Some(embedder) => lineage::EmbedderProvenance {
-                model: embedder.model_id().to_string(),
-                dim: embedder.dimensions().min(u16::MAX as usize) as u16,
-            },
-            None => lineage::EmbedderProvenance {
-                model: self.config.memory.embedding_model.clone(),
-                dim: moa_memory_vector::VECTOR_DIMENSION as u16,
-            },
-        }
-    }
-
-    async fn retrieve_hits(
-        &self,
-        ctx: &WorkingContext,
-        query: String,
-        policy: &MemoryAdmissionPolicy,
-        requested_result_limit: usize,
-    ) -> Result<(Vec<RetrievalHit>, RetrievalProvenance)> {
-        let retrieval_plan = policy.plans();
-        if retrieval_plan.is_empty() {
-            return Ok((Vec::new(), RetrievalProvenance::default()));
-        }
-        let result_limit = requested_result_limit;
-        let max_pii_class = policy.max_pii_class()?;
-        let query_str = query.as_str();
-
-        // Plan every scope and probe its read-time cache in parallel, before
-        // paying for a query embedding. The embedding is not part of the cache
-        // key, so a probe can hit without one.
-        let probes = try_join_all(retrieval_plan.iter().map(|scope_plan| {
-            self.probe_scope(
-                ctx,
-                query_str,
-                scope_plan,
-                policy,
-                max_pii_class,
-                result_limit,
-            )
-        }))
-        .await?;
-
-        // Embed once, and only when at least one scope missed the cache.
-        let needs_backend = probes.iter().any(|probe| probe.cached_hits.is_none());
-        let query_embedding = if needs_backend {
-            match self.embedder.as_deref() {
-                // A query-embedding failure must degrade to lexical-only
-                // retrieval rather than abort the turn: an empty embedding makes
-                // the vector leg return nothing while the lexical leg still runs.
-                Some(embedder) => match embed_query(embedder, query_str).await {
-                    Ok(embedding) => {
-                        match moa_memory_vector::QueryEmbedding::new(embedding, embedder.model_id())
-                        {
-                            Ok(embedding) => Some(embedding),
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    "query embedding was invalid; degrading to lexical-only retrieval"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "query embedding failed; degrading to lexical-only retrieval"
-                        );
-                        metrics::counter!(
-                            "moa_retrieval_leg_degraded_total",
-                            "leg" => "embedding",
-                            "reason" => "error",
-                        )
-                        .increment(1);
-                        None
-                    }
-                },
-                None => None,
-            }
-        } else {
-            None
-        };
-
-        // Resolve the missed scopes against the backend in parallel; cached
-        // scopes reuse their probe result and carry no fresh provenance.
-        let scope_results = try_join_all(probes.iter().map(|probe| {
-            let query_embedding = query_embedding.clone();
-            async move {
-                match &probe.cached_hits {
-                    Some(hits) => Ok::<_, MoaError>((hits.clone(), RetrievalProvenance::default())),
-                    None => {
-                        let output = self
-                            .retrieve_scope_backend(
-                                ctx,
-                                query_str,
-                                probe,
-                                policy,
-                                query_embedding,
-                                max_pii_class,
-                                result_limit,
-                            )
-                            .await?;
-                        Ok(provenance_from_output(output))
-                    }
-                }
-            }
-        }))
-        .await?;
-
-        // Merge in scope order, admitting each scope's hits under its own plan.
-        // Every candidate the admission policy rejects is counted so the turn can
-        // emit one aggregated scope-enforcement decision.
-        let mut hits = Vec::new();
-        let mut provenance = RetrievalProvenance::default();
-        for (probe, (results, scope_provenance)) in probes.iter().zip(scope_results) {
-            provenance.merge(scope_provenance);
-            let before = results.len();
-            let admitted = results
-                .into_iter()
-                .filter_map(|hit| policy.admit_hit(hit, probe.scope_plan))
-                .collect::<Vec<_>>();
-            provenance.admission_rejected = provenance
-                .admission_rejected
-                .saturating_add(before.saturating_sub(admitted.len()));
-            hits.extend(admitted);
-        }
-        Ok((dedupe_and_rank_hits(hits, result_limit), provenance))
-    }
-
-    /// Runs the deep, decomposed retrieval path for multi-hop queries.
-    ///
-    /// The query is split into at most two self-contained sub-queries; each is
-    /// retrieved through the same per-scope machinery as [`Self::retrieve_hits`],
-    /// and the union of sub-query hits is fused through `dedupe_and_rank_hits`
-    /// (dedup by uid keeping the max score) — the existing rank path, never a new
-    /// fusion path. When decomposition cannot split the query it degrades to a
-    /// single retrieval over the full query.
-    async fn retrieve_hits_deep(
-        &self,
-        ctx: &WorkingContext,
-        query: &str,
-        policy: &MemoryAdmissionPolicy,
-        requested_result_limit: usize,
-    ) -> Result<(Vec<RetrievalHit>, RetrievalProvenance)> {
-        let mut sub_queries = decompose_query(query);
-        if sub_queries.is_empty() {
-            sub_queries.push(query.to_string());
-        }
-
-        let result_limit = requested_result_limit;
-
-        // F23: run the (≤2) decomposed sub-queries concurrently instead of
-        // serially. `try_join_all` preserves the decomposition input order in its
-        // output, so fusion stays deterministic before `dedupe_and_rank_hits`.
-        let sub_results =
-            try_join_all(sub_queries.into_iter().map(|sub_query| {
-                self.retrieve_hits(ctx, sub_query, policy, requested_result_limit)
-            }))
-            .await?;
-        // Fold each sub-query's provenance into one turn-level record so lineage
-        // reflects the full decomposed retrieval.
-        let mut fused = Vec::new();
-        let mut provenance = RetrievalProvenance::default();
-        for (hits, sub_provenance) in sub_results {
-            provenance.merge(sub_provenance);
-            fused.extend(hits);
-        }
-        Ok((dedupe_and_rank_hits(fused, result_limit), provenance))
-    }
-
-    /// Plans one scope and probes its read-time cache without an embedding.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the probe needs the full admission policy alongside scope and limits"
-    )]
-    async fn probe_scope<'a>(
-        &self,
-        ctx: &WorkingContext,
-        query: &str,
-        scope_plan: &'a RetrievalScopePlan,
-        policy: &MemoryAdmissionPolicy,
-        max_pii_class: SensitivityClass,
-        result_limit: usize,
-    ) -> Result<ScopeProbe<'a>> {
-        let runtime = self.runtime_for_scope(scope_plan.scope()).await?;
-        let planning = moa_retrieval::planning::PlanningCtx::new(
-            scope_plan.scope().clone(),
-            runtime.graph.clone(),
-        );
-        let planned = self.planner.plan(query, &planning).await.map_err(|error| {
-            MoaError::StorageError(format!("graph memory planning failed: {error}"))
-        })?;
-        // The probe request omits the embedding and lineage — neither takes part
-        // in the cache key, so this fingerprints identically to the backend run.
-        let probe_request = self.build_scope_request(
-            ctx,
-            query,
-            None,
-            scope_plan,
-            policy,
-            &planned,
-            max_pii_class,
-            result_limit,
-            false,
-        )?;
-        let cached_hits = runtime
-            .hybrid
-            .retrieve_cached(&planned, &probe_request)
-            .await
-            .map_err(|error| {
-                MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
-            })?;
-        Ok(ScopeProbe {
-            scope_plan,
-            planned,
-            runtime,
-            cached_hits,
-        })
-    }
-
-    /// Runs the backend retrieval for a scope that missed the read-time cache.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the backend run needs the full admission policy alongside scope and limits"
-    )]
-    async fn retrieve_scope_backend(
-        &self,
-        ctx: &WorkingContext,
-        query: &str,
-        probe: &ScopeProbe<'_>,
-        policy: &MemoryAdmissionPolicy,
-        query_embedding: Option<moa_memory_vector::QueryEmbedding>,
-        max_pii_class: SensitivityClass,
-        result_limit: usize,
-    ) -> Result<RetrievalOutput> {
-        let request = self.build_scope_request(
-            ctx,
-            query,
-            query_embedding,
-            probe.scope_plan,
-            policy,
-            &probe.planned,
-            max_pii_class,
-            result_limit,
-            true,
-        )?;
-        probe
-            .runtime
-            .hybrid
-            .retrieve(&probe.planned, request)
-            .await
-            .map_err(|error| {
-                MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
-            })
-    }
-
-    /// Builds a scope retrieval request from a planned query and scope plan.
-    #[allow(clippy::too_many_arguments)]
-    fn build_scope_request(
-        &self,
-        ctx: &WorkingContext,
-        query: &str,
-        query_embedding: Option<moa_memory_vector::QueryEmbedding>,
-        scope_plan: &RetrievalScopePlan,
-        policy: &MemoryAdmissionPolicy,
-        planned: &PlannedQuery,
-        max_pii_class: SensitivityClass,
-        result_limit: usize,
-        emit_storage_lineage: bool,
-    ) -> Result<RetrievalRequest> {
-        let mut request = planned.clone().into_retrieval_request(
-            query.to_string(),
-            query_embedding,
-            max_pii_class,
-            result_limit,
-            true,
-        );
-        // The memory evidence window is calibrated for the small injected
-        // block, so this stage rides its request-scoped window policy from the
-        // configured memory ranking knobs. Knowledge-lane retrievals keep the
-        // default (off) policy and size their own top-k window.
-        let ranking = &self.config.memory.retrieval.ranking;
-        request.window_policy = moa_retrieval::retrieval::EvidenceWindowPolicy {
-            rerank_window: ranking.rerank_window,
-            abstain_below_window_evidence: ranking.abstain_below_window_evidence,
-        };
-        // The caller's resolved provider-source admission context rides the
-        // request rather than the shared per-scope runtime, so one runtime can
-        // never serve a principal set it was not built for — every leg reads it
-        // from the request it is executing.
-        request.source_acl = policy.source_acl().clone();
-        // Source the running agent's complete information-barrier policy. This
-        // is the single point that populates request clearances; every scoped
-        // leg installs them as the `moa.cleared_barriers` GUC.
-        request.cleared_barriers = ctx
+        let clearances = ctx
             .agent_context
             .as_ref()
             .ok_or_else(|| {
@@ -847,46 +352,63 @@ impl GraphMemoryRetriever {
                     "memory retrieval requires a valid pinned agent policy: {error}"
                 ))
             })?;
-        tracing::debug!(
-            cleared_barrier_count = request.cleared_barriers.len(),
-            "sourced agent information-barrier clearances for retrieval"
-        );
-        if let Some(label_filter) = scope_plan.label_filter() {
-            request.label_filter = Some(label_filter.to_vec());
-        }
-        request.disable_graph_expansion = should_disable_graph_expansion(scope_plan);
-        if matches!(
-            scope_plan.source_tier(),
-            moa_retrieval::retrieval::SourceTier::TenantKnowledge
-        ) {
-            request.strategy = Some(Strategy::VectorFirst);
-        }
-        if emit_storage_lineage {
-            request.lineage = Some(lineage_context_from_context(ctx));
-        }
-        Ok(request)
+        let result = self
+            .engine
+            .retrieve(
+                MemoryRetrievalRequest::new(query, policy, clearances, result_limit)
+                    .with_lineage(lineage_context_from_context(ctx)),
+            )
+            .await?;
+        self.access_auditor
+            .emit(&self.pool, ctx, policy, &result.hits)
+            .await?;
+        let embedder = self.engine.embedding_provenance();
+        lineage::emit_retrieval_lineage(
+            self.lineage.as_ref(),
+            ctx,
+            query,
+            &result.hits,
+            result.elapsed,
+            &lineage::EmbedderProvenance {
+                model: embedder.model,
+                dim: embedder.dimensions,
+            },
+            &result.provenance,
+        )
+        .await;
+        Ok((result.strategy, result.hits))
     }
 
-    /// Returns a per-scope retrieval runtime, reusing one from the bounded cache
-    /// when present. All scope tiers (tenant and contact) share the same
-    /// capacity- and time-bounded cache, so repeated turns for the same scope
-    /// avoid rebuilding backends while total retained runtimes stay bounded.
-    async fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
-        if let Some(runtime) = self.scoped_runtimes.get(scope).await {
-            return Ok(runtime);
-        }
-
-        let runtime = Arc::new(self.build_runtime_for_scope(scope).await?);
-        self.scoped_runtimes
-            .insert(scope.clone(), runtime.clone())
-            .await;
-        Ok(runtime)
-    }
-
-    async fn build_runtime_for_scope(&self, scope: &MemoryScope) -> Result<ScopedRetrievalRuntime> {
-        self.runtime_factory
-            .build_runtime(scope, &self.config, &self.pool, self.assume_app_role)
-            .await
+    #[cfg(test)]
+    async fn retrieve_hits(
+        &self,
+        ctx: &WorkingContext,
+        query: String,
+        policy: &MemoryAdmissionPolicy,
+        result_limit: usize,
+    ) -> Result<(
+        Vec<RetrievalHit>,
+        moa_retrieval::retrieval::RetrievalProvenance,
+    )> {
+        let clearances = ctx
+            .agent_context
+            .as_ref()
+            .ok_or_else(|| {
+                MoaError::ValidationError(
+                    "memory retrieval requires a pinned agent context".to_string(),
+                )
+            })?
+            .information_barrier_clearances()?;
+        let result = self
+            .engine
+            .retrieve(MemoryRetrievalRequest::new(
+                &query,
+                policy,
+                clearances,
+                result_limit,
+            ))
+            .await?;
+        Ok((result.hits, result.provenance))
     }
 }
 
@@ -913,17 +435,6 @@ fn build_memory_evidence_response(
         source_refs: budgeted.rendered.source_refs,
         source_metadata,
     })
-}
-
-/// Splits a backend retrieval output into its hits and lineage provenance.
-///
-/// The raw graph paths captured in the retrieval diagnostics are moved into the
-/// provenance so the emitter records real traversal paths without re-walking the
-/// graph; ranking has already run, so this is observation-only.
-fn provenance_from_output(mut output: RetrievalOutput) -> (Vec<RetrievalHit>, RetrievalProvenance) {
-    let mut provenance = output.provenance;
-    provenance.graph_paths = std::mem::take(&mut output.diagnostics.path_traces);
-    (output.hits, provenance)
 }
 
 fn memory_evidence_source_metadata(hit: &RetrievalHit) -> Result<MemoryEvidenceSourceMetadata> {
@@ -1112,17 +623,6 @@ impl ContextProcessor for GraphMemoryRetriever {
     }
 }
 
-async fn embed_query(embedder: &dyn EmbeddingProvider, query: &str) -> Result<Vec<f32>> {
-    let query_input = vec![query.to_string()];
-    let embed_started = std::time::Instant::now();
-    let mut embeddings = embedder.embed(&query_input).await?;
-    metrics::histogram!("moa_retrieval_embedder_seconds")
-        .record(embed_started.elapsed().as_secs_f64());
-    embeddings.pop().ok_or_else(|| {
-        MoaError::ProviderError("graph memory embedder returned no query embedding".to_string())
-    })
-}
-
 use super::trailing_user_insertion_index;
 
 /// Token cost of the outer `<memory-reminder>` wrapper added around the rendered
@@ -1244,13 +744,6 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
     extract_search_query_from_messages(&ctx.messages)
 }
 
-fn should_disable_graph_expansion(scope_plan: &RetrievalScopePlan) -> bool {
-    matches!(
-        scope_plan.source_tier(),
-        moa_retrieval::retrieval::SourceTier::TenantKnowledge
-    )
-}
-
 fn query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
     let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
     let query = result.retrieval_query.trim();
@@ -1344,14 +837,16 @@ mod tests {
     use uuid::Uuid;
 
     use crate::query_rewrite::QueryRewriteResult;
+    use moa_retrieval::engine::{
+        ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory, SourceAclContextResolver,
+    };
     use moa_retrieval::planning::Strategy;
     use moa_retrieval::retrieval::{MemoryAdmissionPolicy, RetrievalScopePlan};
 
     use super::{
-        GraphMemoryRetriever, MemoryAccessAuditor, MemoryEvidenceRequest, ScopedRetrievalRuntime,
-        ScopedRetrievalRuntimeFactory, SharedGraphMemoryRetriever, SourceAclContextResolver,
-        build_memory_evidence_response, emit_data_access_audit, extract_search_keywords,
-        extract_search_query, should_disable_graph_expansion,
+        GraphMemoryRetriever, MemoryAccessAuditor, MemoryEvidenceRequest,
+        SharedGraphMemoryRetriever, build_memory_evidence_response, emit_data_access_audit,
+        extract_search_keywords, extract_search_query,
     };
 
     /// Wraps scripted hits in a retrieval output with empty diagnostics/provenance.
@@ -1395,7 +890,8 @@ mod tests {
         async fn resolve(
             &self,
             _pool: &sqlx::PgPool,
-            _ctx: &WorkingContext,
+            _tenant_id: TenantId,
+            _contact_id: Option<ContactId>,
             _assume_app_role: bool,
         ) -> moa_core::error::Result<SourceAclContext> {
             Ok(SourceAclContext::empty(0))
@@ -1530,6 +1026,7 @@ mod tests {
         label_boost: Option<Vec<NodeLabel>>,
         strategy: Option<Strategy>,
         cleared_barriers: moa_core::types::memory::InformationBarrierClearances,
+        disable_graph_expansion: bool,
     }
 
     #[derive(Debug)]
@@ -1554,6 +1051,7 @@ mod tests {
                     label_boost: req.label_boost.clone(),
                     strategy: req.strategy,
                     cleared_barriers: req.cleared_barriers.clone(),
+                    disable_graph_expansion: req.disable_graph_expansion,
                 });
             Ok(test_output(
                 self.hits_by_scope
@@ -1729,6 +1227,7 @@ mod tests {
                 calls: embed_calls.clone(),
             })),
         )
+        .with_source_acl_resolver(Arc::new(ResolvedEmptySourceAclContextResolver))
         .with_scoped_runtime_factory(Arc::new(CacheHitRuntimeFactory {
             retriever: Arc::new(CacheHitRetriever {
                 retrieve_calls: retrieve_calls.clone(),
@@ -1792,49 +1291,30 @@ mod tests {
             .expect("lazy test pool should not connect");
         let calls = Arc::new(AtomicUsize::new(0));
         let retriever = GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
+            .with_source_acl_resolver(Arc::new(ResolvedEmptySourceAclContextResolver))
             .with_scoped_runtime_factory(Arc::new(CountingRuntimeFactory {
                 calls: calls.clone(),
             }));
         let tenant_id = TenantId::new();
-        let contact_scope = MemoryScope::Contact {
-            tenant_id,
-            contact_id: ContactId::new(),
-        };
-        let tenant_scope = MemoryScope::Tenant { tenant_id };
-
-        retriever
-            .runtime_for_scope(&contact_scope)
-            .await
-            .expect("contact runtime should build");
-        retriever
-            .runtime_for_scope(&contact_scope)
-            .await
-            .expect("contact runtime should be reused");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "contact scope should reuse its cached runtime across turns"
+        let mut session = contact_session(
+            ContactId::new(),
+            ContactVerificationState::Verified,
+            Vec::new(),
         );
-
-        retriever
-            .runtime_for_scope(&tenant_scope)
-            .await
-            .expect("tenant runtime should build");
-        retriever
-            .runtime_for_scope(&tenant_scope)
-            .await
-            .expect("tenant runtime should be reused");
+        session.tenant_id = tenant_id;
+        let ctx = WorkingContext::new(&session, capabilities());
+        let policy = MemoryAdmissionPolicy::from_working_context(&ctx)
+            .expect("contact policy should include both scopes");
+        for _ in 0..2 {
+            retriever
+                .retrieve_hits(&ctx, "remember the cache".to_string(), &policy, 4)
+                .await
+                .expect("scoped retrieval should use injected runtimes");
+        }
         assert_eq!(
             calls.load(Ordering::SeqCst),
             2,
-            "tenant scope should reuse its cached runtime across turns"
-        );
-
-        retriever.scoped_runtimes.run_pending_tasks().await;
-        assert_eq!(
-            retriever.scoped_runtimes.entry_count(),
-            2,
-            "each distinct scope retains exactly one bounded cache entry"
+            "tenant and contact scopes should each reuse one cached runtime"
         );
     }
 
@@ -1846,31 +1326,25 @@ mod tests {
             .expect("lazy test pool should not connect");
         let calls = Arc::new(AtomicUsize::new(0));
         let retriever = GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
+            .with_source_acl_resolver(Arc::new(ResolvedEmptySourceAclContextResolver))
             .with_scoped_runtime_factory(Arc::new(CountingRuntimeFactory {
                 calls: calls.clone(),
             }));
         let tenant_id = TenantId::new();
-        let tenant_scope = MemoryScope::Tenant { tenant_id };
-        let contact_scope = MemoryScope::Contact {
+        let session = SessionMeta {
             tenant_id,
-            contact_id: ContactId::new(),
+            ..tenant_only_session()
         };
-
-        retriever
-            .runtime_for_scope(&tenant_scope)
-            .await
-            .expect("tenant runtime should build from injected factory");
-        retriever
-            .runtime_for_scope(&tenant_scope)
-            .await
-            .expect("tenant runtime should be cached");
+        let ctx = WorkingContext::new(&session, capabilities());
+        let policy =
+            MemoryAdmissionPolicy::from_working_context(&ctx).expect("tenant policy should parse");
+        for _ in 0..2 {
+            retriever
+                .retrieve_hits(&ctx, "tenant cache".to_string(), &policy, 4)
+                .await
+                .expect("tenant runtime should come from injected factory");
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        retriever
-            .runtime_for_scope(&contact_scope)
-            .await
-            .expect("contact runtime should build from injected factory");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -2061,31 +1535,29 @@ mod tests {
         assert_eq!(plan[1].label_filter(), None);
     }
 
-    #[test]
-    fn tenant_knowledge_retrieval_disables_graph_expansion() {
+    #[tokio::test]
+    async fn tenant_knowledge_retrieval_disables_graph_expansion() {
         // Pins: tenant KB retrieval stays on direct vector/lexical hits; graph
         // expansion remains available for contact memory where fact-neighbor
         // traversal is part of the retrieval model.
         let contact_id = ContactId::new();
         let session = contact_session(contact_id, ContactVerificationState::Verified, Vec::new());
-        let ctx = WorkingContext::new(&session, capabilities());
-        let plan = retrieval_scopes_from_context(&ctx);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls.clone(), HashMap::new());
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(ContextMessage::user(
+            "What do we know about the deployment?",
+        ));
 
-        let tenant_plan = plan
-            .iter()
-            .find(|scope_plan| {
-                scope_plan.source_tier() == moa_retrieval::retrieval::SourceTier::TenantKnowledge
-            })
-            .expect("tenant knowledge plan should exist");
-        let contact_plan = plan
-            .iter()
-            .find(|scope_plan| {
-                scope_plan.source_tier() == moa_retrieval::retrieval::SourceTier::UserMemory
-            })
-            .expect("contact memory plan should exist");
+        retriever
+            .process(&mut ctx)
+            .await
+            .expect("retrieval should execute both scoped legs");
 
-        assert!(should_disable_graph_expansion(tenant_plan));
-        assert!(!should_disable_graph_expansion(contact_plan));
+        let calls = calls.lock().expect("scripted retriever calls lock");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].disable_graph_expansion);
+        assert!(!calls[1].disable_graph_expansion);
     }
 
     #[test]
@@ -2244,6 +1716,7 @@ mod tests {
                     ]),
                     label_boost: None,
                     strategy: Some(Strategy::VectorFirst),
+                    disable_graph_expansion: true,
                 },
                 RecordedRetrievalRequest {
                     cleared_barriers: expected_clearances,
@@ -2254,6 +1727,7 @@ mod tests {
                     label_filter: None,
                     label_boost: None,
                     strategy: Some(Strategy::Both),
+                    disable_graph_expansion: false,
                 },
             ],
             "retriever should call tenant knowledge and current-contact scopes only"
@@ -2339,6 +1813,7 @@ mod tests {
                     ]),
                     label_boost: Some(vec![NodeLabel::Incident]),
                     strategy: Some(Strategy::VectorFirst),
+                    disable_graph_expansion: true,
                 },
                 RecordedRetrievalRequest {
                     cleared_barriers: expected_clearances,
@@ -2346,6 +1821,7 @@ mod tests {
                     label_filter: None,
                     label_boost: Some(vec![NodeLabel::Incident]),
                     strategy: Some(Strategy::Both),
+                    disable_graph_expansion: false,
                 },
             ],
             "planner hint must be a soft boost on both scopes; only the scope \
@@ -2845,6 +2321,7 @@ mod tests {
                     ]),
                     label_boost: None,
                     strategy: Some(Strategy::VectorFirst),
+                    disable_graph_expansion: true,
                 },
                 RecordedRetrievalRequest {
                     cleared_barriers: expected_clearances,
@@ -2852,6 +2329,7 @@ mod tests {
                     label_filter: None,
                     label_boost: None,
                     strategy: Some(Strategy::Both),
+                    disable_graph_expansion: false,
                 },
             ]
         );

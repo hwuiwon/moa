@@ -421,6 +421,44 @@ impl ArtifactRegistry {
         row.as_ref().map(revision_from_row).transpose()
     }
 
+    /// Loads visible artifact revisions for one scope in a single set-based read.
+    ///
+    /// Missing or invisible revisions are omitted. Results are ordered by
+    /// revision UUID so callers can build an explicit identity map without
+    /// relying on request order or duplicate expansion.
+    pub async fn load_revisions(
+        &self,
+        scope: &ActionRuleScope,
+        revision_uids: &[Uuid],
+    ) -> Result<Vec<StoredArtifactRevision>> {
+        if revision_uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT {REVISION_COLUMNS}
+            FROM moa.artifact a
+            JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
+            WHERE a.valid_to IS NULL
+              AND r.revision_uid = ANY($3)
+              AND r.valid_to IS NULL
+              AND (a.storage_partition_id IS NULL OR a.storage_partition_id = $1)
+              AND (a.user_id IS NULL OR a.user_id = $2)
+            ORDER BY r.revision_uid
+            "#
+        ))
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(revision_uids)
+        .fetch_all(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        rows.iter().map(revision_from_row).collect()
+    }
+
     /// Stores a validation report against a revision without changing its status.
     ///
     /// Generic validation makes an immutable revision eligible for evaluation. It

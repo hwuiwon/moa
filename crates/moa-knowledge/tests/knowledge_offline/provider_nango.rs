@@ -9,8 +9,9 @@ use moa_knowledge::{
     Error,
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, FetchRecordContentRequest,
-        KnowledgeConnection, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        ProviderRecordAcl, RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest,
+        KnowledgeConnection, LinkedProviderKind, ListChangedRecordsRequest, ProviderIntegration,
+        ProviderRecord, ProviderRecordAcl, ProviderRecordMaterialization, RemoteRevokeRequest,
+        StartInitialSyncRequest, TriggerSyncRequest,
     },
     providers::{LinkedIntegrationProvider, nango::NangoProvider},
 };
@@ -28,7 +29,7 @@ fn connection() -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::from_u128(101),
         tenant_id: TenantId::from(Uuid::from_u128(102)),
-        provider: "nango".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: "google-drive".to_string(),
         provider_account_id: "conn_123".to_string(),
         metadata: json!({ "safe": true }),
@@ -104,7 +105,7 @@ async fn link_token_creation_forwards_nango_metadata_selection() {
         .await
         .expect("create Nango link token with source selection metadata");
 
-    assert_eq!(token.provider, "nango");
+    assert_eq!(token.provider, LinkedProviderKind::Nango);
     assert_eq!(token.token, "link-token-123");
     assert_eq!(
         token.link_url.as_deref(),
@@ -152,7 +153,7 @@ async fn initial_link_sync_uses_idempotent_start_and_never_the_one_off_trigger()
             .await
             .expect("initial link sync start through local Nango fixture");
 
-        assert_eq!(started.provider, "nango");
+        assert_eq!(started.provider, LinkedProviderKind::Nango);
         assert!(
             !started.completed,
             "Nango starts asynchronously, so a successful start never proves completion"
@@ -319,7 +320,7 @@ async fn trigger_sync_posts_provider_config_connection_and_sync_name() {
         .await
         .expect("trigger sync through local Nango fixture");
 
-    assert_eq!(triggered.provider, "nango");
+    assert_eq!(triggered.provider, LinkedProviderKind::Nango);
     assert_eq!(triggered.provider_sync_id, None);
     assert_eq!(triggered.status, "accepted");
     assert!(triggered.metadata.get("provider_token").is_none());
@@ -610,6 +611,10 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
         Some(ts("2026-06-26T12:00:00Z"))
     );
     assert!(!page.records[0].deleted);
+    assert!(matches!(
+        &page.records[0].materialization,
+        ProviderRecordMaterialization::ProviderFetch { .. }
+    ));
 
     assert_eq!(page.records[1].source_id, "doc-2");
     assert!(page.records[1].deleted);
@@ -709,6 +714,9 @@ fn drive_record(source_id: &str, mime_type: &str) -> ProviderRecord {
         change_token: None,
         deleted: false,
         source_updated_at: None,
+        materialization: ProviderRecordMaterialization::ProviderFetch {
+            mime_type: Some(mime_type.to_string()),
+        },
         metadata: json!({}),
         payload: json!({ "mimeType": mime_type }),
     }
@@ -739,7 +747,7 @@ async fn content_fetch_exports_google_apps_files_as_plain_text() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection: connection(),
             record: drive_record("doc-apps", "application/vnd.google-apps.document"),
         })
@@ -776,7 +784,7 @@ async fn content_fetch_streams_binary_files_via_alt_media() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection: connection(),
             record: drive_record("doc-bin", "application/pdf"),
         })
@@ -807,7 +815,7 @@ async fn content_fetch_rejects_bodies_over_the_size_cap() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let error = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection: connection(),
             record: drive_record("doc-huge", "application/octet-stream"),
         })
@@ -832,7 +840,7 @@ async fn content_fetch_returns_none_for_non_text_exportable_google_apps_types() 
 
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection: connection(),
             record: drive_record("folder-1", "application/vnd.google-apps.folder"),
         })
@@ -865,7 +873,7 @@ async fn content_fetch_exports_spreadsheets_as_csv() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection: connection(),
             record: drive_record("sheet-1", "application/vnd.google-apps.spreadsheet"),
         })
@@ -891,7 +899,7 @@ async fn content_fetch_returns_none_for_non_drive_integrations() {
 
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection,
             record: drive_record("page-1", "text/markdown"),
         })
@@ -921,7 +929,7 @@ async fn content_fetch_surfaces_upstream_errors() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let error = provider
         .fetch_record_content(FetchRecordContentRequest {
-            credential: test_credential(),
+            credential: None,
             connection: connection(),
             record: drive_record("doc-error", "application/pdf"),
         })

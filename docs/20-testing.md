@@ -175,20 +175,22 @@ cargo run -p xtask -- check-architecture-boundaries
 
 The check fails on new direct SQL in
 `crates/moa-orchestrator/src/services/**` or
-`crates/moa-orchestrator/src/workflows/**`, and on new raw
-`OrchestratorCtx` dependency access such as `current_graph_pool()` or
-`current_session_store()` under orchestrator objects, services, and workflows;
-the current count in those scanner roots is zero. This does not claim that the
-context type is absent everywhere. If a handler truly needs a temporary
-exception, record it in the scanner allowlist with a concrete reason and exact
-expected count. Prefer moving SQL to a repository or domain crate and passing
-concrete dependencies from the composition root instead of expanding the
-allowlist.
+`crates/moa-orchestrator/src/workflows/**`, and on attempts by orchestrator
+objects, services, or workflows to recover runtime dependencies from a global
+or static accessor. Runtime dependencies must originate in
+`moa_orchestrator::runtime::deps::RuntimeDeps` and travel through constructors
+or handler structs. If a handler truly needs a temporary direct-SQL exception,
+record it in the scanner allowlist with a concrete reason and exact expected
+count. The scanner fails when a counted source allowance becomes unused, so
+deleting debt also requires deleting its allowance; forbidden dependency
+directions and global dependency access have no allowance list. Prefer moving
+SQL to a repository or domain crate instead of expanding the allowlist.
 
 The same command also reports and enforces architecture budgets from Cargo
 metadata and current source files: workspace package/default-member counts,
 `moa-core` direct and transitive reverse dependencies, configured LOC budgets,
-forbidden dependency directions from `docs/15-architecture-policy.md`, and the
+reduced-module LOC ratchets, forbidden dependency directions from
+`docs/15-architecture-policy.md`, and the
 exact semantic `moa-core` root allowlist (`MoaError`, `Result`, and
 `WORKSPACE_ID`) with wildcard rejection. Dependency rules distinguish normal,
 build, and dev edges so a test-only allowance cannot silently become a
@@ -242,8 +244,8 @@ binaries are scheduled by two named profiles, both invoked from
 
 | Profile | Binaries | Restate stack |
 | --- | --- | --- |
-| `behavior-lab-service-e2e` | `behavior_lab_simulation_e2e`, `experiment_agent_loop_e2e`, `experiment_trial_run_e2e`, `skill_learning_gate_e2e` | external: reads `MOA_RESTATE_INGRESS_URL`/`MOA_RESTATE_ADMIN_URL`, spawns its own orchestrator on reserved ports |
-| `behavior-lab-fixture-service-e2e` | `artifact_release_service_e2e`, `experiment_execution_service_e2e` | self-contained: `OrchestratorTestFixture` starts its own containers and **fails** if `MOA_RESTATE_INGRESS_URL` is set |
+| `behavior-lab-service-e2e` | `experiment_trial_run_e2e`, `skill_learning_gate_e2e` | external: reads `MOA_RESTATE_INGRESS_URL`/`MOA_RESTATE_ADMIN_URL`, spawns its own orchestrator on reserved ports |
+| `behavior-lab-fixture-service-e2e` | `artifact_release_service_e2e` | self-contained: `OrchestratorTestFixture` starts its own containers and **fails** if `MOA_RESTATE_INGRESS_URL` is set |
 
 That split is why there are two profiles rather than one: the two halves need
 opposite environments, so the runner invokes the first with the ephemeral

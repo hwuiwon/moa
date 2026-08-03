@@ -6,8 +6,8 @@ use std::{
 };
 
 use moa_artifacts::execution_plan::{
-    CapabilityReference, ExecutionFailureClass, ExecutionNode, ExecutionOperation,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
+    CapabilityReference, ExecutionFailureClass, ExecutionTaskOutcome, ExecutionTaskResult,
+    ExecutionUsage,
 };
 use moa_config::SessionLimitsConfig;
 use moa_core::{
@@ -27,12 +27,16 @@ use moa_core::{
 };
 use moa_execution::{
     capability::{CapabilitySource, ExecutionCapability},
+    interpreter::validate_task_outcome,
     repository::{
         ActionReviewResolutionWrite, ExecutionRepository, ExecutionRunRecord, ExecutionScope,
         ExecutionTaskRecord, ReservationOutcome, TaskOutcomeWrite, TransitionOutcome,
     },
     schema::validate_instance,
-    state::{ExecutionTaskStatus, LogicalTaskKind},
+    state::{
+        ExecutionTaskStatus, LogicalTaskKind, cancelled_task_outcome, completed_task_outcome,
+        exhaust_retry_outcome, failed_task_outcome, parse_agent_task_outcome, retry_delay_ms,
+    },
     wire::{
         ExecutionActionReviewAcknowledgement, ExecutionActionReviewResolution,
         ExecutionActionReviewResolutionRequest, ExecutionInputRequest,
@@ -209,8 +213,14 @@ impl ExecutionTask for ExecutionTaskImpl {
                     },
                 },
             };
-            let outcome = validate_task_outcome(&prepared.run, &prepared.task, outcome);
-            let outcome = exhaust_retry_if_needed(&prepared.task, outcome);
+            let outcome = validate_task_outcome(
+                &prepared.run.active_plan,
+                &prepared.task.node_id,
+                &prepared.task.kind,
+                outcome,
+            );
+            let outcome =
+                exhaust_retry_outcome(prepared.task.attempt, &prepared.task.retry, outcome);
             let repository = self.repository.clone();
             let persist_run = prepared.run.clone();
             let persist_task = prepared.task.clone();
@@ -264,7 +274,7 @@ impl ExecutionTask for ExecutionTaskImpl {
                         cleanup_task_hands(&ctx, &retried.run, &retried.task);
                         return Ok(());
                     }
-                    let delay = retry_delay_ms(&retried.task);
+                    let delay = retry_delay_ms(retried.task.attempt, &retried.task.retry);
                     ctx.sleep(std::time::Duration::from_millis(delay)).await?;
                 }
                 ExecutionTaskResult::NeedsInput { .. } => {
@@ -584,7 +594,7 @@ async fn execute_task(
                 "execution_task.output",
             )
             .map_err(execution_error)?;
-            Ok(completed_outcome(value.clone(), task.actual.clone()))
+            Ok(completed_task_outcome(value.clone(), task.actual.clone()))
         }
         LogicalTaskKind::CompletionVerifier {
             instructions,
@@ -663,7 +673,7 @@ async fn execute_capability(
         value,
         "execution_task.capability_output",
     ) {
-        return Ok(failed_outcome(
+        return Ok(failed_task_outcome(
             ExecutionFailureClass::InvalidOutput,
             error.to_string(),
             output_usage,
@@ -825,7 +835,7 @@ async fn execute_agent(
         max_turns,
     } = request;
     if max_turns == 0 {
-        return Ok(failed_outcome(
+        return Ok(failed_task_outcome(
             ExecutionFailureClass::InvalidInput,
             "agent max_turns must be positive".to_string(),
             task.actual.clone(),
@@ -911,7 +921,7 @@ async fn execute_agent(
         );
         let response = restate_sdk::select! {
             reason = ctx.promise::<String>(K_CANCEL_PROMISE) => {
-                return Ok(cancelled_outcome(reason?, usage));
+                return Ok(cancelled_task_outcome(reason?, usage));
             },
             response = crate::restate_identity::replay_safe_request(
                 ctx.service_client::<LLMGatewayClient>()
@@ -939,7 +949,7 @@ async fn execute_agent(
             })
             .collect::<Vec<_>>();
         if tool_calls.is_empty() {
-            return Ok(parse_agent_result(&response.text, usage));
+            return Ok(parse_agent_task_outcome(&response.text, usage));
         }
         messages.push(ContextMessage::assistant_with_thought_signature(
             response.text,
@@ -1045,7 +1055,7 @@ async fn execute_agent(
                 }
                 match stage {
                     moa_core::types::security::SecurityCircuitStage::Halted => {
-                        return Ok(failed_outcome(
+                        return Ok(failed_task_outcome(
                             ExecutionFailureClass::Terminal,
                             EXECUTION_TASK_SECURITY_HALT_MESSAGE.to_string(),
                             usage,
@@ -1081,7 +1091,7 @@ async fn execute_agent(
             ));
         }
     }
-    Ok(failed_outcome(
+    Ok(failed_task_outcome(
         ExecutionFailureClass::Terminal,
         format!("task-local agent exhausted max_turns={max_turns}"),
         usage,
@@ -1480,7 +1490,11 @@ fn capability_invocation_outcome(
             } else {
                 ExecutionFailureClass::Terminal
             };
-            Ok(failed_outcome(class, output.safe_output.to_text(), usage))
+            Ok(failed_task_outcome(
+                class,
+                output.safe_output.to_text(),
+                usage,
+            ))
         }
         CapabilityInvocationResult::Output(output) => {
             // A non-safe class already cleared `structured`, so a task whose
@@ -1491,85 +1505,8 @@ fn capability_invocation_outcome(
                 .structured
                 .clone()
                 .unwrap_or_else(|| Value::String(output.safe_output.to_text()));
-            Ok(completed_outcome(value, usage))
+            Ok(completed_task_outcome(value, usage))
         }
-    }
-}
-
-fn parse_agent_result(text: &str, usage: ExecutionUsage) -> ExecutionTaskOutcome {
-    if let Ok(result) = serde_json::from_str::<ExecutionTaskResult>(text) {
-        return ExecutionTaskOutcome {
-            schema_version: 1,
-            usage,
-            result,
-        };
-    }
-    match serde_json::from_str::<Value>(text) {
-        Ok(output) => completed_outcome(output, usage),
-        Err(error) => failed_outcome(
-            ExecutionFailureClass::InvalidOutput,
-            format!("agent final response is not JSON: {error}"),
-            usage,
-        ),
-    }
-}
-
-fn validate_task_outcome(
-    run: &ExecutionRunRecord,
-    task: &ExecutionTaskRecord,
-    mut outcome: ExecutionTaskOutcome,
-) -> ExecutionTaskOutcome {
-    let ExecutionTaskResult::Completed { output, .. } = &outcome.result else {
-        return outcome;
-    };
-    let validation = match &task.kind {
-        LogicalTaskKind::CompletionVerifier { .. } => {
-            let valid = output.as_object().is_some_and(|object| {
-                object.len() == 2
-                    && object.get("passed").and_then(Value::as_bool).is_some()
-                    && object.contains_key("evidence")
-            });
-            valid.then_some(()).ok_or_else(|| {
-                "completion verifier output must contain exactly boolean `passed` and `evidence`"
-                    .to_string()
-            })
-        }
-        _ => run
-            .active_plan
-            .definition
-            .nodes
-            .iter()
-            .find(|node| node.id == task.node_id)
-            .ok_or_else(|| format!("active plan has no node `{}`", task.node_id))
-            .and_then(|node| {
-                validate_instance(
-                    task_output_schema(node),
-                    output,
-                    "execution_task.node_output",
-                )
-                .map_err(|error| error.to_string())
-            }),
-    };
-    if let Err(message) = validation {
-        outcome.result = ExecutionTaskResult::Failed {
-            class: ExecutionFailureClass::InvalidOutput,
-            message,
-        };
-    }
-    outcome
-}
-
-fn task_output_schema(node: &ExecutionNode) -> &Value {
-    match &node.operation {
-        ExecutionOperation::Map {
-            item_output_schema, ..
-        } => item_output_schema,
-        ExecutionOperation::Capability { .. }
-        | ExecutionOperation::Agent { .. }
-        | ExecutionOperation::Reduce { .. }
-        | ExecutionOperation::Review { .. }
-        | ExecutionOperation::WaitSignal { .. }
-        | ExecutionOperation::Output { .. } => &node.output_schema,
     }
 }
 
@@ -1578,66 +1515,6 @@ fn agent_system_prompt(instructions: &str, skills: &[String]) -> String {
         "{instructions}\n\nPinned instruction skills:\n{}\n\nReturn only JSON. To finish normally return any JSON value. To request input or replanning, return the exact ExecutionTaskResult tagged shape with status needs_input or needs_replan.",
         skills.join("\n\n---\n\n")
     )
-}
-
-fn exhaust_retry_if_needed(
-    task: &ExecutionTaskRecord,
-    mut outcome: ExecutionTaskOutcome,
-) -> ExecutionTaskOutcome {
-    if task.attempt >= task.retry.max_attempts
-        && let ExecutionTaskResult::Failed {
-            class: ExecutionFailureClass::Retryable,
-            message,
-        } = &outcome.result
-    {
-        outcome.result = ExecutionTaskResult::Failed {
-            class: ExecutionFailureClass::Terminal,
-            message: format!(
-                "retry policy exhausted after {} attempts: {message}",
-                task.attempt
-            ),
-        };
-    }
-    outcome
-}
-
-fn retry_delay_ms(task: &ExecutionTaskRecord) -> u64 {
-    let exponent = task.attempt.saturating_sub(2).min(31);
-    task.retry
-        .initial_backoff_ms
-        .saturating_mul(1_u64 << exponent)
-        .min(task.retry.max_backoff_ms)
-}
-
-fn completed_outcome(output: Value, usage: ExecutionUsage) -> ExecutionTaskOutcome {
-    ExecutionTaskOutcome {
-        schema_version: 1,
-        usage,
-        result: ExecutionTaskResult::Completed {
-            output,
-            citations: Vec::new(),
-        },
-    }
-}
-
-fn failed_outcome(
-    class: ExecutionFailureClass,
-    message: String,
-    usage: ExecutionUsage,
-) -> ExecutionTaskOutcome {
-    ExecutionTaskOutcome {
-        schema_version: 1,
-        usage,
-        result: ExecutionTaskResult::Failed { class, message },
-    }
-}
-
-fn cancelled_outcome(reason: String, usage: ExecutionUsage) -> ExecutionTaskOutcome {
-    ExecutionTaskOutcome {
-        schema_version: 1,
-        usage,
-        result: ExecutionTaskResult::Cancelled { reason },
-    }
 }
 
 fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
@@ -1762,8 +1639,7 @@ fn execution_error(error: moa_execution::Error) -> HandlerError {
 mod tests {
     use moa_artifacts::{
         execution_plan::{
-            CapabilityReference, ExecutionFailureClass, ExecutionNode, ExecutionOperation,
-            ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
+            CapabilityReference, ExecutionFailureClass, ExecutionTaskResult, ExecutionUsage,
         },
         reference::ArtifactRef,
     };
@@ -1781,7 +1657,7 @@ mod tests {
 
     use super::{
         CapabilityInvocationResult, action_review_invocation_result, capability_invocation_outcome,
-        task_agent_tool_schema, task_output_schema, validate_agent_capability_bindings,
+        task_agent_tool_schema, validate_agent_capability_bindings,
     };
 
     fn task_agent_capability(
@@ -1947,42 +1823,6 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
-    }
-
-    #[test]
-    fn map_execution_task_uses_item_output_schema() {
-        // Pins: each materialized map task validates its own result before the
-        // scheduler builds and validates the aggregate map-node output.
-        let item_schema = json!({"type": "object", "required": ["symbol"]});
-        let aggregate_schema = json!({"type": "object", "required": ["items"]});
-        let node = ExecutionNode {
-            id: "quotes".to_string(),
-            requirement_ids: vec!["prices".to_string()],
-            depends_on: Vec::new(),
-            when: None,
-            input: json!({}),
-            output_schema: aggregate_schema,
-            operation: ExecutionOperation::Map {
-                items: json!([]),
-                item_key: "/symbol".to_string(),
-                max_items: 10,
-                item_output_schema: item_schema.clone(),
-                task: MapTask::Agent {
-                    instructions: "quote".to_string(),
-                    skill_refs: Vec::new(),
-                    capability_refs: Vec::new(),
-                    max_turns: 1,
-                },
-            },
-            retry: RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                max_backoff_ms: 1,
-            },
-            budget: None,
-        };
-
-        assert_eq!(task_output_schema(&node), &item_schema);
     }
 
     #[test]

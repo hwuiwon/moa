@@ -1,15 +1,15 @@
 //! Postgres repository coverage for connector lifecycle and authorization intent.
 
-use moa_artifacts::connector::RuntimeConnectorDefinitionV1;
+use moa_artifacts::connector::ConnectorDefinition;
 use moa_authz_schema::MODEL_VERSION;
 use moa_connectors::Error;
 use moa_connectors::catalog::InstalledConnectorCatalogSource;
 use moa_connectors::domain::{
-    CompiledOperationContract, ConnectionDefinitionRef, ConnectionGeneration, ConnectionStatus,
-    InstalledActionBinding, InstalledActionBindingId,
+    CompiledOperationContract, ConnectionDefinitionRef, ConnectionGeneration, ConnectionOrigin,
+    ConnectionStatus, InstalledActionBinding, InstalledActionBindingId,
 };
 use moa_connectors::repository::{
-    ConnectionActivation, ConnectionRepository, NewConnectorConnection,
+    ConnectionActivation, ConnectionLifecycleRepository, NewConnectorConnection,
     PostgresConnectionRepository,
 };
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
@@ -71,9 +71,16 @@ async fn create_commits_exact_tenant_and_owner_outbox_tuples_db_memory() {
     );
     assert!(
         repository
-            .list(other_tenant)
+            .list(
+                other_tenant,
+                moa_connectors::repository::ConnectionListRequest {
+                    after: None,
+                    limit: 50,
+                },
+            )
             .await
             .expect("cross-tenant catalog metadata should remain hidden by RLS")
+            .connections
             .is_empty()
     );
 
@@ -380,15 +387,174 @@ async fn credential_generation_fence_is_cas_and_suspends_active_connection_db_me
             tenant_id,
             pending_id,
             generation(2),
+            ConnectionStatus::Disconnecting,
+        )
+        .await
+        .expect("pending-auth fixture should enter disconnecting state");
+    repository
+        .transition(
+            tenant_id,
+            pending_id,
+            generation(2),
             ConnectionStatus::Deleted,
         )
         .await
-        .expect("pending-auth fixture should enter deleted state");
+        .expect("disconnecting fixture should enter deleted state");
     let teardown = repository
         .advance_credential_generation(tenant_id, pending_id, generation(2))
         .await
         .expect_err("deleted connection must reject credential generation writes");
     assert!(matches!(teardown, Error::InvalidContract { .. }));
+}
+
+#[tokio::test]
+async fn load_pinned_action_joins_exact_connection_and_binding_under_tenant_rls_db_memory() {
+    // Pins: the final pre-send read returns the exact tenant connection generation,
+    // immutable artifact revision, and action binding from one joined snapshot; a
+    // credential fence leaves the stale binding visible but disabled so the executor
+    // can reject its generation pin, while tenant RLS hides the row entirely.
+    let test_db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap pinned connector action test database");
+    let pool = test_db.store().pool().clone();
+    let repository = PostgresConnectionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let other_tenant_id = TenantId::new();
+    let connection_id = ConnectorConnectionId::new();
+    let artifact_uid = Uuid::new_v4();
+    let revision_uid = Uuid::new_v4();
+    let definition = definition_fixture(&["invoice_create"]);
+    insert_connector_artifact_revision(&pool, tenant_id, artifact_uid, revision_uid, &definition)
+        .await;
+    let definition_ref = ConnectionDefinitionRef::Artifact {
+        artifact_uid,
+        revision_uid,
+    };
+    repository
+        .create(NewConnectorConnection {
+            connection_id,
+            tenant_id,
+            display_name: "Pinned billing account".to_string(),
+            definition_ref: definition_ref.clone(),
+            origin: Some(
+                ConnectionOrigin::parse("https://billing.example.com")
+                    .expect("fixture connector origin should be canonical"),
+            ),
+            non_secret_config: json!({"region": "eu-west-1"}),
+            created_by_identity_id: Some(Uuid::new_v4()),
+            owner_identity_id: Uuid::new_v4(),
+        })
+        .await
+        .expect("artifact-backed connection fixture should be created");
+
+    let action = definition
+        .actions
+        .first()
+        .expect("fixture definition should contain one action");
+    let binding_id = InstalledActionBindingId(Uuid::new_v4());
+    let expected_binding = binding(
+        tenant_id,
+        connection_id,
+        generation(2),
+        binding_id,
+        &definition,
+        action,
+    );
+    let activated = repository
+        .activate(ConnectionActivation {
+            tenant_id,
+            connection_id,
+            expected_generation: generation(1),
+            bindings: vec![expected_binding.clone()],
+        })
+        .await
+        .expect("pinned action fixture should activate atomically");
+
+    let pinned = repository
+        .load_pinned_action(tenant_id, connection_id, binding_id)
+        .await
+        .expect("joined final pin read should succeed")
+        .expect("exact tenant connection and binding should exist");
+    assert_eq!(pinned.connection, activated);
+    assert_eq!(pinned.connection.definition, definition_ref);
+    assert_eq!(pinned.connection.generation, generation(2));
+    assert_eq!(pinned.binding, expected_binding);
+    assert_eq!(
+        pinned.binding.governed_contract_revision,
+        "billing/v1/invoice_create"
+    );
+
+    assert!(
+        repository
+            .load_pinned_action(other_tenant_id, connection_id, binding_id)
+            .await
+            .expect("cross-tenant final pin read should fail closed")
+            .is_none(),
+        "tenant RLS must hide both the connection and its binding"
+    );
+    assert!(
+        repository
+            .load_pinned_action(
+                tenant_id,
+                connection_id,
+                InstalledActionBindingId(Uuid::new_v4()),
+            )
+            .await
+            .expect("missing binding lookup should remain a successful read")
+            .is_none(),
+        "an unknown binding identity must not select a different action"
+    );
+
+    let fenced = repository
+        .advance_credential_generation(tenant_id, connection_id, generation(2))
+        .await
+        .expect("credential invalidation should advance and suspend the connection");
+    assert_eq!(fenced.generation, generation(3));
+    assert_eq!(fenced.status, ConnectionStatus::Suspended);
+    let stale_pin = repository
+        .load_pinned_action(tenant_id, connection_id, binding_id)
+        .await
+        .expect("joined final pin read should expose authoritative invalidation state")
+        .expect("immutable stale binding should remain available for final validation");
+    assert_eq!(stale_pin.connection.generation, generation(3));
+    assert_eq!(stale_pin.connection.status, ConnectionStatus::Suspended);
+    assert_eq!(stale_pin.binding.connection_generation, generation(2));
+    assert!(!stale_pin.binding.enabled);
+}
+
+async fn insert_connector_artifact_revision(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    artifact_uid: Uuid,
+    revision_uid: Uuid,
+    definition: &ConnectorDefinition,
+) {
+    sqlx::query(
+        "INSERT INTO moa.artifact \
+             (artifact_uid, tenant_id, storage_partition_id, kind, name) \
+         VALUES ($1, $2, $2::TEXT, 'connector', $3)",
+    )
+    .bind(artifact_uid)
+    .bind(tenant_id.0)
+    .bind(format!("pinned-connector-{artifact_uid}"))
+    .execute(pool)
+    .await
+    .expect("connector artifact fixture should be persisted");
+    sqlx::query(
+        "INSERT INTO moa.artifact_revision \
+             (revision_uid, artifact_uid, tenant_id, storage_partition_id, definition, \
+              canonical_hash, source_format, source_text, status, version) \
+         VALUES ($1, $2, $3, $3::TEXT, $4, $5, 'json', $6, 'published', 1)",
+    )
+    .bind(revision_uid)
+    .bind(artifact_uid)
+    .bind(tenant_id.0)
+    .bind(serde_json::to_value(definition).expect("connector definition should serialize"))
+    .bind(vec![7_u8; 32])
+    .bind(serde_json::to_vec(definition).expect("connector source fixture should serialize"))
+    .execute(pool)
+    .await
+    .expect("connector artifact revision fixture should be persisted");
 }
 
 fn new_connection(
@@ -401,31 +567,33 @@ fn new_connection(
         connection_id,
         tenant_id,
         display_name: "Billing account".to_string(),
-        definition_ref: ConnectionDefinitionRef::built_in("billing", 1)
+        definition_ref: ConnectionDefinitionRef::built_in("knowledge:nango", 1)
             .expect("fixture built-in definition should be valid"),
+        origin: None,
         non_secret_config: json!({"region": "us-east-1"}),
         created_by_identity_id,
         owner_identity_id,
     }
 }
 
-fn definition_fixture(action_ids: &[&str]) -> RuntimeConnectorDefinitionV1 {
+fn definition_fixture(action_ids: &[&str]) -> ConnectorDefinition {
     let actions = action_ids
         .iter()
         .map(|action_id| {
             json!({
                 "id": action_id,
                 "description": "DB-memory connector fixture action.",
-                "binding": {
-                    "type": "built_in_managed",
-                    "operation": action_id,
-                    "contract": {
+                "contract": {
+                    "method": "POST",
+                    "path_template": "/actions",
+                    "max_request_bytes": 1024,
+                    "max_response_bytes": 1024,
+                    "connect_timeout_ms": 1000,
+                    "total_timeout_ms": 2000,
+                    "policy": {
                         "input_schema": {"type": "object"},
                         "output_schema": {"type": "object"},
                         "data_classes": [],
-                        "action_class": "external_write",
-                        "risk_level": "high",
-                        "minimum_effect": "admin_review",
                         "idempotency": "idempotent"
                     }
                 }
@@ -435,8 +603,7 @@ fn definition_fixture(action_ids: &[&str]) -> RuntimeConnectorDefinitionV1 {
     serde_json::from_value(json!({
         "definition_version": "v1",
         "display_name": "Billing fixture",
-        "runtime": {"type": "built_in_managed", "provider": "billing/v1"},
-        "auth": [{"type": "managed_oauth", "slot": "primary"}],
+        "auth": [{"type": "none"}],
         "actions": actions,
     }))
     .expect("fixture definition should match the runtime V1 contract")
@@ -447,7 +614,7 @@ fn binding(
     connection_id: ConnectorConnectionId,
     connection_generation: ConnectionGeneration,
     binding_id: InstalledActionBindingId,
-    definition: &RuntimeConnectorDefinitionV1,
+    definition: &ConnectorDefinition,
     action: &moa_artifacts::connector::RuntimeConnectorActionV1,
 ) -> InstalledActionBinding {
     let compiled_contract = CompiledOperationContract::compile(definition, action)
@@ -464,7 +631,7 @@ fn binding(
         compiled_contract,
         contract_hash,
         governed_contract_revision: format!("billing/v1/{}", action.id),
-        minimum_effect: action.policy().minimum_effect,
+        minimum_effect: moa_core::types::action_policy::ActionPolicyEffect::AdminReview,
         enabled: true,
     }
 }

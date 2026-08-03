@@ -19,8 +19,8 @@ use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, Error as IngestError,
     FastError, FastPathCtx, FastRememberRequest, ForgetPattern, IncidentRecord, IngestRuntime,
-    RrfPlusJudgeDetector, execute_memory_tool, fast_forget, fast_remember, install_runtime,
-    record_incident, record_incident_with_ctx,
+    RrfPlusJudgeDetector, execute_memory_tool, fast_forget, fast_remember, record_incident,
+    record_incident_with_ctx,
 };
 use moa_memory_pii::{Error as PiiError, PiiCategory, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStoreFactory};
@@ -740,20 +740,18 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
         &embedder
     ));
     assert!(Arc::ptr_eq(&runtime.pii_classifier(), &pii));
-    install_runtime(runtime).expect("install hermetic fast-path runtime");
-
     let session = session_with_write_barrier(tenant_id, barrier, true);
     let remember_input = serde_json::json!({
         "items": [{ "text": "we deploy to railway" }]
     });
     let first_uid = single_stored_uid(
-        &execute_memory_tool(&session, "memory_remember", &remember_input)
+        &execute_memory_tool(&runtime, &session, "memory_remember", &remember_input)
             .await
             .expect("first remember dispatch"),
         "first remember",
     );
     let repeated_uid = single_stored_uid(
-        &execute_memory_tool(&session, "memory_remember", &remember_input)
+        &execute_memory_tool(&runtime, &session, "memory_remember", &remember_input)
             .await
             .expect("repeated remember dispatch"),
         "repeated remember",
@@ -778,12 +776,12 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
         Some(barrier),
     );
 
-    let incident_uid = record_incident(&session, 7, "search_web", "provider_error")
+    let incident_uid = record_incident(&runtime, &session, 7, "search_web", "provider_error")
         .await
         .expect("first incident")
         .expect("first incident should write");
     assert_eq!(
-        record_incident(&session, 7, "search_web", "provider_error")
+        record_incident(&runtime, &session, 7, "search_web", "provider_error")
             .await
             .expect("repeated incident"),
         None,
@@ -809,6 +807,7 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
 
     let old_uid = single_stored_uid(
         &execute_memory_tool(
+            &runtime,
             &session,
             "memory_remember",
             &serde_json::json!({ "items": [{ "text": "cache backend is redis" }] }),
@@ -819,6 +818,7 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
     );
     let replacement_uid = single_stored_uid(
         &execute_memory_tool(
+            &runtime,
             &session,
             "memory_supersede",
             &serde_json::json!({
@@ -846,6 +846,7 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
 
     let invalid_session = session_with_write_barrier(tenant_id, barrier, false);
     let invalid_forget = execute_memory_tool(
+        &runtime,
         &invalid_session,
         "memory_forget",
         &serde_json::json!({ "uid": first_uid }),
@@ -860,6 +861,7 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
     );
 
     let forget = execute_memory_tool(
+        &runtime,
         &session,
         "memory_forget",
         &serde_json::json!({ "uid": first_uid }),

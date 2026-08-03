@@ -14,7 +14,6 @@ use rmcp::model::CallToolResult;
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use super::command::ServicePath;
@@ -60,17 +59,8 @@ struct ExperimentListInput {
 struct ExperimentRunInput {
     /// Human-readable experiment run name.
     name: String,
-    /// Optional exact published `experiment_plan` revision UUID; use this instead of ad hoc target/variant payloads when available.
-    plan_revision_uid: Option<Uuid>,
-    /// Optional JSON target definition for an ad hoc run; shape is defined by the experiment target kind.
-    target: Option<Value>,
-    /// Optional JSON behavior variant for an ad hoc run.
-    variant: Option<Value>,
-    /// Typed scorecard for an ad hoc run: `{"requirements": [{"evaluator_id",
-    /// "evaluator_version", "config", "effect"}]}` with at least one `blocking` requirement.
-    /// Omit it entirely when `plan_revision_uid` is supplied; the pinned plan owns the scorecard.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scorecard: Option<Value>,
+    /// Exact published `experiment_plan` revision UUID to execute.
+    plan_revision_uid: Uuid,
     /// Optional existing score-run UUID used to join external or previously collected scores.
     score_run_id: Option<Uuid>,
     /// Optional stable retry key; reuse only when retrying the same logical experiment admission.

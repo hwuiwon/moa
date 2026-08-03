@@ -28,7 +28,9 @@ use secrecy::SecretString;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 
-use crate::services::connectors::{ConnectorManagementError, ConnectorManagementService};
+use crate::services::connectors::management::{
+    ConnectorManagementError, ConnectorManagementService,
+};
 
 /// Maximum accepted HTTP body size for one private credential-ingress request.
 ///
@@ -318,9 +320,8 @@ fn map_credential_error(error: CredentialError) -> CredentialIngressError {
 }
 
 fn map_management_error(error: ConnectorManagementError) -> CredentialIngressError {
-    use crate::services::connectors::{
-        ConnectorDefinitionResolutionError, ConnectorManagementAuthorizationError,
-    };
+    use crate::services::connectors::authz::ConnectorManagementAuthorizationError;
+    use crate::services::connectors::definitions::ConnectorDefinitionResolutionError;
 
     match error {
         ConnectorManagementError::Authorization(ConnectorManagementAuthorizationError::Denied) => {
@@ -594,9 +595,7 @@ mod tests {
     use chrono::Utc;
     use moa_connectors::domain::ConnectionGeneration;
     use moa_core::traits::IdentityType;
-    use moa_core::types::credentials::{
-        CredentialSource, CredentialStagingToken, CredentialVersion, RedactedSecret,
-    };
+    use moa_core::types::credentials::{CredentialStagingToken, CredentialVersion, RedactedSecret};
     use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
     use secrecy::ExposeSecret;
     use serde_json::json;
@@ -694,15 +693,6 @@ mod tests {
 
     #[async_trait]
     impl CredentialVault for RecordingVault {
-        async fn create(
-            &self,
-            _identity: CredentialIdentity,
-            _material: SecretString,
-            _ctx: &CredentialContext,
-        ) -> Result<CredentialVersion, CredentialError> {
-            Err(CredentialError::NotFound)
-        }
-
         async fn stage(
             &self,
             identity: CredentialIdentity,
@@ -744,14 +734,6 @@ mod tests {
             Err(CredentialError::NotFound)
         }
 
-        async fn resolve(
-            &self,
-            _source: &CredentialSource,
-            _ctx: &CredentialContext,
-        ) -> Result<RedactedSecret, CredentialError> {
-            Err(CredentialError::NotFound)
-        }
-
         async fn has_active(
             &self,
             _identity: &CredentialIdentity,
@@ -784,15 +766,6 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn rotate(
-            &self,
-            _current: moa_core::types::credentials::CredentialRef,
-            _material: SecretString,
-            _ctx: &CredentialContext,
-        ) -> Result<CredentialVersion, CredentialError> {
-            Err(CredentialError::NotFound)
-        }
-
         async fn revoke(
             &self,
             _reference: moa_core::types::credentials::CredentialRef,
@@ -804,14 +777,6 @@ mod tests {
         }
 
         async fn revoke_connection(
-            &self,
-            _connection_uid: uuid::Uuid,
-            _ctx: &CredentialContext,
-        ) -> Result<u64, CredentialError> {
-            Ok(0)
-        }
-
-        async fn delete_connection(
             &self,
             _connection_uid: uuid::Uuid,
             _ctx: &CredentialContext,

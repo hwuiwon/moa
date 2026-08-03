@@ -10,8 +10,9 @@ use moa_knowledge::{
         KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
     },
     repository::{
-        KnowledgeDiscoveryStore, KnowledgeRepository, PostgresKnowledgeDiscoveryStore,
-        PostgresKnowledgeRepository, ProviderAccountConnectionLookup,
+        KnowledgeDiscoveryStore, PostgresKnowledgeDiscoveryStore, PostgresKnowledgeRepository,
+        ProviderAccountConnectionLookup, connection::KnowledgeConnectionRepository,
+        document::KnowledgeIngestionRepository, sync::KnowledgeSyncRepository,
     },
 };
 use moa_test_support::postgres;
@@ -34,7 +35,7 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
-        provider: "nango".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: format!("google-drive-{label}"),
         provider_account_id: format!("provider-account-{label}"),
         metadata: json!({ "safe_label": label }),
@@ -224,21 +225,33 @@ async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge(
     let discovery = discovery(&db);
     assert_eq!(
         discovery
-            .lookup_connection_by_provider_account("nango", Some("connector-a"), "missing-account",)
+            .lookup_connection_by_provider_account(
+                moa_knowledge::domain::LinkedProviderKind::Nango,
+                Some("connector-a"),
+                "missing-account",
+            )
             .await
             .expect("missing provider lookup should complete"),
         ProviderAccountConnectionLookup::NotFound
     );
     assert_eq!(
         discovery
-            .lookup_connection_by_provider_account("nango", Some("connector-a"), "shared-account",)
+            .lookup_connection_by_provider_account(
+                moa_knowledge::domain::LinkedProviderKind::Nango,
+                Some("connector-a"),
+                "shared-account",
+            )
             .await
             .expect("connector-qualified provider lookup should complete"),
         ProviderAccountConnectionLookup::Unique(connection_a.clone())
     );
     assert_eq!(
         discovery
-            .lookup_connection_by_provider_account("nango", None, "shared-account",)
+            .lookup_connection_by_provider_account(
+                moa_knowledge::domain::LinkedProviderKind::Nango,
+                None,
+                "shared-account",
+            )
             .await
             .expect("ambiguous provider lookup should complete"),
         ProviderAccountConnectionLookup::Ambiguous { matches: 2 }
@@ -495,7 +508,10 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
         "tenant A must not update tenant B source selection"
     );
     let connection_summaries = repo_a
-        .list_connections(tenant_a, Some("nango"))
+        .list_connections(
+            tenant_a,
+            Some(moa_knowledge::domain::LinkedProviderKind::Nango),
+        )
         .await
         .expect("list tenant A connections");
     assert_eq!(connection_summaries.len(), 1);

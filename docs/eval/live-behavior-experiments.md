@@ -17,6 +17,10 @@ in `moa.experiment_run`, then admit the target through existing production
 paths: `Session`/`TurnExecution` for dynamically routed agent loops and
 `ExecutionRun` for durable typed plans.
 
+Every product run names one published `experiment_plan` revision. Admission
+projects the target, variant, scorecard, and resource envelope from that
+immutable revision; raw single-target run payloads are not accepted.
+
 Do not use live experiments as a shortcut for regression coverage. If a live
 experiment reveals a repeatable failure, turn the finding into a regression
 eval or a `learning_candidates` proposal with enough evidence to reproduce it.
@@ -29,7 +33,7 @@ The product-facing Behavior Lab artifact model is documented in
 attachments. They carry no session ID: an experiment never continues a
 caller-owned conversation, so every run creates its own eval-owned session for
 the authorized user or delegated agent identity, initializes the session virtual
-object, and queues the prompt through `Session/queue_message`. Tool routing,
+object, and submits the prompt through `Session/start_turn`. Tool routing,
 skills, memory, approvals, event logging, and learning emission are the same
 production path used by user sessions.
 
@@ -132,18 +136,18 @@ Use nextest for deterministic behavior-lab checks:
 cargo nextest run -p moa-artifacts --all-targets --locked
 cargo nextest run -p moa-scoring --all-targets --locked
 cargo nextest run -p moa-experiments --all-targets --locked
-cargo nextest run -p moa-orchestrator --test experiment_service --test behavior_lab_simulation_e2e --locked
+cargo nextest run -p moa-orchestrator --test experiment_service --test experiment_trial_run_e2e --locked
 cargo nextest run -p moa-edge --lib --locked
 ```
 
-The `behavior_lab_simulation_e2e` target compiles in the default lane; its
-local Restate E2E tests are ignored. To run those ignored tests, start the local
+The `experiment_trial_run_e2e` target compiles in the default lane; its local
+Restate E2E tests are ignored. To run those ignored tests, start the local
 Postgres/OpenFGA/Restate dependencies first and compile the orchestrator with
 provider overrides:
 
 ```bash
 cargo nextest run -p moa-orchestrator \
-  --test behavior_lab_simulation_e2e \
+  --test experiment_trial_run_e2e \
   --features integration,provider-overrides \
   --locked \
   --run-ignored ignored-only

@@ -54,7 +54,7 @@ pub use profile::{
 pub use reaper::{HandLeaseReaper, HandLeaseReaperConfig, PostgresExpiredHandLeaseClaims};
 pub use registration::{
     HandRoute, MCP_TOOL_REFERENCE_PREFIX, ToolExecution, ToolRegistry,
-    governed_tool_contract_revision, mcp_tool_reference,
+    governed_tool_contract_revision, installed_connector_tool_name, mcp_tool_reference,
 };
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
@@ -313,7 +313,7 @@ pub struct ToolRouter {
     unmatched_permission_patterns: std::sync::RwLock<Vec<UnmatchedPermissionPattern>>,
     rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
     session_store: Option<Arc<dyn SessionStore>>,
-    memory_tool_executor: RwLock<Option<Arc<dyn MemoryToolExecutor>>>,
+    memory_tool_executor: Option<Arc<dyn MemoryToolExecutor>>,
     memory_retrieval_executor: RwLock<Option<Arc<dyn MemoryRetrievalExecutor>>>,
     lineage: Arc<dyn moa_core::traits::LineageHandle>,
     sandbox_root: Option<PathBuf>,

@@ -7,5 +7,3 @@ mod support;
 mod ciba_db;
 #[path = "auth_providers_auth0_db/jwt_validation_db.rs"]
 mod jwt_validation_db;
-#[path = "auth_providers_auth0_db/vault_db.rs"]
-mod vault_db;

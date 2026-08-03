@@ -14,6 +14,7 @@ use moa_core::{
 };
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_orchestrator::services::memory::OrchestratorMemoryRetrievalExecutor;
+use moa_retrieval::engine::MemoryRetrievalEngine;
 use moa_session::testing;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -86,11 +87,14 @@ async fn pinned_clearances_isolate_reads_and_replayed_audit_is_idempotent_db_mem
     );
     let mut config = MoaConfig::default();
     config.memory.vector.embedder.name = "disabled".to_string();
-    let executor = OrchestratorMemoryRetrievalExecutor::new(
+    let retrieval_engine = Arc::new(
+        MemoryRetrievalEngine::new(config, pool.clone(), kms.clone(), None)
+            .with_assume_app_role(true),
+    );
+    let executor = OrchestratorMemoryRetrievalExecutor::from_retrieval_engine(
         pool.clone(),
         kms,
-        Arc::new(config),
-        Arc::new(moa_runtime_store::MemoryRuntimeCacheStore::new()),
+        retrieval_engine,
     );
     let operation_id = Uuid::now_v7().to_string();
     let audit_operation_id = format!("tool_call:{operation_id}");

@@ -16,8 +16,8 @@ use moa_knowledge::domain::{
     ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
     KnowledgeConnection, KnowledgeCredentialOwnership, KnowledgeDisconnectReservation,
     KnowledgeDisconnectState, KnowledgeDisconnectTransition, LinkClaim, LinkClaimReservation,
-    LinkClaimState, LinkClaimTransition, LinkedAccount, NewKnowledgeConnectionDisconnect,
-    NewLinkClaim, RemoteRevokeRequest,
+    LinkClaimState, LinkClaimTransition, LinkedAccount, LinkedProviderKind,
+    NewKnowledgeConnectionDisconnect, NewLinkClaim, RemoteRevokeRequest,
 };
 use moa_knowledge::normalize::{normalize_source_selection, redact_provider_metadata};
 use moa_wire::knowledge::{
@@ -122,7 +122,9 @@ impl KnowledgeService {
         &self,
         request: KnowledgeCreateLinkTokenRequest,
     ) -> Result<KnowledgeCreateLinkTokenResponse, KnowledgeServiceError> {
-        let provider = self.provider(&request.provider)?;
+        let provider_kind = LinkedProviderKind::from_str_exact(&request.provider)
+            .ok_or_else(|| KnowledgeServiceError::UnknownProvider(request.provider.clone()))?;
+        let provider = self.provider(provider_kind)?;
         let token = provider
             .create_link_token(CreateLinkTokenRequest {
                 tenant_id: request.tenant_id,
@@ -135,7 +137,7 @@ impl KnowledgeService {
             .await?;
 
         Ok(KnowledgeCreateLinkTokenResponse {
-            provider: token.provider,
+            provider: token.provider.to_string(),
             link_token: token.token,
             link_url: token.link_url,
             expires_at: token.expires_at,
@@ -155,7 +157,7 @@ impl KnowledgeService {
         caller: &KnowledgeCaller,
     ) -> Result<KnowledgeExchangeTokenResponse, KnowledgeServiceError> {
         let tenant_id = request.tenant_id;
-        let repository = self.repository(tenant_id);
+        let repository = self.connection_repository(tenant_id);
         let operation_id = caller.step("link");
 
         // Exchanging the public token is a provider-side read, so replaying it is
@@ -164,8 +166,10 @@ impl KnowledgeService {
         // request hash that fences the operation. Short-circuiting on a finalized
         // claim before computing that hash would return a recorded result without
         // ever checking that the inputs still match it.
+        let provider_kind = LinkedProviderKind::from_str_exact(&request.provider)
+            .ok_or_else(|| KnowledgeServiceError::UnknownProvider(request.provider.clone()))?;
         let account = self
-            .provider(&request.provider)?
+            .provider(provider_kind)?
             .exchange_public_token(ExchangePublicTokenRequest {
                 tenant_id,
                 connector: request.connector.clone(),
@@ -182,7 +186,7 @@ impl KnowledgeService {
         let existing_claim = repository.get_link_claim(tenant_id, &operation_id).await?;
         let existing = repository
             .connection_by_provider_account(
-                &account.provider,
+                account.provider,
                 &account.connector,
                 &account.provider_account_id,
             )
@@ -263,8 +267,9 @@ impl KnowledgeService {
         caller: &KnowledgeCaller,
     ) -> Result<KnowledgeExchangeTokenResponse, KnowledgeServiceError> {
         let tenant_id = claim.tenant_id;
-        let repository = self.repository(tenant_id);
-        let definition = ManagedParentDefinition::for_knowledge_provider(&account.provider)?;
+        let repository = self.connection_repository(tenant_id);
+        let definition =
+            ManagedParentDefinition::for_knowledge_provider(account.provider.as_str())?;
         let parent_claim = self
             .connector_connections()?
             .claim_managed_parent(ManagedParentClaimRequest {
@@ -274,9 +279,6 @@ impl KnowledgeService {
                 connection_id: ConnectorConnectionId(claim.connection_uid),
                 definition,
                 display_name: format!("{} {}", account.provider, account.connector),
-                connector: account.connector.clone(),
-                provider_config_key: account.connector.clone(),
-                provider_connection_id: account.provider_account_id.clone(),
                 owner_identity_id: claim.owner_identity_id,
             })
             .await?;
@@ -388,7 +390,7 @@ impl KnowledgeService {
             .upsert_connection(KnowledgeConnection {
                 connection_uid: claim.connection_uid,
                 tenant_id,
-                provider: account.provider.clone(),
+                provider: account.provider,
                 connector: account.connector.clone(),
                 provider_account_id: account.provider_account_id.clone(),
                 metadata: redact_provider_metadata(account.metadata.clone()),
@@ -407,7 +409,7 @@ impl KnowledgeService {
             ));
         }
 
-        self.provider(&connection.provider)?
+        self.provider(connection.provider)?
             .apply_source_selection(ApplySourceSelectionRequest {
                 connection: connection.clone(),
             })
@@ -447,7 +449,7 @@ impl KnowledgeService {
 
         Ok(KnowledgeExchangeTokenResponse {
             connection_uid: connection.connection_uid,
-            provider: connection.provider,
+            provider: connection.provider.to_string(),
             connector: connection.connector,
             provider_account_id: connection.provider_account_id,
             source_selection: connection.source_selection,
@@ -468,7 +470,7 @@ impl KnowledgeService {
         caller: &KnowledgeCaller,
     ) -> Result<(), KnowledgeServiceError> {
         let tenant_id = claim.tenant_id;
-        let repository = self.repository(tenant_id);
+        let repository = self.connection_repository(tenant_id);
         let Some(claim) = repository
             .advance_link_claim(
                 tenant_id,
@@ -565,12 +567,13 @@ impl KnowledgeService {
         if claim.state != LinkClaimState::Finalized {
             return Ok(None);
         }
-        let repository = self.repository(claim.tenant_id);
+        let repository = self.connection_repository(claim.tenant_id);
         let Some(connection) = repository.get_connection(claim.connection_uid).await? else {
             return Ok(None);
         };
         let sync_status = match claim.sync_run_uid {
-            Some(sync_run_uid) => repository
+            Some(sync_run_uid) => self
+                .sync_repository(claim.tenant_id)
                 .get_sync_run(sync_run_uid)
                 .await?
                 .map(|run| run.status.as_str().to_string()),
@@ -578,7 +581,7 @@ impl KnowledgeService {
         };
         Ok(Some(KnowledgeExchangeTokenResponse {
             connection_uid: connection.connection_uid,
-            provider: connection.provider,
+            provider: connection.provider.to_string(),
             connector: connection.connector,
             provider_account_id: connection.provider_account_id,
             source_selection: connection.source_selection,
@@ -593,7 +596,7 @@ impl KnowledgeService {
         request: KnowledgeUpdateConnectionSourceSelectionRequest,
         caller: &KnowledgeCaller,
     ) -> Result<KnowledgeUpdateConnectionSourceSelectionResponse, KnowledgeServiceError> {
-        let repository = self.repository(request.tenant_id);
+        let repository = self.connection_repository(request.tenant_id);
         let connection = repository
             .get_connection(request.connection_uid)
             .await?
@@ -605,7 +608,7 @@ impl KnowledgeService {
         let connection = repository
             .update_connection_source_selection(request.connection_uid, source_selection)
             .await?;
-        self.provider(&connection.provider)?
+        self.provider(connection.provider)?
             .apply_source_selection(ApplySourceSelectionRequest {
                 connection: connection.clone(),
             })
@@ -645,7 +648,7 @@ impl KnowledgeService {
         request: KnowledgeDisconnectConnectionRequest,
         caller: &KnowledgeCaller,
     ) -> Result<KnowledgeDisconnectConnectionResponse, KnowledgeServiceError> {
-        let repository = self.repository(request.tenant_id);
+        let repository = self.connection_repository(request.tenant_id);
         let connection = repository
             .get_connection(request.connection_uid)
             .await?
@@ -727,7 +730,7 @@ impl KnowledgeService {
                 return Err(error);
             }
         };
-        let provider = match self.provider(&connection.provider) {
+        let provider = match self.provider(connection.provider) {
             Ok(provider) => provider,
             Err(error) => {
                 repository

@@ -42,7 +42,10 @@ async fn merge_live_creates_link_token() {
         .await
         .expect("merge live link token creation should succeed");
 
-    assert_eq!(token.provider, "merge");
+    assert_eq!(
+        token.provider,
+        moa_knowledge::domain::LinkedProviderKind::Merge
+    );
     assert!(!token.token.trim().is_empty());
 }
 
@@ -75,7 +78,10 @@ async fn nango_live_creates_link_token() {
         .await
         .expect("nango live link token creation should succeed");
 
-    assert_eq!(token.provider, "nango");
+    assert_eq!(
+        token.provider,
+        moa_knowledge::domain::LinkedProviderKind::Nango
+    );
     assert!(!token.token.trim().is_empty());
 }
 
@@ -236,7 +242,7 @@ async fn nango_live_lists_integrations_including_google_drive() {
 #[ignore = "requires MOA_RUN_LIVE_KNOWLEDGE_PROVIDER_TESTS=1, NANGO_API_KEY, and a live google-drive connection"]
 async fn nango_live_google_drive_fetches_record_content() {
     // Pins: against a live Nango google-drive connection, fetch_record_content
-    // downloads real byte content through the proxy for a metadata-only record,
+    // downloads real byte content through the proxy for a provider-fetch record,
     // and text-MIME content parses to non-empty text via the native parser,
     // proving Drive file content (not just metadata) reaches ingestion.
     require_live_flag();
@@ -311,7 +317,7 @@ async fn nango_live_google_drive_fetches_record_content() {
             .to_string();
         match provider
             .fetch_record_content(FetchRecordContentRequest {
-                credential: test_credential(),
+                credential: None,
                 connection: connection.clone(),
                 record: record.clone(),
             })
@@ -449,7 +455,7 @@ fn live_connection(connector: &str, connection_id: &str, model: &str) -> Knowled
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id: TenantId::from(Uuid::now_v7()),
-        provider: "nango".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: connector.to_string(),
         provider_account_id: connection_id.to_string(),
         metadata: json!({}),

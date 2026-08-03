@@ -1,6 +1,6 @@
 //! Offline contracts for the closed managed knowledge-parent definitions.
 
-use moa_artifacts::connector::{RuntimeConnectorAuthRequirementV1, RuntimeConnectorKindV1};
+use moa_artifacts::connector::RuntimeConnectorAuthRequirementV1;
 use moa_connectors::Error;
 use moa_connectors::domain::{ConnectionDefinitionRef, ManagedParentDefinition};
 use moa_core::types::credentials::CredentialSlotName;
@@ -30,29 +30,17 @@ fn managed_knowledge_parent_definitions_are_closed_and_exact_offline() {
 }
 
 #[test]
-fn managed_knowledge_runtime_definitions_pin_provider_specific_auth_offline() {
+fn managed_knowledge_parents_pin_provider_specific_auth_offline() {
     // Pins: Nango uses only its deployment-owned provider handle, while Merge
     // cannot activate until the tenant's primary bearer credential is ready.
-    let nango = ManagedParentDefinition::KnowledgeNangoV1.runtime_definition();
-    assert!(matches!(
-        nango.runtime,
-        RuntimeConnectorKindV1::BuiltInManaged { ref provider }
-            if provider == "knowledge:nango"
-    ));
-    assert_eq!(nango.auth, vec![RuntimeConnectorAuthRequirementV1::None]);
-    assert!(nango.actions.is_empty());
+    let nango = ManagedParentDefinition::KnowledgeNangoV1.credential_requirements();
+    assert_eq!(nango, vec![RuntimeConnectorAuthRequirementV1::None]);
 
-    let merge = ManagedParentDefinition::KnowledgeMergeV1.runtime_definition();
-    assert!(matches!(
-        merge.runtime,
-        RuntimeConnectorKindV1::BuiltInManaged { ref provider }
-            if provider == "knowledge:merge"
-    ));
+    let merge = ManagedParentDefinition::KnowledgeMergeV1.credential_requirements();
     assert_eq!(
-        merge.auth,
+        merge,
         vec![RuntimeConnectorAuthRequirementV1::Bearer {
             slot: CredentialSlotName::PRIMARY,
         }]
     );
-    assert!(merge.actions.is_empty());
 }

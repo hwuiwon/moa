@@ -121,12 +121,6 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             error_code: codes.transport_retryable,
             retryable: true,
         },
-        Error::Provider { message, .. } if message.contains("materializable text") => {
-            FailureClassification {
-                error_code: "provider_record_missing_text",
-                retryable: false,
-            }
-        }
         Error::Provider { .. } => FailureClassification {
             error_code: "provider_error_retryable",
             retryable: true,

@@ -44,23 +44,6 @@ impl TestDatabase {
     pub(crate) async fn independent_pool(&self) -> Arc<sqlx::PgPool> {
         Arc::new(connect_pool(&self.database_url, &self.schema_name).await)
     }
-
-    /// Consume the fixture and return its primary pool.
-    pub(crate) fn into_pool(self) -> sqlx::PgPool {
-        self.pool
-    }
-}
-
-/// Create one migrated schema-scoped pool.
-pub(crate) async fn migrated_pool(prefix: &str) -> sqlx::PgPool {
-    TestDatabase::new(prefix).await.into_pool()
-}
-
-/// Create two independent pools against one migrated schema.
-pub(crate) async fn migrated_pool_pair(prefix: &str) -> (sqlx::PgPool, sqlx::PgPool) {
-    let database = TestDatabase::new(prefix).await;
-    let second = database.independent_pool().await;
-    (database.into_pool(), second.as_ref().clone())
 }
 
 async fn connect_pool(database_url: &str, schema_name: &str) -> sqlx::PgPool {

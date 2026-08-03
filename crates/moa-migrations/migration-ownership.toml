@@ -629,17 +629,6 @@ schema = "public"
 owner = "moa-session"
 
 [[table]]
-name = "linked_connections"
-schema = "public"
-owner = "moa-auth/auth0"
-
-[[table]]
-name = "token_vault_connections"
-schema = "public"
-owner = "moa-auth/providers"
-notes = "Self-hosted token vault storing sealed third-party OAuth tokens."
-
-[[table]]
 name = "oauth_clients"
 schema = "public"
 owner = "moa-auth/providers"
@@ -726,7 +715,7 @@ name = "tenant_purge_catalog"
 schema = "moa"
 owner = "moa-orchestrator"
 readers = ["moa-migrations"]
-notes = "Closed 135-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
+notes = "Closed 133-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
 
 [[table]]
 name = "tenant_user_invitations"

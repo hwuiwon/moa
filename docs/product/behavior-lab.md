@@ -125,6 +125,12 @@ the pinned plan revision, selected persona/profile/scenario/data-bundle IDs,
 simulator settings, target session or execution-run links, trial score run ID,
 stop reason, and trace ID.
 
+Resource admission is one concrete `moa-experiments` domain transition: it
+checks the persisted run and trial ceilings plus deadline, then computes the
+next committed and outstanding counters for reserve, reconcile, or release.
+The SQL store supplies row locks, replay lookup, RLS, transactions, and writes;
+`ExperimentTrialRun` only journals those repository calls around dispatch.
+
 Before a simulator turn, `ExperimentTrialRun` reloads the pinned plan and exact
 policy revision, verifies both against the stored trial snapshot, and dispatches
 the request through the production provider gateway. Simulator output uses the
@@ -175,7 +181,7 @@ Default deterministic checks:
 cargo nextest run -p moa-artifacts --all-targets --locked
 cargo nextest run -p moa-scoring --all-targets --locked
 cargo nextest run -p moa-experiments --all-targets --locked
-cargo nextest run -p moa-orchestrator --test experiment_service --test behavior_lab_simulation_e2e --locked
+cargo nextest run -p moa-orchestrator --test experiment_service --test experiment_trial_run_e2e --locked
 cargo nextest run -p moa-edge --lib --locked
 ```
 
@@ -186,7 +192,7 @@ default.
 
 ```bash
 cargo nextest run -p moa-orchestrator \
-  --test behavior_lab_simulation_e2e \
+  --test experiment_trial_run_e2e \
   --features integration,provider-overrides \
   --locked \
   --run-ignored ignored-only

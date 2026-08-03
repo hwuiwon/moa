@@ -8,7 +8,10 @@ use moa_knowledge::domain::{
     KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
     SyncRunStatus,
 };
-use moa_knowledge::repository::{ProviderAccountConnectionLookup, SyncRunClaim};
+use moa_knowledge::repository::{
+    ProviderAccountConnectionLookup, SyncRunClaim, document::KnowledgeIngestionRepository,
+    sync::KnowledgeSyncRepository,
+};
 use moa_observability::record_knowledge_sync_run;
 use moa_wire::knowledge::{KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -71,20 +74,28 @@ impl KnowledgeService {
             "connection_id",
             tracing::field::display(binding.connection_uid),
         );
-        let repository = self.repository(binding.tenant_id);
+        let connections = self.connection_repository(binding.tenant_id);
+        let sync = self.sync_repository(binding.tenant_id);
+        let ingestion = self.ingestion_repository(binding.tenant_id);
+        let events = self.event_repository(binding.tenant_id);
         let parser_completion = if is_parser_completion_event(
             &verified.provider,
             &verified.event_type,
             &verified.metadata,
         ) {
             Some(
-                resolve_parser_completion_context(&*repository, &binding, &verified.metadata)
-                    .await?,
+                resolve_parser_completion_context(
+                    ingestion.as_ref(),
+                    sync.as_ref(),
+                    &binding,
+                    &verified.metadata,
+                )
+                .await?,
             )
         } else {
             None
         };
-        let recorded = repository
+        let recorded = events
             .record_provider_event(KnowledgeProviderEventRecord {
                 provider_event_uid: Uuid::now_v7(),
                 tenant_id: binding.tenant_id,
@@ -103,24 +114,24 @@ impl KnowledgeService {
         if !recorded.duplicate && should_enqueue_ingestion(&recorded.provider, &recorded.event_type)
         {
             let connection_uid = binding.connection_uid;
-            if let Some(mut run) = repository
+            if let Some(mut run) = sync
                 .latest_sync_run_for_connection(connection_uid, &[SyncRunStatus::ProviderSyncing])
                 .await?
             {
                 run.status = SyncRunStatus::ProviderSynced;
-                repository.update_sync_run(run.clone()).await?;
+                sync.update_sync_run(run.clone()).await?;
                 verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
                 record_knowledge_sync_run(&recorded.provider, run.status.as_str());
-                ingestion_enqueued = record_ingestion_enqueue_step(&*repository, &run).await?;
+                ingestion_enqueued = record_ingestion_enqueue_step(sync.as_ref(), &run).await?;
                 sync_run_uid = Some(run.sync_run_uid);
-            } else if let Some(run) = repository
+            } else if let Some(run) = sync
                 .latest_sync_run_for_connection(connection_uid, non_terminal_sync_run_statuses())
                 .await?
             {
                 verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
                 sync_run_uid = Some(run.sync_run_uid);
             } else {
-                let information_barrier = repository
+                let information_barrier = connections
                     .get_connection(connection_uid)
                     .await?
                     .ok_or(KnowledgeServiceError::NotFound("knowledge connection"))?
@@ -149,13 +160,13 @@ impl KnowledgeService {
                     // MOA-side dispatch this run is waiting on.
                     provider_trigger_completed_at: Some(Utc::now()),
                 };
-                match repository.claim_sync_run(run).await? {
+                match sync.claim_sync_run(run).await? {
                     SyncRunClaim::Claimed(run) => {
                         verify_span
                             .record("sync_run_id", tracing::field::display(run.sync_run_uid));
                         record_knowledge_sync_run(&recorded.provider, run.status.as_str());
                         ingestion_enqueued =
-                            record_ingestion_enqueue_step(&*repository, &run).await?;
+                            record_ingestion_enqueue_step(sync.as_ref(), &run).await?;
                         sync_run_uid = Some(run.sync_run_uid);
                     }
                     SyncRunClaim::AlreadyRunning(run) => {
@@ -170,7 +181,7 @@ impl KnowledgeService {
             && let Some(parser_completion) = parser_completion
         {
             let signal = record_parser_completion_signal(
-                &*repository,
+                sync.as_ref(),
                 parser_completion,
                 &recorded.provider,
                 &recorded.payload,
@@ -200,13 +211,13 @@ impl KnowledgeService {
             tenant_id_from_metadata(metadata),
             uuid_from_metadata(metadata, &["connection_uid"]),
         ) {
-            let repository = self.repository(tenant_id);
+            let repository = self.connection_repository(tenant_id);
             let connection = repository
                 .get_connection(connection_uid)
                 .await?
                 .ok_or(KnowledgeServiceError::NotFound("knowledge connection"))?;
             if connection.tenant_id != tenant_id
-                || !connection_provider_matches_webhook(provider, &connection.provider)
+                || !connection_provider_matches_webhook(provider, connection.provider.as_str())
             {
                 return Err(KnowledgeServiceError::NotFound("knowledge connection"));
             }
@@ -225,7 +236,8 @@ impl KnowledgeService {
         let lookup = self
             .discovery()
             .lookup_connection_by_provider_account(
-                provider,
+                moa_knowledge::domain::LinkedProviderKind::from_str_exact(provider)
+                    .ok_or_else(|| KnowledgeServiceError::UnknownProvider(provider.to_string()))?,
                 candidate.connector.as_deref(),
                 &candidate.provider_account_id,
             )
@@ -251,7 +263,7 @@ impl KnowledgeService {
 }
 
 pub(super) async fn record_ingestion_enqueue_step(
-    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    repository: &dyn KnowledgeSyncRepository,
     run: &KnowledgeSyncRun,
 ) -> Result<bool, KnowledgeServiceError> {
     repository
@@ -289,12 +301,13 @@ struct ParserCompletionContext {
 }
 
 async fn resolve_parser_completion_context(
-    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    ingestion: &dyn KnowledgeIngestionRepository,
+    sync: &dyn KnowledgeSyncRepository,
     binding: &VerifiedWebhookBinding,
     metadata: &Value,
 ) -> Result<ParserCompletionContext, KnowledgeServiceError> {
-    let object = resolve_parser_webhook_object(repository, binding, metadata).await?;
-    let Some(run) = repository
+    let object = resolve_parser_webhook_object(ingestion, binding, metadata).await?;
+    let Some(run) = sync
         .latest_sync_run_for_connection(binding.connection_uid, non_terminal_sync_run_statuses())
         .await?
     else {
@@ -307,7 +320,7 @@ async fn resolve_parser_completion_context(
 }
 
 async fn record_parser_completion_signal(
-    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    repository: &dyn KnowledgeSyncRepository,
     mut context: ParserCompletionContext,
     provider: &str,
     metadata: &Value,
@@ -332,7 +345,7 @@ async fn record_parser_completion_signal(
 }
 
 async fn resolve_parser_webhook_object(
-    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    repository: &dyn KnowledgeIngestionRepository,
     binding: &VerifiedWebhookBinding,
     metadata: &Value,
 ) -> Result<KnowledgeObject, KnowledgeServiceError> {
@@ -361,7 +374,7 @@ async fn resolve_parser_webhook_object(
 }
 
 async fn record_parser_completion_step(
-    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    repository: &dyn KnowledgeSyncRepository,
     run: &KnowledgeSyncRun,
     object: &KnowledgeObject,
     provider: &str,
@@ -485,7 +498,7 @@ fn verified_binding_from_connection(
     provider: &str,
     connection: KnowledgeConnection,
 ) -> Result<VerifiedWebhookBinding, KnowledgeServiceError> {
-    if !connection_provider_matches_webhook(provider, &connection.provider) {
+    if !connection_provider_matches_webhook(provider, connection.provider.as_str()) {
         return Err(KnowledgeServiceError::NotFound("knowledge connection"));
     }
     Ok(VerifiedWebhookBinding {
