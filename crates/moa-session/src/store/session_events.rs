@@ -102,6 +102,13 @@ fn record_append_phase(phase: SessionEventAppendPhase, started: Instant) {
     record_session_event_append_phase_duration(phase, started.elapsed());
 }
 
+/// Truncates a timestamp to the precision PostgreSQL can persist exactly.
+fn postgres_timestamp(timestamp: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp_micros(timestamp.timestamp_micros()).ok_or_else(|| {
+        MoaError::StorageError("current time is outside PostgreSQL timestamp range".to_string())
+    })
+}
+
 /// Refuses an append whose session has already had its history archived.
 ///
 /// Read from the `sessions` row the append path already holds under
@@ -141,7 +148,7 @@ impl PostgresSessionStore {
         event: Event,
         dedupe_key: Option<&str>,
     ) -> Result<u64> {
-        let now = Utc::now();
+        let now = postgres_timestamp(Utc::now())?;
         let payload = encode_event_for_storage(
             self.blob_store.as_ref(),
             &session_id,
@@ -434,7 +441,7 @@ impl PostgresSessionStore {
 
         // Offload blobs before opening the transaction (uses a second pooled
         // connection) so the append transaction only does index-friendly work.
-        let now = Utc::now();
+        let now = postgres_timestamp(Utc::now())?;
         let phase_started = Instant::now();
         let mut prepared = Vec::with_capacity(appends.len());
         for append in appends {
@@ -823,6 +830,27 @@ impl SessionEventLookupStore for PostgresSessionStore {
             tool_call_id,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    //! Timestamp normalization coverage for persisted event records.
+
+    use super::postgres_timestamp;
+    use chrono::{DateTime, Utc};
+
+    #[test]
+    fn postgres_timestamp_truncates_linux_nanoseconds_to_microseconds_offline() {
+        // Pins: append results use the exact timestamp PostgreSQL will return,
+        // even when the host clock supplies sub-microsecond precision.
+        let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000, 123_456_789)
+            .expect("fixture timestamp should be representable");
+
+        let normalized = postgres_timestamp(timestamp).expect("timestamp should normalize");
+
+        assert_eq!(normalized.timestamp(), timestamp.timestamp());
+        assert_eq!(normalized.timestamp_subsec_nanos(), 123_456_000);
     }
 }
 
