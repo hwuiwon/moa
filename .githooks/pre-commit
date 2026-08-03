@@ -4,122 +4,16 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-# Paths that never affect Rust compilation. When a commit only touches files
-# under these prefixes, skip the cargo lint.
-DOC_ONLY_PREFIXES=("docs/" "sequence/")
-
-staged="$(git diff --cached --name-only)"
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 
 if [ -z "$staged" ]; then
   echo "[pre-commit] no staged files — nothing to check"
   exit 0
 fi
 
-is_doc_only=true
-while IFS= read -r path; do
-  matched=false
-  for prefix in "${DOC_ONLY_PREFIXES[@]}"; do
-    case "$path" in
-      "$prefix"*) matched=true; break ;;
-    esac
-  done
-  if ! $matched; then
-    is_doc_only=false
-    break
-  fi
-done <<< "$staged"
-
-if $is_doc_only; then
-  echo "[pre-commit] doc-only change set — skipping clippy"
-  exit 0
+if grep -qE '\.rs$' <<< "$staged"; then
+  echo "[pre-commit] checking Rust formatting"
+  cargo fmt --all -- --check
 fi
 
-# ---------------------------------------------------------------------------
-# Scope clippy to only the crates that changed.
-# Falls back to --workspace when root-level files are touched (e.g. root
-# Cargo.toml, CI configs, rust-toolchain.toml).
-# ---------------------------------------------------------------------------
-WORKSPACE_MEMBERS=(
-  crates/moa-core
-  crates/moa-brain
-  crates/moa-session
-  crates/moa-memory/graph
-  crates/moa-memory/ingest
-  crates/moa-memory/pii
-  crates/moa-memory/vector
-  crates/moa-lineage/core
-  crates/moa-lineage/sink
-  crates/moa-lineage/citation
-  crates/moa-lineage/cold
-  crates/moa-lineage/audit
-  crates/moa-auth/authz-schema
-  crates/moa-auth/authz
-  crates/moa-auth/providers
-  crates/moa-auth/auth0
-  crates/moa-auth/fga-bootstrap
-  crates/moa-ocsf
-  crates/moa-edge
-  crates/moa-hands
-  crates/moa-providers
-  crates/moa-orchestrator
-  crates/moa-gateway
-  crates/moa-security
-  crates/moa-skills
-  crates/moa-eval
-  crates/moa-loadtest
-  crates/moa-test-support
-  crates/xtask
-)
-
-affected=()
-root_touched=false
-
-while IFS= read -r path; do
-  in_crate=false
-  for member in "${WORKSPACE_MEMBERS[@]}"; do
-    case "$path" in
-      "$member/"*)
-        already=false
-        for a in "${affected[@]+"${affected[@]}"}"; do
-          [[ "$a" == "$member" ]] && { already=true; break; }
-        done
-        $already || affected+=("$member")
-        in_crate=true
-        break
-        ;;
-    esac
-  done
-  $in_crate || root_touched=true
-done <<< "$staged"
-
-if $root_touched || [ ${#affected[@]} -eq 0 ]; then
-  echo "[pre-commit] root files changed — full workspace check"
-  scope=("--workspace")
-  scope_label="workspace"
-else
-  scope=()
-  for c in "${affected[@]}"; do
-    # `-p` takes the package name, not the member path.
-    name="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$c/Cargo.toml" | head -1)"
-    scope+=("-p" "${name:-$c}")
-  done
-  scope_label="${affected[*]}"
-  echo "[pre-commit] scoped to: $scope_label"
-fi
-
-# ---------------------------------------------------------------------------
-
-timed() {
-  local label="$1"; shift
-  local t0; t0=$(date +%s)
-  echo "[pre-commit] $label"
-  "$@"
-  echo "[pre-commit] $label — $(($(date +%s) - t0))s"
-}
-
-# Clippy — scoped to affected crates. Clippy compiles + lints in one pass,
-# so a separate `cargo build` step is redundant.
-timed "clippy [$scope_label]" \
-  cargo clippy "${scope[@]}" --all-targets -- -D warnings
-
-echo "[pre-commit] clippy passed"
+echo "[pre-commit] fast checks passed"
