@@ -8,9 +8,9 @@ use moa_artifacts::validation::{ValidationError, validate_for_status};
 use serde_json::{Value, json};
 
 #[test]
-fn connector_definition_round_trips_as_one_versioned_http_shape() {
-    // Pins: connector artifacts have one explicit versioned HTTP contract and
-    // cannot decode legacy aliases, runtime selectors, or managed operations.
+fn connector_definition_round_trips_as_one_http_shape() {
+    // Pins: connector artifacts have one HTTP contract and cannot decode
+    // legacy aliases, runtime selectors, or managed operations.
     let document =
         connector_document_from_spec(http_spec()).expect("valid connector should decode");
     let encoded = document.to_json().expect("connector should serialize");
@@ -23,14 +23,12 @@ fn connector_definition_round_trips_as_one_versioned_http_shape() {
     for invalid in [
         json!({"auth": {}, "actions": [], "ui": {}}),
         json!({
-            "definition_version": "v1",
             "display_name": "Invalid",
             "runtime": {"type": "constrained_http"},
             "auth": [{"type": "none"}],
             "actions": []
         }),
         json!({
-            "definition_version": "v1",
             "display_name": "Invalid",
             "auth": [{"type": "none"}],
             "actions": [{
@@ -41,6 +39,16 @@ fn connector_definition_round_trips_as_one_versioned_http_shape() {
     ] {
         assert!(connector_document_from_spec(invalid).is_err());
     }
+}
+
+#[test]
+fn connector_definition_rejects_removed_definition_version_discriminator() {
+    // Pins: the current HTTP shape rejects the removed definition_version
+    // discriminator instead of silently accepting an obsolete wire contract.
+    let mut obsolete = http_spec();
+    obsolete["definition_version"] = json!("v1");
+
+    assert!(connector_document_from_spec(obsolete).is_err());
 }
 
 #[test]
@@ -210,7 +218,6 @@ fn connector_action_ids_and_secret_free_shape_fail_closed() {
 
 fn http_spec() -> Value {
     json!({
-        "definition_version": "v1",
         "display_name": "Billing API",
         "description": "Reviewed billing operations.",
         "auth": [{"type": "bearer", "slot": "primary"}],

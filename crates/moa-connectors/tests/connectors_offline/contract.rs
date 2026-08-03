@@ -1,8 +1,8 @@
 //! Canonical installed constrained-HTTP operation contract behavior.
 
 use moa_artifacts::connector::{
-    ConnectorDefinition, ConnectorDefinitionVersionV1, HttpMethodV1, HttpOperationContract,
-    RuntimeConnectorActionV1, RuntimeConnectorAuthRequirementV1, RuntimeOperationPolicyV1,
+    ConnectorDefinition, HttpMethod, HttpOperationContract, RuntimeConnectorAction,
+    RuntimeConnectorAuthRequirement, RuntimeOperationPolicy,
 };
 use moa_connectors::Error;
 use moa_connectors::domain::{
@@ -17,12 +17,12 @@ use moa_core::types::tools::IdempotencyClass;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-fn action(input_schema: Value) -> RuntimeConnectorActionV1 {
-    RuntimeConnectorActionV1 {
+fn action(input_schema: Value) -> RuntimeConnectorAction {
+    RuntimeConnectorAction {
         id: "create_invoice".to_string(),
         description: "Create one invoice".to_string(),
         contract: HttpOperationContract {
-            method: HttpMethodV1::Post,
+            method: HttpMethod::Post,
             path_template: "/invoices".to_string(),
             path_inputs: Vec::new(),
             query_inputs: Vec::new(),
@@ -34,7 +34,7 @@ fn action(input_schema: Value) -> RuntimeConnectorActionV1 {
             max_response_bytes: 1024,
             connect_timeout_ms: 1_000,
             total_timeout_ms: 2_000,
-            policy: RuntimeOperationPolicyV1 {
+            policy: RuntimeOperationPolicy {
                 input_schema,
                 output_schema: json!({"type": "object"}),
                 data_classes: vec![SensitivityClass::Pii],
@@ -46,10 +46,9 @@ fn action(input_schema: Value) -> RuntimeConnectorActionV1 {
 
 fn definition() -> ConnectorDefinition {
     ConnectorDefinition {
-        definition_version: ConnectorDefinitionVersionV1::V1,
         display_name: "Billing".to_string(),
         description: String::new(),
-        auth: vec![RuntimeConnectorAuthRequirementV1::Bearer {
+        auth: vec![RuntimeConnectorAuthRequirement::Bearer {
             slot: CredentialSlotName::PRIMARY,
         }],
         actions: Vec::new(),
@@ -138,13 +137,13 @@ fn compiled_http_contract_requires_its_selected_credential_slot_offline() {
     // Pins: activation cannot persist a selected credential slot that was not declared.
     let action = action(json!({"type": "object"}));
     let mut definition = definition();
-    definition.auth = vec![RuntimeConnectorAuthRequirementV1::None];
+    definition.auth = vec![RuntimeConnectorAuthRequirement::None];
     assert!(matches!(
         CompiledOperationContract::compile(&definition, &action),
         Err(Error::CredentialSlotMissing { ref slot }) if slot == &CredentialSlotName::PRIMARY
     ));
 
-    definition.auth = vec![RuntimeConnectorAuthRequirementV1::Bearer {
+    definition.auth = vec![RuntimeConnectorAuthRequirement::Bearer {
         slot: CredentialSlotName::PRIMARY,
     }];
     CompiledOperationContract::compile(&definition, &action)

@@ -300,7 +300,6 @@ async fn active_binding(
         .await
         .expect("connection fixture should be created");
     let definition: ConnectorDefinition = serde_json::from_value(json!({
-        "definition_version": "v1",
         "display_name": "Billing replay fixture",
         "auth": [{"type": "none"}],
         "actions": [{
@@ -322,7 +321,7 @@ async fn active_binding(
             }
         }]
     }))
-    .expect("fixture definition should match the runtime V1 contract");
+    .expect("fixture definition should match the runtime connector contract");
     let action = definition
         .actions
         .first()

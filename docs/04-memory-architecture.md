@@ -84,13 +84,14 @@ source stay in relational Postgres nodes, edges, and pgvector rows. The
 the graph transaction commits.
 
 `moa.node_index` also carries derived ranking metadata. `quality_score` is a
-neutral-by-default `0.5` prior that FeatureV1 centers to zero contribution; a
+neutral-by-default `0.5` prior that the deterministic feature scorer centers to
+zero contribution; a
 score above or below that value can promote or demote otherwise similar facts
 without changing graph truth. The value lives in the sidecar row rather than
 node properties so candidate hydration does not parse dynamic properties per
 query.
 
-FeatureV1 token features (subject match, overlap) stem pure-alphabetic tokens
+Deterministic token features (subject match, overlap) stem pure-alphabetic tokens
 with Snowball so morphological variants match; identifier-like tokens with
 digits are compared verbatim. First-person queries ("the way I prefer") double
 the caller's contact-scope term, because such queries rarely share tokens with

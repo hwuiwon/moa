@@ -297,7 +297,7 @@ fn candidate(
     let now = Utc::now();
     let generation = ConnectionGeneration::new(1).expect("fixture generation should be positive");
     let definition: ConnectorDefinition = serde_json::from_value(definition_fixture(action_id))
-        .expect("fixture definition should match the runtime V1 contract");
+        .expect("fixture definition should match the runtime connector contract");
     let action = definition
         .actions
         .first()
@@ -343,7 +343,6 @@ fn candidate(
 
 fn definition_fixture(action_id: &str) -> Value {
     json!({
-        "definition_version": "v1",
         "display_name": "Offline HTTP fixture",
         "auth": [{"type": "none"}],
         "actions": [{

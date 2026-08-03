@@ -601,12 +601,11 @@ fn definition_fixture(action_ids: &[&str]) -> ConnectorDefinition {
         })
         .collect::<Vec<Value>>();
     serde_json::from_value(json!({
-        "definition_version": "v1",
         "display_name": "Billing fixture",
         "auth": [{"type": "none"}],
         "actions": actions,
     }))
-    .expect("fixture definition should match the runtime V1 contract")
+    .expect("fixture definition should match the runtime connector contract")
 }
 
 fn binding(
@@ -615,7 +614,7 @@ fn binding(
     connection_generation: ConnectionGeneration,
     binding_id: InstalledActionBindingId,
     definition: &ConnectorDefinition,
-    action: &moa_artifacts::connector::RuntimeConnectorActionV1,
+    action: &moa_artifacts::connector::RuntimeConnectorAction,
 ) -> InstalledActionBinding {
     let compiled_contract = CompiledOperationContract::compile(definition, action)
         .expect("fixture operation contract should compile");

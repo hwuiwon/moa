@@ -47,7 +47,7 @@ async fn managed_parent_claim_replays_owned_bit_and_refuses_ownerless_creation_d
         connection_id,
         "link-operation-1",
         &"a".repeat(64),
-        ManagedParentDefinition::KnowledgeMergeV1,
+        ManagedParentDefinition::KnowledgeMerge,
         Some(owner_id),
     );
 
@@ -114,7 +114,7 @@ async fn managed_parent_claim_replays_owned_bit_and_refuses_ownerless_creation_d
         ownerless_id,
         "ownerless-new-operation",
         &"c".repeat(64),
-        ManagedParentDefinition::KnowledgeNangoV1,
+        ManagedParentDefinition::KnowledgeNango,
         None,
     );
     assert!(matches!(
@@ -150,7 +150,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
         .create(existing_managed_parent(
             tenant_id,
             connection_id,
-            ManagedParentDefinition::KnowledgeNangoV1,
+            ManagedParentDefinition::KnowledgeNango,
             "",
             "",
             "",
@@ -164,7 +164,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
             connection_id,
             "attach-existing",
             &"d".repeat(64),
-            ManagedParentDefinition::KnowledgeNangoV1,
+            ManagedParentDefinition::KnowledgeNango,
             None,
         ))
         .await
@@ -187,7 +187,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
         connection_id,
         "attach-existing",
         &"d".repeat(64),
-        ManagedParentDefinition::KnowledgeNangoV1,
+        ManagedParentDefinition::KnowledgeNango,
         None,
     );
     let claim = repository
@@ -235,7 +235,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
         .create(existing_managed_parent(
             tenant_id,
             mismatch_id,
-            ManagedParentDefinition::KnowledgeMergeV1,
+            ManagedParentDefinition::KnowledgeMerge,
             "merge-config",
             "different-account",
             "ats",
@@ -249,7 +249,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
             mismatch_id,
             "mismatched-account",
             &"e".repeat(64),
-            ManagedParentDefinition::KnowledgeMergeV1,
+            ManagedParentDefinition::KnowledgeMerge,
             None,
         ))
         .await
@@ -267,7 +267,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
         .create(existing_managed_parent(
             tenant_id,
             wrong_definition_id,
-            ManagedParentDefinition::KnowledgeMergeV1,
+            ManagedParentDefinition::KnowledgeMerge,
             "",
             "",
             "",
@@ -282,7 +282,7 @@ async fn managed_parent_existing_compatibility_is_exact_and_never_claims_creatio
                 wrong_definition_id,
                 "wrong-managed-definition",
                 &"f".repeat(64),
-                ManagedParentDefinition::KnowledgeNangoV1,
+                ManagedParentDefinition::KnowledgeNango,
                 None,
             ))
             .await,
@@ -313,7 +313,7 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
             connection_id,
             operation_id,
             &request_hash,
-            ManagedParentDefinition::KnowledgeNangoV1,
+            ManagedParentDefinition::KnowledgeNango,
             Some(Uuid::new_v4()),
         ))
         .await
@@ -324,7 +324,7 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
             tenant_id,
             connection_id,
             expected_generation: generation(1),
-            definition: ManagedParentDefinition::KnowledgeNangoV1,
+            definition: ManagedParentDefinition::KnowledgeNango,
         })
         .await
         .expect("knowledge-only parent should activate without action bindings");
@@ -345,7 +345,7 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
             tenant_id,
             connection_id,
             expected_generation: generation(1),
-            definition: ManagedParentDefinition::KnowledgeNangoV1,
+            definition: ManagedParentDefinition::KnowledgeNango,
         })
         .await
         .expect("suspended knowledge-only parent should reactivate without a new generation");
@@ -411,7 +411,7 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
             dependent_id,
             "dependent-parent",
             &dependent_hash,
-            ManagedParentDefinition::KnowledgeNangoV1,
+            ManagedParentDefinition::KnowledgeNango,
             Some(Uuid::new_v4()),
         ))
         .await
@@ -423,7 +423,7 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
                 tenant_id,
                 connection_id: dependent_id,
                 expected_generation: generation(1),
-                definition: ManagedParentDefinition::KnowledgeNangoV1,
+                definition: ManagedParentDefinition::KnowledgeNango,
             })
             .await,
         Err(Error::ManagedParentActionDependents { connection_id: actual })
@@ -462,7 +462,7 @@ async fn managed_parent_activation_and_compensation_preserve_generation_and_depe
             inflight_id,
             "creator-with-inflight-peer",
             &inflight_hash,
-            ManagedParentDefinition::KnowledgeNangoV1,
+            ManagedParentDefinition::KnowledgeNango,
             Some(Uuid::new_v4()),
         ))
         .await
@@ -494,8 +494,8 @@ fn claim_request(
     owner_identity_id: Option<Uuid>,
 ) -> ManagedParentClaimRequest {
     let display_name = match definition {
-        ManagedParentDefinition::KnowledgeNangoV1 => "github",
-        ManagedParentDefinition::KnowledgeMergeV1 => "ats",
+        ManagedParentDefinition::KnowledgeNango => "github",
+        ManagedParentDefinition::KnowledgeMerge => "ats",
     };
     ManagedParentClaimRequest {
         tenant_id,

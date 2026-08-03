@@ -371,7 +371,6 @@ impl Fixture {
         let generation =
             ConnectionGeneration::new(7).expect("fixture generation should be positive");
         let definition: ConnectorDefinition = serde_json::from_value(json!({
-            "definition_version": "v1",
             "display_name": "Billing connector",
             "auth": [{"type": "none"}],
             "actions": [{

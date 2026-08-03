@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_artifacts::connector::RuntimeConnectorAuthRequirementV1;
+use moa_artifacts::connector::RuntimeConnectorAuthRequirement;
 use moa_connectors::domain::{
     ConnectionDefinitionRef, ConnectionGeneration, ConnectionHealth, ConnectionStatus,
     ConnectorConnection,
@@ -812,7 +812,7 @@ fn require_completed_credential_fence(
 }
 
 fn declared_slot_readiness(
-    auth: &[RuntimeConnectorAuthRequirementV1],
+    auth: &[RuntimeConnectorAuthRequirement],
     ready: bool,
 ) -> ConnectorManagementResult<Vec<CredentialSlotReadiness>> {
     Ok(

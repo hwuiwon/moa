@@ -23,15 +23,15 @@ use moa_eval::external_memory::answer::{
     SupportStatus, reader_fit_support, render_control_evidence, render_reader_prompt,
 };
 use moa_eval::external_memory::cost::{
-    BudgetLedger, NormalizedUsage, PricingSnapshotV1, StageName, UsageProvenance,
+    BudgetLedger, NormalizedUsage, PricingSnapshot, StageName, UsageProvenance,
 };
 use moa_eval::external_memory::dataset::{
-    DatasetPackageRegistry, DatasetPackageV1, PreparedExternalMemoryCase, VerifiedFetchSummaryV1,
+    DatasetPackage, DatasetPackageRegistry, PreparedExternalMemoryCase, VerifiedFetchSummary,
     scan_package_leakage,
 };
 use moa_eval::external_memory::formation::{
     ComponentConfig, ConsolidationSettings, EmbeddingConfig, EntityBlockingConfig, FormationMode,
-    RecordedFormationManifestV1, ResolvedFormationConfig,
+    RecordedFormationManifest, ResolvedFormationConfig,
 };
 use moa_eval::external_memory::harness::{
     EvidenceExport, ExternalMemoryBackend, validate_evidence_export,
@@ -49,7 +49,7 @@ use moa_eval::external_memory::personamem::{
 };
 use moa_eval::external_memory::report::{
     CaseReport, ExternalMemoryDatasetMetricsV2, ExternalMemoryReportBuilder, FailureKind,
-    LongMemEvalAnswerSliceV1, LongMemEvalModeMetricsV2, PersonaMemModeMetricsV2, ReaderContractV2,
+    LongMemEvalAnswerSlice, LongMemEvalModeMetricsV2, PersonaMemModeMetricsV2, ReaderContractV2,
     ReportBudgetV2, RetrievalMetricsV2, StageObservation,
 };
 use moa_memory_ingest::{
@@ -102,7 +102,7 @@ impl LiveRunBudget {
         &self,
         stage: StageName,
         mode: Option<ExternalMemoryMode>,
-        pricing: PricingSnapshotV1,
+        pricing: PricingSnapshot,
         usage: NormalizedUsage,
     ) -> std::result::Result<usize, String> {
         let mut state = self.state.lock().await;
@@ -184,7 +184,7 @@ impl LiveRunBudget {
 
 struct AccountingModelObserver {
     stage: StageName,
-    pricing: PricingSnapshotV1,
+    pricing: PricingSnapshot,
     budget: LiveRunBudget,
     pending: tokio::sync::Mutex<Vec<(usize, Instant)>>,
 }
@@ -254,7 +254,7 @@ impl ModelCallObserver for AccountingModelObserver {
 
 struct AccountingEmbeddingProvider {
     inner: Arc<dyn EmbeddingProvider>,
-    pricing: PricingSnapshotV1,
+    pricing: PricingSnapshot,
     budget: LiveRunBudget,
 }
 
@@ -416,7 +416,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             parsed.package_manifest.display()
         )
     })?;
-    let package: DatasetPackageV1 =
+    let package: DatasetPackage =
         serde_json::from_slice(&package_bytes).context("parse external-memory package manifest")?;
     package.validate().map_err(anyhow::Error::from)?;
     if parsed.dataset != package.manifest.dataset {
@@ -501,7 +501,7 @@ enum LoadedDatasetCounts {
 
 fn validate_fetch_summary_before_runtime(
     path: Option<&Path>,
-    package: &DatasetPackageV1,
+    package: &DatasetPackage,
     counts: Option<&LoadedDatasetCounts>,
 ) -> Result<()> {
     let Some(path) = path else {
@@ -512,14 +512,14 @@ fn validate_fetch_summary_before_runtime(
     };
     let bytes = std::fs::read(path)
         .with_context(|| format!("read verified fetch summary {}", path.display()))?;
-    let summary: VerifiedFetchSummaryV1 =
+    let summary: VerifiedFetchSummary =
         serde_json::from_slice(&bytes).context("parse strict verified fetch summary")?;
     summary
         .validate_package(package)
         .map_err(anyhow::Error::from)?;
     let matches = match (&summary, counts) {
         (
-            VerifiedFetchSummaryV1::PersonaMem(summary),
+            VerifiedFetchSummary::PersonaMem(summary),
             Some(LoadedDatasetCounts::PersonaMem {
                 questions,
                 personas,
@@ -531,7 +531,7 @@ fn validate_fetch_summary_before_runtime(
                 && summary.context_count == *contexts
         }
         (
-            VerifiedFetchSummaryV1::LongMemEval(summary),
+            VerifiedFetchSummary::LongMemEval(summary),
             Some(LoadedDatasetCounts::LongMemEval {
                 questions,
                 abstentions,
@@ -552,7 +552,7 @@ fn validate_fetch_summary_before_runtime(
 
 async fn run_validated(
     args: RunExternalMemoryEvalArgs,
-    package: DatasetPackageV1,
+    package: DatasetPackage,
     cases: Vec<PreparedExternalMemoryCase>,
     personamem_cases: Option<Vec<PreparedPersonaMemCase>>,
     longmemeval_cases: Option<Vec<PreparedLongMemEvalCase>>,
@@ -1112,9 +1112,9 @@ async fn run_control_modes(
     longmemeval_cases: &Option<Vec<PreparedLongMemEvalCase>>,
     reader: &dyn LLMProvider,
     reader_model: &str,
-    reader_pricing: PricingSnapshotV1,
+    reader_pricing: PricingSnapshot,
     judge: Option<&dyn LLMProvider>,
-    judge_pricing: Option<&PricingSnapshotV1>,
+    judge_pricing: Option<&PricingSnapshot>,
     budget: &LiveRunBudget,
     args: &RunExternalMemoryEvalArgs,
 ) -> Result<BTreeMap<ExternalMemoryMode, BTreeMap<String, PersonaMemAnswerOutcome>>> {
@@ -1448,7 +1448,7 @@ fn resolve_formation_inputs(
                 .recorded_manifest
                 .as_ref()
                 .expect("recorded manifest was validated");
-            let manifest: RecordedFormationManifestV1 =
+            let manifest: RecordedFormationManifest =
                 serde_json::from_slice(&std::fs::read(manifest_path).with_context(|| {
                     format!("read recorded manifest {}", manifest_path.display())
                 })?)
@@ -1704,9 +1704,9 @@ fn failed_after_reader(
     report
 }
 
-fn reader_pricing(provider: &dyn LLMProvider, model: &str) -> PricingSnapshotV1 {
+fn reader_pricing(provider: &dyn LLMProvider, model: &str) -> PricingSnapshot {
     let pricing = provider.capabilities().pricing;
-    PricingSnapshotV1 {
+    PricingSnapshot {
         model: model.to_string(),
         effective_date: Utc::now().date_naive().to_string(),
         input_per_million_usd: pricing.input_per_mtok,
@@ -1718,14 +1718,14 @@ fn reader_pricing(provider: &dyn LLMProvider, model: &str) -> PricingSnapshotV1 
     }
 }
 
-fn chat_pricing(model_selector: &str) -> Result<PricingSnapshotV1> {
+fn chat_pricing(model_selector: &str) -> Result<PricingSnapshot> {
     let model = model_selector
         .split_once(':')
         .map_or(model_selector, |(_, model)| model);
     let pricing = moa_providers::pricing_for_model(model).with_context(|| {
         format!("no model-aware pricing is registered for live model `{model_selector}`")
     })?;
-    Ok(PricingSnapshotV1 {
+    Ok(PricingSnapshot {
         model: model_selector.to_string(),
         effective_date: PRICING_AS_OF.to_string(),
         input_per_million_usd: pricing.input_per_mtok,
@@ -1737,7 +1737,7 @@ fn chat_pricing(model_selector: &str) -> Result<PricingSnapshotV1> {
     })
 }
 
-fn embedding_pricing(selector: &str, actual_model: &str) -> Result<PricingSnapshotV1> {
+fn embedding_pricing(selector: &str, actual_model: &str) -> Result<PricingSnapshot> {
     let (provider, configured_model) = selector.split_once(':').with_context(|| {
         format!("embedding selector `{selector}` must use explicit provider:model syntax")
     })?;
@@ -1754,7 +1754,7 @@ fn embedding_pricing(selector: &str, actual_model: &str) -> Result<PricingSnapsh
             bail!("no dated input-token pricing is registered for embedding selector `{selector}`")
         }
     };
-    Ok(PricingSnapshotV1 {
+    Ok(PricingSnapshot {
         model: selector.to_string(),
         effective_date: PRICING_AS_OF.to_string(),
         input_per_million_usd,
@@ -1812,7 +1812,7 @@ async fn execute_paid_completion(
     request: CompletionRequest,
     stage: StageName,
     mode: ExternalMemoryMode,
-    pricing: PricingSnapshotV1,
+    pricing: PricingSnapshot,
     budget: &LiveRunBudget,
     call_timeout: Duration,
 ) -> std::result::Result<PaidCompletion, PaidCallFailure> {
@@ -1909,7 +1909,7 @@ fn build_longmemeval_report(
         })
         .map(|report| report.isolation_key.as_str())
         .collect::<HashSet<_>>();
-    let answers = LongMemEvalAnswerSliceV1 {
+    let answers = LongMemEvalAnswerSlice {
         numerator: cases
             .iter()
             .filter(|case| correct.contains(case.prepared.case.isolation_key.as_str()))
@@ -1956,8 +1956,8 @@ fn build_longmemeval_report(
 fn answer_slice<'a>(
     cases: impl Iterator<Item = &'a PreparedLongMemEvalCase>,
     correct: &HashSet<&str>,
-) -> LongMemEvalAnswerSliceV1 {
-    let mut slice = LongMemEvalAnswerSliceV1 {
+) -> LongMemEvalAnswerSlice {
+    let mut slice = LongMemEvalAnswerSlice {
         numerator: 0,
         denominator: 0,
     };
@@ -2000,7 +2000,7 @@ fn answer_score_for_dataset(dataset: &str, reference: &str, candidate: &str) -> 
     if dataset == PERSONAMEM_DATASET {
         return AnswerScoreOutcome::Supported(AnswerScore {
             metric: "personamem_label_accuracy_v1".to_string(),
-            value: moa_eval::external_memory::personamem::PersonaMemLabelScorerV1::score_text(
+            value: moa_eval::external_memory::personamem::PersonaMemLabelScorer::score_text(
                 reference, candidate,
             ),
             denominator: 1,
@@ -2087,7 +2087,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_data_provenance(path: &Path, package: &DatasetPackageV1) -> Result<()> {
+fn verify_data_provenance(path: &Path, package: &DatasetPackage) -> Result<()> {
     let provenance = package
         .manifest
         .files
@@ -2396,11 +2396,11 @@ mod tests {
     #[test]
     fn task_11_run_external_memory_eval_validates_fetch_summary_before_runtime() {
         // Pins: the run command shares the strict summary wire and rejects count/provenance drift.
-        let package = DatasetPackageV1::new(
-            moa_eval::external_memory::dataset::DatasetPackageManifestV1 {
+        let package =
+            DatasetPackage::new(moa_eval::external_memory::dataset::DatasetPackageManifest {
                 schema_version: 1,
                 dataset: PERSONAMEM_DATASET.to_string(),
-                source: moa_eval::external_memory::dataset::DatasetPackageSourceV1 {
+                source: moa_eval::external_memory::dataset::DatasetPackageSource {
                     repository: "fixture/personamem".to_string(),
                     revision: "fixture-v1".to_string(),
                 },
@@ -2409,11 +2409,10 @@ mod tests {
                     size_bytes: 1,
                     sha256: "a".repeat(64),
                 }],
-            },
-        )
-        .expect("package hashes");
-        let summary = VerifiedFetchSummaryV1::PersonaMem(
-            moa_eval::external_memory::dataset::PersonaMemFetchSummaryV1 {
+            })
+            .expect("package hashes");
+        let summary = VerifiedFetchSummary::PersonaMem(
+            moa_eval::external_memory::dataset::PersonaMemFetchSummary {
                 schema_version: 1,
                 dataset: package.manifest.dataset.clone(),
                 repository: package.manifest.source.repository.clone(),
@@ -2495,7 +2494,7 @@ mod tests {
         // Pins: neither direct typed loader branch can reach scoring with an
         // answer-key turn after it has produced prepared cases.
         let case = moa_eval::external_memory::dataset::validate_case(
-            moa_eval::external_memory::dataset::ExternalMemoryCaseV1 {
+            moa_eval::external_memory::dataset::ExternalMemoryCase {
                 schema_version: 1,
                 isolation_key: "leaky-case".to_string(),
                 sessions: vec![moa_eval::external_memory::dataset::ExternalMemorySession {
@@ -3166,7 +3165,7 @@ mod tests {
 
     fn prepared_case(isolation_key: &str, category: &str) -> PreparedExternalMemoryCase {
         PreparedExternalMemoryCase {
-            case: moa_eval::external_memory::dataset::ExternalMemoryCaseV1 {
+            case: moa_eval::external_memory::dataset::ExternalMemoryCase {
                 schema_version: 1,
                 isolation_key: isolation_key.to_string(),
                 category: category.to_string(),

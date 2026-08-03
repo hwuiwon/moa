@@ -155,7 +155,7 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
         let operation_id = caller.step("credential-stage");
         self.record(operation_id.clone(), caller.principal());
         match ManagedParentDefinition::for_knowledge_provider(account.provider.as_str())? {
-            ManagedParentDefinition::KnowledgeNangoV1 => {
+            ManagedParentDefinition::KnowledgeNango => {
                 if account.credential_material.is_some() {
                     return Err(KnowledgeServiceError::InvalidRequest(
                         "fake Nango account returned credential material".to_string(),
@@ -163,7 +163,7 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
                 }
                 return Ok(StagedKnowledgeCredential::ProviderNative);
             }
-            ManagedParentDefinition::KnowledgeMergeV1 => {}
+            ManagedParentDefinition::KnowledgeMerge => {}
         }
         let material = account.credential_material.clone().ok_or_else(|| {
             KnowledgeServiceError::InvalidRequest(
@@ -293,7 +293,7 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
     ) -> Result<Option<RedactedSecret>, KnowledgeServiceError> {
         self.record(caller.step("credential-resolve"), caller.principal());
         if ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())?
-            == ManagedParentDefinition::KnowledgeNangoV1
+            == ManagedParentDefinition::KnowledgeNango
         {
             return Ok(None);
         }
@@ -322,7 +322,7 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
             caller.principal(),
         );
         if ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())?
-            == ManagedParentDefinition::KnowledgeNangoV1
+            == ManagedParentDefinition::KnowledgeNango
         {
             return Ok(false);
         }
@@ -354,8 +354,8 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
                 match ManagedParentDefinition::for_knowledge_provider(
                     connection.provider.as_str(),
                 ) {
-                    Ok(ManagedParentDefinition::KnowledgeNangoV1) => None,
-                    Ok(ManagedParentDefinition::KnowledgeMergeV1) => Some(
+                    Ok(ManagedParentDefinition::KnowledgeNango) => None,
+                    Ok(ManagedParentDefinition::KnowledgeMerge) => Some(
                         if state.versions.values().any(|version| {
                             version.tenant_id == tenant_id
                                 && version.connection_uid == connection.connection_uid

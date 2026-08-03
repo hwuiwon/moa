@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use moa_eval::external_memory::calibration::{
-    CALIBRATION_SAMPLE_SIZE, CalibrationAdjudicationItemV1, CalibrationAdjudicationV1,
-    CalibrationArtifactStatus, CalibrationLabel, CalibrationLabelArtifactV1, CalibrationManifestV1,
-    CalibrationResultsV1, CalibrationRole, CalibrationSourceCase, CalibrationStratum,
+    CALIBRATION_SAMPLE_SIZE, CalibrationAdjudication, CalibrationAdjudicationItem,
+    CalibrationArtifactStatus, CalibrationLabel, CalibrationLabelArtifact, CalibrationManifest,
+    CalibrationResults, CalibrationRole, CalibrationSourceCase, CalibrationStratum,
     CalibrationVerdict, KappaStatus, hash_identity, prepare_calibration, score_calibration,
 };
 
@@ -32,10 +32,10 @@ fn source_cases() -> Vec<CalibrationSourceCase> {
 }
 
 fn completed_labels(
-    template: &moa_eval::external_memory::calibration::CalibrationLabelArtifactV1,
+    template: &moa_eval::external_memory::calibration::CalibrationLabelArtifact,
     identity: &str,
     invert: bool,
-) -> moa_eval::external_memory::calibration::CalibrationLabelArtifactV1 {
+) -> moa_eval::external_memory::calibration::CalibrationLabelArtifact {
     let mut artifact = template.clone();
     artifact.status = CalibrationArtifactStatus::Completed;
     artifact.identity_sha256 = Some(hash_identity(identity).expect("hash test identity"));
@@ -50,8 +50,8 @@ fn completed_labels(
     artifact
 }
 
-fn adjudication(manifest: &CalibrationManifestV1, identity: &str) -> CalibrationAdjudicationV1 {
-    CalibrationAdjudicationV1 {
+fn adjudication(manifest: &CalibrationManifest, identity: &str) -> CalibrationAdjudication {
+    CalibrationAdjudication {
         schema_version: 1,
         manifest_sha256: manifest.manifest_sha256.clone(),
         role: CalibrationRole::Adjudicator,
@@ -60,7 +60,7 @@ fn adjudication(manifest: &CalibrationManifestV1, identity: &str) -> Calibration
             .sample
             .iter()
             .enumerate()
-            .map(|(index, sample)| CalibrationAdjudicationItemV1 {
+            .map(|(index, sample)| CalibrationAdjudicationItem {
                 question_id: sample.question_id.clone(),
                 label: if index % 2 == 0 {
                     CalibrationLabel::Correct
@@ -266,7 +266,7 @@ fn external_memory_calibration_rejects_identity_content_and_schema_violations() 
     let mut unknown: serde_json::Value =
         serde_json::from_slice(&manifest_bytes).expect("parse manifest value");
     unknown["unexpected"] = serde_json::json!(true);
-    let error = serde_json::from_value::<CalibrationManifestV1>(unknown)
+    let error = serde_json::from_value::<CalibrationManifest>(unknown)
         .expect_err("unknown manifest fields must fail");
     assert!(error.to_string().contains("unknown field"));
 
@@ -351,7 +351,7 @@ fn external_memory_calibration_identity_hash_uses_trimmed_nfc_text() {
 fn external_memory_calibration_label_fixture_pins_strict_v1_wire() {
     // Pins: committed calibration labels use the strict V1 names and complete 70-item shape.
     let bytes = std::fs::read(fixture_path()).expect("read calibration label fixture");
-    let artifact: CalibrationLabelArtifactV1 =
+    let artifact: CalibrationLabelArtifact =
         serde_json::from_slice(&bytes).expect("parse strict calibration label fixture");
     assert_eq!(artifact.schema_version, 1);
     assert_eq!(artifact.role, CalibrationRole::LabelerA);
@@ -366,14 +366,14 @@ fn external_memory_calibration_label_fixture_pins_strict_v1_wire() {
     let mut unknown: serde_json::Value =
         serde_json::from_slice(&bytes).expect("parse fixture value");
     unknown["items"][0]["judge_output"] = serde_json::json!("must stay blinded");
-    assert!(serde_json::from_value::<CalibrationLabelArtifactV1>(unknown).is_err());
+    assert!(serde_json::from_value::<CalibrationLabelArtifact>(unknown).is_err());
 }
 
 #[test]
 fn external_memory_calibration_results_hash_pins_finite_float_canonicalization() {
     // Pins: self-hashing lexically sorts scalar keys and uses deterministic shortest finite JSON
     // numbers for nontrivial agreement, kappa, and accuracy values; NaN never hashes as null.
-    let results = CalibrationResultsV1 {
+    let results = CalibrationResults {
         schema_version: 1,
         manifest_sha256: "a".repeat(64),
         report_sha256: "b".repeat(64),

@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use moa_eval::external_memory::answer::ExternalMemoryMode;
 use moa_eval::external_memory::calibration::{
-    CalibrationManifestV1, CalibrationSourceCase, CalibrationStratum, prepare_calibration,
+    CalibrationManifest, CalibrationSourceCase, CalibrationStratum, prepare_calibration,
     score_calibration,
 };
-use moa_eval::external_memory::dataset::DatasetPackageV1;
+use moa_eval::external_memory::dataset::DatasetPackage;
 use moa_eval::external_memory::longmemeval::{
     LONGMEMEVAL_DATASET, LONGMEMEVAL_FILE, LongMemEvalDataset, LongMemEvalQuestionType,
     load_full_longmemeval_package,
@@ -79,7 +79,7 @@ fn prepare(
 ) -> Result<()> {
     let package_path = dataset_root.join("package.json");
     let package_bytes = read(&package_path)?;
-    let package: DatasetPackageV1 =
+    let package: DatasetPackage =
         serde_json::from_slice(&package_bytes).context("parse strict dataset package")?;
     package.validate().map_err(anyhow::Error::from)?;
     if package.manifest.dataset != LONGMEMEVAL_DATASET
@@ -120,7 +120,7 @@ fn score(
     output: &Path,
 ) -> Result<()> {
     let manifest_bytes = read(manifest_path)?;
-    let manifest: CalibrationManifestV1 =
+    let manifest: CalibrationManifest =
         serde_json::from_slice(&manifest_bytes).context("parse strict calibration manifest")?;
     manifest.validate().map_err(anyhow::Error::from)?;
     let report_bytes = read(report_path)?;
@@ -215,7 +215,7 @@ fn source_cases_from_report(
 
 fn primary_judge_outcomes(
     report: &ExternalMemoryReportV2,
-    manifest: &CalibrationManifestV1,
+    manifest: &CalibrationManifest,
 ) -> Result<BTreeMap<String, Option<bool>>> {
     let primary = unique_primary_cases(report)?;
     Ok(manifest

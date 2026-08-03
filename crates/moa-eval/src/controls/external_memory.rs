@@ -183,7 +183,7 @@ mod tests {
 
     use crate::controls::authoring::DEFAULT_AUTHORING_FRACTION;
     use crate::external_memory::dataset::{
-        EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession, ExternalMemoryTurn,
+        EvidenceLabels, ExternalMemoryCase, ExternalMemorySession, ExternalMemoryTurn,
         validate_case,
     };
     use crate::kernel::controls::{DEFAULT_CONTROL_ALPHA, derive_null_ceilings};
@@ -194,7 +194,7 @@ mod tests {
         answer: &str,
         options: &[&str],
     ) -> PreparedExternalMemoryCase {
-        validate_case(ExternalMemoryCaseV1 {
+        validate_case(ExternalMemoryCase {
             schema_version: 1,
             isolation_key: key.to_string(),
             sessions: vec![ExternalMemorySession {

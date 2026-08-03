@@ -1,7 +1,7 @@
 //! Exact connector-definition resolution.
 
 use async_trait::async_trait;
-use moa_artifacts::connector::{ConnectorDefinition, RuntimeConnectorAuthRequirementV1};
+use moa_artifacts::connector::{ConnectorDefinition, RuntimeConnectorAuthRequirement};
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
 use moa_connectors::domain::{ConnectionDefinitionRef, ManagedParentDefinition};
@@ -36,7 +36,7 @@ pub struct ResolvedConnectorDefinition {
     /// Validated artifact definition when this is an action-capable connector.
     pub definition: Option<ConnectorDefinition>,
     /// Closed secret-free credential requirements for readiness projection.
-    pub credential_requirements: Vec<RuntimeConnectorAuthRequirementV1>,
+    pub credential_requirements: Vec<RuntimeConnectorAuthRequirement>,
 }
 
 impl ResolvedConnectorDefinition {
@@ -222,8 +222,8 @@ pub(super) fn managed_knowledge_definition(
     reference: &ConnectionDefinitionRef,
 ) -> Option<ManagedParentDefinition> {
     [
-        ManagedParentDefinition::KnowledgeNangoV1,
-        ManagedParentDefinition::KnowledgeMergeV1,
+        ManagedParentDefinition::KnowledgeNango,
+        ManagedParentDefinition::KnowledgeMerge,
     ]
     .into_iter()
     .find(|managed| &managed.definition_ref() == reference)

@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 
 use super::answer::{AnswerScore, AnswerScoreOutcome, AnswerScorer, ReaderResponse, SupportStatus};
 use super::dataset::{
-    DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageSourceV1, DatasetPackageV1,
-    EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession, ExternalMemoryTurn,
+    DatasetFileProvenance, DatasetPackage, DatasetPackageManifest, DatasetPackageSource,
+    EvidenceLabels, ExternalMemoryCase, ExternalMemorySession, ExternalMemoryTurn,
     PreparedExternalMemoryCase, validate_case,
 };
 use super::{ExternalMemoryError, Result};
@@ -199,11 +199,11 @@ struct PersonaMemMessage {
 
 /// Returns the exact pinned full-release manifest.
 #[must_use]
-pub fn official_personamem_manifest() -> DatasetPackageManifestV1 {
-    DatasetPackageManifestV1 {
+pub fn official_personamem_manifest() -> DatasetPackageManifest {
+    DatasetPackageManifest {
         schema_version: 1,
         dataset: PERSONAMEM_DATASET.to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: PERSONAMEM_REPOSITORY.to_string(),
             revision: PERSONAMEM_REVISION.to_string(),
         },
@@ -275,7 +275,7 @@ pub fn load_personamem_files(
             &context[..row.end_index_in_shared_context],
         )?;
         let external_sessions = external_sessions(&row.shared_context_id, &history);
-        let external_case = ExternalMemoryCaseV1 {
+        let external_case = ExternalMemoryCase {
             schema_version: 1,
             isolation_key: format!(
                 "{PERSONAMEM_DATASET}/{PERSONAMEM_REVISION}/{}",
@@ -325,7 +325,7 @@ pub fn load_personamem_files(
 
 /// Validates and loads the pinned complete PersonaMem 32k package.
 pub fn load_full_personamem_package(
-    package: &DatasetPackageV1,
+    package: &DatasetPackage,
     root: &Path,
 ) -> Result<PersonaMemDataset> {
     let expected_manifest = official_personamem_manifest();
@@ -695,9 +695,9 @@ fn csv_error(error: csv::Error) -> ExternalMemoryError {
 
 /// Versioned deterministic PersonaMem label-only scorer.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct PersonaMemLabelScorerV1;
+pub struct PersonaMemLabelScorer;
 
-impl PersonaMemLabelScorerV1 {
+impl PersonaMemLabelScorer {
     /// Scores candidate text only when its distinct parenthesized label set is the gold singleton.
     #[must_use]
     pub fn score_text(gold_label: &str, candidate: &str) -> f64 {
@@ -714,10 +714,10 @@ impl PersonaMemLabelScorerV1 {
     }
 }
 
-impl AnswerScorer for PersonaMemLabelScorerV1 {
+impl AnswerScorer for PersonaMemLabelScorer {
     fn score(
         &self,
-        case: &ExternalMemoryCaseV1,
+        case: &ExternalMemoryCase,
         answer: &ReaderResponse,
     ) -> std::result::Result<AnswerScoreOutcome, String> {
         Ok(AnswerScoreOutcome::Supported(AnswerScore {
@@ -755,7 +755,7 @@ pub struct PersonaMemSliceReport {
 /// Versioned PersonaMem accuracy and slice report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PersonaMemAccuracyReportV1 {
+pub struct PersonaMemAccuracyReport {
     /// Report schema version.
     pub schema_version: u32,
     /// Versioned headline metric name.
@@ -780,7 +780,7 @@ pub struct PersonaMemAccuracyReportV1 {
 pub fn build_accuracy_report(
     cases: &[PreparedPersonaMemCase],
     outcomes: &BTreeMap<String, PersonaMemAnswerOutcome>,
-) -> Result<PersonaMemAccuracyReportV1> {
+) -> Result<PersonaMemAccuracyReport> {
     if cases.is_empty() {
         return Err(ExternalMemoryError::InvalidDataset(
             "PersonaMem accuracy requires at least one case".to_string(),
@@ -794,7 +794,7 @@ pub fn build_accuracy_report(
         let correct = matches!(
             outcomes.get(&case.metadata.question_id),
             Some(PersonaMemAnswerOutcome::Answer(answer))
-                if PersonaMemLabelScorerV1::score_text(&case.prepared.case.answer, answer) == 1.0
+                if PersonaMemLabelScorer::score_text(&case.prepared.case.answer, answer) == 1.0
         );
         numerator += usize::from(correct);
         observations.push(ClusterObservation {
@@ -816,7 +816,7 @@ pub fn build_accuracy_report(
         .map(|observation| observation.user_id.as_str())
         .collect::<HashSet<_>>()
         .len();
-    Ok(PersonaMemAccuracyReportV1 {
+    Ok(PersonaMemAccuracyReport {
         schema_version: 1,
         metric: "personamem_label_accuracy_v1".to_string(),
         numerator,
@@ -856,7 +856,7 @@ fn slice_report(members: &[(u32, bool)]) -> PersonaMemSliceReport {
 /// Strict provenance for counts in the tiny contract fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PersonaMemFixtureCountsV1 {
+pub struct PersonaMemFixtureCounts {
     /// Fixture question count.
     pub questions: usize,
     /// Fixture persona count.
@@ -868,13 +868,13 @@ pub struct PersonaMemFixtureCountsV1 {
 /// Strict provenance manifest for the tiny PersonaMem contract fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PersonaMemFixtureManifestV1 {
+pub struct PersonaMemFixtureManifest {
     /// Fixture manifest schema version.
     pub schema_version: u32,
     /// Distinct fixture dataset identifier.
     pub dataset: String,
     /// Official source repository and revision.
-    pub source: DatasetPackageSourceV1,
+    pub source: DatasetPackageSource,
     /// Official source file provenance.
     pub source_files: Vec<DatasetFileProvenance>,
     /// Tiny fixture file provenance.
@@ -886,10 +886,10 @@ pub struct PersonaMemFixtureManifestV1 {
     /// Explicit derived-versus-synthetic status.
     pub content_origin: String,
     /// Exact tiny fixture counts.
-    pub counts: PersonaMemFixtureCountsV1,
+    pub counts: PersonaMemFixtureCounts,
 }
 
-impl PersonaMemFixtureManifestV1 {
+impl PersonaMemFixtureManifest {
     /// Validates official provenance, fixture bytes, selected IDs, and counts.
     pub fn validate(&self, root: &Path) -> Result<()> {
         if self.schema_version != 1

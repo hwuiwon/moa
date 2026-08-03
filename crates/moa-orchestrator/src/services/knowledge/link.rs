@@ -104,8 +104,8 @@ fn managed_definition_for_parent(
     parent: &ConnectorConnection,
 ) -> Result<ManagedParentDefinition, KnowledgeServiceError> {
     for definition in [
-        ManagedParentDefinition::KnowledgeNangoV1,
-        ManagedParentDefinition::KnowledgeMergeV1,
+        ManagedParentDefinition::KnowledgeNango,
+        ManagedParentDefinition::KnowledgeMerge,
     ] {
         if parent.definition == definition.definition_ref() {
             return Ok(definition);

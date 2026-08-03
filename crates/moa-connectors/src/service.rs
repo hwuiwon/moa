@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_artifacts::connector::{ConnectorDefinition, RuntimeConnectorAuthRequirementV1};
+use moa_artifacts::connector::{ConnectorDefinition, RuntimeConnectorAuthRequirement};
 use moa_core::types::action_policy::ActionPolicyEffect;
 use moa_core::types::credentials::{CredentialKind, CredentialSlotName};
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
@@ -418,7 +418,7 @@ impl ConnectorService {
         &self,
         tenant_id: TenantId,
         connection_id: ConnectorConnectionId,
-        auth: &[RuntimeConnectorAuthRequirementV1],
+        auth: &[RuntimeConnectorAuthRequirement],
     ) -> Result<Vec<CredentialSlotReadiness>> {
         let required = required_credential_slots_for_requirements(auth)?;
         let reported = self
@@ -596,17 +596,17 @@ pub fn required_credential_slots(
 
 /// Derives the unique credential series declared by closed auth requirements.
 pub fn required_credential_slots_for_requirements(
-    auth: &[RuntimeConnectorAuthRequirementV1],
+    auth: &[RuntimeConnectorAuthRequirement],
 ) -> Result<Vec<RequiredCredentialSlot>> {
     let mut slots = BTreeMap::<CredentialSlotName, CredentialKind>::new();
     for requirement in auth {
         let pair = match requirement {
-            RuntimeConnectorAuthRequirementV1::None => None,
-            RuntimeConnectorAuthRequirementV1::Bearer { slot }
-            | RuntimeConnectorAuthRequirementV1::ApiKeyHeader { slot, .. } => {
+            RuntimeConnectorAuthRequirement::None => None,
+            RuntimeConnectorAuthRequirement::Bearer { slot }
+            | RuntimeConnectorAuthRequirement::ApiKeyHeader { slot, .. } => {
                 Some((slot.clone(), CredentialKind::ProviderApiKey))
             }
-            RuntimeConnectorAuthRequirementV1::ManagedOauth { slot } => {
+            RuntimeConnectorAuthRequirement::ManagedOauth { slot } => {
                 Some((slot.clone(), CredentialKind::OAuth))
             }
         };

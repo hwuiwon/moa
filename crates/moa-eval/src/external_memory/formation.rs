@@ -220,7 +220,7 @@ fn parse_decimal(name: &str, raw: &str) -> Result<f64> {
 
 /// Versioned recorded-mode fixture manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordedFormationManifestV1 {
+pub struct RecordedFormationManifest {
     /// Manifest schema version.
     pub schema_version: u32,
     /// Extraction fixture path.
@@ -233,7 +233,7 @@ pub struct RecordedFormationManifestV1 {
     pub merge_fixture_sha256: String,
 }
 
-impl RecordedFormationManifestV1 {
+impl RecordedFormationManifest {
     /// Validates versioned, separate extraction and merge fixtures.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != 1 {

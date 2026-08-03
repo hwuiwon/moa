@@ -7,16 +7,16 @@ use moa_eval::external_memory::answer::{
     ControlKind, ExternalMemoryMode, SupportStatus, control_prerequisite,
 };
 use moa_eval::external_memory::cost::{
-    BudgetLedger, NormalizedUsage, PricingSnapshotV1, StageName, UsageProvenance,
+    BudgetLedger, NormalizedUsage, PricingSnapshot, StageName, UsageProvenance,
 };
 use moa_eval::external_memory::dataset::{
-    ChronologicalTurn, DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageRegistry,
-    DatasetPackageSourceV1, DatasetPackageV1, EvidenceLabels, ExternalMemoryCaseV1,
+    ChronologicalTurn, DatasetFileProvenance, DatasetPackage, DatasetPackageManifest,
+    DatasetPackageRegistry, DatasetPackageSource, EvidenceLabels, ExternalMemoryCase,
     ExternalMemorySession, ExternalMemoryTurn, validate_case,
 };
 use moa_eval::external_memory::formation::{
     ComponentConfig, ConsolidationSettings, EmbeddingConfig, EntityBlockingConfig, FormationMode,
-    RecordedFormationManifestV1, ResolvedFormationConfig,
+    RecordedFormationManifest, ResolvedFormationConfig,
 };
 use moa_eval::external_memory::harness::{
     EvidenceExport, EvidenceOccurrenceRef, EvidenceSourceRef, ExternalMemoryBackend,
@@ -39,8 +39,8 @@ fn turn(source_id: &str, hour: u32, text: &str) -> ExternalMemoryTurn {
     }
 }
 
-fn case() -> ExternalMemoryCaseV1 {
-    ExternalMemoryCaseV1 {
+fn case() -> ExternalMemoryCase {
+    ExternalMemoryCase {
         schema_version: 1,
         isolation_key: "revision-a/question-1".to_string(),
         sessions: vec![
@@ -289,7 +289,7 @@ fn mutate_formation_leaf(value: &mut serde_json::Value, pointer: &str) {
 #[test]
 fn external_memory_recorded_manifest_keeps_extraction_and_merge_separate() {
     // Pins: recorded mode cannot reuse one ambiguous fixture file for both paid formation stages.
-    let manifest = RecordedFormationManifestV1 {
+    let manifest = RecordedFormationManifest {
         schema_version: 1,
         extraction_fixture_path: "fixtures/extractions.jsonl".into(),
         extraction_fixture_sha256: "a".repeat(64),
@@ -311,10 +311,10 @@ fn external_memory_recorded_manifest_keeps_extraction_and_merge_separate() {
 #[test]
 fn external_memory_package_manifest_is_versioned_and_pins_each_file() {
     // Pins: reports can identify both a dataset revision and every byte-bearing package file.
-    let manifest = DatasetPackageManifestV1 {
+    let manifest = DatasetPackageManifest {
         schema_version: 1,
         dataset: "common-json".to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: "fixtures/common-json".to_string(),
             revision: "fixture-v1".to_string(),
         },
@@ -331,8 +331,8 @@ fn external_memory_package_manifest_is_versioned_and_pins_each_file() {
     assert!(registry.entry("longmemeval").is_none());
 }
 
-fn pricing(model: &str, input: f64, output: f64) -> PricingSnapshotV1 {
-    PricingSnapshotV1 {
+fn pricing(model: &str, input: f64, output: f64) -> PricingSnapshot {
+    PricingSnapshot {
         model: model.to_string(),
         effective_date: "2026-07-09".to_string(),
         input_per_million_usd: input,
@@ -557,10 +557,10 @@ fn external_memory_report_serialization_is_clock_normalized_and_keeps_failures()
         .with_ymd_and_hms(2026, 7, 9, 12, 0, 0)
         .single()
         .expect("fixed timestamp should parse");
-    let package = DatasetPackageV1::new(DatasetPackageManifestV1 {
+    let package = DatasetPackage::new(DatasetPackageManifest {
         schema_version: 1,
         dataset: "common-json".to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: "fixtures/common-json".to_string(),
             revision: "fixture-v1".to_string(),
         },

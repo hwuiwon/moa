@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use moa_eval::external_memory::dataset::{
-    DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageSourceV1, DatasetPackageV1,
-    LongMemEvalFetchSummaryV1, PersonaMemFetchSummaryV1, VerifiedFetchSummaryV1,
+    DatasetFileProvenance, DatasetPackage, DatasetPackageManifest, DatasetPackageSource,
+    LongMemEvalFetchSummary, PersonaMemFetchSummary, VerifiedFetchSummary,
 };
 use moa_eval::external_memory::longmemeval::{
     LONGMEMEVAL_ABSTENTION_COUNT, LONGMEMEVAL_DATASET, LONGMEMEVAL_FILE, LONGMEMEVAL_FILE_SHA256,
@@ -51,7 +51,7 @@ impl BenchmarkFileSpec {
 
 #[derive(Debug, Clone)]
 struct BenchmarkSpec {
-    manifest: DatasetPackageManifestV1,
+    manifest: DatasetPackageManifest,
     package_sha256: String,
     files: Vec<BenchmarkFileSpec>,
     validator: BenchmarkValidator,
@@ -103,10 +103,10 @@ impl BenchmarkSpec {
                 sha256: PERSONAMEM_SHARED_CONTEXTS_SHA256.to_string(),
             },
         ];
-        let manifest = DatasetPackageManifestV1 {
+        let manifest = DatasetPackageManifest {
             schema_version: 1,
             dataset: PERSONAMEM_DATASET.to_string(),
-            source: DatasetPackageSourceV1 {
+            source: DatasetPackageSource {
                 repository: PERSONAMEM_REPOSITORY.to_string(),
                 revision: PERSONAMEM_REVISION.to_string(),
             },
@@ -131,10 +131,10 @@ impl BenchmarkSpec {
             size_bytes: LONGMEMEVAL_FILE_SIZE_BYTES,
             sha256: LONGMEMEVAL_FILE_SHA256.to_string(),
         }];
-        let manifest = DatasetPackageManifestV1 {
+        let manifest = DatasetPackageManifest {
             schema_version: 1,
             dataset: LONGMEMEVAL_DATASET.to_string(),
-            source: DatasetPackageSourceV1 {
+            source: DatasetPackageSource {
                 repository: LONGMEMEVAL_REPOSITORY.to_string(),
                 revision: LONGMEMEVAL_REVISION.to_string(),
             },
@@ -288,7 +288,7 @@ async fn fetch_with_transport(
     spec: &BenchmarkSpec,
     output: &Path,
     summary_output: &Path,
-) -> Result<VerifiedFetchSummaryV1> {
+) -> Result<VerifiedFetchSummary> {
     validate_target_path(output)?;
     validate_target_path(summary_output)?;
     if output.exists() {
@@ -318,7 +318,7 @@ async fn fetch_with_transport(
         std::fs::write(staging.join(file.path), response.bytes)
             .with_context(|| format!("write staged benchmark file {}", file.path))?;
     }
-    let package = DatasetPackageV1 {
+    let package = DatasetPackage {
         manifest: spec.manifest.clone(),
         package_sha256: spec.package_sha256.clone(),
     };
@@ -339,9 +339,9 @@ async fn fetch_with_transport(
     Ok(summary)
 }
 
-fn validate_published_package(spec: &BenchmarkSpec, root: &Path) -> Result<VerifiedFetchSummaryV1> {
+fn validate_published_package(spec: &BenchmarkSpec, root: &Path) -> Result<VerifiedFetchSummary> {
     let package_path = root.join("package.json");
-    let package: DatasetPackageV1 = serde_json::from_slice(
+    let package: DatasetPackage = serde_json::from_slice(
         &std::fs::read(&package_path)
             .with_context(|| format!("read {}", package_path.display()))?,
     )
@@ -372,19 +372,17 @@ fn validate_published_package(spec: &BenchmarkSpec, root: &Path) -> Result<Verif
                     dataset.context_count
                 );
             }
-            Ok(VerifiedFetchSummaryV1::PersonaMem(
-                PersonaMemFetchSummaryV1 {
-                    schema_version: 1,
-                    dataset: spec.manifest.dataset.clone(),
-                    repository: spec.manifest.source.repository.clone(),
-                    revision: spec.manifest.source.revision.clone(),
-                    package_sha256: spec.package_sha256.clone(),
-                    question_count: dataset.cases.len(),
-                    persona_count: dataset.persona_count(),
-                    context_count: dataset.context_count,
-                    verified: true,
-                },
-            ))
+            Ok(VerifiedFetchSummary::PersonaMem(PersonaMemFetchSummary {
+                schema_version: 1,
+                dataset: spec.manifest.dataset.clone(),
+                repository: spec.manifest.source.repository.clone(),
+                revision: spec.manifest.source.revision.clone(),
+                package_sha256: spec.package_sha256.clone(),
+                question_count: dataset.cases.len(),
+                persona_count: dataset.persona_count(),
+                context_count: dataset.context_count,
+                verified: true,
+            }))
         }
         BenchmarkValidator::LongMemEval {
             question_count,
@@ -404,19 +402,17 @@ fn validate_published_package(spec: &BenchmarkSpec, root: &Path) -> Result<Verif
                     dataset.retrieval_count()
                 );
             }
-            Ok(VerifiedFetchSummaryV1::LongMemEval(
-                LongMemEvalFetchSummaryV1 {
-                    schema_version: 1,
-                    dataset: spec.manifest.dataset.clone(),
-                    repository: spec.manifest.source.repository.clone(),
-                    revision: spec.manifest.source.revision.clone(),
-                    package_sha256: spec.package_sha256.clone(),
-                    question_count: dataset.cases.len(),
-                    abstention_count: dataset.abstention_count(),
-                    retrieval_count: dataset.retrieval_count(),
-                    verified: true,
-                },
-            ))
+            Ok(VerifiedFetchSummary::LongMemEval(LongMemEvalFetchSummary {
+                schema_version: 1,
+                dataset: spec.manifest.dataset.clone(),
+                repository: spec.manifest.source.repository.clone(),
+                revision: spec.manifest.source.revision.clone(),
+                package_sha256: spec.package_sha256.clone(),
+                question_count: dataset.cases.len(),
+                abstention_count: dataset.abstention_count(),
+                retrieval_count: dataset.retrieval_count(),
+                verified: true,
+            }))
         }
     }
 }
@@ -484,7 +480,7 @@ fn validate_target_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_summary_atomic(path: &Path, summary: &VerifiedFetchSummaryV1) -> Result<()> {
+fn write_summary_atomic(path: &Path, summary: &VerifiedFetchSummary) -> Result<()> {
     let parent = path
         .parent()
         .context("benchmark summary must have a parent directory")?;
@@ -531,7 +527,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
-    use moa_eval::external_memory::dataset::{DatasetPackageManifestV1, DatasetPackageSourceV1};
+    use moa_eval::external_memory::dataset::{DatasetPackageManifest, DatasetPackageSource};
     use moa_eval::external_memory::longmemeval::{
         LONGMEMEVAL_DATASET, LONGMEMEVAL_FILE, LONGMEMEVAL_REPOSITORY, LONGMEMEVAL_REVISION,
     };
@@ -543,10 +539,10 @@ mod tests {
 
     use super::{
         BenchmarkFileSpec, BenchmarkSpec, BenchmarkValidator, DownloadResponse,
-        LongMemEvalFetchSummaryV1, MemoryBenchmarkTransport, PersonaMemFetchSummaryV1,
+        LongMemEvalFetchSummary, MemoryBenchmarkTransport, PersonaMemFetchSummary,
         fetch_with_transport,
     };
-    use moa_eval::external_memory::dataset::VerifiedFetchSummaryV1;
+    use moa_eval::external_memory::dataset::VerifiedFetchSummary;
 
     struct FakeTransport {
         responses: Mutex<BTreeMap<String, VecDeque<Result<DownloadResponse>>>>,
@@ -665,7 +661,7 @@ mod tests {
         let loaded = fetch_with_transport(&transport, &spec, &output, &summary)
             .await
             .expect("valid package should publish");
-        let VerifiedFetchSummaryV1::PersonaMem(loaded) = loaded else {
+        let VerifiedFetchSummary::PersonaMem(loaded) = loaded else {
             panic!("expected PersonaMem fetch summary")
         };
         assert_eq!(loaded.question_count, 3);
@@ -742,7 +738,7 @@ mod tests {
             assert_no_staging(temp.path());
         }
 
-        let mut unknown = serde_json::to_value(PersonaMemFetchSummaryV1 {
+        let mut unknown = serde_json::to_value(PersonaMemFetchSummary {
             schema_version: 1,
             dataset: PERSONAMEM_DATASET.to_string(),
             repository: PERSONAMEM_REPOSITORY.to_string(),
@@ -758,7 +754,7 @@ mod tests {
             .as_object_mut()
             .expect("summary object")
             .insert("extra".to_string(), serde_json::json!(true));
-        assert!(serde_json::from_value::<PersonaMemFetchSummaryV1>(unknown).is_err());
+        assert!(serde_json::from_value::<PersonaMemFetchSummary>(unknown).is_err());
     }
 
     #[tokio::test]
@@ -779,7 +775,7 @@ mod tests {
             .await
             .expect("valid LongMemEval fixture should publish");
         assert_eq!(loaded.question_count(), 7);
-        let parsed: LongMemEvalFetchSummaryV1 =
+        let parsed: LongMemEvalFetchSummary =
             serde_json::from_slice(&std::fs::read(summary).expect("read LongMemEval summary"))
                 .expect("strict LongMemEval summary");
         assert_eq!(parsed.abstention_count, 1);
@@ -833,10 +829,10 @@ mod tests {
             "https://huggingface.co/fixture/longmemeval_s_cleaned.json",
             bytes,
         );
-        let manifest = DatasetPackageManifestV1 {
+        let manifest = DatasetPackageManifest {
             schema_version: 1,
             dataset: LONGMEMEVAL_DATASET.to_string(),
-            source: DatasetPackageSourceV1 {
+            source: DatasetPackageSource {
                 repository: LONGMEMEVAL_REPOSITORY.to_string(),
                 revision: LONGMEMEVAL_REVISION.to_string(),
             },
@@ -867,10 +863,10 @@ mod tests {
                 &fixture.contexts,
             ),
         ];
-        let manifest = DatasetPackageManifestV1 {
+        let manifest = DatasetPackageManifest {
             schema_version: 1,
             dataset: PERSONAMEM_DATASET.to_string(),
-            source: DatasetPackageSourceV1 {
+            source: DatasetPackageSource {
                 repository: PERSONAMEM_REPOSITORY.to_string(),
                 revision: PERSONAMEM_REVISION.to_string(),
             },

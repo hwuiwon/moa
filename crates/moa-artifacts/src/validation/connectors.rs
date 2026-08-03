@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use crate::agent::ConnectorBinding;
 use crate::connector::{
-    ConnectorDefinition, HttpOperationContract, HttpPathInputV1, RuntimeConnectorActionV1,
-    RuntimeConnectorAuthRequirementV1, RuntimeOperationPolicyV1, is_runtime_action_id,
+    ConnectorDefinition, HttpOperationContract, HttpPathInput, RuntimeConnectorAction,
+    RuntimeConnectorAuthRequirement, RuntimeOperationPolicy, is_runtime_action_id,
 };
 use crate::document::ArtifactKind;
 
@@ -55,7 +55,7 @@ pub(super) fn validate(definition: &ConnectorDefinition, report: &mut Validation
     let declared_slots = validate_runtime_connector_auth(&definition.auth, report);
     let has_no_auth = matches!(
         definition.auth.as_slice(),
-        [RuntimeConnectorAuthRequirementV1::None]
+        [RuntimeConnectorAuthRequirement::None]
     );
     if definition.actions.is_empty() {
         report.push_error(
@@ -94,7 +94,7 @@ pub(super) fn validate(definition: &ConnectorDefinition, report: &mut Validation
 }
 
 fn validate_runtime_connector_auth<'a>(
-    auth: &'a [RuntimeConnectorAuthRequirementV1],
+    auth: &'a [RuntimeConnectorAuthRequirement],
     report: &mut ValidationReport,
 ) -> HashSet<&'a str> {
     if auth.is_empty() {
@@ -105,7 +105,7 @@ fn validate_runtime_connector_auth<'a>(
     }
     let none_count = auth
         .iter()
-        .filter(|requirement| matches!(requirement, RuntimeConnectorAuthRequirementV1::None))
+        .filter(|requirement| matches!(requirement, RuntimeConnectorAuthRequirement::None))
         .count();
     if none_count > 0 && auth.len() != 1 {
         report.push_error(
@@ -130,8 +130,8 @@ fn validate_runtime_connector_auth<'a>(
 
 fn validate_runtime_connector_action(
     root: &str,
-    action: &RuntimeConnectorActionV1,
-    auth: &[RuntimeConnectorAuthRequirementV1],
+    action: &RuntimeConnectorAction,
+    auth: &[RuntimeConnectorAuthRequirement],
     declared_slots: &HashSet<&str>,
     has_no_auth: bool,
     report: &mut ValidationReport,
@@ -149,7 +149,7 @@ fn validate_runtime_connector_action(
 fn validate_http_operation_contract(
     root: &str,
     contract: &HttpOperationContract,
-    auth: &[RuntimeConnectorAuthRequirementV1],
+    auth: &[RuntimeConnectorAuthRequirement],
     declared_slots: &HashSet<&str>,
     has_no_auth: bool,
     report: &mut ValidationReport,
@@ -220,7 +220,7 @@ fn validate_http_operation_contract(
         if auth.iter().any(|requirement| {
             matches!(
                 requirement,
-                RuntimeConnectorAuthRequirementV1::ApiKeyHeader {
+                RuntimeConnectorAuthRequirement::ApiKeyHeader {
                     header: auth_header,
                     ..
                 } if auth_header.as_str() == header.as_str()
@@ -277,7 +277,7 @@ fn validate_http_path_template(
 fn validate_http_path_parts(
     root: &str,
     path: &str,
-    path_inputs: &[HttpPathInputV1],
+    path_inputs: &[HttpPathInput],
     report: &mut ValidationReport,
 ) {
     let lowercase = path.to_ascii_lowercase();
@@ -348,7 +348,7 @@ fn validate_http_path_parts(
 
 fn validate_runtime_operation_policy(
     root: &str,
-    policy: &RuntimeOperationPolicyV1,
+    policy: &RuntimeOperationPolicy,
     report: &mut ValidationReport,
 ) {
     validate_bounded_runtime_schema(

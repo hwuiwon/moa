@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 
 use super::answer::{AnswerScoreOutcome, AnswerScorer, ReaderResponse};
 use super::dataset::{
-    DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageSourceV1, DatasetPackageV1,
-    EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession, ExternalMemoryTurn,
+    DatasetFileProvenance, DatasetPackage, DatasetPackageManifest, DatasetPackageSource,
+    EvidenceLabels, ExternalMemoryCase, ExternalMemorySession, ExternalMemoryTurn,
     PreparedExternalMemoryCase, validate_case,
 };
 use super::{ExternalMemoryError, Result};
@@ -31,7 +31,7 @@ pub const LONGMEMEVAL_FILE_SIZE_BYTES: u64 = 277_383_467;
 /// Official source file SHA-256.
 pub const LONGMEMEVAL_FILE_SHA256: &str =
     "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442";
-/// Official package SHA-256 under `DatasetPackageManifestV1`.
+/// Official package SHA-256 under `DatasetPackageManifest`.
 pub const LONGMEMEVAL_PACKAGE_SHA256: &str =
     "620a9833c81011f8f29aa689f8bbf5242669f53eac5853a797330d3dafdedfff";
 /// Exact official question count.
@@ -65,12 +65,12 @@ pub const LONGMEMEVAL_UNSUPPORTED_ANSWER_SCORE_REASON: &str = "longmemeval-requi
 
 /// LongMemEval scorer marker that delegates correctness to the absolute judge.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct LongMemEvalAnswerScorerV1;
+pub struct LongMemEvalAnswerScorer;
 
-impl AnswerScorer for LongMemEvalAnswerScorerV1 {
+impl AnswerScorer for LongMemEvalAnswerScorer {
     fn score(
         &self,
-        _case: &ExternalMemoryCaseV1,
+        _case: &ExternalMemoryCase,
         _answer: &ReaderResponse,
     ) -> std::result::Result<AnswerScoreOutcome, String> {
         Ok(AnswerScoreOutcome::Unsupported {
@@ -291,11 +291,11 @@ struct SessionProjection {
 
 /// Returns the pinned official LongMemEval-S package manifest.
 #[must_use]
-pub fn official_longmemeval_manifest() -> DatasetPackageManifestV1 {
-    DatasetPackageManifestV1 {
+pub fn official_longmemeval_manifest() -> DatasetPackageManifest {
+    DatasetPackageManifest {
         schema_version: 1,
         dataset: LONGMEMEVAL_DATASET.to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: LONGMEMEVAL_REPOSITORY.to_string(),
             revision: LONGMEMEVAL_REVISION.to_string(),
         },
@@ -331,7 +331,7 @@ pub fn load_longmemeval_file(path: &Path) -> Result<LongMemEvalDataset> {
 
 /// Validates and loads the pinned complete LongMemEval-S cleaned package.
 pub fn load_full_longmemeval_package(
-    package: &DatasetPackageV1,
+    package: &DatasetPackage,
     root: &Path,
 ) -> Result<LongMemEvalDataset> {
     if package.manifest != official_longmemeval_manifest()
@@ -521,7 +521,7 @@ fn project_question(question: SourceQuestion) -> Result<PreparedLongMemEvalCase>
         .iter()
         .flat_map(|projection| projection.turns.iter().cloned())
         .collect();
-    let prepared = validate_case(ExternalMemoryCaseV1 {
+    let prepared = validate_case(ExternalMemoryCase {
         schema_version: 1,
         isolation_key: format!(
             "{LONGMEMEVAL_DATASET}/{LONGMEMEVAL_REVISION}/{}",
@@ -650,7 +650,7 @@ pub struct LongMemEvalCutoffMetrics {
 /// Aggregate official retrieval metrics for all contributing cases or one type slice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalRetrievalSliceV1 {
+pub struct LongMemEvalRetrievalSlice {
     /// Number of retrieval cases, including missing or failed rankings.
     pub denominator: usize,
     /// Effective turn-to-session metrics at five unique sessions.
@@ -668,7 +668,7 @@ pub struct LongMemEvalRetrievalSliceV1 {
 /// Versioned LongMemEval retrieval report with official type slices.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalRetrievalMetricsV1 {
+pub struct LongMemEvalRetrievalMetrics {
     /// Report schema version.
     pub schema_version: u32,
     /// Exact retrieval denominator, including failed and absent rankings.
@@ -684,7 +684,7 @@ pub struct LongMemEvalRetrievalMetricsV1 {
     /// Direct turn metrics at rank fifty.
     pub turn_at_50: LongMemEvalCutoffMetrics,
     /// Retrieval metrics sliced by all six official categories.
-    pub question_type_slices: BTreeMap<LongMemEvalQuestionType, LongMemEvalRetrievalSliceV1>,
+    pub question_type_slices: BTreeMap<LongMemEvalQuestionType, LongMemEvalRetrievalSlice>,
 }
 
 /// Scores one non-abstention case in authoritative ranked occurrence order.
@@ -785,7 +785,7 @@ pub fn score_retrieval_case(
 pub fn aggregate_retrieval_metrics(
     cases: &[PreparedLongMemEvalCase],
     rankings: &BTreeMap<String, Vec<LongMemEvalOccurrenceRef>>,
-) -> Result<LongMemEvalRetrievalMetricsV1> {
+) -> Result<LongMemEvalRetrievalMetrics> {
     let known_ids = cases
         .iter()
         .map(|case| case.metadata.question_id.as_str())
@@ -815,7 +815,7 @@ pub fn aggregate_retrieval_metrics(
         }
     }
     let overall_summary = aggregate_scores(&overall);
-    Ok(LongMemEvalRetrievalMetricsV1 {
+    Ok(LongMemEvalRetrievalMetrics {
         schema_version: 1,
         denominator: overall_summary.denominator,
         session_at_5: overall_summary.session_at_5,
@@ -923,8 +923,8 @@ fn binary_dcg(relevance: &[usize]) -> f64 {
             .sum::<f64>()
 }
 
-fn aggregate_scores(scores: &[LongMemEvalRetrievalCaseScore]) -> LongMemEvalRetrievalSliceV1 {
-    LongMemEvalRetrievalSliceV1 {
+fn aggregate_scores(scores: &[LongMemEvalRetrievalCaseScore]) -> LongMemEvalRetrievalSlice {
+    LongMemEvalRetrievalSlice {
         denominator: scores.len(),
         session_at_5: aggregate_cutoff(scores.iter().map(|score| score.session_at_5), scores.len()),
         session_at_10: aggregate_cutoff(
@@ -1096,7 +1096,7 @@ pub fn parse_absolute_judge_label(response: &str) -> Option<bool> {
 /// One exact template and digest recorded in the committed evaluator contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalRubricContractV1 {
+pub struct LongMemEvalRubricContract {
     /// Exact vendored template including its three `{}` placeholders.
     pub template: String,
     /// SHA-256 of the exact UTF-8 template bytes.
@@ -1106,7 +1106,7 @@ pub struct LongMemEvalRubricContractV1 {
 /// One pinned upstream source file and digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalSourceContractV1 {
+pub struct LongMemEvalSourceContract {
     /// Repository-relative upstream source path.
     pub path: String,
     /// SHA-256 of the pinned source bytes.
@@ -1116,7 +1116,7 @@ pub struct LongMemEvalSourceContractV1 {
 /// Deliberate judge-parser compatibility rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalParserContractV1 {
+pub struct LongMemEvalParserContract {
     /// Upstream behavior retained for audit comparison.
     pub upstream: String,
     /// Hardened MOA behavior used by the runner.
@@ -1132,7 +1132,7 @@ pub struct LongMemEvalParserContractV1 {
 /// One deterministic retrieval compatibility vector.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalRetrievalContractVectorV1 {
+pub struct LongMemEvalRetrievalContractVector {
     /// Stable vector name.
     pub name: String,
     /// Ranked mapped occurrence IDs.
@@ -1158,7 +1158,7 @@ pub struct LongMemEvalRetrievalContractVectorV1 {
 /// Strict, self-contained compatibility contract for the pinned upstream evaluator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalUpstreamContractV1 {
+pub struct LongMemEvalUpstreamContract {
     /// Contract schema version.
     pub schema_version: u32,
     /// Pinned evaluator repository.
@@ -1170,9 +1170,9 @@ pub struct LongMemEvalUpstreamContractV1 {
     /// Exact evaluator source SHA-256.
     pub evaluator_source_sha256: String,
     /// Pinned retrieval source files and hashes.
-    pub retrieval_sources: Vec<LongMemEvalSourceContractV1>,
+    pub retrieval_sources: Vec<LongMemEvalSourceContract>,
     /// Exact rubric templates and hashes keyed by canonical name.
-    pub rubrics: BTreeMap<LongMemEvalRubricKind, LongMemEvalRubricContractV1>,
+    pub rubrics: BTreeMap<LongMemEvalRubricKind, LongMemEvalRubricContract>,
     /// Domain-separated digest over the canonical rubric map.
     pub bundle_sha256: String,
     /// Official type-to-rubric mapping for non-abstention questions.
@@ -1180,20 +1180,20 @@ pub struct LongMemEvalUpstreamContractV1 {
     /// Question-ID marker that overrides type mapping for abstentions.
     pub abstention_question_id_marker: String,
     /// Retrieval math and effective-cutoff compatibility vectors.
-    pub retrieval_vectors: Vec<LongMemEvalRetrievalContractVectorV1>,
+    pub retrieval_vectors: Vec<LongMemEvalRetrievalContractVector>,
     /// Deliberately hardened judge parser contract.
-    pub parser: LongMemEvalParserContractV1,
+    pub parser: LongMemEvalParserContract,
 }
 
 /// Loads and fully validates the committed upstream evaluator compatibility contract.
-pub fn load_upstream_contract(path: &Path) -> Result<LongMemEvalUpstreamContractV1> {
+pub fn load_upstream_contract(path: &Path) -> Result<LongMemEvalUpstreamContract> {
     let bytes = std::fs::read(path)?;
-    let contract: LongMemEvalUpstreamContractV1 = serde_json::from_slice(&bytes)?;
+    let contract: LongMemEvalUpstreamContract = serde_json::from_slice(&bytes)?;
     validate_upstream_contract(&contract)?;
     Ok(contract)
 }
 
-fn validate_upstream_contract(contract: &LongMemEvalUpstreamContractV1) -> Result<()> {
+fn validate_upstream_contract(contract: &LongMemEvalUpstreamContract) -> Result<()> {
     if contract.schema_version != 1
         || contract.evaluator_repository != LONGMEMEVAL_EVALUATOR_REPOSITORY
         || contract.evaluator_commit != LONGMEMEVAL_EVALUATOR_COMMIT
@@ -1207,11 +1207,11 @@ fn validate_upstream_contract(contract: &LongMemEvalUpstreamContractV1) -> Resul
         ));
     }
     let expected_sources = vec![
-        LongMemEvalSourceContractV1 {
+        LongMemEvalSourceContract {
             path: "src/retrieval/eval_utils.py".to_string(),
             sha256: LONGMEMEVAL_RETRIEVAL_UTILS_SHA256.to_string(),
         },
-        LongMemEvalSourceContractV1 {
+        LongMemEvalSourceContract {
             path: "src/retrieval/run_retrieval.py".to_string(),
             sha256: LONGMEMEVAL_RETRIEVAL_RUNNER_SHA256.to_string(),
         },
@@ -1265,7 +1265,7 @@ fn validate_upstream_contract(contract: &LongMemEvalUpstreamContractV1) -> Resul
     Ok(())
 }
 
-fn validate_parser_contract(contract: &LongMemEvalParserContractV1) -> Result<()> {
+fn validate_parser_contract(contract: &LongMemEvalParserContract) -> Result<()> {
     if contract.upstream != "case-insensitive substring contains yes"
         || contract.moa != "trimmed case-insensitive exact yes or no"
         || contract.accepted_true != ["yes", " YES "]
@@ -1296,7 +1296,7 @@ fn validate_parser_contract(contract: &LongMemEvalParserContractV1) -> Result<()
     Ok(())
 }
 
-fn validate_retrieval_vector(vector: &LongMemEvalRetrievalContractVectorV1) -> Result<()> {
+fn validate_retrieval_vector(vector: &LongMemEvalRetrievalContractVector) -> Result<()> {
     validate_nonblank("retrieval vector name", &vector.name)?;
     if vector.cutoff == 0 {
         return Err(invalid_dataset(
@@ -1338,7 +1338,7 @@ fn validate_retrieval_vector(vector: &LongMemEvalRetrievalContractVectorV1) -> R
 /// Exact counts recorded by the hermetic synthetic contract fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalFixtureCountsV1 {
+pub struct LongMemEvalFixtureCounts {
     /// Total questions.
     pub questions: usize,
     /// `_abs` questions.
@@ -1352,13 +1352,13 @@ pub struct LongMemEvalFixtureCountsV1 {
 /// Strict provenance manifest for the hermetic LongMemEval contract fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalFixtureManifestV1 {
+pub struct LongMemEvalFixtureManifest {
     /// Manifest schema version.
     pub schema_version: u32,
     /// Stable synthetic fixture identifier.
     pub dataset: String,
     /// Immutable official dataset source.
-    pub source: DatasetPackageSourceV1,
+    pub source: DatasetPackageSource,
     /// Immutable official evaluator source.
     pub evaluator_repository: String,
     /// Immutable official evaluator commit.
@@ -1374,10 +1374,10 @@ pub struct LongMemEvalFixtureManifestV1 {
     /// Exact source-order selected question IDs.
     pub selected_question_ids: Vec<String>,
     /// Exact fixture counts.
-    pub counts: LongMemEvalFixtureCountsV1,
+    pub counts: LongMemEvalFixtureCounts,
 }
 
-impl LongMemEvalFixtureManifestV1 {
+impl LongMemEvalFixtureManifest {
     /// Validates provenance, fixture bytes, strict loading, selected IDs, and counts.
     pub fn validate(&self, root: &Path) -> Result<()> {
         if self.schema_version != 1

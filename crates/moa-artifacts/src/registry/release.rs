@@ -4,7 +4,7 @@
 //!
 //! * [`ReleaseRepository::submit_candidate`] turns an immutable draft into a
 //!   release attempt. It resolves the gate policy server-side, builds the exact
-//!   [`EvaluationSubjectV1`], and assigns the artifact's coalescing slot, so ten
+//!   [`EvaluationSubject`], and assigns the artifact's coalescing slot, so ten
 //!   rapid submissions become one active attempt plus the newest pending subject.
 //! * [`ReleaseRepository::record_decision`] applies a deterministic verdict. Only
 //!   a pass mints an [`ActivationAttestation`]; a regression or an inconclusive
@@ -33,7 +33,7 @@ use crate::registry::serving::load_serving_pointer_in_tx;
 use crate::release::{
     ActivationAttestation, ActivationOutcome, ActivationRequest, ActivationTarget,
     ActivationTargetClass, AgentRuntimeSubject, AssertionRef, CatalogSnapshotBinding,
-    DecisionProvenance, DeterministicVerdict, Digest32, EvaluationPlanSubject, EvaluationSubjectV1,
+    DecisionProvenance, DeterministicVerdict, Digest32, EvaluationPlanSubject, EvaluationSubject,
     EvidenceAdapter, ExpectedServing, PolicyIdentity, ReleasePolicy, ReleaseSlot, ReleaseState,
     ServingBaseline, SimulatorPolicyBinding, TenantScope,
 };
@@ -56,7 +56,7 @@ pub struct ReleaseCandidate {
     /// Coalescing slot.
     pub slot: ReleaseSlot,
     /// Exact evaluation subject.
-    pub subject: EvaluationSubjectV1,
+    pub subject: EvaluationSubject,
     /// Digest over that subject.
     pub subject_digest: Digest32,
     /// Canonical hash of the candidate revision document.
@@ -889,8 +889,8 @@ async fn submit_candidate_in_tx(
     )
     .await?;
 
-    let subject = EvaluationSubjectV1 {
-        subject_version: EvaluationSubjectV1::VERSION,
+    let subject = EvaluationSubject {
+        subject_version: EvaluationSubject::VERSION,
         tenant_id: request.scope.tenant_id(),
         activation_target: request.activation_target,
         candidate_revision_uid: request.candidate_revision_uid,

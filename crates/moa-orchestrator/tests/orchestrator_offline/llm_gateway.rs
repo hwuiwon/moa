@@ -200,7 +200,7 @@ fn llm_gateway_guardrail_direct_session_request_with_defer_skips_gateway_persist
 }
 
 fn token_pricing_from_fixture(provider: &str, model: &str) -> TokenPricing {
-    let table = PricingTable::load_v1();
+    let table = PricingTable::load();
     let pricing = table
         .get(provider, model)
         .unwrap_or_else(|error| panic!("missing fixture pricing for {provider}/{model}: {error}"));

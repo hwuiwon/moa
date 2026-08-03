@@ -56,7 +56,7 @@ Package download and paid execution are independently authorized:
 Anthropic credentials are not present in the PersonaMem step. Credentials are
 never written to fixtures, reports, commands, or artifacts.
 
-The fetcher writes a strict `package.json` and `VerifiedFetchSummaryV1`. The run
+The fetcher writes a strict `package.json` and `VerifiedFetchSummary`. The run
 command requires `--fetch-summary` for both external datasets and verifies the
 dataset, repository, revision, package hash, and release counts against the
 loaded package before migration or provider construction. Network authorization
@@ -300,7 +300,7 @@ Labeler templates contain no judge output.
 
 ### Exact wires and hashes
 
-`CalibrationManifestV1` is exactly:
+`CalibrationManifest` is exactly:
 
 ```text
 {
@@ -340,7 +340,7 @@ A label artifact is exactly:
 completed status, exact sample/content equality, all 70 labels, and non-null
 distinct identity hashes.
 
-`CalibrationAdjudicationV1` is exactly:
+`CalibrationAdjudication` is exactly:
 
 ```text
 {
@@ -352,7 +352,7 @@ distinct identity hashes.
 }
 ```
 
-Labels remain in manifest order. `CalibrationResultsV1` is exactly:
+Labels remain in manifest order. `CalibrationResults` is exactly:
 
 ```text
 {

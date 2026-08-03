@@ -6,7 +6,7 @@
 //! visible: what a session resolves is a type-owned serving pointer
 //! ([`crate::registry::ServingPointer`] for skills and actions, the agent
 //! installation for agents). Moving a pointer requires an unconsumed
-//! [`ActivationAttestation`] over an exact [`EvaluationSubjectV1`], and the only
+//! [`ActivationAttestation`] over an exact [`EvaluationSubject`], and the only
 //! writer of both is the activation repository transaction.
 //!
 //! The types here own the parts of that contract that must be true before any
@@ -16,7 +16,7 @@
 //! * [`ReleaseState`] is the candidate lifecycle, with an explicit transition
 //!   relation instead of an implicit "published means everything" state.
 //! * [`ActivationTarget`] names the exact serving mutation being gated.
-//! * [`EvaluationSubjectV1`] is the exact thing that was evaluated; its digest
+//! * [`EvaluationSubject`] is the exact thing that was evaluated; its digest
 //!   covers every input that could change the answer.
 //! * [`ReleasePolicy`] is the gate, resolved server-side, carrying mandatory
 //!   deterministic score assertions and a nonempty primary gate family.
@@ -1003,7 +1003,7 @@ pub struct EvaluationPlanSubject {
 /// different digest, which is what makes a stale attestation fail closed instead
 /// of silently authorizing a different change.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct EvaluationSubjectV1 {
+pub struct EvaluationSubject {
     /// Subject schema version. Present in the digest so a schema change cannot
     /// collide with an older subject.
     pub subject_version: u16,
@@ -1037,7 +1037,7 @@ pub struct EvaluationSubjectV1 {
     pub resource_policy_hash: Digest32,
 }
 
-impl EvaluationSubjectV1 {
+impl EvaluationSubject {
     /// Current subject schema version.
     pub const VERSION: u16 = 1;
 
@@ -1237,7 +1237,7 @@ pub struct NewActivationAttestation {
     /// Candidate revision the decision was made about.
     pub candidate_revision_uid: Uuid,
     /// Subject the decision was made over.
-    pub subject: EvaluationSubjectV1,
+    pub subject: EvaluationSubject,
     /// Experiment run that produced the evidence.
     pub run_uid: Uuid,
     /// Trials that produced the evidence.
@@ -1305,7 +1305,7 @@ mod tests {
     use moa_core::types::contact::ContactId;
 
     /// One named mutation of a subject, used to prove digest significance.
-    type SubjectMutation = (&'static str, Box<dyn Fn(&mut EvaluationSubjectV1)>);
+    type SubjectMutation = (&'static str, Box<dyn Fn(&mut EvaluationSubject)>);
 
     fn digest(byte: u8) -> Digest32 {
         Digest32([byte; 32])
@@ -1350,9 +1350,9 @@ mod tests {
         }
     }
 
-    fn subject() -> EvaluationSubjectV1 {
-        EvaluationSubjectV1 {
-            subject_version: EvaluationSubjectV1::VERSION,
+    fn subject() -> EvaluationSubject {
+        EvaluationSubject {
+            subject_version: EvaluationSubject::VERSION,
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             activation_target: ActivationTarget::SkillVisibility {
                 artifact_uid: Uuid::from_u128(2),
@@ -1397,13 +1397,13 @@ mod tests {
         let mutations: Vec<SubjectMutation> = vec![
             (
                 "tenant",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.tenant_id = TenantId::from(Uuid::from_u128(99));
                 }),
             ),
             (
                 "activation target",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.activation_target = ActivationTarget::ActionVisibility {
                         artifact_uid: Uuid::from_u128(2),
                     };
@@ -1411,55 +1411,55 @@ mod tests {
             ),
             (
                 "candidate hash",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.candidate_revision_hash = digest(200);
                 }),
             ),
             (
                 "serving baseline",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.serving_baseline = None;
                 }),
             ),
             (
                 "dependency lock",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.dependency_lock_hash = digest(201);
                 }),
             ),
             (
                 "prompt",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.agent_runtime.prompt_hash = digest(202);
                 }),
             ),
             (
                 "model",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.agent_runtime.model = "model-b".to_string();
                 }),
             ),
             (
                 "provider",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.agent_runtime.provider = "provider-b".to_string();
                 }),
             ),
             (
                 "runtime policy",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.agent_runtime.runtime_policy_hash = digest(203);
                 }),
             ),
             (
                 "tool policy",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.tool_policy_hash = digest(204);
                 }),
             ),
             (
                 "catalog snapshot",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.tool_bearing = true;
                     subject.tool_catalog = Some(CatalogSnapshotBinding {
                         snapshot_uid: Uuid::from_u128(50),
@@ -1470,25 +1470,25 @@ mod tests {
             ),
             (
                 "plan",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.plan.plan_hash = digest(206);
                 }),
             ),
             (
                 "scenario dataset",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.plan.scenario_dataset_hash = digest(207);
                 }),
             ),
             (
                 "seeds",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.plan.seed_hash = digest(208);
                 }),
             ),
             (
                 "evaluator versions",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject
                         .plan
                         .evaluator_versions
@@ -1497,7 +1497,7 @@ mod tests {
             ),
             (
                 "simulator policy",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.simulator = Some(SimulatorPolicyBinding {
                         policy_uid: Uuid::from_u128(60),
                         revision: 1,
@@ -1509,19 +1509,19 @@ mod tests {
             ),
             (
                 "release policy",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.release_policy.revision = 2;
                 }),
             ),
             (
                 "resource policy",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.resource_policy_hash = digest(210);
                 }),
             ),
             (
                 "subject version",
-                Box::new(|subject: &mut EvaluationSubjectV1| {
+                Box::new(|subject: &mut EvaluationSubject| {
                     subject.subject_version = 2;
                 }),
             ),
@@ -1544,7 +1544,7 @@ mod tests {
     fn subject_digest_survives_a_json_round_trip_offline() {
         let subject = subject();
         let encoded = serde_json::to_value(&subject).expect("encode");
-        let decoded: EvaluationSubjectV1 = serde_json::from_value(encoded).expect("decode");
+        let decoded: EvaluationSubject = serde_json::from_value(encoded).expect("decode");
         assert_eq!(subject.digest().expect("a"), decoded.digest().expect("b"));
     }
 

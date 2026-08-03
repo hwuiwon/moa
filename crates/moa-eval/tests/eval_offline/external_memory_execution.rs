@@ -11,11 +11,11 @@ use moa_eval::external_memory::answer::{
     SupportStatus,
 };
 use moa_eval::external_memory::cost::{
-    NormalizedUsage, PricingSnapshotV1, StageName, UsageProvenance,
+    NormalizedUsage, PricingSnapshot, StageName, UsageProvenance,
 };
 use moa_eval::external_memory::dataset::{
-    ChronologicalTurn, DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageSourceV1,
-    DatasetPackageV1, EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession,
+    ChronologicalTurn, DatasetFileProvenance, DatasetPackage, DatasetPackageManifest,
+    DatasetPackageSource, EvidenceLabels, ExternalMemoryCase, ExternalMemorySession,
     ExternalMemoryTurn, PreparedExternalMemoryCase, validate_case,
 };
 use moa_eval::external_memory::formation::{
@@ -157,7 +157,7 @@ impl FakeScorer {
 impl AnswerScorer for FakeScorer {
     fn score(
         &self,
-        _case: &ExternalMemoryCaseV1,
+        _case: &ExternalMemoryCase,
         _answer: &ReaderResponse,
     ) -> Result<AnswerScoreOutcome, String> {
         *self.calls.lock().expect("scorer calls lock") += 1;
@@ -465,7 +465,7 @@ fn prepared_case(isolation_key: &str) -> PreparedExternalMemoryCase {
         .with_ymd_and_hms(2026, 7, 9, 10, 0, 0)
         .single()
         .expect("fixed timestamp");
-    validate_case(ExternalMemoryCaseV1 {
+    validate_case(ExternalMemoryCase {
         schema_version: 1,
         isolation_key: isolation_key.to_string(),
         sessions: vec![ExternalMemorySession {
@@ -502,7 +502,7 @@ fn settings() -> ExternalMemoryExecutionSettings {
 
 fn paid_plan(model: &str) -> PaidStagePlan {
     PaidStagePlan {
-        pricing: PricingSnapshotV1 {
+        pricing: PricingSnapshot {
             model: model.to_string(),
             effective_date: "2026-07-09".to_string(),
             input_per_million_usd: 1.0,
@@ -586,10 +586,10 @@ fn report_builder() -> ExternalMemoryReportBuilder {
         Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0)
             .single()
             .expect("fixed timestamp"),
-        DatasetPackageV1::new(DatasetPackageManifestV1 {
+        DatasetPackage::new(DatasetPackageManifest {
             schema_version: 1,
             dataset: "common-json".to_string(),
-            source: DatasetPackageSourceV1 {
+            source: DatasetPackageSource {
                 repository: "fixtures/common-json".to_string(),
                 revision: "fixture-v1".to_string(),
             },

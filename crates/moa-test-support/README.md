@@ -9,7 +9,7 @@ Internal-only fixtures and helpers for MOA tests. This crate is `publish = false
 ```rust
 use moa_test_support::pricing::PricingTable;
 
-let table = PricingTable::load_v1();
+let table = PricingTable::load();
 let cents = table.cost_cents("anthropic", "claude-sonnet-4", 125_000, 20_000, 50_000)?;
 ```
 

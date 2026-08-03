@@ -10,7 +10,7 @@ use moa_eval::external_memory::longmemeval::{
     LONGMEMEVAL_ABSTENTION_COUNT, LONGMEMEVAL_EVALUATOR_COMMIT,
     LONGMEMEVAL_EVALUATOR_SOURCE_SHA256, LONGMEMEVAL_PACKAGE_SHA256, LONGMEMEVAL_QUESTION_COUNT,
     LONGMEMEVAL_RETRIEVAL_COUNT, LONGMEMEVAL_REVISION, LONGMEMEVAL_UNSUPPORTED_ANSWER_SCORE_REASON,
-    LongMemEvalAnswerScorerV1, LongMemEvalFixtureManifestV1, LongMemEvalOccurrenceRef,
+    LongMemEvalAnswerScorer, LongMemEvalFixtureManifest, LongMemEvalOccurrenceRef,
     LongMemEvalQuestionType, LongMemEvalRubricKind, aggregate_retrieval_metrics,
     load_longmemeval_file, load_upstream_contract, official_longmemeval_manifest,
     parse_absolute_judge_label, rubric_bundle_sha256, score_retrieval_case,
@@ -321,7 +321,7 @@ fn external_memory_longmemeval_rubrics_pin_upstream_bytes_mapping_and_strict_par
     assert_eq!(parse_absolute_judge_label(""), None);
 
     let dataset = load_longmemeval_file(&tiny_dataset_path()).expect("load scorer fixture");
-    let outcome = LongMemEvalAnswerScorerV1
+    let outcome = LongMemEvalAnswerScorer
         .score(
             &dataset.cases[0].prepared.case,
             &ReaderResponse {
@@ -353,7 +353,7 @@ fn external_memory_longmemeval_fixture_and_official_provenance_are_self_consiste
     // manifest keeps the immutable official file and package identities.
     let bytes = std::fs::read(fixture_root().join("fixture_manifest.json"))
         .expect("read LongMemEval fixture manifest");
-    let manifest: LongMemEvalFixtureManifestV1 =
+    let manifest: LongMemEvalFixtureManifest =
         serde_json::from_slice(&bytes).expect("parse strict fixture manifest");
     manifest
         .validate(&fixture_root())

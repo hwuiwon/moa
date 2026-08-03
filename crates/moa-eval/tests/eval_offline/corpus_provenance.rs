@@ -243,14 +243,14 @@ fn a_paired_comparison_rejects_a_corpus_generated_from_different_seeds() {
 #[test]
 fn the_dataset_package_validator_trips_on_a_seeded_answer_key_or_duplicate_question() {
     use moa_eval::external_memory::dataset::{
-        EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession, ExternalMemoryTurn,
+        EvidenceLabels, ExternalMemoryCase, ExternalMemorySession, ExternalMemoryTurn,
         scan_package_leakage, validate_case,
     };
 
     // Pins: the external-memory package validator refuses a package that leaks its
     // own answers, and accepts one whose evidence turn merely contains the answer.
     let case = |key: &str, question: &str, answer: &str, turn_text: &str| {
-        validate_case(ExternalMemoryCaseV1 {
+        validate_case(ExternalMemoryCase {
             schema_version: 1,
             isolation_key: key.to_string(),
             sessions: vec![ExternalMemorySession {

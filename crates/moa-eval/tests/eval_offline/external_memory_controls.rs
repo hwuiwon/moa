@@ -4,20 +4,20 @@ use std::collections::BTreeMap;
 
 use chrono::{TimeZone, Utc};
 use moa_eval::external_memory::answer::{
-    ExternalMemoryMode, FULL_CONTEXT_V1_PREFIX, PERSONAMEM_ORACLE_UNSUPPORTED_REASON,
+    ExternalMemoryMode, FULL_CONTEXT_PREFIX, PERSONAMEM_ORACLE_UNSUPPORTED_REASON,
     READER_CONTEXT_LIMIT_REASON, SupportStatus, reader_fit_support, render_control_evidence,
     render_reader_prompt,
 };
 use moa_eval::external_memory::dataset::{
-    DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageSourceV1, DatasetPackageV1,
-    EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession, ExternalMemoryTurn, validate_case,
+    DatasetFileProvenance, DatasetPackage, DatasetPackageManifest, DatasetPackageSource,
+    EvidenceLabels, ExternalMemoryCase, ExternalMemorySession, ExternalMemoryTurn, validate_case,
 };
 use moa_eval::external_memory::formation::{
     ComponentConfig, ConsolidationSettings, EmbeddingConfig, EntityBlockingConfig, FormationMode,
     ResolvedFormationConfig,
 };
 use moa_eval::external_memory::longmemeval::LONGMEMEVAL_DATASET;
-use moa_eval::external_memory::personamem::{PERSONAMEM_DATASET, PersonaMemAccuracyReportV1};
+use moa_eval::external_memory::personamem::{PERSONAMEM_DATASET, PersonaMemAccuracyReport};
 use moa_eval::external_memory::report::{
     CaseReportV2, ExternalMemoryDatasetMetricsV2, ExternalMemoryReportBuilder,
     PersonaMemModeMetricsV2, ReaderContractV2, ReportBudgetV2,
@@ -27,7 +27,7 @@ use moa_eval::kernel::stats::ClusterBootstrapReport;
 fn prepared(
     labels: Option<Vec<String>>,
 ) -> moa_eval::external_memory::dataset::PreparedExternalMemoryCase {
-    validate_case(ExternalMemoryCaseV1 {
+    validate_case(ExternalMemoryCase {
         schema_version: 1,
         isolation_key: "case-1".to_string(),
         sessions: vec![ExternalMemorySession {
@@ -72,10 +72,10 @@ fn external_memory_controls_render_exact_envelopes_without_truncation() {
 
     let full = render_control_evidence(&case, ExternalMemoryMode::FullContext, LONGMEMEVAL_DATASET)
         .expect("full context renders");
-    assert!(full.rendered_evidence.starts_with(FULL_CONTEXT_V1_PREFIX));
+    assert!(full.rendered_evidence.starts_with(FULL_CONTEXT_PREFIX));
     let full_json: serde_json::Value = serde_json::from_str(
         full.rendered_evidence
-            .strip_prefix(FULL_CONTEXT_V1_PREFIX)
+            .strip_prefix(FULL_CONTEXT_PREFIX)
             .expect("prefix"),
     )
     .expect("compact envelope JSON");
@@ -87,7 +87,7 @@ fn external_memory_controls_render_exact_envelopes_without_truncation() {
     assert!(
         !full
             .rendered_evidence
-            .strip_prefix(FULL_CONTEXT_V1_PREFIX)
+            .strip_prefix(FULL_CONTEXT_PREFIX)
             .expect("prefix")
             .contains('\n')
     );
@@ -101,7 +101,7 @@ fn external_memory_controls_render_exact_envelopes_without_truncation() {
     let oracle_json: serde_json::Value = serde_json::from_str(
         oracle
             .rendered_evidence
-            .strip_prefix(FULL_CONTEXT_V1_PREFIX)
+            .strip_prefix(FULL_CONTEXT_PREFIX)
             .expect("prefix"),
     )
     .expect("compact envelope JSON");
@@ -206,10 +206,10 @@ fn external_memory_controls_v2_report_is_strict_and_mode_ordered() {
         },
     };
     let formation_hash = formation.canonical_hash().expect("formation hashes");
-    let package = DatasetPackageV1::new(DatasetPackageManifestV1 {
+    let package = DatasetPackage::new(DatasetPackageManifest {
         schema_version: 1,
         dataset: "common-json".to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: "fixture".to_string(),
             revision: "v1".to_string(),
         },
@@ -245,7 +245,7 @@ fn external_memory_controls_v2_report_is_strict_and_mode_ordered() {
     builder.set_dataset_metrics(
         ExternalMemoryMode::Primary,
         ExternalMemoryDatasetMetricsV2::PersonaMem32k(Box::new(PersonaMemModeMetricsV2 {
-            answer: PersonaMemAccuracyReportV1 {
+            answer: PersonaMemAccuracyReport {
                 schema_version: 1,
                 metric: "personamem_label_accuracy_v1".to_string(),
                 numerator: 1,

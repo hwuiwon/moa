@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const PRICING_V1: &str = include_str!("../fixtures/pricing/v1.json");
+const PRICING: &str = include_str!("../fixtures/pricing/v1.json");
 const TOKENS_PER_MTOK: u128 = 1_000_000;
 
 /// One provider/model pricing row, expressed in USD cents per million tokens.
@@ -53,8 +53,8 @@ impl PricingTable {
     /// The fixture is embedded with `include_str!`, so tests do not need
     /// filesystem access to load canonical pricing.
     #[must_use]
-    pub fn load_v1() -> Self {
-        let json = strip_json_comments(PRICING_V1);
+    pub fn load() -> Self {
+        let json = strip_json_comments(PRICING);
         match serde_json::from_str(&json) {
             Ok(table) => table,
             Err(error) => panic!("bundled pricing fixture v1.json is invalid: {error}"),

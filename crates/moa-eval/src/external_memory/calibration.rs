@@ -1468,7 +1468,7 @@ pub struct CalibrationSourceCase {
 /// One ordered manifest selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationSampleItemV1 {
+pub struct CalibrationSampleItem {
     /// Stable upstream question ID.
     pub question_id: String,
     /// Calibration stratum.
@@ -1478,7 +1478,7 @@ pub struct CalibrationSampleItemV1 {
 /// Strict, self-hashed calibration selection manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationManifestV1 {
+pub struct CalibrationManifest {
     /// Wire schema version.
     pub schema_version: u32,
     /// Exact dataset registry identifier.
@@ -1492,12 +1492,12 @@ pub struct CalibrationManifestV1 {
     /// Versioned deterministic selection seed.
     pub selection_seed: String,
     /// Exactly 70 unique ordered selections.
-    pub sample: Vec<CalibrationSampleItemV1>,
+    pub sample: Vec<CalibrationSampleItem>,
     /// Domain-separated canonical self-hash.
     pub manifest_sha256: String,
 }
 
-impl CalibrationManifestV1 {
+impl CalibrationManifest {
     /// Validates the complete manifest, including deterministic ordering and its self-hash.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != CALIBRATION_SCHEMA_VERSION
@@ -1574,7 +1574,7 @@ pub enum CalibrationArtifactStatus {
 /// One blinded label item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationLabelItemV1 {
+pub struct CalibrationLabelItem {
     /// Stable upstream question ID.
     pub question_id: String,
     /// Calibration stratum.
@@ -1594,7 +1594,7 @@ pub struct CalibrationLabelItemV1 {
 /// Strict blinded labeler artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationLabelArtifactV1 {
+pub struct CalibrationLabelArtifact {
     /// Wire schema version.
     pub schema_version: u32,
     /// Exact manifest self-hash.
@@ -1606,13 +1606,13 @@ pub struct CalibrationLabelArtifactV1 {
     /// Domain-separated identity hash; null in templates.
     pub identity_sha256: Option<String>,
     /// Exactly 70 ordered label items.
-    pub items: Vec<CalibrationLabelItemV1>,
+    pub items: Vec<CalibrationLabelItem>,
 }
 
 /// One adjudicated gold label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationAdjudicationItemV1 {
+pub struct CalibrationAdjudicationItem {
     /// Stable upstream question ID.
     pub question_id: String,
     /// Final adjudicated label.
@@ -1622,7 +1622,7 @@ pub struct CalibrationAdjudicationItemV1 {
 /// Strict ordered adjudication artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationAdjudicationV1 {
+pub struct CalibrationAdjudication {
     /// Wire schema version.
     pub schema_version: u32,
     /// Exact manifest self-hash.
@@ -1632,7 +1632,7 @@ pub struct CalibrationAdjudicationV1 {
     /// Domain-separated adjudicator identity hash.
     pub identity_sha256: String,
     /// Exactly 70 labels in manifest order.
-    pub labels: Vec<CalibrationAdjudicationItemV1>,
+    pub labels: Vec<CalibrationAdjudicationItem>,
 }
 
 /// Whether Cohen's kappa had a defined denominator.
@@ -1669,7 +1669,7 @@ impl CalibrationVerdict {
 /// Strict, self-hashed judge calibration results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationResultsV1 {
+pub struct CalibrationResults {
     /// Wire schema version.
     pub schema_version: u32,
     /// Manifest self-hash.
@@ -1716,7 +1716,7 @@ pub struct CalibrationResultsV1 {
     pub results_sha256: String,
 }
 
-impl CalibrationResultsV1 {
+impl CalibrationResults {
     /// Validates hashes, denominators, metrics, threshold flags, and the canonical self-hash.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != CALIBRATION_SCHEMA_VERSION {
@@ -1776,19 +1776,17 @@ impl CalibrationResultsV1 {
 
 /// Prepared manifest and two blinded templates.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedCalibrationV1 {
+pub struct PreparedCalibration {
     /// Self-hashed selection manifest.
-    pub manifest: CalibrationManifestV1,
+    pub manifest: CalibrationManifest,
     /// First blinded labeler template.
-    pub labeler_a: CalibrationLabelArtifactV1,
+    pub labeler_a: CalibrationLabelArtifact,
     /// Second blinded labeler template.
-    pub labeler_b: CalibrationLabelArtifactV1,
+    pub labeler_b: CalibrationLabelArtifact,
 }
 
 /// Selects exactly ten deterministic question IDs per ordered stratum.
-pub fn select_question_ids(
-    cases: &[CalibrationSourceCase],
-) -> Result<Vec<CalibrationSampleItemV1>> {
+pub fn select_question_ids(cases: &[CalibrationSourceCase]) -> Result<Vec<CalibrationSampleItem>> {
     validate_source_cases(cases)?;
     let mut selected = Vec::with_capacity(CALIBRATION_SAMPLE_SIZE);
     for stratum in CalibrationStratum::ALL {
@@ -1812,7 +1810,7 @@ pub fn select_question_ids(
             candidates
                 .into_iter()
                 .take(CASES_PER_STRATUM)
-                .map(|(_, question_id)| CalibrationSampleItemV1 {
+                .map(|(_, question_id)| CalibrationSampleItem {
                     question_id,
                     stratum,
                 }),
@@ -1827,7 +1825,7 @@ pub fn prepare_calibration(
     cases: &[CalibrationSourceCase],
     package_bytes: &[u8],
     report_bytes: &[u8],
-) -> Result<PreparedCalibrationV1> {
+) -> Result<PreparedCalibration> {
     if dataset_revision.trim().is_empty() {
         return Err(invalid("dataset revision must not be blank"));
     }
@@ -1836,7 +1834,7 @@ pub fn prepare_calibration(
         .iter()
         .map(|case| (case.question_id.as_str(), case))
         .collect::<BTreeMap<_, _>>();
-    let mut manifest = CalibrationManifestV1 {
+    let mut manifest = CalibrationManifest {
         schema_version: CALIBRATION_SCHEMA_VERSION,
         dataset: "longmemeval-s-cleaned".to_string(),
         dataset_revision: dataset_revision.to_string(),
@@ -1860,7 +1858,7 @@ pub fn prepare_calibration(
                     sample.question_id
                 ))
             })?;
-            Ok(CalibrationLabelItemV1 {
+            Ok(CalibrationLabelItem {
                 question_id: source.question_id.clone(),
                 stratum: source.stratum,
                 question: source.question.clone(),
@@ -1873,7 +1871,7 @@ pub fn prepare_calibration(
         .collect::<Result<Vec<_>>>()?;
     let labeler_a = label_template(&manifest, CalibrationRole::LabelerA, items.clone());
     let labeler_b = label_template(&manifest, CalibrationRole::LabelerB, items);
-    Ok(PreparedCalibrationV1 {
+    Ok(PreparedCalibration {
         manifest,
         labeler_a,
         labeler_b,
@@ -1888,8 +1886,8 @@ pub fn score_calibration(
     labeler_b_bytes: &[u8],
     adjudication_bytes: &[u8],
     judge_outcomes: &BTreeMap<String, Option<bool>>,
-) -> Result<CalibrationResultsV1> {
-    let manifest: CalibrationManifestV1 = serde_json::from_slice(manifest_bytes)?;
+) -> Result<CalibrationResults> {
+    let manifest: CalibrationManifest = serde_json::from_slice(manifest_bytes)?;
     manifest.validate()?;
     let actual_report_sha256 = exact_sha256(report_bytes);
     if actual_report_sha256 != manifest.report_sha256 {
@@ -1898,12 +1896,12 @@ pub fn score_calibration(
             manifest.report_sha256
         )));
     }
-    let labeler_a: CalibrationLabelArtifactV1 = serde_json::from_slice(labeler_a_bytes)?;
-    let labeler_b: CalibrationLabelArtifactV1 = serde_json::from_slice(labeler_b_bytes)?;
+    let labeler_a: CalibrationLabelArtifact = serde_json::from_slice(labeler_a_bytes)?;
+    let labeler_b: CalibrationLabelArtifact = serde_json::from_slice(labeler_b_bytes)?;
     validate_completed_labels(&labeler_a, &manifest, CalibrationRole::LabelerA)?;
     validate_completed_labels(&labeler_b, &manifest, CalibrationRole::LabelerB)?;
     validate_label_content_equality(&labeler_a, &labeler_b)?;
-    let adjudication: CalibrationAdjudicationV1 = serde_json::from_slice(adjudication_bytes)?;
+    let adjudication: CalibrationAdjudication = serde_json::from_slice(adjudication_bytes)?;
     validate_adjudication(&adjudication, &manifest)?;
 
     let identity_a = labeler_a
@@ -1955,7 +1953,7 @@ pub fn score_calibration(
         counts[3],
         judge_correct_count,
     );
-    let mut results = CalibrationResultsV1 {
+    let mut results = CalibrationResults {
         schema_version: CALIBRATION_SCHEMA_VERSION,
         manifest_sha256: manifest.manifest_sha256,
         report_sha256: actual_report_sha256,
@@ -1994,7 +1992,7 @@ pub fn score_calibration(
 /// has a standard error near 0.07, so the V1 `kappa_pass` flag alone cannot
 /// distinguish substantial agreement from moderate agreement.
 #[must_use]
-pub fn calibration_reliability(results: &CalibrationResultsV1) -> judge::AgreementReliability {
+pub fn calibration_reliability(results: &CalibrationResults) -> judge::AgreementReliability {
     judge::human_agreement(judge::ConfusionMatrix {
         true_positive: results.n11 as u64,
         false_negative: results.n10 as u64,
@@ -2059,11 +2057,11 @@ pub fn hash_identity(identity: &str) -> Result<String> {
 }
 
 fn label_template(
-    manifest: &CalibrationManifestV1,
+    manifest: &CalibrationManifest,
     role: CalibrationRole,
-    items: Vec<CalibrationLabelItemV1>,
-) -> CalibrationLabelArtifactV1 {
-    CalibrationLabelArtifactV1 {
+    items: Vec<CalibrationLabelItem>,
+) -> CalibrationLabelArtifact {
+    CalibrationLabelArtifact {
         schema_version: CALIBRATION_SCHEMA_VERSION,
         manifest_sha256: manifest.manifest_sha256.clone(),
         role,
@@ -2102,7 +2100,7 @@ fn validate_source_cases(cases: &[CalibrationSourceCase]) -> Result<()> {
     Ok(())
 }
 
-fn validate_sample(sample: &[CalibrationSampleItemV1]) -> Result<()> {
+fn validate_sample(sample: &[CalibrationSampleItem]) -> Result<()> {
     if sample.len() != CALIBRATION_SAMPLE_SIZE {
         return Err(invalid(format!(
             "calibration sample must contain exactly {CALIBRATION_SAMPLE_SIZE} items"
@@ -2127,8 +2125,8 @@ fn validate_sample(sample: &[CalibrationSampleItemV1]) -> Result<()> {
 }
 
 fn validate_completed_labels(
-    artifact: &CalibrationLabelArtifactV1,
-    manifest: &CalibrationManifestV1,
+    artifact: &CalibrationLabelArtifact,
+    manifest: &CalibrationManifest,
     role: CalibrationRole,
 ) -> Result<()> {
     if artifact.schema_version != CALIBRATION_SCHEMA_VERSION
@@ -2173,8 +2171,8 @@ fn validate_completed_labels(
 }
 
 fn validate_label_content_equality(
-    a: &CalibrationLabelArtifactV1,
-    b: &CalibrationLabelArtifactV1,
+    a: &CalibrationLabelArtifact,
+    b: &CalibrationLabelArtifact,
 ) -> Result<()> {
     for (a, b) in a.items.iter().zip(&b.items) {
         if a.question_id != b.question_id
@@ -2193,8 +2191,8 @@ fn validate_label_content_equality(
 }
 
 fn validate_adjudication(
-    adjudication: &CalibrationAdjudicationV1,
-    manifest: &CalibrationManifestV1,
+    adjudication: &CalibrationAdjudication,
+    manifest: &CalibrationManifest,
 ) -> Result<()> {
     if adjudication.schema_version != CALIBRATION_SCHEMA_VERSION
         || adjudication.manifest_sha256 != manifest.manifest_sha256

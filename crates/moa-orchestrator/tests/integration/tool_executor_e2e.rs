@@ -170,7 +170,6 @@ async fn seed_published_http_connector(
     origin: &str,
 ) -> Result<SeededConnector> {
     let definition: ConnectorDefinition = serde_json::from_value(json!({
-        "definition_version": "v1",
         "display_name": "ToolExecutor connector fixture",
         "auth": [{"type": "none"}],
         "actions": [{

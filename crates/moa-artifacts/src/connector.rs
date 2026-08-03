@@ -1,4 +1,4 @@
-//! Versioned connector artifact definitions and secret-free operation contracts.
+//! Connector artifact definitions and secret-free operation contracts.
 
 use std::fmt;
 use std::str::FromStr;
@@ -14,31 +14,21 @@ use serde_json::Value;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorDefinition {
-    /// Required wire discriminator whose type admits only literal `v1`.
-    pub definition_version: ConnectorDefinitionVersionV1,
     /// Human-readable label that does not participate in artifact identity.
     pub display_name: String,
     /// Optional human-readable connector description.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// Named, secret-free credential requirements.
-    pub auth: Vec<RuntimeConnectorAuthRequirementV1>,
+    pub auth: Vec<RuntimeConnectorAuthRequirement>,
     /// Logical operations exposed by this connector.
-    pub actions: Vec<RuntimeConnectorActionV1>,
-}
-
-/// Single valid discriminator for a runtime connector V1 body.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum ConnectorDefinitionVersionV1 {
-    /// Runtime connector definition version one.
-    #[serde(rename = "v1")]
-    V1,
+    pub actions: Vec<RuntimeConnectorAction>,
 }
 
 /// Secret-free authentication requirement declared by a runtime connector.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeConnectorAuthRequirementV1 {
+pub enum RuntimeConnectorAuthRequirement {
     /// The connection requires no credential material.
     None,
     /// An HTTP bearer token is resolved from the named slot.
@@ -60,7 +50,7 @@ pub enum RuntimeConnectorAuthRequirementV1 {
     },
 }
 
-impl RuntimeConnectorAuthRequirementV1 {
+impl RuntimeConnectorAuthRequirement {
     /// Returns the credential slot selected by this requirement, when any.
     #[must_use]
     pub const fn slot(&self) -> Option<&CredentialSlotName> {
@@ -76,7 +66,7 @@ impl RuntimeConnectorAuthRequirementV1 {
 /// Logical action declared by a runtime connector.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeConnectorActionV1 {
+pub struct RuntimeConnectorAction {
     /// Stable action identifier within the connector.
     pub id: String,
     /// Human-readable operation description.
@@ -89,7 +79,7 @@ pub struct RuntimeConnectorActionV1 {
 /// Governed schemas, data classes, policy floor, and retry semantics for an operation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeOperationPolicyV1 {
+pub struct RuntimeOperationPolicy {
     /// JSON object schema offered to the model for operation inputs.
     pub input_schema: Value,
     /// JSON object schema enforced for operation outputs.
@@ -105,18 +95,18 @@ pub struct RuntimeOperationPolicyV1 {
 #[serde(deny_unknown_fields)]
 pub struct HttpOperationContract {
     /// Fixed HTTP method.
-    pub method: HttpMethodV1,
+    pub method: HttpMethod,
     /// Fixed origin-relative path template.
     pub path_template: String,
     /// Complete-segment path placeholder mappings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub path_inputs: Vec<HttpPathInputV1>,
+    pub path_inputs: Vec<HttpPathInput>,
     /// Fixed query parameter mappings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub query_inputs: Vec<HttpQueryInputV1>,
+    pub query_inputs: Vec<HttpQueryInput>,
     /// Optional JSON request-body mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body_input: Option<HttpBodyInputV1>,
+    pub body_input: Option<HttpBodyInput>,
     /// Optional declared credential slot attached by trusted host code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_slot: Option<CredentialSlotName>,
@@ -135,13 +125,13 @@ pub struct HttpOperationContract {
     /// Whole-operation timeout in milliseconds.
     pub total_timeout_ms: u32,
     /// Governed model-facing and policy contract.
-    pub policy: RuntimeOperationPolicyV1,
+    pub policy: RuntimeOperationPolicy,
 }
 
-/// Closed set of HTTP methods accepted by custom connector V1.
+/// Closed set of HTTP methods accepted by custom connectors.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum HttpMethodV1 {
+pub enum HttpMethod {
     /// HTTP GET.
     Get,
     /// HTTP POST.
@@ -157,7 +147,7 @@ pub enum HttpMethodV1 {
 /// Maps one complete path-template placeholder to model input.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct HttpPathInputV1 {
+pub struct HttpPathInput {
     /// Placeholder name without braces.
     pub placeholder: String,
     /// RFC 6901 pointer into the validated operation input.
@@ -167,7 +157,7 @@ pub struct HttpPathInputV1 {
 /// Maps one fixed query parameter to model input.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct HttpQueryInputV1 {
+pub struct HttpQueryInput {
     /// Fixed query parameter name.
     pub parameter: String,
     /// RFC 6901 pointer into the validated operation input.
@@ -177,7 +167,7 @@ pub struct HttpQueryInputV1 {
 /// Maps a JSON request body from model input.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct HttpBodyInputV1 {
+pub struct HttpBodyInput {
     /// RFC 6901 pointer into the validated operation input.
     pub input_pointer: String,
 }

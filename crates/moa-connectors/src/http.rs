@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use moa_artifacts::connector::{
-    HttpMethodV1, HttpOperationContract, RuntimeConnectorAuthRequirementV1,
+    HttpMethod, HttpOperationContract, RuntimeConnectorAuthRequirement,
 };
 use moa_core::traits::CredentialVault;
 use moa_core::types::credentials::{
@@ -545,7 +545,7 @@ fn select_auth_requirement(
     contract: &HttpOperationContract,
 ) -> Result<SelectedAuth> {
     let Some(selected_slot) = &contract.credential_slot else {
-        if binding.compiled_contract.auth.as_slice() == [RuntimeConnectorAuthRequirementV1::None] {
+        if binding.compiled_contract.auth.as_slice() == [RuntimeConnectorAuthRequirement::None] {
             return Ok(SelectedAuth::None);
         }
         return Err(Error::Http {
@@ -561,13 +561,13 @@ fn select_auth_requirement(
             code: "credential_contract_rejected",
         })?;
     match requirement {
-        RuntimeConnectorAuthRequirementV1::Bearer { slot } => Ok(SelectedAuth::Credential {
+        RuntimeConnectorAuthRequirement::Bearer { slot } => Ok(SelectedAuth::Credential {
             slot: slot.clone(),
             kind: CredentialKind::ProviderApiKey,
             header: "authorization".to_string(),
             bearer: true,
         }),
-        RuntimeConnectorAuthRequirementV1::ApiKeyHeader { slot, header } => {
+        RuntimeConnectorAuthRequirement::ApiKeyHeader { slot, header } => {
             Ok(SelectedAuth::Credential {
                 slot: slot.clone(),
                 kind: CredentialKind::ProviderApiKey,
@@ -575,13 +575,13 @@ fn select_auth_requirement(
                 bearer: false,
             })
         }
-        RuntimeConnectorAuthRequirementV1::ManagedOauth { slot } => Ok(SelectedAuth::Credential {
+        RuntimeConnectorAuthRequirement::ManagedOauth { slot } => Ok(SelectedAuth::Credential {
             slot: slot.clone(),
             kind: CredentialKind::OAuth,
             header: "authorization".to_string(),
             bearer: true,
         }),
-        RuntimeConnectorAuthRequirementV1::None => Err(Error::Http {
+        RuntimeConnectorAuthRequirement::None => Err(Error::Http {
             code: "credential_contract_rejected",
         }),
     }
@@ -645,11 +645,11 @@ fn build_request(
     upstream_idempotency_key: Option<String>,
 ) -> Result<reqwest::RequestBuilder> {
     let method = match contract.method {
-        HttpMethodV1::Get => reqwest::Method::GET,
-        HttpMethodV1::Post => reqwest::Method::POST,
-        HttpMethodV1::Put => reqwest::Method::PUT,
-        HttpMethodV1::Patch => reqwest::Method::PATCH,
-        HttpMethodV1::Delete => reqwest::Method::DELETE,
+        HttpMethod::Get => reqwest::Method::GET,
+        HttpMethod::Post => reqwest::Method::POST,
+        HttpMethod::Put => reqwest::Method::PUT,
+        HttpMethod::Patch => reqwest::Method::PATCH,
+        HttpMethod::Delete => reqwest::Method::DELETE,
     };
     let mut request = client.request(method, request_url);
     if let Some(body) = request_body {

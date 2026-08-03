@@ -6,12 +6,12 @@ use moa_eval::external_memory::answer::{
 };
 use moa_eval::external_memory::cost::{NormalizedUsage, UsageProvenance};
 use moa_eval::external_memory::dataset::{
-    DatasetFileProvenance, DatasetPackageManifestV1, DatasetPackageSourceV1, DatasetPackageV1,
+    DatasetFileProvenance, DatasetPackage, DatasetPackageManifest, DatasetPackageSource,
 };
 use moa_eval::external_memory::personamem::{
     PERSONAMEM_DATASET, PERSONAMEM_QUESTIONS_SHA256, PERSONAMEM_REPOSITORY, PERSONAMEM_REVISION,
-    PERSONAMEM_SHARED_CONTEXTS_SHA256, PersonaMemAnswerOutcome, PersonaMemFixtureManifestV1,
-    PersonaMemLabelScorerV1, build_accuracy_report, load_personamem_files,
+    PERSONAMEM_SHARED_CONTEXTS_SHA256, PersonaMemAnswerOutcome, PersonaMemFixtureManifest,
+    PersonaMemLabelScorer, build_accuracy_report, load_personamem_files,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -38,7 +38,7 @@ fn reader(answer: &str) -> ReaderResponse {
 
 fn score_value(
     scorer: &impl AnswerScorer,
-    case: &moa_eval::external_memory::dataset::ExternalMemoryCaseV1,
+    case: &moa_eval::external_memory::dataset::ExternalMemoryCase,
     answer: &str,
 ) -> f64 {
     match scorer.score(case, &reader(answer)).expect("score") {
@@ -52,10 +52,10 @@ fn score_value(
 #[test]
 fn external_memory_personamem_manifest_hash_is_canonical_and_every_field_sensitive() {
     // Pins: package.json hashes only the canonical inner manifest with domain separation.
-    let manifest = DatasetPackageManifestV1 {
+    let manifest = DatasetPackageManifest {
         schema_version: 1,
         dataset: PERSONAMEM_DATASET.to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: PERSONAMEM_REPOSITORY.to_string(),
             revision: PERSONAMEM_REVISION.to_string(),
         },
@@ -72,7 +72,7 @@ fn external_memory_personamem_manifest_hash_is_canonical_and_every_field_sensiti
             },
         ],
     };
-    let package = DatasetPackageV1::new(manifest.clone()).expect("official manifest should hash");
+    let package = DatasetPackage::new(manifest.clone()).expect("official manifest should hash");
     assert_eq!(
         package.package_sha256,
         "f4baf9ffa83a8452b5a026564eb439caa94334020d49be84510d392a88fe94ac"
@@ -85,7 +85,7 @@ fn external_memory_personamem_manifest_hash_is_canonical_and_every_field_sensiti
     }
     assert_eq!(
         package.package_sha256,
-        DatasetPackageManifestV1::canonical_hash_value(&serde_json::Value::Object(reordered))
+        DatasetPackageManifest::canonical_hash_value(&serde_json::Value::Object(reordered))
             .expect("reordered manifest should hash")
     );
 
@@ -116,7 +116,7 @@ fn external_memory_personamem_manifest_hash_is_canonical_and_every_field_sensiti
         };
         assert_ne!(
             package.package_sha256,
-            DatasetPackageManifestV1::canonical_hash_value(&changed)
+            DatasetPackageManifest::canonical_hash_value(&changed)
                 .expect("changed manifest should hash"),
             "hash omitted {pointer}"
         );
@@ -129,7 +129,7 @@ fn external_memory_personamem_package_json_is_strict_and_files_are_sorted() {
     let root = fixture_root();
     let package = tiny_package(&root);
     let encoded = serde_json::to_vec(&package).expect("serialize package");
-    let decoded: DatasetPackageV1 = serde_json::from_slice(&encoded).expect("strict package");
+    let decoded: DatasetPackage = serde_json::from_slice(&encoded).expect("strict package");
     decoded.validate().expect("package should validate");
 
     let mut unknown = serde_json::to_value(&package).expect("serialize package");
@@ -137,14 +137,14 @@ fn external_memory_personamem_package_json_is_strict_and_files_are_sorted() {
         .as_object_mut()
         .expect("package object")
         .insert("extra".to_string(), serde_json::json!(true));
-    assert!(serde_json::from_value::<DatasetPackageV1>(unknown).is_err());
+    assert!(serde_json::from_value::<DatasetPackage>(unknown).is_err());
 
     let mut nested_unknown = serde_json::to_value(&package).expect("serialize package");
     nested_unknown["manifest"]
         .as_object_mut()
         .expect("manifest object")
         .insert("extra".to_string(), serde_json::json!(true));
-    assert!(serde_json::from_value::<DatasetPackageV1>(nested_unknown).is_err());
+    assert!(serde_json::from_value::<DatasetPackage>(nested_unknown).is_err());
 
     let mut unsorted = package.clone();
     unsorted.manifest.files.reverse();
@@ -391,7 +391,7 @@ fn external_memory_personamem_label_scorer_rejects_ambiguity_and_keeps_denominat
         &root.join("shared_contexts_32k_tiny.jsonl"),
     )
     .expect("tiny PersonaMem fixture should load");
-    let scorer = PersonaMemLabelScorerV1;
+    let scorer = PersonaMemLabelScorer;
     let case = &dataset.cases[0].prepared.case;
     assert_eq!(score_value(&scorer, case, "Answer: (b)"), 1.0);
     assert_eq!(score_value(&scorer, case, "(b), confirmed: (b)"), 1.0);
@@ -435,7 +435,7 @@ fn external_memory_personamem_label_scorer_rejects_ambiguity_and_keeps_denominat
 fn external_memory_personamem_fixture_manifest_proves_provenance_and_hashes() {
     // Pins: tiny data is explicitly synthetic and its selected IDs, rationale, counts, and bytes are audited.
     let root = fixture_root();
-    let fixture: PersonaMemFixtureManifestV1 = serde_json::from_slice(
+    let fixture: PersonaMemFixtureManifest = serde_json::from_slice(
         &std::fs::read(root.join("fixture_manifest.json")).expect("read fixture manifest"),
     )
     .expect("strict fixture manifest");
@@ -460,7 +460,7 @@ fn external_memory_personamem_fixture_manifest_proves_provenance_and_hashes() {
     );
 }
 
-fn tiny_package(root: &Path) -> DatasetPackageV1 {
+fn tiny_package(root: &Path) -> DatasetPackage {
     let files = ["questions_32k_tiny.csv", "shared_contexts_32k_tiny.jsonl"]
         .into_iter()
         .map(|path| {
@@ -472,10 +472,10 @@ fn tiny_package(root: &Path) -> DatasetPackageV1 {
             }
         })
         .collect();
-    DatasetPackageV1::new(DatasetPackageManifestV1 {
+    DatasetPackage::new(DatasetPackageManifest {
         schema_version: 1,
         dataset: "personamem-32k-tiny".to_string(),
-        source: DatasetPackageSourceV1 {
+        source: DatasetPackageSource {
             repository: PERSONAMEM_REPOSITORY.to_string(),
             revision: PERSONAMEM_REVISION.to_string(),
         },

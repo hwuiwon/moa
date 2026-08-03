@@ -24,7 +24,7 @@ const DATASET_PACKAGE_HASH_DOMAIN: &[u8] = b"moa.external-memory.package.v1\0";
 
 /// One backend-neutral external-memory benchmark case.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExternalMemoryCaseV1 {
+pub struct ExternalMemoryCase {
     /// Version of this case contract.
     pub schema_version: u32,
     /// Hard isolation boundary for this case.
@@ -103,7 +103,7 @@ pub struct ChronologicalTurn {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedExternalMemoryCase {
     /// Original versioned case.
-    pub case: ExternalMemoryCaseV1,
+    pub case: ExternalMemoryCase,
     /// Stable chronological ingest order.
     pub chronological_turns: Vec<ChronologicalTurn>,
 }
@@ -120,7 +120,7 @@ impl PreparedExternalMemoryCase {
 }
 
 /// Validates a versioned case and derives its chronological ingest order.
-pub fn validate_case(case: ExternalMemoryCaseV1) -> Result<PreparedExternalMemoryCase> {
+pub fn validate_case(case: ExternalMemoryCase) -> Result<PreparedExternalMemoryCase> {
     if case.schema_version != EXTERNAL_MEMORY_CASE_SCHEMA_VERSION {
         return Err(ExternalMemoryError::InvalidDataset(format!(
             "unsupported case schema version {}",
@@ -258,7 +258,7 @@ pub struct DatasetFileProvenance {
 /// Immutable upstream repository provenance for a dataset package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DatasetPackageSourceV1 {
+pub struct DatasetPackageSource {
     /// Upstream repository identifier.
     pub repository: String,
     /// Immutable upstream revision.
@@ -268,18 +268,18 @@ pub struct DatasetPackageSourceV1 {
 /// Versioned provenance manifest for one dataset package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DatasetPackageManifestV1 {
+pub struct DatasetPackageManifest {
     /// Manifest schema version.
     pub schema_version: u32,
     /// Registry dataset identifier.
     pub dataset: String,
     /// Immutable upstream source.
-    pub source: DatasetPackageSourceV1,
+    pub source: DatasetPackageSource,
     /// Every byte-bearing file used by the loader.
     pub files: Vec<DatasetFileProvenance>,
 }
 
-impl DatasetPackageManifestV1 {
+impl DatasetPackageManifest {
     /// Validates version, revision, file paths, lengths, and digests.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != DATASET_PACKAGE_SCHEMA_VERSION {
@@ -359,9 +359,9 @@ impl DatasetPackageManifestV1 {
 /// Strict `package.json` wrapper for one canonical dataset manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DatasetPackageV1 {
+pub struct DatasetPackage {
     /// Canonical inner manifest.
-    pub manifest: DatasetPackageManifestV1,
+    pub manifest: DatasetPackageManifest,
     /// Domain-separated SHA-256 over only the canonical inner manifest.
     pub package_sha256: String,
 }
@@ -369,17 +369,17 @@ pub struct DatasetPackageV1 {
 /// Strict verified fetch summary shared by fetch and run commands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum VerifiedFetchSummaryV1 {
+pub enum VerifiedFetchSummary {
     /// PersonaMem 32k package validation summary.
-    PersonaMem(PersonaMemFetchSummaryV1),
+    PersonaMem(PersonaMemFetchSummary),
     /// LongMemEval-S Cleaned package validation summary.
-    LongMemEval(LongMemEvalFetchSummaryV1),
+    LongMemEval(LongMemEvalFetchSummary),
 }
 
 /// Strict PersonaMem fetch summary emitted only after package validation succeeds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PersonaMemFetchSummaryV1 {
+pub struct PersonaMemFetchSummary {
     /// Summary schema version.
     pub schema_version: u32,
     /// Dataset registry key.
@@ -403,7 +403,7 @@ pub struct PersonaMemFetchSummaryV1 {
 /// Strict LongMemEval fetch summary emitted only after package validation succeeds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalFetchSummaryV1 {
+pub struct LongMemEvalFetchSummary {
     /// Summary schema version.
     pub schema_version: u32,
     /// Dataset registry key.
@@ -424,7 +424,7 @@ pub struct LongMemEvalFetchSummaryV1 {
     pub verified: bool,
 }
 
-impl VerifiedFetchSummaryV1 {
+impl VerifiedFetchSummary {
     /// Returns the validated question count.
     #[must_use]
     pub fn question_count(&self) -> usize {
@@ -435,7 +435,7 @@ impl VerifiedFetchSummaryV1 {
     }
 
     /// Validates shared package provenance before any runtime construction.
-    pub fn validate_package(&self, package: &DatasetPackageV1) -> Result<()> {
+    pub fn validate_package(&self, package: &DatasetPackage) -> Result<()> {
         package.validate()?;
         let (schema_version, dataset, repository, revision, package_sha256, verified) = match self {
             Self::PersonaMem(summary) => (
@@ -473,9 +473,9 @@ impl VerifiedFetchSummaryV1 {
     }
 }
 
-impl DatasetPackageV1 {
+impl DatasetPackage {
     /// Constructs a package wrapper with its canonical digest.
-    pub fn new(manifest: DatasetPackageManifestV1) -> Result<Self> {
+    pub fn new(manifest: DatasetPackageManifest) -> Result<Self> {
         let package_sha256 = manifest.canonical_hash()?;
         Ok(Self {
             manifest,
@@ -532,7 +532,7 @@ impl DatasetPackageV1 {
 /// Loads the Task-8 common-JSON case format from a package file.
 pub fn load_common_json(path: &Path) -> Result<Vec<PreparedExternalMemoryCase>> {
     let bytes = std::fs::read(path)?;
-    let cases: Vec<ExternalMemoryCaseV1> = serde_json::from_slice(&bytes)?;
+    let cases: Vec<ExternalMemoryCase> = serde_json::from_slice(&bytes)?;
     if cases.is_empty() {
         return Err(ExternalMemoryError::InvalidDataset(
             "common JSON package contains no cases".to_string(),
@@ -713,7 +713,7 @@ impl DatasetPackageRegistry {
     /// Validates a manifest and loads its cases through the registered format.
     pub fn load(
         &self,
-        package: &DatasetPackageV1,
+        package: &DatasetPackage,
         data_path: &Path,
     ) -> Result<Vec<PreparedExternalMemoryCase>> {
         package.validate()?;

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_artifacts::connector::{
-    ConnectorDefinition, ConnectorDefinitionVersionV1, HttpMethodV1, HttpOperationContract,
-    RuntimeConnectorActionV1, RuntimeConnectorAuthRequirementV1, RuntimeOperationPolicyV1,
+    ConnectorDefinition, HttpMethod, HttpOperationContract, RuntimeConnectorAction,
+    RuntimeConnectorAuthRequirement, RuntimeOperationPolicy,
 };
 use moa_connectors::domain::{
     ConnectionDefinitionRef, ConnectionGeneration, ConnectionHealth, ConnectionStatus,
@@ -90,15 +90,14 @@ fn wire_definition_ref() -> ConnectorArtifactReference {
 
 fn definition() -> ConnectorDefinition {
     ConnectorDefinition {
-        definition_version: ConnectorDefinitionVersionV1::V1,
         display_name: "Billing".to_string(),
         description: String::new(),
-        auth: vec![RuntimeConnectorAuthRequirementV1::None],
-        actions: vec![RuntimeConnectorActionV1 {
+        auth: vec![RuntimeConnectorAuthRequirement::None],
+        actions: vec![RuntimeConnectorAction {
             id: "create_invoice".to_string(),
             description: "Create one invoice".to_string(),
             contract: HttpOperationContract {
-                method: HttpMethodV1::Post,
+                method: HttpMethod::Post,
                 path_template: "/invoices".to_string(),
                 path_inputs: Vec::new(),
                 query_inputs: Vec::new(),
@@ -110,7 +109,7 @@ fn definition() -> ConnectorDefinition {
                 max_response_bytes: 1024,
                 connect_timeout_ms: 1000,
                 total_timeout_ms: 2000,
-                policy: RuntimeOperationPolicyV1 {
+                policy: RuntimeOperationPolicy {
                     input_schema: json!({"type": "object"}),
                     output_schema: json!({"type": "object"}),
                     data_classes: Vec::new(),
@@ -217,8 +216,8 @@ impl ConnectorDefinitionResolver for FakeDefinitions {
         reference: &ConnectionDefinitionRef,
     ) -> Result<ResolvedConnectorDefinition, ConnectorDefinitionResolutionError> {
         let managed = [
-            ManagedParentDefinition::KnowledgeNangoV1,
-            ManagedParentDefinition::KnowledgeMergeV1,
+            ManagedParentDefinition::KnowledgeNango,
+            ManagedParentDefinition::KnowledgeMerge,
         ]
         .into_iter()
         .find(|managed| managed.definition_ref() == *reference);
@@ -704,7 +703,7 @@ async fn denied_manage_stops_before_connection_definition_or_credential_reads_of
 async fn managed_knowledge_parent_resolves_for_installed_list_and_get_offline() {
     // Pins: `knowledge:nango@1` is a code-owned definition only after the
     // exact parent exists; normal list/get remain observable to its manager.
-    let managed = ManagedParentDefinition::KnowledgeNangoV1;
+    let managed = ManagedParentDefinition::KnowledgeNango;
     let fixture = fixture_with_definition(
         ConnectionStatus::PendingAuth,
         1,
@@ -783,8 +782,8 @@ async fn managed_knowledge_parent_generic_operations_stop_after_auth_and_load_of
         Operation::Delete,
     ];
     for managed in [
-        ManagedParentDefinition::KnowledgeNangoV1,
-        ManagedParentDefinition::KnowledgeMergeV1,
+        ManagedParentDefinition::KnowledgeNango,
+        ManagedParentDefinition::KnowledgeMerge,
     ] {
         for operation in operations {
             let status = match operation {
@@ -1116,7 +1115,7 @@ async fn delete_does_not_revoke_credentials_when_disconnect_fence_fails_offline(
 
 #[tokio::test]
 async fn verification_is_sanitized_unverified_without_reviewed_remote_contract_offline() {
-    // Pins: current V1 definitions never invent a remote authentication probe;
+    // Pins: current definitions never invent a remote authentication probe;
     // local admission plus ready slots remains explicitly unverified.
     let fixture = fixture(ConnectionStatus::PendingAuth, 1);
     let identity = fixture_identity(&fixture);

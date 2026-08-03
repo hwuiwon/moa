@@ -597,7 +597,6 @@ mod tests {
         let generation =
             ConnectionGeneration::new(1).expect("fixture generation should be positive");
         let definition: ConnectorDefinition = serde_json::from_value(json!({
-            "definition_version": "v1",
             "display_name": "Scoped catalog fixture",
             "auth": [{"type": "none"}],
             "actions": [{

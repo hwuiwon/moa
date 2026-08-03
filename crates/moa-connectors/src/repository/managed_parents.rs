@@ -308,8 +308,8 @@ fn validate_any_closed_managed_parent(
     actual: &ConnectionDefinitionRef,
 ) -> Result<()> {
     if [
-        ManagedParentDefinition::KnowledgeNangoV1,
-        ManagedParentDefinition::KnowledgeMergeV1,
+        ManagedParentDefinition::KnowledgeNango,
+        ManagedParentDefinition::KnowledgeMerge,
     ]
     .into_iter()
     .any(|definition| actual == &definition.definition_ref())

@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use super::answer::{
     AbsoluteJudgeResponse, AnswerScore, ExternalMemoryMode, ReaderResponse, SupportStatus,
-    TOKEN_ESTIMATOR_CHARS_DIV_4_V1,
+    TOKEN_ESTIMATOR_CHARS_DIV_4,
 };
 use super::cost::{StageCostRecord, StageName};
-use super::dataset::DatasetPackageV1;
+use super::dataset::DatasetPackage;
 use super::formation::ResolvedFormationConfig;
-use super::longmemeval::LongMemEvalRetrievalMetricsV1;
-use super::personamem::PersonaMemAccuracyReportV1;
+use super::longmemeval::LongMemEvalRetrievalMetrics;
+use super::personamem::PersonaMemAccuracyReport;
 
 /// Failure class retained in partial reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +296,7 @@ pub struct ModeDenominatorsV2 {
 /// Correct-answer numerator and failure-retaining denominator for one LongMemEval slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LongMemEvalAnswerSliceV1 {
+pub struct LongMemEvalAnswerSlice {
     /// Judge-supported answers in the slice.
     pub numerator: usize,
     /// Every case in the slice, including all terminal failures.
@@ -310,7 +310,7 @@ pub enum RetrievalMetricsV2 {
     /// Primary-mode retrieval metrics.
     Supported {
         /// Dataset-owned metric payload.
-        metrics: Box<LongMemEvalRetrievalMetricsV1>,
+        metrics: Box<LongMemEvalRetrievalMetrics>,
     },
     /// Retrieval does not apply to the mode or dataset.
     Unsupported {
@@ -324,7 +324,7 @@ pub enum RetrievalMetricsV2 {
 #[serde(deny_unknown_fields)]
 pub struct PersonaMemModeMetricsV2 {
     /// Label-only answer accuracy and clustered slices.
-    pub answer: PersonaMemAccuracyReportV1,
+    pub answer: PersonaMemAccuracyReport,
     /// PersonaMem supplies no authoritative retrieval labels.
     pub retrieval: SupportStatus,
 }
@@ -336,11 +336,11 @@ pub struct LongMemEvalModeMetricsV2 {
     /// Metric payload schema version.
     pub schema_version: u32,
     /// Accuracy over all 500 answer cases.
-    pub answers: LongMemEvalAnswerSliceV1,
+    pub answers: LongMemEvalAnswerSlice,
     /// Accuracy over the 30 abstention cases.
-    pub abstentions: LongMemEvalAnswerSliceV1,
+    pub abstentions: LongMemEvalAnswerSlice,
     /// Answer accuracy for every official question type.
-    pub question_type_slices: BTreeMap<String, LongMemEvalAnswerSliceV1>,
+    pub question_type_slices: BTreeMap<String, LongMemEvalAnswerSlice>,
     /// Primary retrieval metrics or the exact control exclusion.
     pub retrieval: RetrievalMetricsV2,
     /// Retained terminal failure counts keyed by stable failure kind.
@@ -400,7 +400,7 @@ impl ReaderContractV2 {
             prompt_version: prompt_version.into(),
             context_window,
             output_token_reserve,
-            token_estimator: TOKEN_ESTIMATOR_CHARS_DIV_4_V1.to_string(),
+            token_estimator: TOKEN_ESTIMATOR_CHARS_DIV_4.to_string(),
         }
     }
 }
@@ -487,7 +487,7 @@ pub struct ExternalMemoryReportV2 {
     /// Clock-normalized generation instant.
     pub generated_at: String,
     /// Dataset revision and file/package hashes.
-    pub dataset_package: DatasetPackageV1,
+    pub dataset_package: DatasetPackage,
     /// Fully resolved formation configuration.
     pub formation: ResolvedFormationConfig,
     /// Domain-separated formation digest.
@@ -527,7 +527,7 @@ impl ExternalMemoryReportV2 {
             || self.reader_contract.prompt_version.trim().is_empty()
             || self.reader_contract.context_window == 0
             || self.reader_contract.output_token_reserve == 0
-            || self.reader_contract.token_estimator != TOKEN_ESTIMATOR_CHARS_DIV_4_V1
+            || self.reader_contract.token_estimator != TOKEN_ESTIMATOR_CHARS_DIV_4
         {
             return Err(ExternalMemoryError::InvalidConfig(
                 "invalid V2 reader/report contract".to_string(),
@@ -592,7 +592,7 @@ impl ExternalMemoryReportV2 {
 #[derive(Clone)]
 pub struct ExternalMemoryReportBuilder {
     generated_at: DateTime<Utc>,
-    dataset_package: DatasetPackageV1,
+    dataset_package: DatasetPackage,
     formation: ResolvedFormationConfig,
     formation_hash: String,
     reader_contract: ReaderContractV2,
@@ -607,7 +607,7 @@ impl ExternalMemoryReportBuilder {
     #[must_use]
     pub fn new(
         generated_at: DateTime<Utc>,
-        dataset_package: DatasetPackageV1,
+        dataset_package: DatasetPackage,
         formation: ResolvedFormationConfig,
         formation_hash: String,
         reader_contract: ReaderContractV2,

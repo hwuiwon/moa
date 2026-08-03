@@ -13,7 +13,7 @@ use super::answer::{
     SupportStatus,
 };
 use super::cost::{
-    BudgetLedger, NormalizedUsage, PricingSnapshotV1, StageCostRecord, StageName, UsageProvenance,
+    BudgetLedger, NormalizedUsage, PricingSnapshot, StageCostRecord, StageName, UsageProvenance,
 };
 use super::dataset::{ChronologicalTurn, PreparedExternalMemoryCase};
 use super::report::{CaseFailure, CaseReport, FailureKind, StageObservation};
@@ -180,7 +180,7 @@ pub fn validate_evidence_export(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaidStagePlan {
     /// Immutable model/date pricing used by the budget ledger.
-    pub pricing: PricingSnapshotV1,
+    pub pricing: PricingSnapshot,
     /// Provider-neutral usage forecast recorded before the call.
     pub estimated_usage: NormalizedUsage,
 }

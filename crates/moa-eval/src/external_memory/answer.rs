@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::cost::NormalizedUsage;
-use super::dataset::{ExternalMemoryCaseV1, ExternalMemorySession, PreparedExternalMemoryCase};
+use super::dataset::{ExternalMemoryCase, ExternalMemorySession, PreparedExternalMemoryCase};
 use super::{ExternalMemoryError, Result as ExternalMemoryResult};
 
 /// Stable estimator identifier persisted in V2 reports.
-pub const TOKEN_ESTIMATOR_CHARS_DIV_4_V1: &str = "chars_div_4_v1";
+pub const TOKEN_ESTIMATOR_CHARS_DIV_4: &str = "chars_div_4_v1";
 /// Full-context control envelope prefix.
-pub const FULL_CONTEXT_V1_PREFIX: &str = "FULL_CONTEXT_V1\n";
+pub const FULL_CONTEXT_PREFIX: &str = "FULL_CONTEXT_V1\n";
 /// Stable context-window exclusion reason.
 pub const READER_CONTEXT_LIMIT_REASON: &str = "reader-context-limit";
 /// Stable PersonaMem oracle exclusion reason.
@@ -175,7 +175,7 @@ fn render_control_envelope(
         mode,
         sessions,
     })?;
-    Ok(format!("{FULL_CONTEXT_V1_PREFIX}{json}"))
+    Ok(format!("{FULL_CONTEXT_PREFIX}{json}"))
 }
 
 /// Renders the single reader prompt contract shared by fitting and dispatch.
@@ -358,7 +358,7 @@ pub trait AnswerScorer: Send + Sync {
     /// Scores one generated answer under dataset-owned rules.
     fn score(
         &self,
-        case: &ExternalMemoryCaseV1,
+        case: &ExternalMemoryCase,
         answer: &ReaderResponse,
     ) -> Result<AnswerScoreOutcome, String>;
 }

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// invalidates cache fingerprints computed against the old shape.
 pub const RANKING_PIPELINE_VERSION: u32 = 16;
 
-/// Weights used by the FeatureV1 deterministic scorer.
+/// Weights used by the deterministic feature scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RankingWeights {
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn feature_score_scope_term_orders_contact_over_tenant_when_tied() {
-        // Pins: FeatureV1 prefers contact facts over tenant facts when text features tie.
+        // Pins: feature scoring prefers contact facts over tenant facts when text features tie.
         let reference_time = Utc
             .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
             .single()
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn feature_score_is_deterministic_for_fixed_reference_time() {
-        // Pins: FeatureV1 scoring does not depend on wall clock when reference time is fixed.
+        // Pins: feature scoring does not depend on wall clock when reference time is fixed.
         let reference_time = Utc
             .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
             .single()
@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn feature_ranking_with_all_neutral_scores_matches_prompt_eleven_ordering() {
-        // Pins: neutral quality priors do not perturb FeatureV1 candidate ordering.
+        // Pins: neutral quality priors do not perturb feature-scored candidate ordering.
         let reference_time = Utc
             .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
             .single()

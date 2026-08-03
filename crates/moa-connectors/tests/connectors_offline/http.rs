@@ -783,7 +783,6 @@ fn runtime_fixture(
     let connection_id = ConnectorConnectionId::new();
     let generation = ConnectionGeneration::new(2).expect("fixture generation should be valid");
     let definition: ConnectorDefinition = serde_json::from_value(json!({
-        "definition_version": "v1",
         "display_name": "HTTP fixture",
         "auth": [{
             "type": "api_key_header",

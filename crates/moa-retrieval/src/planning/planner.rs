@@ -68,7 +68,7 @@ pub struct PlannedQuery {
     pub label_hint: Option<Vec<NodeLabel>>,
     /// Most-specific request scope.
     pub scope: MemoryScope,
-    /// Optional application-time filter. V1 leaves this unset.
+    /// Optional application-time filter inferred from the query.
     pub temporal_filter: Option<DateTime<Utc>>,
 }
 

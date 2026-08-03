@@ -8,8 +8,8 @@ use moa_test_support::pricing::PricingTable;
 use sqlx::Row;
 
 #[test]
-fn pricing_table_v1_loads_with_all_required_provider_model_pairs() {
-    let table = PricingTable::load_v1();
+fn pricing_table_loads_with_all_required_provider_model_pairs() {
+    let table = PricingTable::load();
     for (provider, model) in [
         ("anthropic", "claude-sonnet-4"),
         ("anthropic", "claude-haiku-4"),
@@ -30,7 +30,7 @@ fn pricing_table_v1_loads_with_all_required_provider_model_pairs() {
 /// fixture rates and rounded up only after summing all token classes.
 #[test]
 fn pricing_cost_cents_matches_published_anthropic_sonnet_for_known_token_counts() {
-    let table = PricingTable::load_v1();
+    let table = PricingTable::load();
     let pricing = table
         .get("anthropic", "claude-sonnet-4")
         .expect("sonnet pricing fixture");

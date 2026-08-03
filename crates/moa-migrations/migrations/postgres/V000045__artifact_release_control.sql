@@ -386,7 +386,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact_release_candidate (
     -- Installation the candidate would deploy into, for agent subjects only.
     target_installation_uid UUID
         REFERENCES moa.agent_installation(installation_uid) ON DELETE CASCADE,
-    -- The exact `EvaluationSubjectV1` and its canonical digest. Activation
+    -- The exact `EvaluationSubject` and its canonical digest. Activation
     -- recomputes the digest from this row plus live pointer state and refuses to
     -- proceed when they differ.
     subject JSONB NOT NULL,

@@ -7,8 +7,8 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::connector::{
-    ConnectorDefinition, HttpOperationContract, RuntimeConnectorActionV1,
-    RuntimeConnectorAuthRequirementV1, validate_connector_action_id,
+    ConnectorDefinition, HttpOperationContract, RuntimeConnectorAction,
+    RuntimeConnectorAuthRequirement, validate_connector_action_id,
 };
 use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::types::action_policy::ActionPolicyEffect;
@@ -315,17 +315,17 @@ impl ConnectionDefinitionRef {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagedParentDefinition {
     /// Nango-linked knowledge account using the first managed contract version.
-    KnowledgeNangoV1,
+    KnowledgeNango,
     /// Merge-linked knowledge account using the first managed contract version.
-    KnowledgeMergeV1,
+    KnowledgeMerge,
 }
 
 impl ManagedParentDefinition {
     /// Resolves the only knowledge providers admitted by the managed-parent boundary.
     pub fn for_knowledge_provider(provider: &str) -> Result<Self> {
         match provider {
-            "nango" => Ok(Self::KnowledgeNangoV1),
-            "merge" => Ok(Self::KnowledgeMergeV1),
+            "nango" => Ok(Self::KnowledgeNango),
+            "merge" => Ok(Self::KnowledgeMerge),
             _ => Err(Error::UnsupportedManagedKnowledgeProvider),
         }
     }
@@ -343,18 +343,18 @@ impl ManagedParentDefinition {
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
-            Self::KnowledgeNangoV1 => "knowledge:nango",
-            Self::KnowledgeMergeV1 => "knowledge:merge",
+            Self::KnowledgeNango => "knowledge:nango",
+            Self::KnowledgeMerge => "knowledge:merge",
         }
     }
 
     /// Returns the closed credential requirements for this knowledge parent.
     #[must_use]
-    pub fn credential_requirements(self) -> Vec<RuntimeConnectorAuthRequirementV1> {
+    pub fn credential_requirements(self) -> Vec<RuntimeConnectorAuthRequirement> {
         match self {
-            Self::KnowledgeNangoV1 => vec![RuntimeConnectorAuthRequirementV1::None],
-            Self::KnowledgeMergeV1 => {
-                vec![RuntimeConnectorAuthRequirementV1::Bearer {
+            Self::KnowledgeNango => vec![RuntimeConnectorAuthRequirement::None],
+            Self::KnowledgeMerge => {
+                vec![RuntimeConnectorAuthRequirement::Bearer {
                     slot: CredentialSlotName::PRIMARY,
                 }]
             }
@@ -524,7 +524,7 @@ pub struct CompiledOperationContract {
     /// Stable action identifier from the connector definition.
     pub action_id: String,
     /// Complete secret-free connection authentication contract.
-    pub auth: Vec<RuntimeConnectorAuthRequirementV1>,
+    pub auth: Vec<RuntimeConnectorAuthRequirement>,
     /// Fixed constrained-HTTP transport and governed policy contract.
     pub operation: HttpOperationContract,
 }
@@ -533,7 +533,7 @@ impl CompiledOperationContract {
     /// Compiles the normalized persisted contract for one validated runtime action.
     pub fn compile(
         definition: &ConnectorDefinition,
-        action: &RuntimeConnectorActionV1,
+        action: &RuntimeConnectorAction,
     ) -> Result<Self> {
         validate_connector_action_id(&action.id).map_err(|_| Error::InvalidContract {
             message: "connector action id must match [A-Za-z][A-Za-z0-9_-]{0,23}".to_string(),
@@ -546,10 +546,10 @@ impl CompiledOperationContract {
         if definition
             .auth
             .iter()
-            .any(|requirement| matches!(requirement, RuntimeConnectorAuthRequirementV1::None))
+            .any(|requirement| matches!(requirement, RuntimeConnectorAuthRequirement::None))
             && !matches!(
                 definition.auth.as_slice(),
-                [RuntimeConnectorAuthRequirementV1::None]
+                [RuntimeConnectorAuthRequirement::None]
             )
         {
             return Err(Error::InvalidContract {
@@ -560,7 +560,7 @@ impl CompiledOperationContract {
         for slot in definition
             .auth
             .iter()
-            .filter_map(RuntimeConnectorAuthRequirementV1::slot)
+            .filter_map(RuntimeConnectorAuthRequirement::slot)
         {
             if !declared_slots.insert(slot.as_str()) {
                 return Err(Error::InvalidContract {
@@ -606,14 +606,14 @@ impl CompiledOperationContract {
     }
 }
 
-fn auth_requirement_sort_key(requirement: &RuntimeConnectorAuthRequirementV1) -> String {
+fn auth_requirement_sort_key(requirement: &RuntimeConnectorAuthRequirement) -> String {
     match requirement {
-        RuntimeConnectorAuthRequirementV1::None => "0:none".to_string(),
-        RuntimeConnectorAuthRequirementV1::Bearer { slot } => format!("1:{slot}"),
-        RuntimeConnectorAuthRequirementV1::ApiKeyHeader { slot, header } => {
+        RuntimeConnectorAuthRequirement::None => "0:none".to_string(),
+        RuntimeConnectorAuthRequirement::Bearer { slot } => format!("1:{slot}"),
+        RuntimeConnectorAuthRequirement::ApiKeyHeader { slot, header } => {
             format!("2:{slot}:{header}")
         }
-        RuntimeConnectorAuthRequirementV1::ManagedOauth { slot } => format!("3:{slot}"),
+        RuntimeConnectorAuthRequirement::ManagedOauth { slot } => format!("3:{slot}"),
     }
 }
 

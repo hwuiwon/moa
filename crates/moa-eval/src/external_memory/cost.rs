@@ -52,7 +52,7 @@ pub struct NormalizedUsage {
 /// Immutable model pricing used to calculate one stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PricingSnapshotV1 {
+pub struct PricingSnapshot {
     /// Exact provider/model selector.
     pub model: String,
     /// Effective pricing date.
@@ -67,7 +67,7 @@ pub struct PricingSnapshotV1 {
     pub cache_write_per_million_usd: f64,
 }
 
-impl PricingSnapshotV1 {
+impl PricingSnapshot {
     fn validate(&self) -> Result<()> {
         if self.model.trim().is_empty() || self.effective_date.trim().is_empty() {
             return Err(ExternalMemoryError::InvalidConfig(
@@ -110,7 +110,7 @@ pub struct StageCostRecord {
     /// Benchmark mode, or null for formation and embedding.
     pub mode: Option<ExternalMemoryMode>,
     /// Model/date-specific pricing.
-    pub pricing: PricingSnapshotV1,
+    pub pricing: PricingSnapshot,
     /// Pre-call forecast usage.
     pub estimated_usage: NormalizedUsage,
     /// Forecast cost.
@@ -147,7 +147,7 @@ impl BudgetLedger {
         &mut self,
         stage: StageName,
         mode: Option<ExternalMemoryMode>,
-        pricing: PricingSnapshotV1,
+        pricing: PricingSnapshot,
         usage: NormalizedUsage,
     ) -> Result<usize> {
         pricing.validate()?;

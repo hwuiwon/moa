@@ -286,7 +286,7 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
 async fn published_runtime_connector_bindings_pin_canonical_deployment_policy_connector_binding()
 -> Result<()> {
     // Pins: a release-candidate agent resolves reverse-authored connector
-    // bindings through published Runtime V1 revisions, then a deployed agent
+    // bindings through published runtime revisions, then a deployed agent
     // revalidates the same canonical connection/revision policy from its lock.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
@@ -690,7 +690,6 @@ fn runtime_http_connector_doc(name: &str, display_name: &str) -> ArtifactDocumen
         "definition": {
             "type": "connector",
             "spec": {
-                "definition_version": "v1",
                 "display_name": display_name,
                 "description": "Invoke one fixed remote operation.",
                 "auth": [{"type": "none"}],

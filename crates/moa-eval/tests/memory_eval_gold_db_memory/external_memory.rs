@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use moa_core::traits::EmbeddingProvider;
 use moa_eval::external_memory::dataset::{
-    EvidenceLabels, ExternalMemoryCaseV1, ExternalMemorySession, ExternalMemoryTurn, validate_case,
+    EvidenceLabels, ExternalMemoryCase, ExternalMemorySession, ExternalMemoryTurn, validate_case,
 };
 use moa_eval::external_memory::harness::{ExternalMemoryBackend, run_retrieval_case};
 use moa_eval::external_memory::moa_backend::MoaMemoryBackend;
@@ -13,12 +13,12 @@ use moa_session::PostgresSessionStore;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-fn one_turn_case(isolation_key: &str, source_prefix: &str, fact: &str) -> ExternalMemoryCaseV1 {
+fn one_turn_case(isolation_key: &str, source_prefix: &str, fact: &str) -> ExternalMemoryCase {
     let occurred_at = Utc
         .with_ymd_and_hms(2026, 7, 9, 12, 0, 0)
         .single()
         .expect("fixed timestamp should parse");
-    ExternalMemoryCaseV1 {
+    ExternalMemoryCase {
         schema_version: 1,
         isolation_key: isolation_key.to_string(),
         sessions: vec![ExternalMemorySession {

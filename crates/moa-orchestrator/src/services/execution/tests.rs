@@ -69,7 +69,6 @@ fn connector_definitions_require_an_installed_connection_for_capability_projecti
             serde_json::from_value(json!({
                 "type": "connector",
                 "spec": {
-                    "definition_version": "v1",
                     "display_name": "Runtime billing",
                     "auth": [{"type": "none"}],
                     "actions": [{
@@ -110,7 +109,7 @@ fn connector_definitions_require_an_installed_connection_for_capability_projecti
             .filter(|name| **name == "action://runtime-billing.charge")
             .count(),
         0,
-        "runtime V1 requires an installed connection before it can enter a catalog"
+        "a runtime connector requires an installed connection before it can enter a catalog"
     );
 }
 

@@ -1,6 +1,6 @@
 //! Offline contracts for the closed managed knowledge-parent definitions.
 
-use moa_artifacts::connector::RuntimeConnectorAuthRequirementV1;
+use moa_artifacts::connector::RuntimeConnectorAuthRequirement;
 use moa_connectors::Error;
 use moa_connectors::domain::{ConnectionDefinitionRef, ManagedParentDefinition};
 use moa_core::types::credentials::CredentialSlotName;
@@ -33,13 +33,13 @@ fn managed_knowledge_parent_definitions_are_closed_and_exact_offline() {
 fn managed_knowledge_parents_pin_provider_specific_auth_offline() {
     // Pins: Nango uses only its deployment-owned provider handle, while Merge
     // cannot activate until the tenant's primary bearer credential is ready.
-    let nango = ManagedParentDefinition::KnowledgeNangoV1.credential_requirements();
-    assert_eq!(nango, vec![RuntimeConnectorAuthRequirementV1::None]);
+    let nango = ManagedParentDefinition::KnowledgeNango.credential_requirements();
+    assert_eq!(nango, vec![RuntimeConnectorAuthRequirement::None]);
 
-    let merge = ManagedParentDefinition::KnowledgeMergeV1.credential_requirements();
+    let merge = ManagedParentDefinition::KnowledgeMerge.credential_requirements();
     assert_eq!(
         merge,
-        vec![RuntimeConnectorAuthRequirementV1::Bearer {
+        vec![RuntimeConnectorAuthRequirement::Bearer {
             slot: CredentialSlotName::PRIMARY,
         }]
     );

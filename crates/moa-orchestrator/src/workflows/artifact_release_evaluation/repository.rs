@@ -1,7 +1,7 @@
 //! Persistence for release-evaluation dispatch, overlays, and attempts.
 //!
 //! Every write here is fenced by the same two facts: the submission `generation`
-//! and the exact `EvaluationSubjectV1` digest. A dispatch record is created with
+//! and the exact `EvaluationSubject` digest. A dispatch record is created with
 //! both, a result is only accepted when both still match the open record, and a
 //! record whose subject was superseded is abandoned rather than left to answer
 //! later. That is the whole reason a superseded result cannot make any revision
@@ -21,7 +21,7 @@ use moa_artifacts::registry::{
 };
 use moa_artifacts::release::{
     ActivationTargetClass, DeterministicVerdict, Digest32, EvaluationPlanSubject,
-    EvaluationSubjectV1, EvidenceAdapter, ReleasePolicy, SimulatorPolicyBinding, TenantScope,
+    EvaluationSubject, EvidenceAdapter, ReleasePolicy, SimulatorPolicyBinding, TenantScope,
     overlay_token_hash,
 };
 use moa_core::types::identifiers::TenantId;
@@ -126,7 +126,7 @@ impl ReleaseEvaluationRepository {
 
     /// Resolves the approved release plan and its certified simulator binding.
     ///
-    /// Submission calls this before constructing `EvaluationSubjectV1`, so the
+    /// Submission calls this before constructing `EvaluationSubject`, so the
     /// attestation binds the actual production plan/case cohort and simulator
     /// policy instead of document-shaped placeholders.
     pub async fn resolve_subject_environment(
@@ -1231,7 +1231,7 @@ async fn load_current_subject(
     conn: &mut PgConnection,
     scope: &TenantScope,
     record: &DispatchRecord,
-) -> Result<EvaluationSubjectV1, Error> {
+) -> Result<EvaluationSubject, Error> {
     let subject: Value = sqlx::query_scalar(
         r#"
         SELECT subject
@@ -1255,7 +1255,7 @@ async fn load_current_subject(
             record.outbox_uid
         ))
     })?;
-    let subject: EvaluationSubjectV1 = serde_json::from_value(subject).map_err(|error| {
+    let subject: EvaluationSubject = serde_json::from_value(subject).map_err(|error| {
         Error::Storage(format!("stored release subject is unreadable: {error}"))
     })?;
     if subject.candidate_revision_uid != record.revision_uid
@@ -1273,7 +1273,7 @@ async fn ensure_plan_matches_subject(
     conn: &mut PgConnection,
     pool: &PgPool,
     scope: &TenantScope,
-    subject: &EvaluationSubjectV1,
+    subject: &EvaluationSubject,
     plan: &MergedCasePlan,
     now: DateTime<Utc>,
 ) -> Result<(), Error> {

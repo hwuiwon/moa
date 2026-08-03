@@ -1233,7 +1233,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
         account: &LinkedAccount,
     ) -> Result<StagedKnowledgeCredential, KnowledgeServiceError> {
         match ManagedParentDefinition::for_knowledge_provider(account.provider.as_str())? {
-            ManagedParentDefinition::KnowledgeNangoV1 => {
+            ManagedParentDefinition::KnowledgeNango => {
                 if account.credential_material.is_some() {
                     return Err(KnowledgeServiceError::InvalidRequest(
                         "Nango linked accounts must not return tenant credential material"
@@ -1242,7 +1242,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
                 }
                 return Ok(StagedKnowledgeCredential::ProviderNative);
             }
-            ManagedParentDefinition::KnowledgeMergeV1 => {}
+            ManagedParentDefinition::KnowledgeMerge => {}
         }
         let material = account.credential_material.as_deref().ok_or_else(|| {
             KnowledgeServiceError::InvalidRequest(
@@ -1397,10 +1397,10 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
         match ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())? {
-            ManagedParentDefinition::KnowledgeNangoV1 => {
+            ManagedParentDefinition::KnowledgeNango => {
                 return Ok(None);
             }
-            ManagedParentDefinition::KnowledgeMergeV1 => {}
+            ManagedParentDefinition::KnowledgeMerge => {}
         }
         let identity = CredentialIdentity {
             tenant_id,
@@ -1438,7 +1438,7 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
         if ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())?
-            == ManagedParentDefinition::KnowledgeNangoV1
+            == ManagedParentDefinition::KnowledgeNango
         {
             return Ok(false);
         }
@@ -1473,8 +1473,8 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
                 return Err(KnowledgeServiceError::NotFound("knowledge connection"));
             }
             match ManagedParentDefinition::for_knowledge_provider(connection.provider.as_str())? {
-                ManagedParentDefinition::KnowledgeNangoV1 => {}
-                ManagedParentDefinition::KnowledgeMergeV1 => {
+                ManagedParentDefinition::KnowledgeNango => {}
+                ManagedParentDefinition::KnowledgeMerge => {
                     identities.push(CredentialIdentity {
                         tenant_id,
                         connection_uid: connection.connection_uid,

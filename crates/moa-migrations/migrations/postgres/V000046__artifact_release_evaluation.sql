@@ -1,7 +1,7 @@
 -- Durable dispatch, isolation, and containment for release-candidate evaluation.
 --
 -- The release-control migration owns candidate states, the coalescing slot, the
--- `EvaluationSubjectV1` digest, the single-use activation attestation, and the
+-- `EvaluationSubject` digest, the single-use activation attestation, and the
 -- activation transaction. This migration owns durable dispatch and the
 -- executed-evidence path that settles those candidates.
 --
