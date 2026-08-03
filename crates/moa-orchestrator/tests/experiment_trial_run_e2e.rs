@@ -2024,9 +2024,9 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         // The scores must be readable the instant the trial reports terminal, with
         // no additional wait. That is the whole ordering guarantee: evaluate, emit,
         // confirm visibility, and only then persist the terminal status.
-        let rows = moa_scoring::exact_experiment_score_rows_for_tenant(
+        let rows = moa_experiments::score_store::exact_experiment_score_rows_for_tenant(
             &pool,
-            moa_scoring::ExperimentScoreRowsRef {
+            moa_experiments::score_store::ExperimentScoreRowsRef {
                 tenant_id,
                 score_run_id: response.score_run_id,
             },

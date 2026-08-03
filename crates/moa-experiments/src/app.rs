@@ -23,10 +23,6 @@ use moa_core::{
     types::resource::ResourceAmounts,
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
-use moa_scoring::{
-    Error, ExperimentRunScoreRowsRef, ExperimentScoreRow, ScoreCompareRef, ScoreCompareRow,
-    ScoreSummaryRow, compare_score_runs_for_tenant, exact_experiment_run_score_rows_for_tenant,
-};
 use moa_wire::experiments::{
     AgentRevisionSimulationVariant, ArtifactReleaseExperimentBinding, ExperimentCancelRequest,
     ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
@@ -57,6 +53,10 @@ use crate::model::{
 use crate::plan::{
     PlanCaseSelection, PlanMatrixShape, plan_matrix_shape, project_plan_run,
     selected_plan_matrix_shape,
+};
+use crate::score_store::{
+    Error, ExperimentRunScoreRowsRef, ExperimentScoreRow, ScoreCompareRef, ScoreCompareRow,
+    ScoreSummaryRow, compare_score_runs_for_tenant, exact_experiment_run_score_rows_for_tenant,
 };
 use crate::scores::{
     ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,

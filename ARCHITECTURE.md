@@ -221,7 +221,6 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-contacts` | Contact identity domain and persistence helpers |
 | `moa-artifacts` | Canonical artifact definitions for agents, skills, connectors, actions, and experiment plans |
 | `moa-experiments` | Domain types for experiment runs and scorecard configuration |
-| `moa-scoring` | Shared score-run storage and score summary queries |
 | `moa-messaging` | Messaging adapters, platform renderers, and notification connectors |
 | `moa-security` | MCP credential handling, outbound destination policy, and prompt-injection controls |
 | `moa-skills` | Agent Skills parsing, distillation, improvement, and regression generation |

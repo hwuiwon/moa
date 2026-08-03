@@ -179,7 +179,6 @@ Default deterministic checks:
 
 ```bash
 cargo nextest run -p moa-artifacts --all-targets --locked
-cargo nextest run -p moa-scoring --all-targets --locked
 cargo nextest run -p moa-experiments --all-targets --locked
 cargo nextest run -p moa-orchestrator --test experiment_service --test experiment_trial_run_e2e --locked
 cargo nextest run -p moa-edge --lib --locked

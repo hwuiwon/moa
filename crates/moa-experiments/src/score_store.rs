@@ -1,4 +1,4 @@
-//! Shared score-run storage and score summary queries.
+//! Behavior Lab score-run storage and score summary queries.
 
 use moa_core::{
     types::action_policy::ActionRuleScope, types::experiments::ScorecardValueType,

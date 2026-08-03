@@ -12,6 +12,7 @@ use moa_experiments::app::{
     store_generated_plan, trial_status,
 };
 use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus, ExperimentVariant};
+use moa_experiments::score_store::Error;
 use moa_experiments::scores::{
     ExperimentRunScoreRef, TrialScoreSummary, experiment_score_breakdown_for_tenant,
 };
@@ -19,7 +20,6 @@ use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::ProviderRegistry;
-use moa_scoring::Error;
 use moa_wire::artifacts::ArtifactSummary as WireArtifactSummary;
 use moa_wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,

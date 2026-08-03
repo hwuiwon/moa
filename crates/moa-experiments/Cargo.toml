@@ -14,7 +14,6 @@ moa-wire.workspace = true
 moa-db.workspace = true
 moa-memory-pii.workspace = true
 moa-observability.workspace = true
-moa-scoring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["chrono", "json", "uuid"] }

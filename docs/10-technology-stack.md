@@ -26,7 +26,7 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   `moa-analytics-export` (incremental Postgres-to-ClickHouse exporter; see
   [ClickHouse Analytics: Supported, Not Deployed](#clickhouse-analytics-supported-not-deployed)).
 - Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`, `moa-connectors`,
-  `moa-experiments`, `moa-scoring`, `moa-messaging`, `moa-skills`.
+  `moa-experiments`, `moa-messaging`, `moa-skills`.
 - Providers/tools/eval/dev: `moa-hands`, `moa-providers`,
   `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`,
   `workspace-hack`, `xtask`.
@@ -38,7 +38,7 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 - `moa-brain` gates evaluation-only harness code behind `eval-harness`;
 - `moa-eval-core` has no direct `moa-providers` or `sqlx` dependency;
   provider-aware construction lives in `moa-eval`;
-- scoring and experiment persistence stay in their owning crates; and
+- score and experiment persistence stay in `moa-experiments`; and
 - `moa-memory-lifecycle` has no dependency on `moa-memory-ingest`.
 
 The orchestrator constructs one `RuntimeDeps` graph per process. That graph owns

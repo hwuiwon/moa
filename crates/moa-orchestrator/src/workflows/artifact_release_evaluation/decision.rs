@@ -30,8 +30,10 @@ use moa_eval_core::metric::{
     MetricDefinition, MetricDirection as EvalMetricDirection, MetricUnit, ResamplingPlan,
 };
 use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus};
+use moa_experiments::score_store::{
+    ExperimentRunScoreRowsRef, exact_experiment_run_score_rows_for_tenant,
+};
 use moa_experiments::store::ExperimentStore;
-use moa_scoring::{ExperimentRunScoreRowsRef, exact_experiment_run_score_rows_for_tenant};
 use moa_wire::experiments::{
     ARTIFACT_RELEASE_BASELINE_VARIANT_KEY, ARTIFACT_RELEASE_CANDIDATE_VARIANT_KEY,
     ExperimentScoresRequest, ExperimentTrialScoreSummary,

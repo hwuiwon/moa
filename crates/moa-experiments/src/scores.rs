@@ -4,10 +4,11 @@ use moa_core::{
     types::experiments::ScorecardValueType, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
 };
-use moa_scoring::{Error, ScoreSummaryRow};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
+
+use crate::score_store::{Error, ScoreSummaryRow};
 
 /// Score-run source label for live behavior experiment parents.
 pub const SCORE_RUN_SOURCE_EXPERIMENT_RUN: &str = "experiment_run";

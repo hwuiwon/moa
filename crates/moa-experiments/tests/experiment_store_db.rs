@@ -1,3 +1,5 @@
+#[path = "experiment_store_db/score_store_db.rs"]
+mod score_store_db;
 mod support;
 
 use chrono::Utc;
@@ -21,6 +23,7 @@ use moa_core::{
     types::identifiers::UserId,
 };
 use moa_db::ScopedConn;
+use moa_experiments::score_store::ScoreSummaryRow;
 use moa_experiments::{
     eligibility::ScorecardEligibility,
     model::{
@@ -38,7 +41,6 @@ use moa_experiments::{
     },
     store::ExperimentStore,
 };
-use moa_scoring::ScoreSummaryRow;
 use moa_wire::experiments::ExperimentCancelRequest;
 use serde_json::json;
 use tokio::sync::Mutex;

@@ -1,7 +1,5 @@
-//! Execution-lane tests for the score-query runtime path.
+//! Execution-lane tests for the Behavior Lab score-query runtime path.
 //!
-//! moa-scoring previously had no `tests/` directory: every async query function
-//! and score-parent helpers were unexecuted, pinned only by SQL string-matches.
 //! These tests seed real `analytics.scores` / `analytics.score_run` rows in an
 //! isolated test schema and drive the production functions end to end,
 //! asserting aggregation, cross-tenant filtering, NULL-delta handling, and
@@ -17,7 +15,7 @@ use moa_core::{
     types::action_policy::ActionRuleScope, types::contact::ContactId,
     types::experiments::ScorecardValueType, types::identifiers::TenantId,
 };
-use moa_scoring::{
+use moa_experiments::score_store::{
     Error, ScoreCompareRef, ScoreRunRef, compare_score_runs_for_tenant, ensure_score_run_parent,
     score_summaries_for_tenant,
 };

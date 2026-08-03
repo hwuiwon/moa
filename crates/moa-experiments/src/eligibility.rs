@@ -1,10 +1,10 @@
 //! Behavior Lab scorecard completeness policy.
 //!
-//! `moa-scoring` owns the raw exact-row query. This module owns what those rows
-//! have to look like: exactly one row for every typed blocking requirement, with
-//! evaluator, version, value type, plan revision, trial, target, and evidence
-//! hash all matching what the trial actually ran. Wrong or duplicate rows never
-//! satisfy the gate.
+//! [`crate::score_store`] owns the raw exact-row query. This module owns what
+//! those rows have to look like: exactly one row for every typed blocking
+//! requirement, with evaluator, version, value type, plan revision, trial,
+//! target, and evidence hash all matching what the trial actually ran. Wrong or
+//! duplicate rows never satisfy the gate.
 //!
 //! This is Behavior Lab scorecard eligibility. It is not an agent deployment
 //! guard, and nothing here should be treated as one until a deployment path
@@ -22,12 +22,12 @@ pub use moa_core::types::experiments::{
     ScorecardSupportSummary,
 };
 use moa_eval_core::metric::MIN_DECLARABLE_INDEPENDENT_UNITS;
-use moa_scoring::ExperimentScoreRow;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::evaluator::{EvaluatorDescriptor, EvaluatorError, descriptor, validate_scorecard};
 use crate::evidence::TrialScoreTarget;
+use crate::score_store::ExperimentScoreRow;
 
 /// The exact identity a trial's score rows must carry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

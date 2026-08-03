@@ -3804,7 +3804,6 @@ dependencies = [
  "moa-eval-core",
  "moa-memory-pii",
  "moa-observability",
- "moa-scoring",
  "moa-test-support",
  "moa-wire",
  "serde",
@@ -4376,7 +4375,6 @@ dependencies = [
  "moa-providers",
  "moa-retrieval",
  "moa-runtime-store",
- "moa-scoring",
  "moa-security",
  "moa-session",
  "moa-skills",
@@ -4477,20 +4475,6 @@ dependencies = [
  "moa-core",
  "redis",
  "tokio",
- "workspace-hack",
-]
-
-[[package]]
-name = "moa-scoring"
-version = "0.1.0"
-dependencies = [
- "moa-core",
- "moa-test-support",
- "serde",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
  "workspace-hack",
 ]
 

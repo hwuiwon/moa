@@ -272,7 +272,6 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-contacts`](crates/moa-contacts/) | Contact identity domain and persistence helpers |
 | [`moa-artifacts`](crates/moa-artifacts/) | Canonical artifact definitions for agents, skills, connectors, actions, and experiment plans |
 | [`moa-experiments`](crates/moa-experiments/) | Domain types for experiment runs and scorecard configuration |
-| [`moa-scoring`](crates/moa-scoring/) | Shared score-run storage and score summary queries |
 | [`moa-messaging`](crates/moa-messaging/) | Slack adapter, platform rendering, Postmark email connector, and Twilio SMS connector |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
 | [`moa-kms`](crates/moa-kms/) | Postgres-backed KMS for envelope encryption and crypto-shred |

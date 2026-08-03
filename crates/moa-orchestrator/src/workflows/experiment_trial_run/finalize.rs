@@ -25,11 +25,13 @@ use moa_core::types::experiments::ExperimentScorecard;
 use moa_core::types::identifiers::StoragePartitionId;
 use moa_experiments::evaluator::{EvaluatedScore, EvaluatedValue, evaluate_trial};
 use moa_experiments::evidence::{TrialScoreTarget, TrialTerminalEvidence, TrialTerminalOutcome};
+use moa_experiments::score_store::{
+    ExperimentScoreRowsRef, exact_experiment_score_rows_for_tenant,
+};
 use moa_lineage_core::{
     ExperimentScoreProvenance, ExperimentScoreTarget, LineageEvent, ScoreRecord, ScoreSource,
     ScoreTarget, ScoreValue,
 };
-use moa_scoring::{ExperimentScoreRowsRef, exact_experiment_score_rows_for_tenant};
 use std::collections::BTreeSet;
 
 /// Longest a trial waits for its own score rows to become query-visible.

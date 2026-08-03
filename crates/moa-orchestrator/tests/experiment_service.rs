@@ -465,7 +465,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     let tenant_id = TenantId::new();
     let run = completed_run_record(storage_partition_id.clone());
     let trials = vec![completed_trial_record(run.run_uid)];
-    let summary_rows = vec![moa_scoring::ScoreSummaryRow {
+    let summary_rows = vec![moa_experiments::score_store::ScoreSummaryRow {
         name: "target_completed".to_string(),
         value_type: ScorecardValueType::Boolean,
         n: 1,

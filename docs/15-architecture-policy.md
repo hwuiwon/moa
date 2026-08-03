@@ -455,3 +455,38 @@ Consequences:
 - A database whose recorded checksums predate this epoch is rejected before
   DDL and must be rebuilt together with fresh Restate durable state; no
   compatibility or export path is retained.
+
+### ADR 0007 - Fold Score Storage Into Behavior Lab
+
+Status: Accepted.
+Date: 2026-08-03.
+
+`moa-scoring` had no independent scoring engine or product boundary. Its
+production callers were Behavior Lab and the orchestrator workflows that drive
+Behavior Lab, while its exact-row reads joined the experiment-owned
+`moa.experiment_score_provenance` table. Keeping that repository in a separate
+crate added a package and public API boundary without a second domain owner.
+
+Decisions:
+
+1. Remove `moa-scoring` and move its score-run parent, exact-row, summary, and
+   comparison queries into `moa-experiments::score_store` without a compatibility
+   re-export.
+2. Keep typed `ScoreRecord` lineage contracts in `moa-lineage-core`, durable
+   score writes in `moa-lineage-sink`, and persistence-free evaluation contracts
+   in `moa-eval-core`. The platform regression harness in `moa-eval` remains
+   separate from tenant Behavior Lab persistence.
+3. Assign `analytics.score_run` repository ownership to `moa-experiments`; the
+   shared `analytics.scores` sink ownership does not change.
+4. Lower the architecture ratchets to the exact post-fold graph: **51 packages**,
+   **48 default members**, and `moa-core` reverse dependencies of **43 direct**
+   and **46 transitive**.
+
+Consequences:
+
+- Behavior Lab owns its score repository and scorecard read model in one domain
+  crate while the lineage sink remains the only durable score-row writer.
+- A future independent scored-run product must demonstrate a second owner before
+  extracting shared storage again.
+- The lower package and reverse-dependency counts are ratchets, not spare
+  capacity; increasing them requires another accepted decision record.

@@ -16,7 +16,6 @@ use moa_core::{
     types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
-use moa_scoring::ensure_score_run_parent;
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
@@ -32,6 +31,7 @@ use crate::model::{
 use crate::plan::admission::{
     ExperimentAdmissionLimits, ExperimentAdmissionUsage, admit_experiment_run,
 };
+use crate::score_store::{Error as ScoreStoreError, ensure_score_run_parent};
 use crate::scores::{SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL};
 
 /// Advisory lock key that serializes experiment admissions across the fleet.
@@ -1950,6 +1950,6 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 
-fn map_scoring_error(error: moa_scoring::Error) -> MoaError {
+fn map_scoring_error(error: ScoreStoreError) -> MoaError {
     MoaError::StorageError(error.to_string())
 }

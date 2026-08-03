@@ -83,7 +83,6 @@ moa-messaging.workspace = true
 moa-observability = { workspace = true }
 moa-ocsf.workspace = true
 moa-security = { workspace = true }
-moa-scoring = { workspace = true }
 moa-memory-ingest = { workspace = true }
 moa-migrations = { workspace = true }
 metrics.workspace = true

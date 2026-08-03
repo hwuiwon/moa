@@ -11,7 +11,6 @@ members = [
     "crates/moa-kms",
     "crates/moa-execution",
     "crates/moa-db",
-    "crates/moa-scoring",
     "crates/moa-agents",
     "crates/moa-artifacts",
     "crates/moa-brain",
@@ -65,7 +64,6 @@ default-members = [
     "crates/moa-kms",
     "crates/moa-execution",
     "crates/moa-db",
-    "crates/moa-scoring",
     "crates/moa-agents",
     "crates/moa-artifacts",
     "crates/moa-brain",
@@ -132,7 +130,6 @@ moa-dlp = { path = "crates/moa-dlp" }
 moa-kms = { path = "crates/moa-kms" }
 moa-db = { path = "crates/moa-db" }
 moa-execution = { path = "crates/moa-execution" }
-moa-scoring = { path = "crates/moa-scoring" }
 moa-edge = { path = "crates/moa-edge" }
 moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }

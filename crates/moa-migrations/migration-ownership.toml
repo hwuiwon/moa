@@ -245,8 +245,7 @@ owner = "moa-analytics"
 [[table]]
 name = "score_run"
 schema = "analytics"
-owner = "moa-scoring"
-readers = ["moa-experiments"]
+owner = "moa-experiments"
 
 [[table]]
 name = "agent_deployment"
@@ -814,7 +813,7 @@ notes = "One idempotent disposition per enumerated record per erasure operation.
 name = "experiment_score_provenance"
 schema = "moa"
 owner = "moa-experiments"
-readers = ["moa-scoring", "moa-lineage-sink", "moa-orchestrator"]
+readers = ["moa-lineage-sink", "moa-orchestrator"]
 notes = "Typed provenance for one Behavior Lab score row. Written only by the lineage sink drain; read by the exact-row scorecard query. Immutable: an UPDATE trigger refuses every rewrite, so replay is accept-or-refuse."
 
 [[table]]

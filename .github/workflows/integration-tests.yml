@@ -145,7 +145,7 @@ jobs:
         run: >-
           cargo nextest run --locked
           -p moa-core -p moa-artifacts -p moa-wire
-          -p moa-experiments -p moa-scoring
+          -p moa-experiments
           -p moa-lineage-core
           -E 'test(/scorecard|evaluator|eligibility|experiment|provenance/)'
 

@@ -10,6 +10,7 @@ pub mod evaluator;
 pub mod evidence;
 pub mod model;
 pub mod plan;
+pub mod score_store;
 pub mod scores;
 pub mod simulator_policy;
 pub mod store;

@@ -14,14 +14,14 @@ use super::report::{
 };
 use super::source_rules::{ALLOWANCES, SCAN_ROOTS, SENSITIVE_EVENT_CONSUMERS, collect_rust_files};
 
-pub(super) const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 52;
-pub(super) const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 49;
+pub(super) const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 51;
+pub(super) const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 48;
 const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 44,
-    max_transitive: 47,
-    reason: "architecture-policy ADR 0005 adds moa-connectors as the canonical connection category owner; it consumes moa-core IDs and errors, raising the accepted fan-in to 44 direct and 47 transitive reverse dependencies; further growth requires a new decision record rather than a budget bump",
+    max_direct: 43,
+    max_transitive: 46,
+    reason: "architecture-policy ADR 0007 folds score storage into its sole Behavior Lab owner, reducing the exact workspace ratchets to 51 packages, 48 default members, and moa-core fan-in to 43 direct and 46 transitive reverse dependencies; further growth requires a new decision record rather than a budget bump",
 }];
 
 const LOC_BUDGETS: &[LocBudget] = &[
