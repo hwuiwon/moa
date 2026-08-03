@@ -175,32 +175,11 @@ async fn async_main() -> anyhow::Result<()> {
         skip_fga,
     )
     .await?;
-    runtime_deps
-        .install_orchestrator_ctx()
-        .map_err(anyhow::Error::msg)?;
     let scim_base_url = std::env::var("MOA_SCIM_BASE_URL")
         .unwrap_or_else(|_| format!("http://localhost:{}/scim/v2", args.scim_port));
     let scim_state = runtime_deps.scim_state(scim_base_url);
 
-    let endpoint = build_endpoint(
-        runtime_deps.session_store.clone(),
-        runtime_deps.pool.clone(),
-        runtime_deps.background_pool.clone(),
-        runtime_deps.kms.provider(),
-        runtime_deps.fga_client.clone(),
-        runtime_deps.providers.clone(),
-        runtime_deps.tool_router.clone(),
-        &runtime_deps,
-        moa_config.session_limits.clone(),
-        moa_config.clone(),
-        runtime_deps.contact_token_issuer.clone(),
-        runtime_deps.credential_vault.clone(),
-        runtime_deps.lineage.handle.clone(),
-        runtime_deps.embedding_provider.clone(),
-        Arc::new(runtime_deps.channel_adapters.clone()),
-        runtime_deps.runtime_cache.clone(),
-        runtime_deps.lineage.score_handle(),
-    );
+    let endpoint = build_endpoint(&runtime_deps);
 
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(

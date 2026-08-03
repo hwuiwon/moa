@@ -2,7 +2,7 @@
 
 use chrono::{Duration, Utc};
 use moa_authz_schema::TupleOp;
-use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
+use moa_messaging::DeliveryMessage;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -269,8 +269,6 @@ pub(crate) async fn deliver_invitation(
 ) -> Result<(), String> {
     // Email transport is deployment-owned, so no tenant partition selects the
     // credential: every tenant's operator mail leaves through the same sender.
-    let sink = ProviderDeliverySink::from_env(&state.config.messaging)
-        .map_err(|error| format!("build delivery sink: {error}"))?;
     let message = DeliveryMessage::account_invitation_email(
         invitation.tenant_id,
         invitation.user_id,
@@ -280,7 +278,8 @@ pub(crate) async fn deliver_invitation(
         token.expose_secret(),
         invitation.expires_at,
     );
-    let receipt = sink
+    let receipt = state
+        .delivery
         .deliver(message)
         .await
         .map_err(|error| format!("deliver invitation email: {error}"))?;

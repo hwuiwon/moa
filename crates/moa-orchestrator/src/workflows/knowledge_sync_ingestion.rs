@@ -5,21 +5,22 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::traits::{CredentialVault, RuntimeCacheStore};
-use moa_core::types::credentials::{CredentialServiceActor, RedactedSecret};
+use moa_core::types::credentials::CredentialServiceActor;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     acl_key::{KmsSourceAclKeyOwner, SourceAclKeyOwner as _},
     domain::{
-        KnowledgeConnection, KnowledgeSyncRun, ListChangedRecordsRequest, RecordPage, SyncRunStatus,
+        KnowledgeConnection, KnowledgeSyncRun, LinkedProviderKind, ListChangedRecordsRequest,
+        RecordPage, SyncRunStatus,
     },
     ingestion::PageIngestionReport,
     observability::classify_failure,
-    providers::{ConnectionCredentialResolver, LinkedProviderContentFetcher, RecordContentFetcher},
+    providers::{LinkedProviderContentFetcher, RecordContentFetcher},
     repository::{
-        KnowledgeDiscoveryStore as _, KnowledgeRepository as _, PostgresKnowledgeDiscoveryStore,
-        PostgresKnowledgeRepository,
+        KnowledgeDiscoveryStore as _, PostgresKnowledgeDiscoveryStore, PostgresKnowledgeRepository,
+        connection::KnowledgeConnectionRepository as _, sync::KnowledgeSyncRepository as _,
     },
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -27,10 +28,12 @@ use restate_sdk::prelude::*;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::services::knowledge::ingest::{
+    ProductionKnowledgeIngestionRunner, ProductionKnowledgeIngestionRuntime,
+};
 use crate::services::knowledge::{
     ConfigKnowledgeProviders, KnowledgeCaller, KnowledgeCredentialStore,
-    KnowledgeIngestionRunner as _, KnowledgeProviderResolver as _, KnowledgeServiceError,
-    ProductionKnowledgeIngestionRunner, VaultKnowledgeCredentialStore,
+    KnowledgeProviderResolver as _, KnowledgeServiceError, VaultKnowledgeCredentialStore,
 };
 use crate::workflows::errors::handler_error_message;
 
@@ -67,8 +70,8 @@ pub struct KnowledgeSyncPreparedRun {
     pub run: KnowledgeSyncRun,
     /// Stored linked connection for the run.
     pub connection: KnowledgeConnection,
-    /// Low-cardinality provider label.
-    pub provider: String,
+    /// Linked provider selected by the stored connection.
+    pub provider: LinkedProviderKind,
     /// Parser label selected for this run.
     pub parser_label: String,
     /// Provider page size to request before applying the run cap.
@@ -80,8 +83,8 @@ pub struct KnowledgeSyncPreparedRun {
 /// Provider page and low-cardinality ingestion labels returned by the listing step.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KnowledgeSyncProviderPage {
-    /// Provider label used for ingestion observability.
-    pub provider: String,
+    /// Linked provider that returned the page.
+    pub provider: LinkedProviderKind,
     /// Provider records represented by this page.
     pub page: RecordPage,
     /// Number of provider records represented by this page.
@@ -166,6 +169,7 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
             credentials: self.credentials.clone(),
             config: self.config.clone(),
             runtime_cache: Arc::clone(&self.runtime_cache),
+            ingestion_runtime: None,
         };
         let report = run_knowledge_sync_ingestion_workflow(&mut steps, request).await?;
 
@@ -328,6 +332,31 @@ struct RestateKnowledgeSyncIngestionSteps<'ctx, 'workflow> {
     credentials: Arc<dyn KnowledgeCredentialStore>,
     config: Arc<MoaConfig>,
     runtime_cache: Arc<dyn RuntimeCacheStore>,
+    ingestion_runtime: Option<ProductionKnowledgeIngestionRuntime>,
+}
+
+impl RestateKnowledgeSyncIngestionSteps<'_, '_> {
+    fn ingestion_runtime(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+    ) -> Result<ProductionKnowledgeIngestionRuntime, HandlerError> {
+        if self.ingestion_runtime.is_none() {
+            let runner = ProductionKnowledgeIngestionRunner::new(
+                self.pool.clone(),
+                self.kms.clone(),
+                self.config.as_ref().clone(),
+                Arc::clone(&self.runtime_cache),
+            );
+            self.ingestion_runtime = Some(
+                runner
+                    .prepare_run(&prepared.run, prepared.provider.as_str())
+                    .map_err(knowledge_service_handler_error)?,
+            );
+        }
+        self.ingestion_runtime.clone().ok_or_else(|| {
+            TerminalError::new("knowledge ingestion runtime was not prepared").into()
+        })
+    }
 }
 
 #[async_trait]
@@ -384,7 +413,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                     )
                     .into());
                 }
-                let provider = connection.provider.clone();
+                let provider = connection.provider;
                 let parser_label = run
                     .parser
                     .clone()
@@ -424,7 +453,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
     ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
         let config = self.config.clone();
         let tenant_id = prepared.run.tenant_id;
-        let provider_label = prepared.provider.clone();
+        let provider = prepared.provider;
         let connection = prepared.connection.clone();
         let credentials = self.credentials.clone();
         let pool = self.pool.clone();
@@ -443,8 +472,8 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                     .resolve_linked_account(tenant_id, &connection, &caller)
                     .await
                     .map_err(knowledge_service_handler_error)?;
-                let provider = ConfigKnowledgeProviders::new(config.knowledge.clone())
-                    .provider(&provider_label)
+                let implementation = ConfigKnowledgeProviders::new(config.knowledge.clone())
+                    .provider(provider)
                     .map_err(knowledge_service_handler_error)?;
                 // The adapter keys every provider principal as it normalizes,
                 // so the page this step journals holds opaque fingerprints and
@@ -453,7 +482,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                     .current_key(tenant_id)
                     .await
                     .map_err(knowledge_ingestion_error)?;
-                let page = provider
+                let page = implementation
                     .list_changed_records(ListChangedRecordsRequest {
                         acl_key,
                         connection,
@@ -467,7 +496,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                     .map_err(knowledge_ingestion_error)?;
                 let records_listed = page.records.len() as u64;
                 Ok(Json::from(KnowledgeSyncProviderPage {
-                    provider: provider_label,
+                    provider,
                     page,
                     records_listed,
                 }))
@@ -484,12 +513,10 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         page: KnowledgeSyncProviderPage,
         page_index: u32,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
-        let pool = self.pool.clone();
-        let kms = self.kms.clone();
+        let ingestion_runtime = self.ingestion_runtime(prepared)?;
         let config = self.config.clone();
-        let runtime_cache = Arc::clone(&self.runtime_cache);
         let run = prepared.run.clone();
-        let provider_label = prepared.provider.clone();
+        let provider = prepared.provider;
         let connection = prepared.connection.clone();
         let credentials = self.credentials.clone();
         let content_caller = KnowledgeCaller::service(
@@ -498,24 +525,25 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         );
         self.ctx
             .run(|| async move {
-                let content_fetcher = build_record_content_fetcher(
-                    &config,
-                    &provider_label,
-                    connection,
-                    Arc::new(StoreConnectionCredentialResolver::new(
-                        credentials,
-                        content_caller,
-                    )),
-                );
-                let runner = ProductionKnowledgeIngestionRunner::new(
-                    pool,
-                    kms,
-                    config.as_ref().clone(),
-                    runtime_cache,
-                )
-                .with_content_fetcher(content_fetcher);
-                let report = runner
-                    .ingest_record_page(&run, &page.provider, page.page)
+                let requires_provider_fetch = page
+                    .page
+                    .records
+                    .iter()
+                    .any(|record| record.materialization.requires_provider_fetch());
+                let content_fetcher = if requires_provider_fetch {
+                    // Resolve once inside this bounded, non-journaled closure.
+                    // The non-serializable secret is borrowed by every record
+                    // fetch in the page and dropped when the closure ends.
+                    let credential = credentials
+                        .resolve_linked_account(connection.tenant_id, &connection, &content_caller)
+                        .await
+                        .map_err(knowledge_service_handler_error)?;
+                    build_record_content_fetcher(&config, provider, connection, credential)
+                } else {
+                    None
+                };
+                let report = ingestion_runtime
+                    .ingest_record_page(&run, page.page, content_fetcher)
                     .await
                     .map_err(knowledge_service_handler_error)?;
                 Ok::<_, HandlerError>(Json::from(KnowledgeSyncPageApplication::from(report)))
@@ -533,22 +561,12 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         prepared: &KnowledgeSyncPreparedRun,
         seen_source_ids: HashSet<String>,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
-        let pool = self.pool.clone();
-        let kms = self.kms.clone();
-        let config = self.config.clone();
-        let runtime_cache = Arc::clone(&self.runtime_cache);
+        let ingestion_runtime = self.ingestion_runtime(prepared)?;
         let run = prepared.run.clone();
-        let provider = prepared.provider.clone();
         self.ctx
             .run(|| async move {
-                let runner = ProductionKnowledgeIngestionRunner::new(
-                    pool,
-                    kms,
-                    config.as_ref().clone(),
-                    runtime_cache,
-                );
-                let report = runner
-                    .prune_unseen_objects(&run, &provider, &seen_source_ids)
+                let report = ingestion_runtime
+                    .prune_unseen_objects(&run, &seen_source_ids)
                     .await
                     .map_err(knowledge_service_handler_error)?;
                 Ok::<_, HandlerError>(Json::from(KnowledgeSyncPageApplication::from(report)))
@@ -615,7 +633,7 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         let pool = self.pool.clone();
         let tenant_id = prepared.run.tenant_id;
         let sync_run_uid = prepared.run.sync_run_uid;
-        let provider = prepared.provider.clone();
+        let provider = prepared.provider;
         self.ctx
             .run(|| async move {
                 let repository =
@@ -633,7 +651,8 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                 ) {
                     return Ok(Json::from(()));
                 }
-                let classification = classify_workflow_failure(stage, &provider, error_message);
+                let classification =
+                    classify_workflow_failure(stage, provider.as_str(), error_message);
                 run.status = if classification.retryable {
                     SyncRunStatus::FailedRetryable
                 } else {
@@ -675,67 +694,29 @@ impl From<PageIngestionReport> for KnowledgeSyncPageApplication {
 /// Builds a per-page record content fetcher from the configured provider and the
 /// stored connection.
 ///
-/// A build failure degrades gracefully to metadata-only ingestion (records that
-/// need content fall back to their title) rather than failing the page: the
-/// provider was already constructed successfully during the listing step, so a
-/// failure here is not expected but must not abort applying the page.
+/// A build failure disables the fetcher. Records explicitly requiring provider
+/// fetch then fail closed in the ingestion pipeline; they never degrade to
+/// title content.
 fn build_record_content_fetcher(
     config: &std::sync::Arc<moa_config::MoaConfig>,
-    provider_label: &str,
+    provider: LinkedProviderKind,
     connection: KnowledgeConnection,
-    credentials: Arc<dyn ConnectionCredentialResolver>,
+    credential: Option<moa_core::types::credentials::RedactedSecret>,
 ) -> Option<Arc<dyn RecordContentFetcher>> {
-    match ConfigKnowledgeProviders::new(config.knowledge.clone()).provider(provider_label) {
-        Ok(provider) => Some(Arc::new(LinkedProviderContentFetcher::new(
-            provider,
+    match ConfigKnowledgeProviders::new(config.knowledge.clone()).provider(provider) {
+        Ok(implementation) => Some(Arc::new(LinkedProviderContentFetcher::new(
+            implementation,
             connection,
-            credentials,
+            credential,
         ))),
         Err(error) => {
             tracing::warn!(
-                provider = provider_label,
+                provider = provider.as_str(),
                 error = %error,
-                "could not build knowledge content fetcher; records needing content fall back to title-only"
+                "could not build knowledge content fetcher; records requiring content fetch will fail closed"
             );
             None
         }
-    }
-}
-
-/// Resolves connection credentials for content fetches through the shared owner.
-///
-/// Exists so `moa-knowledge` keeps no dependency on credential storage: the
-/// orchestrator owns the vault and hands the ingestion pipeline this narrow,
-/// already-authorized resolver bound to one service actor and one operation.
-struct StoreConnectionCredentialResolver {
-    credentials: Arc<dyn KnowledgeCredentialStore>,
-    caller: KnowledgeCaller,
-}
-
-impl StoreConnectionCredentialResolver {
-    /// Binds a credential store and caller context to one ingestion page.
-    fn new(credentials: Arc<dyn KnowledgeCredentialStore>, caller: KnowledgeCaller) -> Self {
-        Self {
-            credentials,
-            caller,
-        }
-    }
-}
-
-#[async_trait]
-impl ConnectionCredentialResolver for StoreConnectionCredentialResolver {
-    async fn resolve(
-        &self,
-        connection: &KnowledgeConnection,
-    ) -> moa_knowledge::Result<Option<RedactedSecret>> {
-        self.credentials
-            .resolve_linked_account(connection.tenant_id, connection, &self.caller)
-            .await
-            .map_err(|error| {
-                // Only the typed, secret-free service error text crosses this
-                // boundary; provider bodies and material never do.
-                moa_knowledge::Error::Repository(error.to_string())
-            })
     }
 }
 

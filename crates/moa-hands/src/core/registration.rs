@@ -7,19 +7,21 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::mcp::{MCPClient, McpDiscoveredToolRegistration};
 use crate::tools::{memory, session_search, tool_result};
-use moa_artifacts::connector::connection_action_tool_reference;
+use moa_artifacts::connector::validate_connector_action_id;
 use moa_config::ToolBudgetConfig;
 use moa_connectors::catalog::InstalledConnectorAction;
 use moa_connectors::domain::{
     ConnectionDefinitionRef, ConnectionGeneration, InstalledActionBindingId, OperationContractHash,
 };
-use moa_connectors::executor::{ConnectorActionRuntime, InstalledConnectorActionPin};
+use moa_connectors::executor::{
+    ConnectorActionRuntime, InstalledConnectorActionPin, PreparedConnectorAction,
+};
 use moa_core::{
+    canonical_json::canonical_json_bytes,
     error::{MoaError, Result},
     traits::BuiltInTool,
     types::action_policy::ActionClass,
     types::action_policy::ActionPolicyEffect,
-    types::execution_planning::canonical_json_bytes,
     types::hands::BuiltinPolicyRevision,
     types::hands::SandboxPolicySnapshot,
     types::hands::SandboxTier,
@@ -124,6 +126,8 @@ pub enum ToolExecution {
         minimum_effect: ActionPolicyEffect,
         /// Secret-isolated runtime for the selected connection action.
         runtime: Arc<dyn ConnectorActionRuntime>,
+        /// Opaque catalog admission carried unchanged into runtime dispatch.
+        prepared: Box<PreparedConnectorAction>,
     },
 }
 
@@ -278,6 +282,19 @@ pub fn mcp_tool_reference(server_name: &str, remote_tool_name: &str) -> String {
         "{MCP_TOOL_REFERENCE_PREFIX}{}_{server_name}__{remote_tool_name}",
         server_name.len()
     )
+}
+
+/// Builds the model-visible name for one connection-qualified connector action.
+///
+/// The generated name is a lookup key only. Runtime authorization always uses
+/// the typed connection and binding pins stored beside the registered tool.
+pub fn installed_connector_tool_name(
+    connection_id: ConnectorConnectionId,
+    action_id: &str,
+) -> Result<String> {
+    validate_connector_action_id(action_id)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    Ok(format!("conn__{}__{action_id}", connection_id.0.simple()))
 }
 
 /// Returns whether a name is model-safe for the provider tool-calling APIs.
@@ -574,8 +591,7 @@ impl ToolRegistry {
         binding.validate().map_err(|error| {
             MoaError::ValidationError(format!("invalid installed connector binding: {error}"))
         })?;
-        let name = connection_action_tool_reference(action.connection_id(), &binding.action_id)
-            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+        let name = installed_connector_tool_name(action.connection_id(), &binding.action_id)?;
         if self.tools.contains_key(&name) {
             return Err(MoaError::ValidationError(format!(
                 "installed connector action collides with registered tool `{name}`"
@@ -590,7 +606,7 @@ impl ToolRegistry {
                 "agent connector binding `{connector_ref}` selected a non-artifact definition"
             )));
         };
-        let operation_policy = binding.compiled_contract.operation.policy();
+        let operation_policy = &binding.compiled_contract.operation.policy;
         let definition = ToolDefinition {
             name: name.clone(),
             description: format!(
@@ -600,9 +616,9 @@ impl ToolRegistry {
             ),
             schema: operation_policy.input_schema.clone(),
             policy: ToolPolicySpec {
-                risk_level: operation_policy.risk_level,
+                risk_level: moa_core::types::action_policy::RiskLevel::High,
                 default_effect: binding.minimum_effect,
-                action_class: operation_policy.action_class,
+                action_class: ActionClass::ExternalWrite,
                 input_shape: ToolInputShape::Json,
                 diff_strategy: ToolDiffStrategy::None,
             },
@@ -621,6 +637,7 @@ impl ToolRegistry {
             governed_contract_revision: binding.governed_contract_revision.clone(),
             minimum_effect: binding.minimum_effect,
             runtime,
+            prepared: Box::new(action.prepared()),
         };
         self.tools.insert(
             name.clone(),

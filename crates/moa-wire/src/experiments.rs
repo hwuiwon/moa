@@ -3,8 +3,7 @@
 use crate::artifacts::ArtifactSummary;
 use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::types::experiments::{
-    ExperimentScorecard, ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup,
-    ScorecardValueType,
+    ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup, ScorecardValueType,
 };
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_eval_core::assertion::AssertionSpec;
@@ -26,21 +25,7 @@ pub struct ExperimentRunRequest {
     /// Human-readable experiment run name.
     pub name: String,
     /// Published experiment_plan artifact revision to execute.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_revision_uid: Option<Uuid>,
-    /// Target payload for the live behavior run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<Value>,
-    /// Variant payload under experiment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<Value>,
-    /// Typed scorecard requested for a single-target experiment run.
-    ///
-    /// Plan-backed runs take their scorecard from the pinned plan revision and
-    /// leave this unset; a single-target run must declare one, because a run with
-    /// no evidence requirements can never produce deployment evidence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scorecard: Option<ExperimentScorecard>,
+    pub plan_revision_uid: Uuid,
     /// Optional score run identifier used to join against analytics scores.
     pub score_run_id: Option<Uuid>,
     /// Optional idempotency key for scoped run admission.

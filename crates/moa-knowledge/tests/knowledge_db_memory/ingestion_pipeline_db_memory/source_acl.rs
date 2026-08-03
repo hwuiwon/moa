@@ -8,6 +8,7 @@ use moa_knowledge::domain::{
     CanonicalSourcePrincipal, MAX_SOURCE_ACL_ENTRIES, ProviderAclEntry, ProviderRecordAcl,
     SourceAclEntryKind, SourceAclState, SourcePrincipalBinding, SourcePrincipalKind,
 };
+use moa_knowledge::repository::acl::KnowledgeAclRepository;
 
 /// The fixture ACL key. One fixed version and material, so a fingerprint
 /// computed in the test matches the one ingestion persisted.
@@ -78,12 +79,7 @@ async fn source_acl_pipeline(
 ) -> (
     Arc<PostgresKnowledgeRepository>,
     Arc<CountingEmbedder>,
-    KnowledgeIngestionPipeline<
-        PostgresKnowledgeRepository,
-        ParagraphParser,
-        CountingEmbedder,
-        FakeGraphWriter,
-    >,
+    KnowledgeIngestionPipeline,
 ) {
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
@@ -106,7 +102,14 @@ async fn source_acl_pipeline(
         },
     );
     let mut connection = drive_connection(connection_uid, tenant_id);
-    connection.provider = "nango".to_string();
+    connection.provider = moa_knowledge::domain::LinkedProviderKind::Nango;
+    insert_managed_connector_parent(
+        pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(connection)
         .await
@@ -131,6 +134,10 @@ fn acl_record(
         change_token: Some(change_token.to_string()),
         deleted: false,
         source_updated_at: Some(moa_test_support::fixtures::pg_now()),
+        materialization: ProviderRecordMaterialization::InlineText {
+            text: text.to_string(),
+            mime_type: None,
+        },
         metadata: json!({}),
         payload: json!({ "content": text }),
         acl: ProviderRecordAcl {

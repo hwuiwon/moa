@@ -27,12 +27,25 @@ never reads `MOA_DATABASE_ADMIN_URL` or applies migration DDL.
 - `workflows/` — Restate workflow modules (execution runs and tasks,
   experiment runs and trials, memory consolidation).
 - `objects/` — Restate virtual objects (session, worker, tenant, cron jobs).
-- `runtime/` — runtime composition for the binary: database, dependency
-  wiring, Restate endpoint, background jobs, KMS, and channel ingress.
-- Shared support: `ctx` (`OrchestratorCtx`), `config`, `turn`/`turn_driver`
-  (workflow-native turn execution), `brain_bridge`, `guardrails` (LLM judge
-  runner), `handlers` (authorization shims), `vo` (virtual-object state
-  plumbing), and `lineage` (sink selection).
+- `runtime::deps::RuntimeDeps` — the sole production composition root. It owns
+  the process-scoped database and provider dependencies, shared retrieval and
+  ingestion runtimes, connector graph, credential vault, delivery sink, and
+  explicit turn and authorization dependencies.
+- `runtime::endpoint::build_endpoint` — binds the services, workflows, and
+  virtual objects from one completed `RuntimeDeps`; handlers receive their
+  dependencies through constructors rather than a global registry.
+- Other `runtime/` modules own database setup, background jobs, KMS, and
+  channel ingress.
+- Shared support: `ctx` (trusted request-header and trace helpers), `config`,
+  `turn`/`turn_driver` (workflow-native turn execution), `brain_bridge`,
+  `guardrails` (LLM judge runner), `handlers` (authorization shims), `vo`
+  (virtual-object state plumbing), and `lineage` (sink selection).
+
+Connector secrets use `moa_core::traits::CredentialVault`, implemented by
+`moa_auth_providers::postgres_credential_vault::PostgresCredentialVault` and
+constructed once in `runtime::deps::RuntimeDeps`. The boundary is limited to
+connection-owned named credential series: stage, activate or roll back, check
+readiness, resolve the active version, revoke, and perform bounded tenant purge.
 
 ## Features
 

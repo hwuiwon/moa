@@ -30,7 +30,8 @@ domain crates rather than moving into `moa-core`.
   `EventRecord`, `EventStream`, `EventRange`, `EventFilter`
 - Trait surfaces: `BrainOrchestrator`, `SessionStore`, `BlobStore`,
   `BranchManager`, `HandProvider`, `LLMProvider`, `ChannelAdapter`,
-  `BuiltInTool`, `ContextProcessor`, `CredentialVault`
+  `BuiltInTool`, `ContextProcessor`, and the connection-scoped
+  `CredentialVault`
 - Tool execution context: `ToolContext`
 
 ### Memory crates
@@ -55,9 +56,18 @@ governance, and retrieval boundaries without crate-local aliases or re-exports.
 |---|---|
 | `moa-auth/authz-schema` | OpenFGA object, relation, tuple, and model-version constants |
 | `moa-auth/authz` | OpenFGA client, authorization checks, transactional outbox, outbox poller |
-| `moa-auth/providers` | Local API-key auth, disabled auth, builtin approvals, null token vault, provider bundle construction, first-party OAuth 2.1 authorization server (`oauth_as`) |
-| `moa-auth/auth0` | Optional Auth0 and generic OIDC providers behind the `auth0` feature |
+| `moa-auth/providers` | Local API-key auth, disabled auth, builtin approvals, tenant connector credentials, provider bundle construction, first-party OAuth 2.1 authorization server (`oauth_as`) |
+| `moa-auth/auth0` | Optional Auth0 and generic OIDC providers plus CIBA approvals behind the `auth0` feature |
 | `moa-auth/fga-bootstrap` | OpenFGA bootstrap binary |
+
+`moa_core::traits::CredentialVault` is the host-side boundary for named,
+connection-owned secret series. It exposes staging, activation and rollback,
+readiness, active resolution, revocation, and bounded tenant purge; it does not
+broker per-user OAuth tokens or provide credential discovery. The production
+implementation is
+`moa_auth_providers::postgres_credential_vault::PostgresCredentialVault`,
+constructed once by `moa_orchestrator::runtime::deps::RuntimeDeps` and injected
+into the connector services that use it.
 
 ### Brain and retrieval
 
@@ -65,6 +75,9 @@ governance, and retrieval boundaries without crate-local aliases or re-exports.
 
 - `HybridRetriever` (`crates/moa-retrieval/src/retrieval/hybrid.rs`)
 - query planning DTOs
+- `MemoryRetrievalEngine`, the shared scoped runtime, ACL/request assembly,
+  embedding-degradation, routing, admission, and fusion implementation used by
+  brain context retrieval and orchestrator memory handlers
 
 `moa-brain` owns context compilation:
 
@@ -81,7 +94,7 @@ DTOs for the public HTTP edge and orchestrator HTTP surface live in `moa-wire`.
 | `moa-connectors` | Generic tenant connection lifecycle/health/generation, repositories, constrained HTTP execution, installed action bindings, invocation ledgers, and Nango/Merge managed-parent claims |
 | `moa-security` | Production outbound destination admission and one-attempt DNS-pinned client construction |
 | `moa-hands` | Operator-owned deployment MCP catalog and ephemeral governed tool projection |
-| `moa-knowledge` | Nango/Merge knowledge projections, provider records, cursors/deletions, ACL capture, parsing, and ingestion |
+| `moa-knowledge` | Nango/Merge knowledge projections, typed provider/materialization records, cursors/deletions, ACL capture, parsing, ingestion, and six capability-specific repository ports |
 | `moa-orchestrator` | Authentication/authorization context, Restate durability boundaries, runtime composition, and Nango/Merge provider workflow binding |
 
 `moa-connectors` does not depend on `moa-hands`, `moa-knowledge`, `moa-wire`,
@@ -135,7 +148,7 @@ Allowed responsibilities:
 | Application services | Use-case orchestration, business decisions, state transitions, idempotency, domain events, and calls to repositories or existing typed domain APIs |
 | Repositories | SQL, row mapping, transactional persistence helpers, storage errors, and Postgres-specific query optimization |
 | Domain crates | Stable domain models, traits, validation, policy types, reusable algorithms, and tests that should outlive the current Restate adapter |
-| Composition code | Constructing concrete dependencies in `RuntimeDeps`, feature-gated bindings, background jobs, provider selection, and binding in-process implementations through `build_endpoint` |
+| Composition code | Constructing concrete dependencies in `moa_orchestrator::runtime::deps::RuntimeDeps`, feature-gated bindings, background jobs, provider selection, and binding in-process implementations through `moa_orchestrator::runtime::endpoint::build_endpoint` |
 
 Handlers may validate transport shape and reject unauthenticated or unauthorized
 requests, but policy decisions after that point belong in an application or
@@ -149,23 +162,30 @@ without changing turn workflows, handler contracts, or domain tests.
 
 The architecture checker enforces dependency kinds as well as source layout:
 forbidden production directions cannot be hidden as ordinary build edges, and
-explicit dev-only exceptions remain counted. It also constrains raw
-`OrchestratorCtx` dependency reads in orchestrator objects, services, and
-workflows. That scoped rule does not assert repository-wide elimination of the
-context type.
+forbidden dependency directions have no allowance list. Counted source
+exceptions must remain present at their declared path and count or are reported
+as stale. The checker also rejects raw global runtime context access in
+orchestrator objects, services, and workflows.
 
-Zero `OrchestratorCtx` dependency reads of any kind remain under those roots —
-neither a bare `current()`, which hands a caller the whole dependency graph, nor
-a per-accessor `current_*`. The eight counted `current_*` exceptions that used to
-live here are gone: `SessionImpl` now takes its admission pool and configuration
-as constructor parameters, and `ExperimentRunImpl` and `ExperimentTrialRunImpl`
-take their configuration the same way, so the dependency is stated at the
-composition root instead of reached for at the call site.
+`moa_orchestrator::runtime::deps::RuntimeDeps` is the sole production
+composition root. It constructs one shared
+`moa_retrieval::engine::MemoryRetrievalEngine`,
+`moa_memory_ingest::ctx::IngestRuntime`, connector service graph, delivery
+sink, `moa_auth_providers::postgres_credential_vault::PostgresCredentialVault`,
+and the explicit turn and authorization dependencies. It passes those concrete
+dependencies into their consumers before
+`moa_orchestrator::runtime::endpoint::build_endpoint` binds the Restate
+handlers. Production code has no process-global dependency registry or memory
+ingest installation singleton; reintroducing either requires a new decision
+record rather than an allowance entry.
 
-There is no `RuntimeContext` allowance left, and the rule is now absolute under
-those roots: a new `OrchestratorCtx::current*` read fails the checker outright
-rather than consuming a budget. Re-adding one requires a new decision record
-here, not an allowance entry.
+The former monolithic tenant-scoped knowledge repository is split into six
+capability ports owned by `moa-knowledge`: connection/link, sync, ingestion,
+ACL, contact-group, and provider-event persistence. Provider-wide discovery
+remains a separate lookup seam. Consumers request only the ports they call, and
+the ingestion pipeline stores narrow trait objects rather than a monolithic
+repository generic. Nango/Merge provider records carry typed materialization
+intent; ingestion does not infer content behavior from arbitrary JSON.
 
 Postgres DDL has one declared owner per logical top-level table family in the
 `moa-migrations` manifest. New or removed tables must update that manifest in
@@ -402,3 +422,36 @@ Consequences:
 Revisit if the generic connection domain becomes a separately deployed service
 or if a new capability cannot use these boundaries without importing tool or
 knowledge policy into `moa-connectors`.
+
+### ADR 0006 - Retire Per-User Token Vault
+
+Status: Accepted.
+Date: 2026-08-03.
+Supersedes: ADR 0002 decisions 2-4 only where they specify a token-vault trait,
+default, or Auth0 implementation.
+
+The per-user OAuth token-vault providers had no production consumer after
+connector credentials moved to the connection-owned, versioned credential
+series. Retaining a second credential model added configuration, webhook,
+schema, refresh, and runtime-composition paths without supporting an active
+product flow.
+
+Decisions:
+
+1. Remove `TokenVaultProvider`, its Auth0/Postgres/null implementations, the
+   Auth0 connection-linking webhook, and their runtime configuration.
+2. Remove `linked_connections` and `token_vault_connections` from the
+   fresh-install migration catalog. Preserve contiguous numbering with a no-op
+   V29 epoch marker rather than a forward `DROP TABLE` compatibility migration.
+3. Keep `CredentialVault` as the sole owner of MOA-managed connector secrets.
+   Nango and Merge continue using their provider configuration and the generic
+   connector parent; Auth0/OIDC identity and CIBA approvals remain supported.
+
+Consequences:
+
+- MOA no longer brokers user-owned third-party OAuth access tokens.
+- Connector HTTP actions use named connection credential slots through the
+  audited host-side credential boundary.
+- A database whose recorded checksums predate this epoch is rejected before
+  DDL and must be rebuilt together with fresh Restate durable state; no
+  compatibility or export path is retained.

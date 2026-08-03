@@ -10,7 +10,7 @@
 pub mod action;
 /// Tenant-configurable agent artifact definitions.
 pub mod agent;
-/// Canonical JSON serialization and hashing helpers.
+/// Canonical artifact hashing helpers.
 pub mod canonical;
 /// Connector artifact definitions.
 pub mod connector;

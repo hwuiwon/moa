@@ -5,9 +5,7 @@ use std::time::Instant;
 use super::inner::{create_agent_session_for_identity, create_session_for_identity};
 use super::*;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{
-    authorize_tenant, require_fga_client, require_identity, translate_authz_error,
-};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
 use crate::workflows::session_retention::{
     SessionRetentionClient, SessionRetentionDispatch, SessionRetentionRequest,
     session_retention_workflow_id,
@@ -29,7 +27,7 @@ impl RestateSessionStore for SessionStoreImpl {
         let meta = meta.into_inner();
         let vo_meta = meta.clone();
         let identity = require_identity(&ctx)?;
-        let fga = require_fga_client()?;
+        let fga = self.authz.require_fga_client()?;
         require_authz_with_delegation(
             &fga,
             &identity,
@@ -73,7 +71,7 @@ impl RestateSessionStore for SessionStoreImpl {
         let request = request.into_inner();
         let mut vo_meta = request.meta.clone();
         let identity = require_identity(&ctx)?;
-        let fga = require_fga_client()?;
+        let fga = self.authz.require_fga_client()?;
         require_authz_with_delegation(
             &fga,
             &identity,
@@ -158,7 +156,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_events");
         let request = request.into_inner();
-        authorize_session_read(&ctx, request.session_id).await?;
+        authorize_session_read(&self.authz, &ctx, request.session_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -182,7 +180,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_session");
         let session_id = session_id.into_inner();
-        authorize_session_read(&ctx, session_id).await?;
+        authorize_session_read(&self.authz, &ctx, session_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -229,7 +227,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "search_events");
         let request = request.into_inner();
-        authorize_event_search(&ctx, &request).await?;
+        authorize_event_search(&self.authz, &ctx, &request).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -254,7 +252,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "list_sessions");
         let request = request.into_inner();
         let tenant_id = tenant_id_for_session_listing(&request)?;
-        authorize_tenant_admin(&ctx, tenant_id).await?;
+        authorize_tenant_admin(&self.authz, &ctx, tenant_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -278,7 +276,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "tenant_cost_since");
         let request = request.into_inner();
-        authorize_tenant_read(&ctx, request.tenant_id).await?;
+        authorize_tenant_read(&self.authz, &ctx, request.tenant_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -535,7 +533,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_experience_records");
         let request = request.into_inner();
-        authorize_session_read(&ctx, request.session_id).await?;
+        authorize_session_read(&self.authz, &ctx, request.session_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -629,7 +627,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_learning_candidate");
         let request = request.into_inner();
-        authorize_tenant_read(&ctx, request.tenant_id).await?;
+        authorize_tenant_read(&self.authz, &ctx, request.tenant_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -663,7 +661,7 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_learning_candidates");
         let request = request.into_inner();
-        authorize_tenant_read(&ctx, request.tenant_id).await?;
+        authorize_tenant_read(&self.authz, &ctx, request.tenant_id).await?;
         let store = self.store.clone();
 
         Ok(ctx
@@ -689,7 +687,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "start_session_retention");
         let request = request.into_inner();
         let identity = require_identity(&ctx)?;
-        let fga = require_fga_client()?;
+        let fga = self.authz.require_fga_client()?;
         // Retention deletes a tenant's live conversation history. Tenant
         // operator is not enough: this is the same class of irreversible act as
         // a purge, so it requires tenant admin on the tenant being retained.
@@ -1140,11 +1138,12 @@ fn recurrence_cluster_neighbor_limit(groups: &[moa_session::RecurringExperienceC
 }
 
 async fn authorize_session_read(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
+    let fga = authz.require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
@@ -1157,24 +1156,28 @@ async fn authorize_session_read(
 }
 
 async fn authorize_event_search(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     request: &SearchEventsRequest,
 ) -> Result<(), HandlerError> {
     if let Some(session_id) = request.filter.session_id {
-        return authorize_session_read(ctx, session_id).await;
+        return authorize_session_read(authz, ctx, session_id).await;
     }
 
     let tenant_id = request.filter.tenant_id.ok_or_else(|| {
         TerminalError::new_with_code(400, "search_events requires session_id or tenant_id")
     })?;
-    authorize_tenant_admin(ctx, tenant_id).await
+    authorize_tenant_admin(authz, ctx, tenant_id).await
 }
 
 async fn authorize_tenant_read(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<(), HandlerError> {
-    authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
+    authz
+        .authorize_tenant(ctx, tenant_id, Relation::Operator)
+        .await?;
     Ok(())
 }
 
@@ -1188,10 +1191,13 @@ fn tenant_id_for_session_listing(
 }
 
 async fn authorize_tenant_admin(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<(), HandlerError> {
-    authorize_tenant(ctx, tenant_id, Relation::Admin).await?;
+    authz
+        .authorize_tenant(ctx, tenant_id, Relation::Admin)
+        .await?;
     Ok(())
 }
 

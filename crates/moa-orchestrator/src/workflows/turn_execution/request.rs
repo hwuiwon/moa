@@ -13,7 +13,7 @@ use moa_lineage_core::TurnId;
 use restate_sdk::prelude::*;
 use sha2::{Digest, Sha256};
 
-use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
+use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, TurnRequestPreparer};
 use crate::turn_driver::progress as driver_progress;
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_session::PostgresSessionStore;
@@ -29,6 +29,7 @@ pub(super) struct BuiltTurnRequest {
 
 pub(super) async fn build_request_inside_workflow(
     ctx: &WorkflowContext<'_>,
+    request_preparer: Arc<TurnRequestPreparer>,
     session_store: Arc<PostgresSessionStore>,
     session_id: SessionId,
     turn_id: TurnId,
@@ -44,16 +45,17 @@ pub(super) async fn build_request_inside_workflow(
         .map(Json::into_inner);
     let prepared = ctx
         .run(|| async move {
-            prepare_turn_request(
-                session_id,
-                turn_id,
-                identity,
-                active_user_sequence_num,
-                cached_query_rewrite,
-            )
-            .await
-            .map(Json::from)
-            .map_err(moa_error_to_handler_error)
+            request_preparer
+                .prepare(
+                    session_id,
+                    turn_id,
+                    identity,
+                    active_user_sequence_num,
+                    cached_query_rewrite,
+                )
+                .await
+                .map(Json::from)
+                .map_err(moa_error_to_handler_error)
         })
         .name("prepare_turn_request")
         .await?

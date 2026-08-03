@@ -1,11 +1,9 @@
-//! Authentication, token-vault, and async-authorization trait surfaces.
+//! Authentication and async-authorization trait surfaces.
 //!
 //! These traits live in `moa-core::traits` so downstream crates depend on the
 //! contracts without pulling in any provider implementation dependencies.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::time::Duration;
@@ -126,51 +124,6 @@ pub trait AuthProvider: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// Third-party access token returned by a token-vault provider.
-#[derive(Clone)]
-pub struct VaultToken {
-    /// Access token secret.
-    pub access_token: SecretString,
-    /// Optional token expiration.
-    pub expires_at: Option<DateTime<Utc>>,
-    /// Provider scopes associated with the token.
-    pub scopes: Vec<String>,
-}
-
-/// Token-vault provider failures.
-#[derive(Debug, Error)]
-pub enum TokenVaultError {
-    /// No token vault is configured.
-    #[error("vault not configured")]
-    NotConfigured,
-    /// The requested user has not linked the connection.
-    #[error("connection not linked for this user")]
-    NotLinked,
-    /// Vault could not be reached or returned a transient error.
-    #[error("vault unavailable: {0}")]
-    Unavailable(String),
-    /// Vault returned an internal error.
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-/// Retrieves third-party OAuth tokens for user-owned connections.
-#[async_trait]
-pub trait TokenVaultProvider: Send + Sync {
-    /// Retrieve a current access token for `(user_id, connection_name)`.
-    async fn get_token(
-        &self,
-        user_id: Uuid,
-        connection_name: &str,
-    ) -> Result<VaultToken, TokenVaultError>;
-
-    /// List linked connection names for a user.
-    async fn list_connections(&self, user_id: Uuid) -> Result<Vec<String>, TokenVaultError>;
-
-    /// Return a short stable provider name for logs and metrics.
-    fn name(&self) -> &'static str;
-}
-
 /// Request to initiate an async human approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
@@ -263,7 +216,6 @@ mod tests {
         // Pins: downstream crates can continue storing provider implementations
         // behind trait objects without asserting behavior on dummy providers.
         assert_object_safe::<dyn AuthProvider>();
-        assert_object_safe::<dyn TokenVaultProvider>();
         assert_object_safe::<dyn AsyncAuthzProvider>();
     }
 

@@ -244,7 +244,7 @@ async fn purge_credential_state(
     );
     let mut claims = 0_u64;
     loop {
-        let removed = moa_knowledge::repository::KnowledgeRepository::purge_tenant_link_claims(
+        let removed = moa_knowledge::repository::connection::KnowledgeConnectionRepository::purge_tenant_link_claims(
             &repository,
             CREDENTIAL_PURGE_BATCH_SIZE,
         )
@@ -528,15 +528,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CredentialVault for BatchedCredentialVault {
-        async fn create(
-            &self,
-            _identity: moa_core::types::credentials::CredentialIdentity,
-            _material: secrecy::SecretString,
-            _ctx: &CredentialContext,
-        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
-            unreachable!("tenant purge never creates credentials")
-        }
-
         async fn stage(
             &self,
             _identity: moa_core::types::credentials::CredentialIdentity,
@@ -561,14 +552,6 @@ mod tests {
             _ctx: &CredentialContext,
         ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
             unreachable!("tenant purge never rolls back credential activation")
-        }
-
-        async fn resolve(
-            &self,
-            _source: &moa_core::types::credentials::CredentialSource,
-            _ctx: &CredentialContext,
-        ) -> Result<moa_core::types::credentials::RedactedSecret, CredentialError> {
-            unreachable!("tenant purge never resolves credentials")
         }
 
         async fn has_active(
@@ -606,15 +589,6 @@ mod tests {
             unreachable!("tenant purge never describes credentials")
         }
 
-        async fn rotate(
-            &self,
-            _current: moa_core::types::credentials::CredentialRef,
-            _material: secrecy::SecretString,
-            _ctx: &CredentialContext,
-        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
-            unreachable!("tenant purge never rotates credentials")
-        }
-
         async fn revoke(
             &self,
             _reference: moa_core::types::credentials::CredentialRef,
@@ -629,14 +603,6 @@ mod tests {
             _ctx: &CredentialContext,
         ) -> Result<u64, CredentialError> {
             unreachable!("tenant purge never performs ordinary connection revocation")
-        }
-
-        async fn delete_connection(
-            &self,
-            _connection_uid: uuid::Uuid,
-            _ctx: &CredentialContext,
-        ) -> Result<u64, CredentialError> {
-            unreachable!("tenant purge sweeps by tenant, not by connection")
         }
 
         async fn purge_tenant(

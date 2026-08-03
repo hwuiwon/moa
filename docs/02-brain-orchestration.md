@@ -25,11 +25,17 @@ registered with Restate. At startup it:
 1. Loads shared `MoaConfig` from flat `MOA_...` environment variables.
 2. Connects with the runtime Postgres URL and validates that the exact complete
    central migration history is already installed.
-3. Builds the Postgres session store, graph memory stack, provider registry,
-   embedding provider, runtime cache, and tool router.
-4. Installs an `OrchestratorCtx` singleton for handlers.
+3. Builds one `RuntimeDeps` dependency graph containing the Postgres stores,
+   graph memory stack, provider registry, runtime cache, tool router, connector
+   services, shared `IngestRuntime`, and shared `MemoryRetrievalEngine`.
+4. Injects concrete turn, authorization, credential, delivery, retrieval, and
+   ingestion dependencies into their handler implementations.
 5. Binds Restate services, virtual objects, and workflows.
 6. Starts the Restate endpoint and a separate health/readiness endpoint.
+
+There is no process-global orchestrator context or ingestion-runtime singleton.
+`RuntimeDeps` is the sole production composition root, and `build_endpoint`
+only binds the already-constructed graph.
 
 Schema changes are an explicit deployment phase. Only
 `moa-orchestrator migrate` uses `MOA_DATABASE_ADMIN_URL` and executes migration
@@ -76,7 +82,7 @@ graph execution. The open-ended agent loop remains in `Session` and
 client sends message
   -> SessionStore creates/loads session metadata
   -> Session::set_meta initializes VO state when needed
-  -> Session::start_turn / Session::queue_message consults the admission fence,
+  -> Session::start_turn consults the admission fence,
      then records an active turn id
   -> Session sends TurnExecution::run keyed by turn_id
   -> TurnExecution appends the message, runs the brain loop, and records events
@@ -99,7 +105,7 @@ so a duplicate delivery never becomes a retryable error.
 Cancellation scope decides the rest. `CoordinatorOnly` stops one turn and the
 queue continues. `TaskTree` appends one `QueuedMessageRejected` fact per
 already-accepted queued message in FIFO order, drains the queue immediately, and
-fences admission: `start_turn`/`queue_message` return a typed 409
+fences admission: `start_turn` returns a typed 409
 until the cancelled turn reports its outcome, so a message that raced the
 cancellation cannot start a turn inside a tree being torn down. The scope is
 recorded against the turn it cancels and released only by that turn's matching
@@ -107,12 +113,11 @@ outcome, and no queued work is dispatched after a task-tree cancelled callback.
 The former write-only `SessionVoState.cancel_flag` is gone; it was never read and
 was not a fence.
 
-`Session::start_turn` and `Session::queue_message` are the only message-submitting
-handlers; they are serialized by Restate's single-writer-per-key semantics but
-stay fast:
+`Session::start_turn` is the only message-submitting handler. It is serialized
+by Restate's single-writer-per-key semantics but stays fast:
 the VO mutates K/V state and sends a durable workflow invocation. The
 long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
-`queue_message`, and `request_cancel` calls do not wait behind a running turn.
+`start_turn`, and `request_cancel` calls do not wait behind a running turn.
 There is no previous session-local turn runner; `TurnExecution` owns the durable
 turn loop.
 
@@ -483,11 +488,11 @@ output, citations, failures, and gaps to the owning session. The session starts
 at most one deduplicated synthesis turn for the originating user sequence; it
 does not ingest every raw map output or poll the run through the root model.
 
-Behavior-lab execution uses the same reserve-before-dispatch rule. A direct
-`ExperimentRun` reserves its persisted run envelope with a root-level
-reservation before starting its Session or Execution child, waits for terminal
-evidence, and reconciles observed session usage. A planned
-`ExperimentTrialRun` reserves each simulator and target coordinate separately.
+Behavior-lab execution uses the same reserve-before-dispatch rule. An
+`ExperimentRun` requires one exact immutable `experiment_plan` revision and
+pages its trial coordinates through `PlanTrialPager`; there is no direct raw
+target/variant/scorecard run path. Each `ExperimentTrialRun` reserves its
+simulator and target coordinates separately.
 Simulator coordinates are admitted only with an exact certified policy
 revision; the workflow revalidates the stored immutable policy snapshot and
 uses its provider/model, decoding, prompt, context, and structured response

@@ -24,11 +24,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::controls::derangement;
+use crate::fixture_ids::stable_uuid_from_label;
 use crate::kernel::contamination::{containment, shingles};
 use crate::kernel::controls::{NullSeedRun, SliceEvidence};
 use crate::memory_eval::{
     CandidateLegs, LedgerFact, Probe, ProbeResult, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate,
-    stable_uuid_from_label,
 };
 
 /// Answer containment above which a probe query has copied its own answer.

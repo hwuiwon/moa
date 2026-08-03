@@ -108,8 +108,14 @@ async fn mock_connector_end_to_end_db_memory() {
         task14_nango_records(),
     ));
     let providers = StaticKnowledgeProviders::new()
-        .with_provider("merge", merge_provider.clone())
-        .with_provider("nango", nango_provider.clone());
+        .with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Merge,
+            merge_provider.clone(),
+        )
+        .with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Nango,
+            nango_provider.clone(),
+        );
     let service = KnowledgeService::from_postgres_pool(
         pool.clone(),
         Arc::new(providers),
@@ -777,7 +783,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
     let connection = KnowledgeConnection {
         connection_uid,
         tenant_id,
-        provider: "nango".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: "docs".to_string(),
         provider_account_id: "nango-task14-account".to_string(),
         metadata: json!({ "safe": "connection" }),
@@ -917,7 +923,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
     let connection = KnowledgeConnection {
         connection_uid,
         tenant_id,
-        provider: "nango".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: "docs".to_string(),
         provider_account_id: "nango-task14-account".to_string(),
         metadata: json!({ "safe": "connection" }),
@@ -1018,7 +1024,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
         connection: KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: PROVIDER.to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Merge,
             connector: CONNECTOR.to_string(),
             provider_account_id: "provider-account-1".to_string(),
             metadata: json!({}),
@@ -1028,7 +1034,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: Some(modified_after),
         },
-        provider: PROVIDER.to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Merge,
         parser_label: "native".to_string(),
         page_size: 2,
         max_records: 3,

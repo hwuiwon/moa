@@ -11,12 +11,12 @@ pub use scope::{UserScopeError, checked_ingest_contact_id, effective_user_id};
 pub use tools::OrchestratorMemoryRetrievalExecutor;
 
 use moa_authz_schema::Relation;
-use moa_config::MoaConfig;
-use moa_core::traits::{Identity, RuntimeCacheStore, SessionStore};
+use moa_core::traits::{Identity, SessionStore};
 use moa_core::types::identifiers::SessionId;
 use moa_core::types::session::SessionMeta;
 use moa_crypto::KeyManagementProvider;
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_retrieval::engine::MemoryRetrievalEngine;
 use moa_wire::memory::{
     MemoryIngestRequest, MemoryIngestResponse, MemoryRetrieveDebugRequest,
     MemoryRetrieveDebugResponse, MemorySearchRequest, MemorySearchResponse, MemoryShowRequest,
@@ -25,7 +25,7 @@ use moa_wire::memory::{
 use restate_sdk::prelude::*;
 use std::sync::Arc;
 
-use crate::handlers::authz_shim::{authorize_session_participant, authorize_tenant};
+use crate::handlers::authz_shim::AuthzEnforcer;
 
 use self::ingest::ingest_documents_inner;
 use self::retrieval::{
@@ -62,27 +62,27 @@ pub trait Memory {
 pub struct MemoryImpl {
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
-    config: Arc<MoaConfig>,
     session_store: Arc<moa_session::PostgresSessionStore>,
-    runtime_cache: Arc<dyn RuntimeCacheStore>,
+    retrieval_engine: Arc<MemoryRetrievalEngine>,
+    authz: AuthzEnforcer,
 }
 
 impl MemoryImpl {
-    /// Creates the memory adapter with its graph and retrieval dependencies.
+    /// Creates the memory adapter from a process-wide retrieval engine.
     #[must_use]
-    pub fn new(
+    pub fn from_retrieval_engine(
         pool: sqlx::PgPool,
         kms: Arc<dyn KeyManagementProvider>,
-        config: Arc<MoaConfig>,
         session_store: Arc<moa_session::PostgresSessionStore>,
-        runtime_cache: Arc<dyn RuntimeCacheStore>,
+        retrieval_engine: Arc<MemoryRetrievalEngine>,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             pool,
             kms,
-            config,
             session_store,
-            runtime_cache,
+            retrieval_engine,
+            authz,
         }
     }
 }
@@ -97,15 +97,17 @@ impl Memory for MemoryImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "search");
         let request = request.into_inner();
-        let identity = authorize_session_participant(&ctx, request.session_id).await?;
+        let identity = self
+            .authz
+            .authorize_session_participant(&ctx, request.session_id)
+            .await?;
         let session = load_session(&ctx, self.session_store.clone(), request.session_id).await?;
         require_session_tenant(&identity, &session)?;
         let operation_id = format!("memory.search:{}", ctx.invocation_id());
 
         let pool = self.pool.clone();
         let kms = self.kms.clone();
-        let config = self.config.clone();
-        let runtime_cache = Arc::clone(&self.runtime_cache);
+        let retrieval_engine = Arc::clone(&self.retrieval_engine);
         Ok(ctx
             .run(|| async move {
                 search_inner(
@@ -118,9 +120,8 @@ impl Memory for MemoryImpl {
                     MemoryServiceDeps {
                         pool: &pool,
                         kms: &kms,
-                        runtime_cache: &runtime_cache,
+                        retrieval_engine: &retrieval_engine,
                     },
-                    config.as_ref(),
                 )
                 .await
                 .map(Json::from)
@@ -138,14 +139,17 @@ impl Memory for MemoryImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "show");
         let request = request.into_inner();
-        let identity = authorize_session_participant(&ctx, request.session_id).await?;
+        let identity = self
+            .authz
+            .authorize_session_participant(&ctx, request.session_id)
+            .await?;
         let session = load_session(&ctx, self.session_store.clone(), request.session_id).await?;
         require_session_tenant(&identity, &session)?;
         let operation_id = format!("memory.show:{}", ctx.invocation_id());
 
         let pool = self.pool.clone();
         let kms = self.kms.clone();
-        let runtime_cache = Arc::clone(&self.runtime_cache);
+        let retrieval_engine = Arc::clone(&self.retrieval_engine);
         Ok(ctx
             .run(|| async move {
                 show_inner(
@@ -158,7 +162,7 @@ impl Memory for MemoryImpl {
                     MemoryServiceDeps {
                         pool: &pool,
                         kms: &kms,
-                        runtime_cache: &runtime_cache,
+                        retrieval_engine: &retrieval_engine,
                     },
                 )
                 .await
@@ -177,7 +181,10 @@ impl Memory for MemoryImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "ingest_documents");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Operator)
+            .await?;
         let contact_id = checked_ingest_contact_id(request.contact_id, &identity)
             .map_err(user_scope_handler_error)?;
 
@@ -195,15 +202,17 @@ impl Memory for MemoryImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "retrieve_debug");
         let request = request.into_inner();
-        let identity = authorize_session_participant(&ctx, request.session_id).await?;
+        let identity = self
+            .authz
+            .authorize_session_participant(&ctx, request.session_id)
+            .await?;
         let session = load_session(&ctx, self.session_store.clone(), request.session_id).await?;
         require_session_tenant(&identity, &session)?;
         let operation_id = format!("memory.retrieve_debug:{}", ctx.invocation_id());
 
         let pool = self.pool.clone();
         let kms = self.kms.clone();
-        let config = self.config.clone();
-        let runtime_cache = Arc::clone(&self.runtime_cache);
+        let retrieval_engine = Arc::clone(&self.retrieval_engine);
         let response = ctx
             .run(|| async move {
                 retrieve_debug_inner(
@@ -216,9 +225,8 @@ impl Memory for MemoryImpl {
                     MemoryServiceDeps {
                         pool: &pool,
                         kms: &kms,
-                        runtime_cache: &runtime_cache,
+                        retrieval_engine: &retrieval_engine,
                     },
-                    config.as_ref(),
                 )
                 .await
                 .map(Json::from)

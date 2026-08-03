@@ -20,7 +20,10 @@ fn lifecycle_accepts_only_the_documented_directed_edges_offline() {
     ];
     let allowed = [
         (ConnectionStatus::PendingAuth, ConnectionStatus::Active),
-        (ConnectionStatus::PendingAuth, ConnectionStatus::Deleted),
+        (
+            ConnectionStatus::PendingAuth,
+            ConnectionStatus::Disconnecting,
+        ),
         (ConnectionStatus::Active, ConnectionStatus::Suspended),
         (ConnectionStatus::Active, ConnectionStatus::Disconnecting),
         (ConnectionStatus::Suspended, ConnectionStatus::Active),

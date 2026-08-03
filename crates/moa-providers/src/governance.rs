@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use moa_core::{
+    canonical_json::canonical_json_bytes,
     error::{MoaError, Result},
     traits::LLMProvider,
     types::completion::{
@@ -329,32 +330,10 @@ fn dlp_provider_error(error: DlpError) -> MoaError {
 }
 
 fn canonical_json(value: &Value) -> serde_json::Result<String> {
-    match value {
-        Value::Null => Ok("null".to_string()),
-        Value::Bool(value) => Ok(value.to_string()),
-        Value::Number(value) => Ok(value.to_string()),
-        Value::String(value) => serde_json::to_string(value),
-        Value::Array(items) => {
-            let mut serialized = Vec::with_capacity(items.len());
-            for item in items {
-                serialized.push(canonical_json(item)?);
-            }
-            Ok(format!("[{}]", serialized.join(",")))
-        }
-        Value::Object(map) => {
-            let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by_key(|(key, _)| *key);
-            let mut serialized = Vec::with_capacity(entries.len());
-            for (key, value) in entries {
-                serialized.push(format!(
-                    "{}:{}",
-                    serde_json::to_string(key)?,
-                    canonical_json(value)?
-                ));
-            }
-            Ok(format!("{{{}}}", serialized.join(",")))
-        }
-    }
+    let bytes = canonical_json_bytes(value)?;
+    String::from_utf8(bytes).map_err(|error| {
+        serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })
 }
 
 fn detokenizing_stream(inner: CompletionStream, vault: TokenVault) -> CompletionStream {

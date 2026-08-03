@@ -515,8 +515,8 @@ mod tests {
 
     #[test]
     fn scenario_scorecard_is_runnable_with_the_registered_objective_evaluator_offline() {
-        // Pins: direct runs and plan-backed runs share this admission check, so
-        // the objective evaluator must be admitted only after its durable trial
+        // Pins: plan admission shares this runnable-scorecard check, so the
+        // objective evaluator must be admitted only after its durable trial
         // evidence producer is available.
         let scorecard = ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "scenario_outcome".to_string(),

@@ -5,6 +5,7 @@
 //! their owning modules.
 
 pub mod analytics;
+pub mod canonical_json;
 pub mod coordination_counters;
 pub mod diff;
 pub mod error;

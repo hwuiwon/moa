@@ -176,35 +176,6 @@ fn svix_signing_key(signing_key: &str) -> Option<Vec<u8>> {
     decode_base64_signature(encoded)
 }
 
-#[cfg(feature = "auth0")]
-pub(super) fn verify_auth0_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> bool {
-    type HmacSha256 = Hmac<Sha256>;
-    let signature = headers
-        .get("auth0-signature")
-        .and_then(|value| value.to_str().ok())
-        .or_else(|| {
-            headers
-                .get("Auth0-Signature")
-                .and_then(|value| value.to_str().ok())
-        });
-    let Some(signature) = signature else {
-        return false;
-    };
-    let signature = signature
-        .strip_prefix("sha256=")
-        .unwrap_or(signature)
-        .trim();
-    let Ok(provided) = hex::decode(signature) else {
-        return false;
-    };
-    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
-        return false;
-    };
-    mac.update(body);
-    let expected = mac.finalize().into_bytes();
-    expected.as_slice().ct_eq(provided.as_slice()).into()
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderMap;
@@ -329,26 +300,5 @@ mod tests {
             verify_svix_signature_at_edge(&without_sig, body.as_bytes(), key),
             Err((StatusCode::UNAUTHORIZED, "missing webhook signature"))
         );
-    }
-
-    #[cfg(feature = "auth0")]
-    #[test]
-    fn verify_auth0_signature_accepts_valid_and_rejects_tampered_or_missing() {
-        // Pins: the Auth0 webhook verifier accepts a `sha256=` hex HMAC of the body,
-        // rejects a tampered body, and rejects a request with no Auth0-Signature header.
-        let secret = "auth0-webhook-secret";
-        let body = br#"{"type":"user.created"}"#;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "auth0-signature",
-            format!("sha256={}", hmac_sha256_hex(secret.as_bytes(), body))
-                .parse()
-                .expect("valid header value"),
-        );
-
-        assert!(verify_auth0_signature(&headers, body, secret));
-        assert!(!verify_auth0_signature(&headers, b"{}", secret));
-        assert!(!verify_auth0_signature(&HeaderMap::new(), body, secret));
     }
 }

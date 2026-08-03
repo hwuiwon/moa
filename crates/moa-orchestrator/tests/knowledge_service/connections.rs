@@ -23,10 +23,10 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(
-            StaticKnowledgeProviders::new()
-                .with_provider(PROVIDER, Arc::new(FakeLinkedIntegrationProvider::default())),
-        ),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Merge,
+            Arc::new(FakeLinkedIntegrationProvider::default()),
+        )),
         credentials.clone(),
         fake_ingestion_runner(),
         80,
@@ -73,7 +73,7 @@ async fn list_connections_batches_closed_provider_credential_statuses_once() {
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
     let account = LinkedAccount {
-        provider: PROVIDER.to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Merge,
         connector: CONNECTOR.to_string(),
         provider_account_id: "batch-account".to_string(),
         credential_material: Some("batch-secret".to_string()),
@@ -81,7 +81,7 @@ async fn list_connections_batches_closed_provider_credential_statuses_once() {
     };
 
     let mut present = fixture_connection(tenant_id);
-    present.provider = PROVIDER.to_string();
+    present.provider = moa_knowledge::domain::LinkedProviderKind::Merge;
     present.provider_account_id = "present".to_string();
     credentials
         .store_linked_account(tenant_id, present.connection_uid, &caller, &account)
@@ -93,14 +93,14 @@ async fn list_connections_batches_closed_provider_credential_statuses_once() {
 
     let mut provider_native = fixture_connection(tenant_id);
     provider_native.connection_uid = Uuid::now_v7();
-    provider_native.provider = "nango".to_string();
+    provider_native.provider = moa_knowledge::domain::LinkedProviderKind::Nango;
     provider_native.provider_account_id = "provider-native".to_string();
     repository
         .insert_connection(provider_native)
         .expect("insert provider-native connection");
 
     let mut missing = fixture_connection(tenant_id);
-    missing.provider = PROVIDER.to_string();
+    missing.provider = moa_knowledge::domain::LinkedProviderKind::Merge;
     missing.connection_uid = Uuid::now_v7();
     missing.provider_account_id = "missing".to_string();
     repository
@@ -108,7 +108,7 @@ async fn list_connections_batches_closed_provider_credential_statuses_once() {
         .expect("insert missing connection");
 
     let mut revoked = fixture_connection(tenant_id);
-    revoked.provider = PROVIDER.to_string();
+    revoked.provider = moa_knowledge::domain::LinkedProviderKind::Merge;
     revoked.connection_uid = Uuid::now_v7();
     revoked.provider_account_id = "revoked".to_string();
     credentials
@@ -124,7 +124,7 @@ async fn list_connections_batches_closed_provider_credential_statuses_once() {
         .expect("insert revoked connection");
 
     let mut superseded = fixture_connection(tenant_id);
-    superseded.provider = PROVIDER.to_string();
+    superseded.provider = moa_knowledge::domain::LinkedProviderKind::Merge;
     superseded.connection_uid = Uuid::now_v7();
     superseded.provider_account_id = "superseded".to_string();
     credentials
@@ -192,13 +192,6 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
             logo_url: Some("https://logos.example/drive.png".to_string()),
         },
     ]));
-    let merge_like = Arc::new(FakeLinkedIntegrationProvider::with_integrations(vec![
-        ProviderIntegration {
-            id: "filestorage".to_string(),
-            display_name: "File Storage".to_string(),
-            logo_url: None,
-        },
-    ]));
     let broken_like = Arc::new(FakeLinkedIntegrationProvider::with_integrations_error(
         "catalog endpoint returned 500",
     ));
@@ -207,9 +200,11 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
         Arc::new(InMemoryKnowledgeRepository::default()),
         Arc::new(
             StaticKnowledgeProviders::new()
-                .with_provider("nango", nango_like)
-                .with_provider("merge", merge_like)
-                .with_provider("broken", broken_like),
+                .with_provider(moa_knowledge::domain::LinkedProviderKind::Nango, nango_like)
+                .with_provider(
+                    moa_knowledge::domain::LinkedProviderKind::Merge,
+                    broken_like,
+                ),
         ),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
@@ -232,14 +227,13 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
     assert_eq!(
         flattened,
         vec![
-            ("merge".to_string(), "filestorage".to_string()),
             ("nango".to_string(), "google-drive".to_string()),
             ("nango".to_string(), "notion".to_string()),
         ],
         "integrations should be sorted by provider then integration id"
     );
     assert_eq!(
-        all.integrations[1].logo_url.as_deref(),
+        all.integrations[0].logo_url.as_deref(),
         Some("https://logos.example/drive.png")
     );
     assert_eq!(
@@ -247,7 +241,7 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
         1,
         "a failing enabled provider must be reported, not silently dropped"
     );
-    assert_eq!(all.unavailable_providers[0].provider, "broken");
+    assert_eq!(all.unavailable_providers[0].provider, "merge");
     assert!(
         all.unavailable_providers[0]
             .reason
@@ -258,13 +252,13 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
     let filtered = service
         .list_integrations(KnowledgeIntegrationListRequest {
             tenant_id,
-            provider: Some("merge".to_string()),
+            provider: Some("nango".to_string()),
         })
         .await
         .expect("list integrations for one provider");
-    assert_eq!(filtered.integrations.len(), 1);
-    assert_eq!(filtered.integrations[0].provider, "merge");
-    assert_eq!(filtered.integrations[0].id, "filestorage");
+    assert_eq!(filtered.integrations.len(), 2);
+    assert_eq!(filtered.integrations[0].provider, "nango");
+    assert_eq!(filtered.integrations[0].id, "google-drive");
 
     let unknown = service
         .list_integrations(KnowledgeIntegrationListRequest {
@@ -280,7 +274,7 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
     let broken = service
         .list_integrations(KnowledgeIntegrationListRequest {
             tenant_id,
-            provider: Some("broken".to_string()),
+            provider: Some("merge".to_string()),
         })
         .await;
     assert!(
@@ -303,7 +297,10 @@ async fn exchange_stores_merge_credential_only_in_vault() {
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Merge,
+            provider.clone(),
+        )),
         credentials.clone(),
         fake_ingestion_runner(),
         80,
@@ -399,7 +396,10 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let service = KnowledgeService::from_postgres_pool(
         pool.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Merge,
+            provider.clone(),
+        )),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,
@@ -475,7 +475,10 @@ async fn disconnect_connection_revokes_vault_credential_and_deletes_parent() {
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Merge,
+            provider.clone(),
+        )),
         credentials.clone(),
         fake_ingestion_runner(),
         80,
@@ -571,7 +574,10 @@ async fn disconnect_transport_loss_is_unknown_and_replay_never_resends() {
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Merge,
+            provider.clone(),
+        )),
         credentials.clone(),
         fake_ingestion_runner(),
         80,
@@ -633,7 +639,7 @@ async fn disconnect_nango_connection_deletes_parent_without_vault_revocation() {
     let tenant_id = TenantId::from(Uuid::now_v7());
     let caller = test_caller(tenant_id);
     let mut connection = fixture_connection(tenant_id);
-    connection.provider = "nango".to_string();
+    connection.provider = moa_knowledge::domain::LinkedProviderKind::Nango;
     let connection_uid = connection.connection_uid;
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
@@ -643,10 +649,10 @@ async fn disconnect_nango_connection_deletes_parent_without_vault_revocation() {
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(
-            StaticKnowledgeProviders::new()
-                .with_provider("nango", Arc::new(FakeLinkedIntegrationProvider::default())),
-        ),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(
+            moa_knowledge::domain::LinkedProviderKind::Nango,
+            Arc::new(FakeLinkedIntegrationProvider::default()),
+        )),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,

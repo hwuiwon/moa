@@ -33,11 +33,9 @@ moa-memory-vector = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-security = { workspace = true }
 moa-session = { workspace = true }
-moa-test-support = { workspace = true }
 opentelemetry.workspace = true
 regex.workspace = true
 serde.workspace = true
-serde_canonical_json.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
@@ -56,4 +54,5 @@ workspace-hack = { workspace = true }
 # need: the context pipeline now resolves skills through serving pointers, so a
 # draft-only seed is invisible and the scenarios stop measuring what they pin.
 moa-artifacts = { workspace = true, features = ["test-support"] }
+moa-test-support = { workspace = true }
 tempfile.workspace = true

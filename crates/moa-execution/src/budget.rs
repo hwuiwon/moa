@@ -19,6 +19,23 @@ pub struct BudgetLedger {
     pub overrun: bool,
 }
 
+/// Persistence-ready evidence produced by one cumulative budget reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BudgetReconciliation {
+    /// Reservation that remains attached to the logical task.
+    pub remaining_task_reservation: ExecutionEstimate,
+    /// Updated run-level reservation total.
+    pub run_reserved: ExecutionEstimate,
+    /// Updated run-level cumulative consumption.
+    pub run_consumed: ExecutionEstimate,
+    /// Whether this or an earlier transition exceeded a reservation, limit, or counter ceiling.
+    pub budget_overrun: bool,
+    /// Whether this transition released the logical task completely.
+    pub terminal: bool,
+    /// First resource dimension that caused this transition to overrun.
+    pub overrun_dimension: Option<&'static str>,
+}
+
 impl BudgetLedger {
     /// Creates an empty ledger for one approved limit.
     #[must_use]
@@ -57,8 +74,11 @@ impl BudgetLedger {
         actual: &ExecutionUsage,
     ) -> Result<()> {
         let zero = zero_usage();
-        self.reconcile_cumulative(reservation, &zero, actual, true)
-            .map(|_| ())
+        let evidence = self.reconcile_cumulative(reservation, &zero, actual, true)?;
+        if let Some(dimension) = evidence.overrun_dimension {
+            return Err(Error::BudgetOverrun { dimension });
+        }
+        Ok(())
     }
 
     /// Reconciles one cumulative outcome and returns the task's remaining reservation.
@@ -66,17 +86,41 @@ impl BudgetLedger {
     /// Nonterminal outcomes move only the nonnegative cumulative delta from
     /// reserved to consumed resources while retaining the task and its
     /// unconsumed reserve. A terminal outcome releases the complete remaining
-    /// reservation and consumes exactly one logical task.
+    /// reservation and consumes exactly one logical task; a task terminalized
+    /// before reservation may supply an empty reservation.
     pub fn reconcile_cumulative(
         &mut self,
         reservation: ExecutionEstimate,
         previous: &ExecutionUsage,
         cumulative: &ExecutionUsage,
         terminal: bool,
-    ) -> Result<ExecutionEstimate> {
-        if reservation.tasks != 1 {
+    ) -> Result<BudgetReconciliation> {
+        self.reconcile_cumulative_with_ceiling(
+            reservation,
+            previous,
+            cumulative,
+            terminal,
+            u64::MAX,
+        )
+    }
+
+    /// Reconciles cumulative usage while saturating persisted counters at an explicit ceiling.
+    ///
+    /// PostgreSQL-backed repositories pass their integer ceiling and then validate every returned
+    /// value before binding it. Keeping the ceiling in this pure transition avoids a second,
+    /// storage-specific implementation of reservation release and cumulative charging.
+    pub fn reconcile_cumulative_with_ceiling(
+        &mut self,
+        reservation: ExecutionEstimate,
+        previous: &ExecutionUsage,
+        cumulative: &ExecutionUsage,
+        terminal: bool,
+        counter_ceiling: u64,
+    ) -> Result<BudgetReconciliation> {
+        let is_unreserved_terminal = terminal && reservation == ExecutionEstimate::default();
+        if reservation.tasks != 1 && !is_unreserved_terminal {
             return Err(Error::InvalidBudgetLedger {
-                message: "one logical task reconciliation requires a one-task reservation"
+                message: "logical task reconciliation requires a one-task reservation or an unreserved terminal task"
                     .to_string(),
             });
         }
@@ -109,19 +153,30 @@ impl BudgetLedger {
             tasks: self.reserved.tasks - release.tasks,
         };
 
-        let arithmetic_overrun = addition_overrun_dimension(self.consumed, &delta, terminal);
+        let arithmetic_overrun =
+            addition_overrun_dimension(self.consumed, &delta, terminal, counter_ceiling);
         self.consumed = ExecutionEstimate {
-            cost_microusd: self
-                .consumed
-                .cost_microusd
-                .saturating_add(delta.cost_microusd),
-            tokens: self.consumed.tokens.saturating_add(delta.tokens),
-            tool_calls: self.consumed.tool_calls.saturating_add(delta.tool_calls),
-            retrieved_bytes: self
-                .consumed
-                .retrieved_bytes
-                .saturating_add(delta.retrieved_bytes),
-            tasks: self.consumed.tasks.saturating_add(u64::from(terminal)),
+            cost_microusd: saturating_add_to_ceiling(
+                self.consumed.cost_microusd,
+                delta.cost_microusd,
+                counter_ceiling,
+            ),
+            tokens: saturating_add_to_ceiling(self.consumed.tokens, delta.tokens, counter_ceiling),
+            tool_calls: saturating_add_to_ceiling(
+                self.consumed.tool_calls,
+                delta.tool_calls,
+                counter_ceiling,
+            ),
+            retrieved_bytes: saturating_add_to_ceiling(
+                self.consumed.retrieved_bytes,
+                delta.retrieved_bytes,
+                counter_ceiling,
+            ),
+            tasks: saturating_add_to_ceiling(
+                self.consumed.tasks,
+                u64::from(terminal),
+                counter_ceiling,
+            ),
         };
 
         let remaining = if terminal {
@@ -143,11 +198,17 @@ impl BudgetLedger {
         let overrun_dimension = actual_overrun
             .or(arithmetic_overrun)
             .or_else(|| limit_overrun_dimension(self.consumed, self.reserved, &self.limit));
-        if let Some(dimension) = overrun_dimension {
+        if overrun_dimension.is_some() {
             self.overrun = true;
-            return Err(Error::BudgetOverrun { dimension });
         }
-        Ok(remaining)
+        Ok(BudgetReconciliation {
+            remaining_task_reservation: remaining,
+            run_reserved: self.reserved,
+            run_consumed: self.consumed,
+            budget_overrun: self.overrun,
+            terminal,
+            overrun_dimension,
+        })
     }
 
     /// Returns the unconsumed and unreserved resource limit.
@@ -295,28 +356,39 @@ fn addition_overrun_dimension(
     consumed: ExecutionEstimate,
     actual: &ExecutionUsage,
     terminal: bool,
+    counter_ceiling: u64,
 ) -> Option<&'static str> {
-    if consumed
-        .cost_microusd
-        .checked_add(actual.cost_microusd)
-        .is_none()
-    {
+    if exceeds_counter_ceiling(
+        consumed.cost_microusd,
+        actual.cost_microusd,
+        counter_ceiling,
+    ) {
         Some("cost_microusd")
-    } else if consumed.tokens.checked_add(actual.tokens).is_none() {
+    } else if exceeds_counter_ceiling(consumed.tokens, actual.tokens, counter_ceiling) {
         Some("tokens")
-    } else if consumed.tool_calls.checked_add(actual.tool_calls).is_none() {
+    } else if exceeds_counter_ceiling(consumed.tool_calls, actual.tool_calls, counter_ceiling) {
         Some("tool_calls")
-    } else if consumed
-        .retrieved_bytes
-        .checked_add(actual.retrieved_bytes)
-        .is_none()
-    {
+    } else if exceeds_counter_ceiling(
+        consumed.retrieved_bytes,
+        actual.retrieved_bytes,
+        counter_ceiling,
+    ) {
         Some("retrieved_bytes")
-    } else if terminal && consumed.tasks == u64::MAX {
+    } else if terminal && exceeds_counter_ceiling(consumed.tasks, 1, counter_ceiling) {
         Some("tasks")
     } else {
         None
     }
+}
+
+fn saturating_add_to_ceiling(left: u64, right: u64, ceiling: u64) -> u64 {
+    u128::from(left)
+        .saturating_add(u128::from(right))
+        .min(u128::from(ceiling)) as u64
+}
+
+fn exceeds_counter_ceiling(left: u64, right: u64, ceiling: u64) -> bool {
+    u128::from(left) + u128::from(right) > u128::from(ceiling)
 }
 
 fn limit_overrun_dimension(

@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use jsonschema::{Draft, Retrieve, Uri};
-use moa_artifacts::connector::{RuntimeConnectorKindV1, RuntimeOperationBindingV1};
+use moa_artifacts::connector::HttpOperationContract;
+use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::traits::Identity;
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId, ToolCallId};
 use moa_core::types::security::ToolOutputAssessment;
 use serde::{Deserialize, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +21,8 @@ use crate::domain::{
     InstalledActionBindingId, OperationContractHash,
 };
 use crate::repository::{
-    ConnectionRepository, InvocationReservation, InvocationReservationRequest,
+    ConnectionLifecycleRepository, ConnectorInvocationRepository, InvocationReservation,
+    InvocationReservationRequest, PinnedConnectorAction,
 };
 use crate::{Error, Result};
 
@@ -61,6 +62,32 @@ impl From<&InstalledConnectorAction> for InstalledConnectorActionPin {
             action_id: action.binding().action_id.clone(),
             contract_hash: action.binding().contract_hash,
             governed_contract_revision: action.binding().governed_contract_revision.clone(),
+        }
+    }
+}
+
+/// Opaque, ephemeral catalog admission carried unchanged into runtime dispatch.
+///
+/// Only the governed installed catalog can construct this value. It binds the
+/// exact authorized caller to the connection and compiled binding loaded in the
+/// catalog's single protected read; it is never serialized or persisted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedConnectorAction {
+    pub(crate) caller: Identity,
+    pub(crate) connection: ConnectorConnection,
+    pub(crate) binding: InstalledActionBinding,
+}
+
+impl PreparedConnectorAction {
+    pub(crate) fn new(
+        caller: Identity,
+        connection: ConnectorConnection,
+        binding: InstalledActionBinding,
+    ) -> Self {
+        Self {
+            caller,
+            connection,
+            binding,
         }
     }
 }
@@ -116,59 +143,50 @@ impl fmt::Debug for ConnectorActionInvocation {
 /// from a model-facing tool name.
 #[derive(Clone)]
 pub struct ConnectorInvocationCoordinator {
-    catalog: Arc<dyn crate::catalog::InstalledConnectorCatalog>,
-    repository: Arc<dyn ConnectionRepository>,
+    lifecycle: Arc<dyn ConnectionLifecycleRepository>,
+    invocations: Arc<dyn ConnectorInvocationRepository>,
 }
 
 impl ConnectorInvocationCoordinator {
-    /// Composes the governed installed-action catalog with its durable ledger.
+    /// Composes the prepared-action verifier with its durable ledger.
     #[must_use]
     pub fn new(
-        catalog: Arc<dyn crate::catalog::InstalledConnectorCatalog>,
-        repository: Arc<dyn ConnectionRepository>,
+        lifecycle: Arc<dyn ConnectionLifecycleRepository>,
+        invocations: Arc<dyn ConnectorInvocationRepository>,
     ) -> Self {
         Self {
-            catalog,
-            repository,
+            lifecycle,
+            invocations,
         }
     }
 
-    /// Authorizes one exact installed action and reloads all durable pins.
+    /// Authorizes one exact installed action from its catalog-prepared pins.
     ///
     /// No connection or binding is read before the governed catalog has
     /// required delegated `connector_connection#use` authorization.
     pub async fn authorize(
         &self,
         invocation: ConnectorActionInvocation,
+        prepared: PreparedConnectorAction,
     ) -> Result<AuthorizedConnectorInvocation> {
-        let snapshot = self
-            .catalog
-            .snapshot(crate::catalog::InstalledConnectorCatalogQuery::new(
-                invocation.caller.clone(),
-                [invocation.action.connection_id],
-            ))
-            .await?;
-        let catalog_action = snapshot
-            .actions()
-            .iter()
-            .find(|candidate| {
-                candidate.connection_id() == invocation.action.connection_id
-                    && candidate.binding().binding_id == invocation.action.binding_id
-                    && candidate.binding().action_id == invocation.action.action_id
-            })
-            .ok_or(Error::ActionPinMismatch { field: "catalog" })?;
-        validate_catalog_pin(&invocation.action, catalog_action)?;
-
-        let (connection, binding) = self.reload_pinned_state(&invocation).await?;
+        if prepared.caller != invocation.caller {
+            return Err(Error::AuthorizationDenied);
+        }
+        validate_pinned_state(&invocation.action, &prepared.connection, &prepared.binding)?;
         validate_connector_schema(
-            &binding.compiled_contract.operation.policy().input_schema,
+            &prepared
+                .binding
+                .compiled_contract
+                .operation
+                .policy
+                .input_schema,
             &invocation.input,
             "input",
         )?;
         Ok(AuthorizedConnectorInvocation {
             invocation,
-            connection,
-            binding,
+            connection: prepared.connection,
+            binding: prepared.binding,
         })
     }
 
@@ -178,20 +196,6 @@ impl ConnectorInvocationCoordinator {
     /// this method does not reserve again or create a second send opportunity.
     pub async fn recheck(&self, reserved: &ReservedConnectorInvocation) -> Result<()> {
         self.reload_pinned_state(&reserved.authorized.invocation)
-            .await
-            .map(|_| ())
-    }
-
-    /// Reloads exact durable state for a fresh authorized protocol leg.
-    ///
-    /// This is used after that leg resolves credential material. It does not
-    /// create ledger authority; callers discard the auxiliary authorized
-    /// carrier after the recheck and use only the original transmitting state.
-    pub async fn recheck_authorized(
-        &self,
-        authorized: &AuthorizedConnectorInvocation,
-    ) -> Result<()> {
-        self.reload_pinned_state(&authorized.invocation)
             .await
             .map(|_| ())
     }
@@ -216,13 +220,11 @@ impl ConnectorInvocationCoordinator {
             action: &invocation.action,
             input: &invocation.input,
         };
-        let mut serializer =
-            serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-        payload.serialize(&mut serializer)?;
+        let canonical = canonical_json_bytes(&payload)?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(REQUEST_HASH_DOMAIN.as_bytes());
         hasher.update(&[0]);
-        hasher.update(&serializer.into_inner());
+        hasher.update(&canonical);
         Ok(OperationContractHash::from_bytes(
             *hasher.finalize().as_bytes(),
         ))
@@ -248,13 +250,13 @@ impl ConnectorInvocationCoordinator {
             request_hash,
             upstream_idempotency_key,
         };
-        match self.repository.reserve_invocation(request.clone()).await? {
+        match self.invocations.reserve_invocation(request.clone()).await? {
             InvocationReservation::Reserved(record) => {
                 validate_reserved_record(&request, &record)?;
                 Ok(ReservedConnectorInvocation {
                     authorized,
                     record,
-                    repository: Arc::clone(&self.repository),
+                    repository: Arc::clone(&self.invocations),
                 })
             }
             InvocationReservation::Replay(record) | InvocationReservation::InFlight(record) => {
@@ -269,22 +271,20 @@ impl ConnectorInvocationCoordinator {
         &self,
         invocation: &ConnectorActionInvocation,
     ) -> Result<(ConnectorConnection, InstalledActionBinding)> {
-        let connection = self
-            .repository
-            .load(invocation.tenant_id(), invocation.action.connection_id)
-            .await?
-            .ok_or(Error::ActionPinMismatch {
-                field: "connection",
-            })?;
-        let binding = self
-            .repository
-            .load_binding(
+        let PinnedConnectorAction {
+            connection,
+            binding,
+        } = self
+            .lifecycle
+            .load_pinned_action(
                 invocation.tenant_id(),
                 invocation.action.connection_id,
                 invocation.action.binding_id,
             )
             .await?
-            .ok_or(Error::ActionPinMismatch { field: "binding" })?;
+            .ok_or(Error::ActionPinMismatch {
+                field: "pinned_action",
+            })?;
         validate_pinned_state(&invocation.action, &connection, &binding)?;
         Ok((connection, binding))
     }
@@ -319,15 +319,9 @@ impl AuthorizedConnectorInvocation {
         &self.binding
     }
 
-    /// Returns the typed compiled runtime selected by the governed catalog.
+    /// Returns the compiled constrained-HTTP operation selected by the governed catalog.
     #[must_use]
-    pub const fn runtime(&self) -> &RuntimeConnectorKindV1 {
-        &self.binding.compiled_contract.runtime
-    }
-
-    /// Returns the typed compiled operation selected by the governed catalog.
-    #[must_use]
-    pub const fn operation(&self) -> &RuntimeOperationBindingV1 {
+    pub const fn operation(&self) -> &HttpOperationContract {
         &self.binding.compiled_contract.operation
     }
 }
@@ -351,7 +345,7 @@ impl fmt::Debug for AuthorizedConnectorInvocation {
 pub struct ReservedConnectorInvocation {
     authorized: AuthorizedConnectorInvocation,
     record: crate::domain::ConnectorInvocationRecord,
-    repository: Arc<dyn ConnectionRepository>,
+    repository: Arc<dyn ConnectorInvocationRepository>,
 }
 
 impl ReservedConnectorInvocation {
@@ -414,7 +408,7 @@ impl fmt::Debug for ReservedConnectorInvocation {
 pub struct TransmittingConnectorInvocation {
     authorized: AuthorizedConnectorInvocation,
     record: crate::domain::ConnectorInvocationRecord,
-    repository: Arc<dyn ConnectionRepository>,
+    repository: Arc<dyn ConnectorInvocationRepository>,
 }
 
 impl TransmittingConnectorInvocation {
@@ -426,7 +420,7 @@ impl TransmittingConnectorInvocation {
                 .binding
                 .compiled_contract
                 .operation
-                .policy()
+                .policy
                 .output_schema,
             output,
             "output",
@@ -490,18 +484,6 @@ impl fmt::Debug for TransmittingConnectorInvocation {
             .field("authorized", &self.authorized)
             .finish_non_exhaustive()
     }
-}
-
-fn validate_catalog_pin(
-    expected: &InstalledConnectorActionPin,
-    actual: &InstalledConnectorAction,
-) -> Result<()> {
-    if actual.definition() != &expected.definition {
-        return Err(Error::ActionPinMismatch {
-            field: "definition",
-        });
-    }
-    validate_binding_pin(expected, actual.binding())
 }
 
 fn validate_pinned_state(
@@ -767,13 +749,13 @@ impl fmt::Debug for ConnectorInvocationCompletionTicket {
 /// Repository-backed post-journal completion boundary for connector output.
 #[derive(Clone)]
 pub struct ConnectorInvocationCompletionService {
-    repository: std::sync::Arc<dyn ConnectionRepository>,
+    repository: std::sync::Arc<dyn ConnectorInvocationRepository>,
 }
 
 impl ConnectorInvocationCompletionService {
     /// Creates the completion boundary over the authoritative invocation ledger.
     #[must_use]
-    pub fn new(repository: std::sync::Arc<dyn ConnectionRepository>) -> Self {
+    pub fn new(repository: std::sync::Arc<dyn ConnectorInvocationRepository>) -> Self {
         Self { repository }
     }
 
@@ -866,5 +848,6 @@ pub trait ConnectorActionRuntime: Send + Sync {
     async fn invoke(
         &self,
         invocation: ConnectorActionInvocation,
+        prepared: PreparedConnectorAction,
     ) -> Result<RawConnectorActionResult>;
 }

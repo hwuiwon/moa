@@ -4,8 +4,8 @@
 //! deterministically — sending each user message only after the previous
 //! message has fully resolved — and then returns the full durable event log so
 //! tests can inspect what actually happened. The driver reuses [`TestApiClient`]
-//! and the existing `Session/start_turn`, `Session/queue_message`,
-//! `Session/status`, and `Session/progress` handlers rather than reimplementing
+//! and the existing `Session/start_turn`, `Session/status`, and
+//! `Session/progress` handlers rather than reimplementing
 //! HTTP.
 //!
 //! Settling follows the current lifecycle plus the active turn, pending message,
@@ -16,9 +16,7 @@
 use super::*;
 use moa_core::types::contact::ClientMessageId;
 use moa_core::types::worker::state::{WorkerProgressSummary, WorkerState};
-use moa_wire::turn::{
-    QueueMessageRequest, QueueMessageResponse, SessionProgress, SessionProgressRequest,
-};
+use moa_wire::turn::{SessionProgress, SessionProgressRequest};
 
 /// `Session/progress` clamps every response to `MAX_SESSION_PROGRESS_EVENT_LIMIT`
 /// events, so [`fetch_all_events`] pages forward by sequence number using this
@@ -46,11 +44,9 @@ impl Default for ConversationOptions {
 /// Drives `session_id` through `turns` one user message at a time and returns
 /// the complete durable event log once every turn has settled.
 ///
-/// Turn `0` is delivered through `Session/start_turn`; every later turn is
-/// delivered through `Session/queue_message`. Because the driver blocks until
-/// the session has no active work between messages, each queued message starts a
-/// fresh turn immediately instead of waiting behind an active one, keeping the
-/// resulting event log deterministic.
+/// Every turn is delivered through `Session/start_turn`. Because the driver
+/// blocks until the session has no active work between messages, each message
+/// starts a fresh turn immediately, keeping the resulting event log deterministic.
 pub async fn drive_conversation(
     client: &TestApiClient,
     session_id: SessionId,
@@ -58,11 +54,7 @@ pub async fn drive_conversation(
     opts: ConversationOptions,
 ) -> Result<Vec<EventRecord>> {
     for (index, message) in turns.iter().enumerate() {
-        if index == 0 {
-            start_first_turn(client, session_id, message, index as u64).await?;
-        } else {
-            queue_followup_turn(client, session_id, message, index as u64).await?;
-        }
+        start_turn(client, session_id, message, index as u64).await?;
         await_conversation_settled(client, session_id, &opts)
             .await
             .with_context(|| format!("await settled session after conversation turn {index}"))?;
@@ -104,11 +96,11 @@ async fn fetch_all_events(
     Ok(events)
 }
 
-/// Starts the first conversation turn on an idle session.
+/// Starts one conversation turn on an idle session.
 ///
 /// `start_turn` on a `Created` session begins a turn immediately and commits
 /// [`SessionStatus::Running`] before returning.
-async fn start_first_turn(
+async fn start_turn(
     client: &TestApiClient,
     session_id: SessionId,
     message: &str,
@@ -119,34 +111,10 @@ async fn start_first_turn(
         .session(session_id.to_string())
         .start_turn(request, None)
         .await
-        .context("start first conversation turn")?;
+        .context("start conversation turn")?;
     response
         .turn_id
         .context("start_turn on an idle session should begin a turn immediately")?;
-    Ok(())
-}
-
-/// Queues a follow-up message on a settled session, which starts a fresh turn.
-///
-/// The driver only calls this once the prior message has no active work, so
-/// `Session/queue_message` starts the turn immediately rather than enqueueing it.
-async fn queue_followup_turn(
-    client: &TestApiClient,
-    session_id: SessionId,
-    message: &str,
-    ordinal: u64,
-) -> Result<()> {
-    let response: QueueMessageResponse = client
-        .post_call(
-            &format!("/Session/{session_id}/queue_message"),
-            &queue_message_request(message, session_id, ordinal)?,
-        )
-        .await
-        .context("queue follow-up conversation turn")?;
-    response.started_turn_id.context(
-        "queue_message on a settled session should start a turn immediately; \
-         the driver waits for the session to settle between messages",
-    )?;
     Ok(())
 }
 
@@ -248,26 +216,6 @@ fn start_turn_request(
     ordinal: u64,
 ) -> Result<StartTurnRequest> {
     Ok(StartTurnRequest {
-        client_message_id: conversation_message_id(session_id, ordinal)?,
-        reply_to: None,
-        stream_cursor: None,
-        user_message: message.to_string(),
-        attachments: Vec::new(),
-        model: None,
-        contact: None,
-        max_turns: None,
-        resource_budget: Default::default(),
-        execution_template: None,
-    })
-}
-
-/// Builds a minimal `Session/queue_message` request carrying only the user text.
-fn queue_message_request(
-    message: &str,
-    session_id: SessionId,
-    ordinal: u64,
-) -> Result<QueueMessageRequest> {
-    Ok(QueueMessageRequest {
         client_message_id: conversation_message_id(session_id, ordinal)?,
         reply_to: None,
         stream_cursor: None,

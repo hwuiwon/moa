@@ -15,6 +15,3 @@ these implementations in place of the local providers.
   refreshing on unknown `kid`s.
 - `ciba.rs` — `Auth0AsyncAuthzProvider`: Client-Initiated Backchannel
   Authentication for human approvals.
-- `vault.rs` — `Auth0TokenVaultProvider` for third-party user tokens; MOA
-  stores only linkage metadata in `linked_connections`, token material stays
-  in Auth0.

@@ -2,12 +2,8 @@
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
-use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
-use moa_artifacts::simulation::{
-    ExperimentTargetKind, MAX_PLAN_TRIAL_COST_CENTS, MAX_PLAN_TRIAL_TOKENS,
-    experiment_plan_response_schema,
-};
+use moa_artifacts::simulation::{ExperimentTargetKind, experiment_plan_response_schema};
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::traits::Identity;
 use moa_core::{
@@ -42,18 +38,15 @@ use moa_wire::experiments::{
     ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
     ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::eligibility::{
     ScorecardAssessment, ScorecardEligibility, ScorecardExpectation, ScorecardFinding,
-    ScorecardGroupRollup, ScorecardSupportSummary, assess_trial_scorecard,
-    require_runnable_scorecard, roll_up_group,
+    ScorecardGroupRollup, ScorecardSupportSummary, assess_trial_scorecard, roll_up_group,
 };
 use crate::evidence::TrialScoreTarget;
 use crate::model::{
@@ -109,12 +102,8 @@ pub struct AdmittedExperimentRun {
     pub response: ExperimentRunResponse,
     /// Stable run identifier used as the parent workflow key.
     pub run_uid: Uuid,
-    /// Serialized target payload for the run workflow.
-    pub target: Value,
-    /// Serialized variant payload for the run workflow.
-    pub variant: Value,
-    /// Published plan revision used by plan-backed runs.
-    pub plan_revision_uid: Option<Uuid>,
+    /// Target projected from the immutable plan for authorization checks.
+    pub target: ExperimentTarget,
     /// Identity that admitted the run, propagated into workflow execution.
     pub identity: Identity,
     /// Score run identifier used for analytics joins.
@@ -252,21 +241,16 @@ pub async fn admit_run(
 ) -> Result<AdmittedExperimentRun> {
     let scope = tenant_scope(request.tenant_id);
     let release_evaluation = request.release_evaluation.clone();
-    let run_inputs = match request.plan_revision_uid {
-        Some(plan_revision_uid) => {
-            plan_run_inputs(
-                pool.clone(),
-                request.tenant_id,
-                &scope,
-                plan_revision_uid,
-                &request.name,
-                &request.agent_revision_variants,
-                release_evaluation.as_ref(),
-            )
-            .await?
-        }
-        None => single_target_run_inputs(request.target, request.variant, request.scorecard)?,
-    };
+    let run_inputs = plan_run_inputs(
+        pool.clone(),
+        request.tenant_id,
+        &scope,
+        request.plan_revision_uid,
+        &request.name,
+        &request.agent_revision_variants,
+        release_evaluation.as_ref(),
+    )
+    .await?;
     let score_run_id = request.score_run_id.unwrap_or_else(Uuid::now_v7);
     let run = ExperimentStore::new(pool)
         .insert_run(
@@ -295,9 +279,7 @@ pub async fn admit_run(
     Ok(AdmittedExperimentRun {
         response: run_response_from_record(request.tenant_id, &run),
         run_uid: run.run_uid,
-        target: serialized_payload("target", &run.target)?,
-        variant: serialized_payload("variant", &run.variant)?,
-        plan_revision_uid: run_inputs.plan_revision_uid,
+        target: run.target.clone(),
         identity,
         score_run_id: run.score_run_id,
         agent_revision_variants: request.agent_revision_variants,
@@ -769,11 +751,10 @@ struct ExperimentRunInputs {
     variant: ExperimentVariant,
     scorecard: ExperimentScorecard,
     artifact_revision_uids: Vec<Uuid>,
-    plan_revision_uid: Option<Uuid>,
-    plan_artifact_uid: Option<Uuid>,
+    plan_artifact_uid: Uuid,
     expected_trials: u64,
     resource_envelope: ExperimentResourceEnvelope,
-    simulator_policy: Option<crate::simulator_policy::registry::ResolvedSimulatorPolicy>,
+    simulator_policy: crate::simulator_policy::registry::ResolvedSimulatorPolicy,
 }
 
 /// Longest a behavior-lab run may stay live before its envelope expires.
@@ -794,9 +775,6 @@ const EXPERIMENT_MODEL_CALLS_PER_TURN: u64 = 6;
 /// A target turn can fan out into tool and sandbox work; this is the ceiling one
 /// turn is allowed to reserve against, not an expectation.
 const EXPERIMENT_TOOL_CALLS_PER_TURN: u64 = 16;
-
-/// Turns a run without a plan is allowed to reserve for.
-const EXPERIMENT_DIRECT_RUN_TURNS: u64 = 16;
 
 /// Derives the durable envelope a plan-backed run executes inside.
 ///
@@ -867,107 +845,6 @@ fn plan_resource_envelope(
     ))
 }
 
-/// Derives the envelope for a run admitted without a plan.
-///
-/// A direct run is one target with no declared budget of its own, so it inherits
-/// the platform's per-trial ceilings. That is deliberately the smaller envelope:
-/// an unbudgeted run should be the cheapest thing the platform will run, not the
-/// most expensive.
-fn direct_resource_envelope(now: chrono::DateTime<Utc>) -> ExperimentResourceEnvelope {
-    let limits = ResourceAmounts {
-        cost_micro_usd: u64::from(MAX_PLAN_TRIAL_COST_CENTS).saturating_mul(MICRO_USD_PER_CENT),
-        tokens: u64::from(MAX_PLAN_TRIAL_TOKENS),
-        turns: EXPERIMENT_DIRECT_RUN_TURNS,
-        model_calls: EXPERIMENT_DIRECT_RUN_TURNS.saturating_mul(EXPERIMENT_MODEL_CALLS_PER_TURN),
-        tool_calls: EXPERIMENT_DIRECT_RUN_TURNS.saturating_mul(EXPERIMENT_TOOL_CALLS_PER_TURN),
-    };
-    ExperimentResourceEnvelope::new(
-        limits,
-        limits,
-        now + chrono::Duration::hours(EXPERIMENT_RUN_DEADLINE_HOURS),
-    )
-}
-
-fn single_target_run_inputs(
-    target: Option<Value>,
-    variant: Option<Value>,
-    scorecard: Option<ExperimentScorecard>,
-) -> Result<ExperimentRunInputs> {
-    let target = parse_payload::<ExperimentTarget>(
-        "target",
-        target.ok_or_else(|| bad_request("experiment target is required without a plan"))?,
-    )?;
-    let variant = parse_payload::<ExperimentVariant>(
-        "variant",
-        variant.ok_or_else(|| bad_request("experiment variant is required without a plan"))?,
-    )?;
-    let scorecard =
-        scorecard.ok_or_else(|| bad_request("experiment scorecard is required without a plan"))?;
-    require_runnable_scorecard(&scorecard).map_err(|error| {
-        bad_request(format!(
-            "experiment scorecard is not runnable in this build: {error}"
-        ))
-    })?;
-    let mut artifact_revision_uids = variant.artifact_revision_uids.clone();
-    validate_target_variant(&target, &variant, &mut artifact_revision_uids)?;
-    Ok(ExperimentRunInputs {
-        artifact_revision_uids,
-        target,
-        variant,
-        scorecard,
-        plan_revision_uid: None,
-        plan_artifact_uid: None,
-        // A direct run drives exactly one target and mints no trial rows, so it
-        // adds a run slot and no trial load.
-        expected_trials: 0,
-        resource_envelope: direct_resource_envelope(Utc::now()),
-        simulator_policy: None,
-    })
-}
-
-fn validate_target_variant(
-    target: &ExperimentTarget,
-    variant: &ExperimentVariant,
-    artifact_revision_uids: &mut Vec<Uuid>,
-) -> Result<()> {
-    match target {
-        ExperimentTarget::AgentLoop { .. } => {
-            if variant.execution_template.is_some() {
-                return Err(bad_request(
-                    "agent-loop experiment variants cannot pin an execution template",
-                ));
-            }
-        }
-        ExperimentTarget::ExecutionTemplate {
-            template,
-            objective,
-            ..
-        } => {
-            if objective.trim().is_empty() {
-                return Err(bad_request(
-                    "execution-template experiment objective must not be empty",
-                ));
-            }
-            let parsed = ArtifactRef::from_str(&template.skill_ref).map_err(bad_request_from)?;
-            let canonical = parsed.canonical_string().map_err(bad_request_from)?;
-            if canonical != template.skill_ref {
-                return Err(bad_request(
-                    "execution-template experiment skill_ref must be canonical",
-                ));
-            }
-            if variant.execution_template.as_ref() != Some(template) {
-                return Err(bad_request(
-                    "execution-template target and variant must pin the same exact revision",
-                ));
-            }
-            artifact_revision_uids.push(template.revision_uid);
-            artifact_revision_uids.sort_unstable();
-            artifact_revision_uids.dedup();
-        }
-    }
-    Ok(())
-}
-
 async fn plan_run_inputs(
     pool: sqlx::PgPool,
     tenant_id: TenantId,
@@ -1018,11 +895,10 @@ async fn plan_run_inputs(
         variant: projection.variant,
         scorecard: projection.scorecard,
         artifact_revision_uids: projection.artifact_revision_uids,
-        plan_revision_uid: Some(projection.plan_revision_uid),
-        plan_artifact_uid: Some(plan.artifact_uid),
+        plan_artifact_uid: plan.artifact_uid,
         expected_trials: u64::from(shape.total_trials),
         resource_envelope,
-        simulator_policy: Some(simulator_policy),
+        simulator_policy,
     })
 }
 
@@ -1194,7 +1070,7 @@ async fn require_proposal_enabled_plan(
     run: &ExperimentRunRecord,
 ) -> Result<Uuid> {
     let registry = ArtifactRegistry::new(pool);
-    let plan_revision_uid = experiment_plan_revision_uid(&registry, scope, run).await?;
+    let plan_revision_uid = experiment_plan_revision_uid(run)?;
     let plan = registry
         .load_revision(scope, plan_revision_uid)
         .await?
@@ -1216,41 +1092,24 @@ async fn require_proposal_enabled_plan(
     Ok(plan_revision_uid)
 }
 
-async fn experiment_plan_revision_uid(
-    registry: &ArtifactRegistry,
-    scope: &ActionRuleScope,
-    run: &ExperimentRunRecord,
-) -> Result<Uuid> {
-    if let Some(plan_revision_uid) = run
+fn experiment_plan_revision_uid(run: &ExperimentRunRecord) -> Result<Uuid> {
+    let value = run
         .variant
         .metadata
         .get("plan_revision_uid")
         .and_then(Value::as_str)
-        .map(|value| {
-            Uuid::parse_str(value).map_err(|error| {
-                bad_request(format!(
-                    "experiment run {} has invalid plan_revision_uid metadata: {error}",
-                    run.run_uid
-                ))
-            })
-        })
-        .transpose()?
-    {
-        return Ok(plan_revision_uid);
-    }
-
-    for revision_uid in &run.artifact_revision_uids {
-        let Some(revision) = registry.load_revision(scope, *revision_uid).await? else {
-            continue;
-        };
-        if revision.kind == ArtifactKind::ExperimentPlan {
-            return Ok(*revision_uid);
-        }
-    }
-
-    Err(bad_request(
-        "experiment learning proposals require a proposal-enabled experiment plan revision",
-    ))
+        .ok_or_else(|| {
+            bad_request(format!(
+                "experiment run {} is missing its immutable plan_revision_uid metadata",
+                run.run_uid
+            ))
+        })?;
+    Uuid::parse_str(value).map_err(|error| {
+        bad_request(format!(
+            "experiment run {} has invalid plan_revision_uid metadata: {error}",
+            run.run_uid
+        ))
+    })
 }
 
 /// One trial's scorecard assessment with the plan coordinates that group it.
@@ -1673,14 +1532,6 @@ fn generated_plan_validation_error(message: &str, report: &ValidationReport) -> 
     bad_request(format!("{message}: {report}"))
 }
 
-fn parse_payload<T>(field: &'static str, value: Value) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_value(value)
-        .map_err(|error| bad_request(format!("invalid experiment {field}: {error}")))
-}
-
 fn serialized_payload<T>(field: &'static str, value: &T) -> Result<Value>
 where
     T: Serialize,
@@ -1893,22 +1744,6 @@ mod tests {
     use crate::model::{ExperimentSimulatorConfig, ExperimentTrialStopReason};
 
     #[test]
-    fn direct_envelope_prices_every_bounded_model_stage_offline() {
-        // Pins: a direct target reserves enough model-call capacity for the same
-        // bounded pipeline as a simulated turn, rather than only the visible answer.
-        let envelope = direct_resource_envelope(
-            Utc.timestamp_opt(1_700_000_000, 0)
-                .single()
-                .expect("fixed timestamp"),
-        );
-        assert_eq!(
-            envelope.run_limits.model_calls,
-            EXPERIMENT_DIRECT_RUN_TURNS.saturating_mul(EXPERIMENT_MODEL_CALLS_PER_TURN)
-        );
-        assert_eq!(EXPERIMENT_MODEL_CALLS_PER_TURN, 6);
-    }
-
-    #[test]
     fn plan_generation_request_keeps_description_out_of_system_prompt() {
         // Pins: behavior-lab generation keeps reusable artifact rules cacheable.
         let request = ExperimentGeneratePlanRequest {
@@ -1976,40 +1811,6 @@ mod tests {
                 .contains("must include at least one goal")
         );
         assert!(completion.response_format.is_some());
-    }
-
-    #[test]
-    fn direct_execution_template_target_rejects_blank_objective() {
-        // Pins: direct behavior-lab admission cannot bypass the explicit-objective contract.
-        let template = moa_core::types::execution_planning::PinnedExecutionTemplateRef {
-            skill_ref: "skill://damaged-food-order".to_string(),
-            revision_uid: fixture_uuid(77),
-        };
-        let target = ExperimentTarget::ExecutionTemplate {
-            template: template.clone(),
-            objective: " \t\n".to_string(),
-            input: json!({"order_id": "order-123"}),
-            session_id: None,
-            idempotency_key: None,
-        };
-        let variant = ExperimentVariant {
-            name: "template".to_string(),
-            model: None,
-            artifact_revision_uids: vec![template.revision_uid],
-            skill_refs: Vec::new(),
-            execution_template: Some(template),
-            metadata: json!({}),
-        };
-        let mut artifact_revision_uids = Vec::new();
-
-        let error = validate_target_variant(&target, &variant, &mut artifact_revision_uids)
-            .expect_err("blank execution-template objective should reject direct admission");
-
-        assert!(matches!(
-            error,
-            ExperimentAppError::BadRequest(message)
-                if message == "execution-template experiment objective must not be empty"
-        ));
     }
 
     #[test]
@@ -2253,19 +2054,29 @@ mod tests {
         );
     }
 
-    /// Envelope for record fixtures, derived through the production helper so a
-    /// fixture cannot drift into a ceiling the platform would never admit.
+    /// Bounded envelope for completed-record fixtures that do not run admission.
     fn fixture_resource_envelope() -> ExperimentResourceEnvelope {
-        direct_resource_envelope(moa_test_support::fixtures::pg_now())
+        let limits = ResourceAmounts {
+            cost_micro_usd: 1_000_000,
+            tokens: 10_000,
+            turns: 16,
+            model_calls: 96,
+            tool_calls: 256,
+        };
+        ExperimentResourceEnvelope::new(
+            limits,
+            limits,
+            moa_test_support::fixtures::pg_now() + chrono::Duration::hours(1),
+        )
     }
 
     fn completed_run_record(tenant_id: TenantId) -> ExperimentRunRecord {
         ExperimentRunRecord {
             scope: ActionRuleScope::Tenant { tenant_id },
-            plan_artifact_uid: None,
-            expected_trials: 0,
+            plan_artifact_uid: fixture_uuid(19),
+            expected_trials: 1,
             resource_envelope: fixture_resource_envelope(),
-            simulator_policy: None,
+            simulator_policy: crate::simulator_policy::test_support::resolved_policy(),
             run_uid: fixture_uuid(1),
             name: "support escalation comparison".to_string(),
             target_kind: ExperimentTargetKind::AgentLoop,

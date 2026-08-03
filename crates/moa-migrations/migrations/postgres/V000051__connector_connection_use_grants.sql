@@ -198,7 +198,7 @@ VALUES
      'connector_connection_use_grants', 'tenant_id', 'delete');
 
 COMMENT ON TABLE moa.tenant_purge_catalog IS
-    'Closed 133-table tenant-offboarding residue surface. The two nullable-scope simulator certification authority tables are intentionally global and absent.';
+    'Closed 131-table tenant-offboarding residue surface. The two nullable-scope simulator certification authority tables are intentionally global and absent.';
 
 CREATE TRIGGER moa_tenant_purge_fence_insert
 AFTER INSERT ON moa.connector_connection_use_grants
@@ -218,14 +218,14 @@ DECLARE
 BEGIN
     SELECT pg_get_functiondef('moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE)
     INTO predecessor;
-    IF predecessor NOT LIKE '%catalog_count <> 132%'
-       OR predecessor NOT LIKE '%exactly 132 tables%'
+    IF predecessor NOT LIKE '%catalog_count <> 130%'
+       OR predecessor NOT LIKE '%exactly 130 tables%'
     THEN
         RAISE EXCEPTION 'unexpected V50 tenant purge function definition'
             USING ERRCODE = '55000';
     END IF;
-    replacement := replace(predecessor, 'catalog_count <> 132', 'catalog_count <> 133');
-    replacement := replace(replacement, 'exactly 132 tables', 'exactly 133 tables');
+    replacement := replace(predecessor, 'catalog_count <> 130', 'catalog_count <> 131');
+    replacement := replace(replacement, 'exactly 130 tables', 'exactly 131 tables');
     EXECUTE replacement;
 END
 $connector_use_grant_purge$;

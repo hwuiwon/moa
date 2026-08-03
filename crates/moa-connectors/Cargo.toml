@@ -18,7 +18,6 @@ moa-db.workspace = true
 moa-security.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-serde_canonical_json.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["chrono", "json", "uuid"] }
 thiserror.workspace = true

@@ -24,8 +24,8 @@ use moa_core::{
     types::completion::ToolInvocation, types::identifiers::ToolCallId,
     types::model::ModelCapabilities,
 };
+use moa_eval::fixture_ids::tenant_id_from_storage_partition;
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
-use moa_eval::memory_eval::tenant_id_from_storage_partition;
 use moa_eval_core::{
     ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EngineOptions,
     LongConversationMode, LongSessionInterleaving, LongTestCase, SecondaryLongSession, TestCase,

@@ -33,7 +33,6 @@ Trusted headers:
 |---|---|---|
 | Identity | Local API keys | Auth0 or generic OIDC |
 | Authorization | Self-hosted OpenFGA | Auth0 FGA-compatible engine later |
-| Token vault | `NullTokenVaultProvider` | Auth0 Token Vault |
 | Async approvals | Builtin approvals | Auth0 CIBA |
 | Security audit | Signed, immutable OCSF rows in Postgres | Deployment-owned external archival |
 
@@ -99,8 +98,8 @@ deletes in the same transaction so stale FGA grants do not survive.
 |---|---|---|
 | `crates/moa-auth/authz-schema` | `moa-authz-schema` | OpenFGA object, relation, tuple, and model constants |
 | `crates/moa-auth/authz` | `moa-authz` | FGA client, `require_authz`, transactional outbox, poller |
-| `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, null token vault, first-party OAuth 2.1 authorization server (`oauth_as`) |
-| `crates/moa-auth/auth0` | `moa-auth-providers-auth0` | Optional Auth0/OIDC, Token Vault, CIBA, and JWKS |
+| `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, tenant connector credentials, first-party OAuth 2.1 authorization server (`oauth_as`) |
+| `crates/moa-auth/auth0` | `moa-auth-providers-auth0` | Optional Auth0/OIDC, CIBA, and JWKS |
 | `crates/moa-auth/fga-bootstrap` | `moa-fga-bootstrap` | Idempotent OpenFGA store/model bootstrap |
 | `crates/moa-edge` | `moa-edge` | Public authn/proxy edge and identity header injection |
 | `crates/moa-ocsf` | `moa-ocsf` | OCSF security events, signing, verification, persistence |
@@ -123,7 +122,6 @@ into an operator identity.
 | Agent identity and deactivation | [operations/agent-lifecycle.md](../operations/agent-lifecycle.md) |
 | Workspace admin bootstrap | [operations/workspace-admin-bootstrap.md](../operations/workspace-admin-bootstrap.md) |
 | Auth0/OIDC setup | [operations/auth0-setup.md](../operations/auth0-setup.md) |
-| Token Vault setup | [operations/token-vault-setup.md](../operations/token-vault-setup.md) |
 | SCIM provisioning | [scim.md](scim.md) |
 | OCSF security audit | [operations/ocsf-audit.md](../operations/ocsf-audit.md) |
 

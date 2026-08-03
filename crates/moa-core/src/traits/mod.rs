@@ -33,7 +33,7 @@ use crate::types::{
     contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
     contact::StoredSessionAttachment, context::ProcessorOutput, context::WorkingContext,
     credentials::CredentialContext, credentials::CredentialError, credentials::CredentialIdentity,
-    credentials::CredentialRef, credentials::CredentialSource, credentials::CredentialStagingToken,
+    credentials::CredentialRef, credentials::CredentialStagingToken,
     credentials::CredentialVersion, credentials::RedactedSecret, events_stream::ClaimCheck,
     events_stream::EventFilter, events_stream::EventRange, events_stream::EventRecord,
     events_stream::SequenceNum, experience::ExperienceAttribution, experience::ExperienceRecord,
@@ -765,6 +765,19 @@ pub trait MemoryToolExecutor: Send + Sync {
         tool_name: &str,
         input: &Value,
     ) -> Result<ToolOutput>;
+
+    /// Records one terminal tool failure as negative-results memory.
+    ///
+    /// Runtimes that do not enable memory learning may return `Ok(None)`.
+    async fn record_memory_incident(
+        &self,
+        _session: &SessionMeta,
+        _turn_seq: i64,
+        _attempted: &str,
+        _failure: &str,
+    ) -> Result<Option<uuid::Uuid>> {
+        Ok(None)
+    }
 }
 
 /// Executes read-only graph-memory retrieval tools for the agentic strategy.
@@ -923,17 +936,6 @@ pub trait ContextProcessor: Send + Sync {
 /// credential listing cannot be authorized meaningfully.
 #[async_trait]
 pub trait CredentialVault: Send + Sync {
-    /// Stores the first version of a new credential series.
-    ///
-    /// The acting caller identity is recorded as the credential's owner for
-    /// authorization purposes only; it is not a privacy-subject relationship.
-    async fn create(
-        &self,
-        identity: CredentialIdentity,
-        material: SecretString,
-        ctx: &CredentialContext,
-    ) -> std::result::Result<CredentialVersion, CredentialError>;
-
     /// Seals a new version as inactive without changing the active version.
     ///
     /// The returned host-internal token records the exact staged version and
@@ -972,16 +974,6 @@ pub trait CredentialVault: Send + Sync {
         prior_active: Option<CredentialRef>,
         ctx: &CredentialContext,
     ) -> std::result::Result<CredentialVersion, CredentialError>;
-
-    /// Resolves the plaintext behind `source` for one authorized outbound request.
-    ///
-    /// The operation's audit row is committed before plaintext is returned, so a
-    /// resolution can never be observed by the caller without a durable record.
-    async fn resolve(
-        &self,
-        source: &CredentialSource,
-        ctx: &CredentialContext,
-    ) -> std::result::Result<RedactedSecret, CredentialError>;
 
     /// Returns whether one exact credential series has an active usable version.
     ///
@@ -1028,17 +1020,6 @@ pub trait CredentialVault: Send + Sync {
         ctx: &CredentialContext,
     ) -> std::result::Result<Vec<(Uuid, CredentialVersion)>, CredentialError>;
 
-    /// Stores a new active version, superseding `current` under compare-and-swap.
-    ///
-    /// Fails with [`CredentialError::VersionConflict`] when `current` is no
-    /// longer the active version, so a concurrent rotation cannot be lost.
-    async fn rotate(
-        &self,
-        current: CredentialRef,
-        material: SecretString,
-        ctx: &CredentialContext,
-    ) -> std::result::Result<CredentialVersion, CredentialError>;
-
     /// Marks one version unusable while preserving its audit history.
     async fn revoke(
         &self,
@@ -1053,16 +1034,6 @@ pub trait CredentialVault: Send + Sync {
     /// references. Replays are idempotent, and all version plus append-only audit
     /// rows remain available for lifecycle and security review.
     async fn revoke_connection(
-        &self,
-        connection_uid: Uuid,
-        ctx: &CredentialContext,
-    ) -> std::result::Result<u64, CredentialError>;
-
-    /// Removes every credential version for one tenant connection.
-    ///
-    /// Returns the number of versions removed. Idempotent: a repeated call for
-    /// an already-purged connection removes nothing and succeeds.
-    async fn delete_connection(
         &self,
         connection_uid: Uuid,
         ctx: &CredentialContext,

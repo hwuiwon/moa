@@ -2,10 +2,8 @@
 
 use std::fmt::Debug;
 
-use moa_core::diff::compute_unified_diff;
+use moa_core::{canonical_json::canonical_json_bytes, diff::compute_unified_diff};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_canonical_json::CanonicalFormatter;
-use serde_json::Serializer;
 
 /// Durable operation shape pinned by replay-determinism tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -132,11 +130,8 @@ impl Recorder {
 /// Serializes a value to canonical JSON with lexically sorted object keys.
 #[must_use]
 pub fn canonical_json(value: &impl Serialize) -> String {
-    let mut serializer = Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-    value
-        .serialize(&mut serializer)
-        .expect("serialize canonical JSON");
-    String::from_utf8(serializer.into_inner()).expect("canonical JSON must be UTF-8")
+    String::from_utf8(canonical_json_bytes(value).expect("serialize canonical JSON"))
+        .expect("canonical JSON must be UTF-8")
 }
 
 /// Asserts two traces are identical and prints the first divergent step as a unified diff.

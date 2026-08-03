@@ -1,9 +1,9 @@
 # moa-auth-providers
 
 First-party authentication provider implementations for MOA: API keys, local
-users and sessions, contact JWTs, the self-hosted token vault, and the
+users and sessions, contact JWTs, tenant connector credentials, and the
 first-party OAuth 2.1 authorization server. Also builds the runtime provider
-bundle (auth, token vault, contact tokens, approvals) from config.
+bundle (auth, contact tokens, approvals) from config.
 
 ## Structure
 
@@ -18,16 +18,15 @@ bundle (auth, token vault, contact tokens, approvals) from config.
 - `oauth_access_token.rs` — one-pass authentication for MOA-issued OAuth
   access tokens.
 - `contact_tokens.rs` — issuance and verification of MOA contact JWTs.
-- `postgres_vault.rs` — self-hosted Postgres-backed `TokenVaultProvider` for
-  third-party tokens, with refresh support.
-- `null_vault.rs` — null token vault for zero-dependency local deployments.
+- `postgres_credential_vault.rs` — durable staged tenant connector credential
+  storage and audited resolution.
 - `builtin_authz.rs` — builtin async approvals backed by Postgres and Restate
   awakeables.
 - `disabled.rs` — provider for explicitly unauthenticated deployments.
 - `bundle.rs` — independent builders wiring the configured authentication,
-  token vault, contact-token, and approvals providers.
+  contact-token, and approvals providers.
 
 ## Features
 
 - `auth0` — pulls in `moa-auth-providers-auth0` and lets `bundle.rs` construct
-  the Auth0/OIDC providers and Auth0 Token Vault. Off by default.
+  Auth0/OIDC identity and CIBA approval providers. Off by default.

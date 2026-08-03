@@ -646,7 +646,7 @@ pub enum Event {
     },
     /// One accepted queued user message was discarded without ever running.
     ///
-    /// `queue_message`/`start_turn` acknowledge a queued message to its sender, so
+    /// `start_turn` acknowledges a queued message to its sender, so
     /// dropping it silently would leave acknowledged work invisible forever. One
     /// of these is appended per discarded message, in the queue's FIFO order, so
     /// the durable history shows exactly which messages were dropped and why.

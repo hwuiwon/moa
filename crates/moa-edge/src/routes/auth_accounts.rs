@@ -11,7 +11,7 @@ use moa_auth_providers::{NewUserSessionToken, verify_password};
 use moa_authz::fga_subject;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
-use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
+use moa_messaging::DeliveryMessage;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -885,8 +885,6 @@ async fn deliver_password_reset_token(
 ) -> Result<(), String> {
     // Email transport is deployment-owned, so no tenant partition selects the
     // credential: every tenant's operator mail leaves through the same sender.
-    let sink = ProviderDeliverySink::from_env(&state.config.messaging)
-        .map_err(|error| format!("build delivery sink: {error}"))?;
     let message = DeliveryMessage::password_reset_email(
         row.tenant_id,
         row.id,
@@ -894,7 +892,8 @@ async fn deliver_password_reset_token(
         reset_token.token.expose_secret(),
         reset_token.expires_at,
     );
-    let receipt = sink
+    let receipt = state
+        .delivery
         .deliver(message)
         .await
         .map_err(|error| format!("deliver reset email: {error}"))?;

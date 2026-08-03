@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_artifacts::connector::RuntimeConnectorDefinitionV1;
+use moa_artifacts::connector::ConnectorDefinition;
 use moa_connectors::catalog::{
     ConnectorUseAuthorizer, GovernedInstalledConnectorCatalog, InstalledConnectorCatalog,
     InstalledConnectorCatalogQuery, InstalledConnectorCatalogSource,
@@ -55,12 +55,12 @@ struct AllowListConnectorUseAuthorizer {
 
 #[async_trait]
 impl ConnectorUseAuthorizer for AllowListConnectorUseAuthorizer {
-    async fn require_use(
+    async fn require_use_batch(
         &self,
         _caller: &Identity,
-        connection_id: ConnectorConnectionId,
+        connection_ids: &[ConnectorConnectionId],
     ) -> moa_connectors::Result<()> {
-        if self.allowed.contains(&connection_id) {
+        if connection_ids.iter().all(|id| self.allowed.contains(id)) {
             Ok(())
         } else {
             Err(moa_connectors::Error::CatalogInvariant {
@@ -296,9 +296,8 @@ fn candidate(
 ) -> (ConnectorConnection, InstalledActionBinding) {
     let now = Utc::now();
     let generation = ConnectionGeneration::new(1).expect("fixture generation should be positive");
-    let definition: RuntimeConnectorDefinitionV1 =
-        serde_json::from_value(definition_fixture(action_id))
-            .expect("fixture definition should match the runtime V1 contract");
+    let definition: ConnectorDefinition = serde_json::from_value(definition_fixture(action_id))
+        .expect("fixture definition should match the runtime V1 contract");
     let action = definition
         .actions
         .first()
@@ -316,6 +315,7 @@ fn candidate(
             artifact_uid: Uuid::new_v4(),
             revision_uid: Uuid::new_v4(),
         },
+        origin: Some("https://api.example.test".parse().expect("fixture origin")),
         non_secret_config: json!({}),
         generation,
         status,
@@ -344,22 +344,22 @@ fn candidate(
 fn definition_fixture(action_id: &str) -> Value {
     json!({
         "definition_version": "v1",
-        "display_name": "Offline managed fixture",
-        "runtime": {"type": "built_in_managed", "provider": "fixture/v1"},
-        "auth": [{"type": "managed_oauth", "slot": "primary"}],
+        "display_name": "Offline HTTP fixture",
+        "auth": [{"type": "none"}],
         "actions": [{
             "id": action_id,
             "description": "Offline catalog fixture.",
-            "binding": {
-                "type": "built_in_managed",
-                "operation": "fixture.read",
-                "contract": {
+            "contract": {
+                "method": "GET",
+                "path_template": "/fixture",
+                "max_request_bytes": 1024,
+                "max_response_bytes": 1024,
+                "connect_timeout_ms": 1000,
+                "total_timeout_ms": 2000,
+                "policy": {
                     "input_schema": {"type": "object"},
                     "output_schema": {"type": "object"},
                     "data_classes": [],
-                    "action_class": "external_write",
-                    "risk_level": "high",
-                    "minimum_effect": "admin_review",
                     "idempotency": "idempotent"
                 }
             }

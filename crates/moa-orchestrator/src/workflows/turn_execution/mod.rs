@@ -1165,6 +1165,7 @@ async fn run_once_inside_workflow(
     .await?;
     let Some(built_request) = build_request_inside_workflow(
         ctx,
+        workflow.request_preparer.clone(),
         workflow.session_store.clone(),
         session_id,
         turn_id,

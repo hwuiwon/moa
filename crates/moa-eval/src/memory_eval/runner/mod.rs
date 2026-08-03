@@ -58,7 +58,7 @@ use super::{
     read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
     read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
-use super::{
+use crate::fixture_ids::{
     stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
     tenant_id_from_storage_partition_id,
 };

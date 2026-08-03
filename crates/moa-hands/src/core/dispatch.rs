@@ -319,7 +319,9 @@ impl ToolRouter {
             .get(&invocation.name)
             .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
         validate_tool_invocation(&registered_tool.definition, invocation)?;
-        let ToolExecution::InstalledConnectorAction { runtime, .. } = &registered_tool.execution
+        let ToolExecution::InstalledConnectorAction {
+            runtime, prepared, ..
+        } = &registered_tool.execution
         else {
             return Err(MoaError::ValidationError(format!(
                 "tool `{}` is not an installed connector action",
@@ -358,13 +360,16 @@ impl ToolRouter {
                 scope,
                 async {
                     runtime
-                        .invoke(ConnectorActionInvocation {
-                            caller: caller_identity.clone(),
-                            tool_call_id,
-                            action,
-                            input: invocation.input.clone(),
-                            cancellation_token,
-                        })
+                        .invoke(
+                            ConnectorActionInvocation {
+                                caller: caller_identity.clone(),
+                                tool_call_id,
+                                action,
+                                input: invocation.input.clone(),
+                                cancellation_token,
+                            },
+                            prepared.as_ref().clone(),
+                        )
                         .await
                         .map_err(connector_runtime_error)
                 }
@@ -622,7 +627,7 @@ impl ToolRouter {
         active_canary: Option<&str>,
         scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
-        let memory_tool_executor = self.memory_tool_executor.read().await.clone();
+        let memory_tool_executor = self.memory_tool_executor.clone();
         let memory_retrieval_executor = self.memory_retrieval_executor.read().await.clone();
         let ctx = moa_core::traits::ToolContext {
             session,

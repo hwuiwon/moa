@@ -222,78 +222,78 @@ const SENDERS: &[SenderManifestEntry] = &[
         "start"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "cancel",
+        "crates/moa-orchestrator/src/objects/session/handlers/lifecycle.rs",
+        "handle_cancel",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "cancel",
+        "crates/moa-orchestrator/src/objects/session/handlers/lifecycle.rs",
+        "handle_cancel",
         TRACE_HELPER,
         "TurnExecutionClient",
         "request_cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "cancel",
+        "crates/moa-orchestrator/src/objects/session/handlers/lifecycle.rs",
+        "handle_cancel",
         TRACE_HELPER,
         "WorkerClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
+        "crates/moa-orchestrator/src/objects/session/handlers/progress.rs",
         "collect_child_progress",
         TRACE_HELPER,
         "WorkerClient",
         "progress_summary"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "destroy",
+        "crates/moa-orchestrator/src/objects/session/handlers/lifecycle.rs",
+        "handle_destroy",
         TRACE_HELPER,
         "ToolExecutorClient",
         "release_session_hands"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "execution_terminal",
+        "crates/moa-orchestrator/src/objects/session/handlers/execution_bridge.rs",
+        "handle_execution_terminal",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "synthesis_evidence"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
+        "crates/moa-orchestrator/src/objects/session/handlers/turns/replies.rs",
         "forward_user_input_reply",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "confirm"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
+        "crates/moa-orchestrator/src/objects/session/handlers/turns/replies.rs",
         "forward_user_input_reply",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "deliver_input"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
+        "crates/moa-orchestrator/src/objects/session/handlers/turns/replies.rs",
         "forward_user_input_reply",
         IDENTITY_TRACE_HELPER,
         "WorkerClient",
         "provide_input"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "progress",
+        "crates/moa-orchestrator/src/objects/session/handlers/progress.rs",
+        "handle_progress",
         TRACE_HELPER,
         "TurnExecutionClient",
         "progress"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "request_cancel",
+        "crates/moa-orchestrator/src/objects/session/handlers/lifecycle.rs",
+        "handle_request_cancel",
         TRACE_HELPER,
         "TurnExecutionClient",
         "request_cancel"
@@ -376,70 +376,70 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
         "cache_parent_terminal_result",
         TRACE_HELPER,
         "SessionClient",
         "mark_child_terminal"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
         "cancel",
         TRACE_HELPER,
         "WorkerClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
         "cancel",
         TRACE_HELPER,
         "WorkerTurnExecutionClient",
         "request_cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
         "append_action_review_continuation_fact",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
         "emit_terminal_idle_wake",
         TRACE_HELPER,
         "SessionClient",
         "record_child_signal"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/turn.rs",
         "record_response",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "record_segment_turn_usage"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/cleanup.rs",
         "release_and_clear_worker",
         TRACE_HELPER,
         "SessionClient",
         "remove_child"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/cleanup.rs",
         "release_and_clear_worker",
         TRACE_HELPER,
         "ToolExecutorClient",
         "release_worker_hands"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/cleanup.rs",
         "retract_session_input_targets",
         TRACE_HELPER,
         "SessionClient",
         "clear_worker_input_targets"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
         "start_worker_turn_execution",
         TRACE_HELPER,
         "WorkerTurnExecutionClient",
@@ -556,63 +556,70 @@ const SENDERS: &[SenderManifestEntry] = &[
         "send_message",
         IDENTITY_TRACE_HELPER,
         "SessionClient",
-        "queue_message"
+        "start_turn"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "apply_amendment",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "apply_planned_amendment",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "cancel",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "decide_review",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "review_decided"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "deliver_input",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "deliver_input",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "input_delivered"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "deliver_signal",
         TRACE_HELPER,
         "ExecutionTaskClient",
         "signal_delivered"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution.rs",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "start",
         IDENTITY_TRACE_HELPER,
         "SessionClient",
         "execution_run_started"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution/support.rs",
+        "send_run_wake",
+        TRACE_HELPER,
+        "ExecutionRunClient",
+        "wake"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/artifact_release.rs",
@@ -980,90 +987,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "append_experiment_objective",
-        TRACE_HELPER,
-        "RestateSessionStoreClient",
-        "append_event"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "ensure_execution_session",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "status"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "ensure_execution_session",
-        TRACE_HELPER,
-        "SessionClient",
-        "set_meta"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "run_agent_loop_target",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "queue_message"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "run_agent_loop_target",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "request_cancel"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "run_agent_loop_target",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "set_meta"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "run_execution_template_target",
-        IDENTITY_TRACE_HELPER,
-        "ExecutionClient",
-        "planning_context"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "run_execution_template_target",
-        IDENTITY_TRACE_HELPER,
-        "ExecutionClient",
-        "start"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "wait_for_direct_turn",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "attach_turn_waiter"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "wait_for_direct_turn",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "remove_turn_waiter"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "wait_for_execution_outcome",
-        IDENTITY_TRACE_HELPER,
-        "ExecutionClient",
-        "cancel"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "wait_for_execution_outcome",
-        IDENTITY_TRACE_HELPER,
-        "ExecutionClient",
-        "status"
-    ),
-    sender!(
         "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
         "append_experiment_objective",
         TRACE_HELPER,
@@ -1124,7 +1047,7 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run_agent_loop_trial",
         IDENTITY_TRACE_HELPER,
         "SessionClient",
-        "queue_message"
+        "start_turn"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
@@ -1546,7 +1469,7 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
     ReceiverManifestEntry {
         client: "ExecutionClient",
         receiver: ReceiverKind::MoaHandler {
-            path: "crates/moa-orchestrator/src/services/execution.rs",
+            path: "crates/moa-orchestrator/src/services/execution/handlers.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
@@ -1594,7 +1517,7 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
     ReceiverManifestEntry {
         client: "IngestionVOClient",
         receiver: ReceiverKind::MoaHandler {
-            path: "crates/moa-memory/ingest/src/slow_path.rs",
+            path: "crates/moa-orchestrator/src/objects/ingestion.rs",
             symbol: "ingest_turn",
             adoption_symbol: "moa_observability::adopt_remote_parent",
         },
@@ -2645,7 +2568,7 @@ mod tests {
                 "run",
             ),
             (
-                "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+                "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
                 "WorkerTurnExecutionClient",
                 "run",
             ),

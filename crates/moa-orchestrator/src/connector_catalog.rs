@@ -169,7 +169,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use moa_artifacts::connector::RuntimeConnectorDefinitionV1;
+    use moa_artifacts::connector::ConnectorDefinition;
     use moa_connectors::catalog::{
         ConnectorUseAuthorizer, GovernedInstalledConnectorCatalog, InstalledConnectorCatalogSource,
     };
@@ -254,12 +254,12 @@ mod tests {
 
     #[async_trait]
     impl ConnectorUseAuthorizer for AllowSelectedConnections {
-        async fn require_use(
+        async fn require_use_batch(
             &self,
             _caller: &Identity,
-            connection_id: ConnectorConnectionId,
+            connection_ids: &[ConnectorConnectionId],
         ) -> moa_connectors::Result<()> {
-            if self.allowed.contains(&connection_id) {
+            if connection_ids.iter().all(|id| self.allowed.contains(id)) {
                 Ok(())
             } else {
                 Err(moa_connectors::Error::AuthorizationDenied)
@@ -274,6 +274,7 @@ mod tests {
         async fn invoke(
             &self,
             _invocation: ConnectorActionInvocation,
+            _prepared: moa_connectors::executor::PreparedConnectorAction,
         ) -> moa_connectors::Result<RawConnectorActionResult> {
             Err(moa_connectors::Error::Http {
                 code: "catalog_fixture_runtime_must_not_execute",
@@ -435,12 +436,12 @@ mod tests {
         let (tool, execution) = registrations
             .first()
             .expect("the selected connection should expose one action");
-        let selected_tool_name = moa_artifacts::connector::connection_action_tool_reference(
+        let selected_tool_name = moa_hands::core::installed_connector_tool_name(
             selected.binding.connection_id,
             "shared_action",
         )
         .expect("selected fixture action should produce a tool reference");
-        let sibling_tool_name = moa_artifacts::connector::connection_action_tool_reference(
+        let sibling_tool_name = moa_hands::core::installed_connector_tool_name(
             sibling.binding.connection_id,
             "shared_action",
         )
@@ -465,6 +466,7 @@ mod tests {
             governed_contract_revision,
             minimum_effect,
             runtime: _,
+            prepared: _,
         } = execution
         else {
             panic!("the scoped registration must retain installed-connector provenance");
@@ -594,24 +596,24 @@ mod tests {
         let connection_id = ConnectorConnectionId::new();
         let generation =
             ConnectionGeneration::new(1).expect("fixture generation should be positive");
-        let definition: RuntimeConnectorDefinitionV1 = serde_json::from_value(json!({
+        let definition: ConnectorDefinition = serde_json::from_value(json!({
             "definition_version": "v1",
             "display_name": "Scoped catalog fixture",
-            "runtime": {"type": "built_in_managed", "provider": "fixture/v1"},
-            "auth": [{"type": "managed_oauth", "slot": "primary"}],
+            "auth": [{"type": "none"}],
             "actions": [{
                 "id": action_id,
                 "description": "Scoped connector action.",
-                "binding": {
-                    "type": "built_in_managed",
-                    "operation": "fixture.read",
-                    "contract": {
+                "contract": {
+                    "method": "GET",
+                    "path_template": "/fixture",
+                    "max_request_bytes": 1024,
+                    "max_response_bytes": 1024,
+                    "connect_timeout_ms": 1000,
+                    "total_timeout_ms": 2000,
+                    "policy": {
                         "input_schema": {"type": "object"},
                         "output_schema": {"type": "object"},
                         "data_classes": [],
-                        "action_class": "external_write",
-                        "risk_level": "high",
-                        "minimum_effect": "admin_review",
                         "idempotency": "idempotent"
                     }
                 }
@@ -636,6 +638,7 @@ mod tests {
                 artifact_uid,
                 revision_uid,
             },
+            origin: Some("https://api.example.test".parse().expect("fixture origin")),
             non_secret_config: json!({}),
             generation,
             status: ConnectionStatus::Active,

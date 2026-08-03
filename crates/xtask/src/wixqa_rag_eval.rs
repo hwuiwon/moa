@@ -45,7 +45,10 @@ use moa_knowledge::ingestion::{
     PageIngestionReport,
 };
 use moa_knowledge::parser::native::NativeDocumentParser;
-use moa_knowledge::repository::{KnowledgeRepository, PostgresKnowledgeRepository, SyncRunClaim};
+use moa_knowledge::repository::{
+    PostgresKnowledgeRepository, SyncRunClaim, connection::KnowledgeConnectionRepository,
+    sync::KnowledgeSyncRepository,
+};
 use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
@@ -577,7 +580,7 @@ async fn ingest_articles(
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: WIXQA_PROVIDER.to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: WIXQA_CONNECTOR.to_string(),
             provider_account_id: selected.cache_key.clone(),
             metadata: json!({
@@ -1847,6 +1850,10 @@ fn wixqa_public_acl(connection_uid: Uuid, acl_key: &SourceAclKey) -> ProviderRec
 fn article_to_record(article: &WixArticle, public_acl: &ProviderRecordAcl) -> ProviderRecord {
     ProviderRecord {
         acl: public_acl.clone(),
+        materialization: moa_knowledge::domain::ProviderRecordMaterialization::InlineText {
+            text: article.contents.clone(),
+            mime_type: Some("text/plain".to_string()),
+        },
         source_id: article.id.clone(),
         object_type: article.article_type.clone(),
         title: Some(article.title.clone()),

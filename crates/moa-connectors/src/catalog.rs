@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
+use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation_batch};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
@@ -13,6 +13,7 @@ use crate::domain::{
     ConnectionDefinitionRef, ConnectionHealth, ConnectionStatus, ConnectorConnection,
     InstalledActionBinding,
 };
+use crate::executor::PreparedConnectorAction;
 use crate::{Error, Result};
 
 /// Scope for one installed-action catalog read.
@@ -55,24 +56,21 @@ impl InstalledConnectorCatalogQuery {
 /// action cannot become model-visible without passing every catalog fence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstalledConnectorAction {
-    tenant_id: TenantId,
-    connection_id: ConnectorConnectionId,
     connection_display_name: String,
-    definition: ConnectionDefinitionRef,
-    binding: InstalledActionBinding,
+    prepared: PreparedConnectorAction,
 }
 
 impl InstalledConnectorAction {
     /// Returns the tenant that owns this installed action.
     #[must_use]
     pub const fn tenant_id(&self) -> TenantId {
-        self.tenant_id
+        self.prepared.connection.tenant_id
     }
 
     /// Returns the exact tenant connection identity.
     #[must_use]
     pub const fn connection_id(&self) -> ConnectorConnectionId {
-        self.connection_id
+        self.prepared.connection.connection_id
     }
 
     /// Returns the operator-visible account label safe for tool descriptions.
@@ -84,13 +82,19 @@ impl InstalledConnectorAction {
     /// Returns the immutable artifact revision or built-in definition pin.
     #[must_use]
     pub const fn definition(&self) -> &ConnectionDefinitionRef {
-        &self.definition
+        &self.prepared.connection.definition
     }
 
     /// Returns the compiled action binding pinned by this catalog entry.
     #[must_use]
     pub const fn binding(&self) -> &InstalledActionBinding {
-        &self.binding
+        &self.prepared.binding
+    }
+
+    /// Returns the opaque catalog admission carried into runtime dispatch.
+    #[must_use]
+    pub fn prepared(&self) -> PreparedConnectorAction {
+        self.prepared.clone()
     }
 }
 
@@ -136,21 +140,19 @@ impl InstalledConnectorCatalogSnapshot {
                     connection.connection_id, binding.action_id
                 )));
             }
+            let connection_display_name = connection.display_name.clone();
             actions.push(InstalledConnectorAction {
-                tenant_id: connection.tenant_id,
-                connection_id: connection.connection_id,
-                connection_display_name: connection.display_name,
-                definition: connection.definition,
-                binding,
+                connection_display_name,
+                prepared: PreparedConnectorAction::new(query.caller.clone(), connection, binding),
             });
         }
 
         actions.sort_by(|left, right| {
-            left.connection_id
+            left.connection_id()
                 .0
-                .cmp(&right.connection_id.0)
-                .then_with(|| left.binding.action_id.cmp(&right.binding.action_id))
-                .then_with(|| left.binding.binding_id.cmp(&right.binding.binding_id))
+                .cmp(&right.connection_id().0)
+                .then_with(|| left.binding().action_id.cmp(&right.binding().action_id))
+                .then_with(|| left.binding().binding_id.cmp(&right.binding().binding_id))
         });
 
         Ok(Self {
@@ -198,12 +200,11 @@ pub trait InstalledConnectorCatalog: Send + Sync {
 /// Delegated authorization boundary for using one installed connection.
 #[async_trait]
 pub trait ConnectorUseAuthorizer: Send + Sync {
-    /// Requires `connector_connection#use` for the authenticated caller and
-    /// exact connection before any protected connection or binding read.
-    async fn require_use(
+    /// Requires `connector_connection#use` for every exact connection in one batch.
+    async fn require_use_batch(
         &self,
         caller: &Identity,
-        connection_id: ConnectorConnectionId,
+        connection_ids: &[ConnectorConnectionId],
     ) -> Result<()>;
 }
 
@@ -223,19 +224,23 @@ impl FgaConnectorUseAuthorizer {
 
 #[async_trait]
 impl ConnectorUseAuthorizer for FgaConnectorUseAuthorizer {
-    async fn require_use(
+    async fn require_use_batch(
         &self,
         caller: &Identity,
-        connection_id: ConnectorConnectionId,
+        connection_ids: &[ConnectorConnectionId],
     ) -> Result<()> {
         let Some(fga_client) = self.fga_client.as_ref() else {
             return Err(Error::AuthorizationUnavailable);
         };
-        match require_authz_with_delegation(
+        let object_ids = connection_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        match require_authz_with_delegation_batch(
             fga_client,
             caller,
             ObjectType::ConnectorConnection,
-            connection_id,
+            &object_ids,
             Relation::Use,
         )
         .await
@@ -288,11 +293,9 @@ impl InstalledConnectorCatalog for GovernedInstalledConnectorCatalog {
             .collect::<Vec<_>>();
         connection_ids.sort_by_key(|connection_id| connection_id.0);
 
-        for connection_id in &connection_ids {
-            self.authorizer
-                .require_use(&query.caller, *connection_id)
-                .await?;
-        }
+        self.authorizer
+            .require_use_batch(&query.caller, &connection_ids)
+            .await?;
 
         let candidates = self
             .source

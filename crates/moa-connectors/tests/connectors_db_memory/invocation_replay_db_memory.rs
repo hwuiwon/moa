@@ -1,6 +1,6 @@
 //! Postgres replay-ledger coverage for connector action invocations.
 
-use moa_artifacts::connector::RuntimeConnectorDefinitionV1;
+use moa_artifacts::connector::ConnectorDefinition;
 use moa_connectors::Error;
 use moa_connectors::domain::{
     CompiledOperationContract, ConnectionDefinitionRef, ConnectionGeneration, ConnectionStatus,
@@ -8,8 +8,9 @@ use moa_connectors::domain::{
     InstalledActionBinding, InstalledActionBindingId, OperationContractHash,
 };
 use moa_connectors::repository::{
-    ConnectionActivation, ConnectionRepository, InvocationReservation,
-    InvocationReservationRequest, NewConnectorConnection, PostgresConnectionRepository,
+    ConnectionActivation, ConnectionLifecycleRepository, ConnectorInvocationRepository,
+    InvocationReservation, InvocationReservationRequest, NewConnectorConnection,
+    PostgresConnectionRepository,
 };
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
 use serde_json::json;
@@ -289,32 +290,33 @@ async fn active_binding(
             connection_id,
             tenant_id,
             display_name: format!("Billing {suffix}"),
-            definition_ref: ConnectionDefinitionRef::built_in(format!("billing-{suffix}"), 1)
+            definition_ref: ConnectionDefinitionRef::built_in("knowledge:nango", 1)
                 .expect("fixture built-in definition should be valid"),
+            origin: None,
             non_secret_config: json!({}),
             created_by_identity_id: None,
             owner_identity_id: Uuid::new_v4(),
         })
         .await
         .expect("connection fixture should be created");
-    let definition: RuntimeConnectorDefinitionV1 = serde_json::from_value(json!({
+    let definition: ConnectorDefinition = serde_json::from_value(json!({
         "definition_version": "v1",
         "display_name": "Billing replay fixture",
-        "runtime": {"type": "built_in_managed", "provider": "billing/v1"},
-        "auth": [{"type": "managed_oauth", "slot": "primary"}],
+        "auth": [{"type": "none"}],
         "actions": [{
             "id": "invoice_create",
             "description": "Create one invoice.",
-            "binding": {
-                "type": "built_in_managed",
-                "operation": "invoice.create",
-                "contract": {
+            "contract": {
+                "method": "POST",
+                "path_template": "/invoices",
+                "max_request_bytes": 1024,
+                "max_response_bytes": 1024,
+                "connect_timeout_ms": 1000,
+                "total_timeout_ms": 2000,
+                "policy": {
                     "input_schema": {"type": "object"},
                     "output_schema": {"type": "object"},
                     "data_classes": [],
-                    "action_class": "external_write",
-                    "risk_level": "high",
-                    "minimum_effect": "admin_review",
                     "idempotency": "idempotent"
                 }
             }
@@ -345,7 +347,7 @@ async fn active_binding(
                 compiled_contract,
                 contract_hash,
                 governed_contract_revision: format!("billing/{suffix}/invoice.create"),
-                minimum_effect: action.policy().minimum_effect,
+                minimum_effect: moa_core::types::action_policy::ActionPolicyEffect::AdminReview,
                 enabled: true,
             }],
         })

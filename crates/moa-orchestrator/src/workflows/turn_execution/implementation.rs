@@ -21,6 +21,7 @@ use super::{
     parse_turn_id, run_post_outcome_assessment,
 };
 use crate::{
+    brain_bridge::TurnRequestPreparer,
     turn_driver::progress as driver_progress,
     workflows::{
         turn_events::{TurnEventAppender, append_turn_failed},
@@ -36,6 +37,7 @@ pub struct TurnExecutionImpl {
     pub(super) tool_router: Arc<ToolRouter>,
     pub(super) lineage: Arc<dyn LineageHandle>,
     pub(super) channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+    pub(super) request_preparer: Arc<TurnRequestPreparer>,
     /// Classifier used to sanitize segment transcripts before any learning
     /// artifact is derived from them.
     pub(super) learning_classifier: Arc<dyn moa_memory_pii::PiiClassifier>,
@@ -45,13 +47,14 @@ pub struct TurnExecutionImpl {
 impl TurnExecutionImpl {
     /// Creates a root-turn workflow with its persistence, tool, lineage, event-append, and delivery dependencies.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         session_store: Arc<PostgresSessionStore>,
         config: Arc<MoaConfig>,
         tool_router: Arc<ToolRouter>,
         lineage: Arc<dyn LineageHandle>,
         channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
         event_appender: TurnEventAppender,
+        request_preparer: Arc<TurnRequestPreparer>,
     ) -> Self {
         Self {
             session_store,
@@ -59,6 +62,7 @@ impl TurnExecutionImpl {
             tool_router,
             lineage,
             channel_adapters,
+            request_preparer,
             // The deterministic local heuristic, the same one lineage capture
             // uses. Learning sanitization runs inside a durable step, so it must
             // stay synchronous and free of network IO.

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::io::{read_jsonl, write_jsonl};
 use super::{LedgerFact, SyntheticSession, SyntheticTurn, validate_ledger, validate_sessions};
-use super::{stable_uuid_from_label, tenant_id_from_storage_partition_id};
+use crate::fixture_ids::{stable_uuid_from_label, tenant_id_from_storage_partition_id};
 use moa_eval_core::{Error, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;

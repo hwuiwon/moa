@@ -3,6 +3,25 @@
 use super::row_mapping::*;
 use super::*;
 
+/// Persistence operations for derived contact groups and memberships.
+#[async_trait]
+pub trait KnowledgeContactGroupRepository: Send + Sync {
+    /// Saves a derived contact group.
+    async fn upsert_contact_group(&self, group: ContactGroup) -> Result<()>;
+    /// Replaces memberships for a derived contact group.
+    async fn replace_contact_group_memberships(
+        &self,
+        group_uid: Uuid,
+        memberships: Vec<ContactGroupMembership>,
+    ) -> Result<()>;
+    /// Resolves one derived contact group and its active targeting members.
+    async fn contact_group_targets(
+        &self,
+        tenant_id: TenantId,
+        group_key: &str,
+    ) -> Result<Option<ContactGroupTarget>>;
+}
+
 /// Serializes same-group writers behind a transaction-scoped advisory lock.
 ///
 /// Contact groups are cross-object by construction: concurrent page records
@@ -201,4 +220,27 @@ pub(super) async fn contact_group_targets(
     Ok(Some(ContactGroupTarget::from_active_members(
         group, members,
     )))
+}
+
+#[async_trait]
+impl KnowledgeContactGroupRepository for PostgresKnowledgeRepository {
+    async fn upsert_contact_group(&self, group: ContactGroup) -> Result<()> {
+        upsert_contact_group(self, group).await
+    }
+
+    async fn replace_contact_group_memberships(
+        &self,
+        group_uid: Uuid,
+        memberships: Vec<ContactGroupMembership>,
+    ) -> Result<()> {
+        replace_contact_group_memberships(self, group_uid, memberships).await
+    }
+
+    async fn contact_group_targets(
+        &self,
+        tenant_id: TenantId,
+        group_key: &str,
+    ) -> Result<Option<ContactGroupTarget>> {
+        contact_group_targets(self, tenant_id, group_key).await
+    }
 }

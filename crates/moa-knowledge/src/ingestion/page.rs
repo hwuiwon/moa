@@ -2,24 +2,31 @@
 
 use super::*;
 
-impl<R, P, E, G> KnowledgeIngestionPipeline<R, P, E, G>
-where
-    R: KnowledgeRepository,
-    P: DocumentParser,
-    E: EmbeddingProvider,
-    G: KnowledgeGraphWriter,
-{
+impl KnowledgeIngestionPipeline {
     /// Creates a knowledge ingestion pipeline from injected dependencies.
     #[must_use]
-    pub fn new(
+    pub fn new<R, P, E, G>(
         repository: Arc<R>,
         parser: Arc<P>,
         embedder: Arc<E>,
         graph: Arc<G>,
         config: KnowledgeIngestionPipelineConfig,
-    ) -> Self {
+    ) -> Self
+    where
+        R: KnowledgeSyncRepository
+            + KnowledgeIngestionRepository
+            + KnowledgeAclRepository
+            + KnowledgeContactGroupRepository
+            + 'static,
+        P: DocumentParser + 'static,
+        E: EmbeddingProvider + 'static,
+        G: KnowledgeGraphWriter + 'static,
+    {
         Self {
-            repository,
+            sync_repository: repository.clone(),
+            ingestion_repository: repository.clone(),
+            acl_repository: repository.clone(),
+            contact_group_repository: repository,
             parser,
             embedder,
             graph,
@@ -30,11 +37,11 @@ where
         }
     }
 
-    /// Attaches a per-run content fetcher used to download byte content for
-    /// records that carry neither inline text nor a directly fetchable URL.
+    /// Attaches the per-run fetcher required by records explicitly normalized
+    /// with provider-fetch materialization intent.
     ///
-    /// Passing `None` leaves the pipeline with its title-only fallback for such
-    /// records.
+    /// Passing `None` makes such records fail closed. Explicit metadata-only
+    /// records are captured and skipped without invoking the fetcher.
     #[must_use]
     pub fn with_content_fetcher(
         mut self,
@@ -167,7 +174,7 @@ where
         let mut cursor: Option<(String, Uuid)> = None;
         loop {
             let batch = self
-                .repository
+                .ingestion_repository
                 .unseen_active_objects_for_connection(
                     connection_uid,
                     tenant_id,

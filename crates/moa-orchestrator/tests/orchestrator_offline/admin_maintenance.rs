@@ -4,6 +4,7 @@ use moa_core::traits::IdentityType;
 use moa_core::{types::identifiers::TenantId, types::session::CheckpointHandle};
 use moa_memory_vector::PromotionReport;
 use moa_orchestrator::ctx::RequestHeaders;
+use moa_orchestrator::handlers::authz_shim::AuthzEnforcer;
 use moa_orchestrator::services::admin_maintenance::{
     authorize_platform_maintenance, platform_maintenance_identity, promotion_response_from_report,
     promotion_update_response,
@@ -78,7 +79,7 @@ async fn tenant_scoped_identities_cannot_authorize_checkpoint_maintenance() {
     for (operation, identity_type, api_key_id) in cases {
         let headers = headers(identity_type, api_key_id);
 
-        let error = authorize_platform_maintenance(&headers)
+        let error = authorize_platform_maintenance(&AuthzEnforcer::new(None), &headers)
             .await
             .expect_err("tenant-scoped checkpoint maintenance should be forbidden");
 

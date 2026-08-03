@@ -26,8 +26,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use sha2::{Digest, Sha256};
+
+use crate::canonical_json::canonical_json_bytes;
 
 use crate::error::{MoaError, Result};
 use crate::types::action_policy::CallOrigin;
@@ -839,15 +840,11 @@ fn canonical_identity_json(
     sources: &SandboxPolicySources,
     capability_revision: &str,
 ) -> Result<String> {
-    let mut buffer = Vec::new();
-    let mut serializer =
-        serde_json::Serializer::with_formatter(&mut buffer, CanonicalFormatter::new());
-    EffectiveProfileIdentity {
+    let buffer = canonical_json_bytes(&EffectiveProfileIdentity {
         profile,
         sources,
         capability_revision,
-    }
-    .serialize(&mut serializer)
+    })
     .map_err(|error| {
         MoaError::ValidationError(format!(
             "failed to canonically serialize sandbox policy identity: {error}"

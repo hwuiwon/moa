@@ -25,7 +25,10 @@ fn link_service_with_connectors(
     KnowledgeService::new(
         repository.clone(),
         repository,
-        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_provider(moa_knowledge::domain::LinkedProviderKind::Merge, provider),
+        ),
         credentials,
         fake_ingestion_runner(),
         80,
@@ -60,7 +63,10 @@ async fn nango_provider_native_link_compensation_writes_no_tenant_credential() {
     let service = KnowledgeService::new(
         repository.clone(),
         repository.clone(),
-        Arc::new(StaticKnowledgeProviders::new().with_provider("nango", provider)),
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_provider(moa_knowledge::domain::LinkedProviderKind::Nango, provider),
+        ),
         credentials.clone(),
         fake_ingestion_runner(),
         80,

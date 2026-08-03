@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use moa_artifacts::connector::{ConnectorDefinition, RuntimeConnectorDefinitionV1};
+use moa_artifacts::connector::ConnectorDefinition;
 use moa_artifacts::document::{
     ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactMetadata, ArtifactStatus,
     ArtifactUi,
@@ -16,7 +16,7 @@ use moa_connectors::domain::{
     InstalledActionBindingId,
 };
 use moa_connectors::repository::{
-    ConnectionActivation, ConnectionRepository, NewConnectorConnection,
+    ConnectionActivation, ConnectionLifecycleRepository, NewConnectorConnection,
     PostgresConnectionRepository,
 };
 use moa_core::types::action_policy::ActionRuleScope;
@@ -169,17 +169,14 @@ async fn seed_published_http_connector(
     identity: &Identity,
     origin: &str,
 ) -> Result<SeededConnector> {
-    let definition: RuntimeConnectorDefinitionV1 = serde_json::from_value(json!({
+    let definition: ConnectorDefinition = serde_json::from_value(json!({
         "definition_version": "v1",
         "display_name": "ToolExecutor connector fixture",
-        "runtime": {"type": "constrained_http"},
         "auth": [{"type": "none"}],
         "actions": [{
             "id": "create_record",
             "description": "Create one reviewed fixture record.",
-            "binding": {
-                "type": "http",
-                "contract": {
+            "contract": {
                     "method": "POST",
                     "path_template": "/v1/records/{record_id}",
                     "path_inputs": [{
@@ -215,13 +212,9 @@ async fn seed_published_http_connector(
                             "additionalProperties": false
                         },
                         "data_classes": ["pii"],
-                        "action_class": "external_write",
-                        "risk_level": "high",
-                        "minimum_effect": "admin_review",
                         "idempotency": "idempotent"
                     }
                 }
-            }
         }]
     }))
     .context("deserialize reviewed connector definition")?;
@@ -235,9 +228,7 @@ async fn seed_published_http_connector(
             version: None,
         },
         status: ArtifactStatus::Draft,
-        definition: ArtifactDefinition::Connector(ConnectorDefinition::RuntimeV1(
-            definition.clone(),
-        )),
+        definition: ArtifactDefinition::Connector(definition.clone()),
         ui: ArtifactUi::default(),
         reference_resolutions: Vec::new(),
     };
@@ -278,7 +269,8 @@ async fn seed_published_http_connector(
                 artifact_uid: published.artifact_uid,
                 revision_uid: published.revision_uid,
             },
-            non_secret_config: json!({"origin": origin}),
+            origin: Some(origin.parse().context("parse connector fixture origin")?),
+            non_secret_config: json!({}),
             created_by_identity_id: Some(identity.id),
             owner_identity_id: identity.id,
         })
@@ -312,7 +304,7 @@ async fn seed_published_http_connector(
                 compiled_contract,
                 contract_hash,
                 governed_contract_revision: "fixture/create-record/v1".to_string(),
-                minimum_effect: action.policy().minimum_effect,
+                minimum_effect: moa_core::types::action_policy::ActionPolicyEffect::AdminReview,
                 enabled: true,
             }],
         })

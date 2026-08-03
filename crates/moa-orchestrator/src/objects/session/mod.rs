@@ -31,10 +31,10 @@ use moa_session::PostgresSessionStore;
 use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
 use moa_wire::turn::{
     ApplySecurityAssessmentRequest, ApplySecurityAssessmentResponse, CancelResponse,
-    PendingMessage, QueueMessageRequest, QueueMessageResponse, RegisterCoordinatorInputRequest,
-    RunTurnRequest, SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest,
-    StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
-    TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress, TurnTrigger,
+    PendingMessage, RegisterCoordinatorInputRequest, RunTurnRequest, SessionProgress,
+    SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
+    TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
+    TurnTrigger,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
@@ -352,11 +352,6 @@ pub trait Session {
     /// Forwards a cancellation request to the active `TurnExecution` workflow.
     async fn request_cancel(reason: Json<String>) -> Result<Json<CancelResponse>, HandlerError>;
 
-    /// Queues a user message or starts a turn immediately when no turn is active.
-    async fn queue_message(
-        req: Json<QueueMessageRequest>,
-    ) -> Result<Json<QueueMessageResponse>, HandlerError>;
-
     /// Returns a read-only snapshot of the additive `TurnExecution` lifecycle state.
     #[shared]
     async fn snapshot() -> Result<Json<SessionSnapshot>, HandlerError>;
@@ -430,13 +425,14 @@ pub struct SessionImpl {
     config: Arc<MoaConfig>,
     session_limits: SessionLimitsConfig,
     turn_admission: admission::TurnAdmission,
+    authz: crate::handlers::authz_shim::AuthzEnforcer,
 }
 
 impl SessionImpl {
     /// Creates a session object with its persistence and scheduling dependencies.
     ///
-    /// `admission_pool` and `config` are injected rather than read from the
-    /// installed process context: the admission replay transactions and the
+    /// `admission_pool` and `config` are explicit because the admission replay
+    /// transactions and the
     /// template planner are the only reasons this object needed the whole
     /// dependency graph, and a constructor parameter is what makes those two
     /// needs visible at the composition root instead of at the call site.
@@ -447,6 +443,7 @@ impl SessionImpl {
         config: Arc<MoaConfig>,
         session_limits: SessionLimitsConfig,
         runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
+        authz: crate::handlers::authz_shim::AuthzEnforcer,
     ) -> Self {
         let turn_admission = admission::TurnAdmission::new(runtime_cache, &session_limits);
         Self {
@@ -456,6 +453,7 @@ impl SessionImpl {
             config,
             session_limits,
             turn_admission,
+            authz,
         }
     }
 }

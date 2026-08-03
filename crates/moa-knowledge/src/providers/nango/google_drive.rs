@@ -81,7 +81,7 @@ fn drive_file_segments(file_id: &str, export: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::content_fetch_plan;
-    use crate::domain::{ProviderRecord, ProviderRecordAcl};
+    use crate::domain::{ProviderRecord, ProviderRecordAcl, ProviderRecordMaterialization};
     use serde_json::{Value, json};
 
     fn record(source_id: &str, payload: Value) -> ProviderRecord {
@@ -98,6 +98,7 @@ mod tests {
             change_token: None,
             deleted: false,
             source_updated_at: None,
+            materialization: ProviderRecordMaterialization::ProviderFetch { mime_type: None },
             metadata: json!({}),
             payload,
         }

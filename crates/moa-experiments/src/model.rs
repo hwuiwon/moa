@@ -11,7 +11,8 @@ use moa_core::{
     types::identifiers::ModelId,
     types::identifiers::SessionId,
     types::resource::{
-        RESOURCE_CONTRACT_VERSION, ResourceAmounts, ResourceEnvelope, ResourceError,
+        RESOURCE_CONTRACT_VERSION, ReconcileOutcome, ResourceAmounts, ResourceEnvelope,
+        ResourceError, ResourceKind,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -304,6 +305,61 @@ impl ExperimentResourceEnvelope {
     }
 }
 
+/// Splits one trial envelope into the bounded shares used by one simulated turn.
+///
+/// This is experiment policy rather than orchestration: the target owns the
+/// turn, the simulator owns one model call, and together their reservations
+/// never exceed the authored per-turn share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExperimentTurnResourceShares {
+    /// Whole per-turn share before it is divided between participants.
+    pub turn: ResourceAmounts,
+    /// Capacity reserved for the simulator model call.
+    pub simulator: ResourceAmounts,
+    /// Capacity reserved for the target turn.
+    pub target: ResourceAmounts,
+}
+
+impl ExperimentTurnResourceShares {
+    /// Derives one turn's simulator and target reservations from trial limits.
+    #[must_use]
+    pub fn from_trial_limits(limits: ResourceAmounts) -> Self {
+        let turns = limits.turns.max(1);
+        let turn = ResourceAmounts {
+            cost_micro_usd: limits.cost_micro_usd / turns,
+            tokens: limits.tokens / turns,
+            turns: 1,
+            model_calls: (limits.model_calls / turns).max(1),
+            tool_calls: limits.tool_calls / turns,
+        };
+        Self::from_turn(turn)
+    }
+
+    /// Divides one already-derived turn share between simulator and target.
+    #[must_use]
+    pub fn from_turn(turn: ResourceAmounts) -> Self {
+        let simulator = ResourceAmounts {
+            cost_micro_usd: (turn.cost_micro_usd / 2).max(1),
+            tokens: (turn.tokens / 2).max(1),
+            turns: 0,
+            model_calls: 1,
+            tool_calls: 0,
+        };
+        let target = ResourceAmounts {
+            cost_micro_usd: turn.cost_micro_usd.saturating_sub(simulator.cost_micro_usd),
+            tokens: turn.tokens.saturating_sub(simulator.tokens),
+            turns: 1,
+            model_calls: turn.model_calls.saturating_sub(1).max(1),
+            tool_calls: turn.tool_calls,
+        };
+        Self {
+            turn,
+            simulator,
+            target,
+        }
+    }
+}
+
 /// Actual usage reconciled against one reservation.
 ///
 /// `amounts.tokens` is the input plus output total the ledger meters; the split
@@ -494,13 +550,36 @@ pub struct ExperimentResourceReservationRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+impl ExperimentResourceReservationRecord {
+    /// Returns the amount this row contributes to trial resource use.
+    #[must_use]
+    pub(crate) fn accounted_amounts(&self) -> ResourceAmounts {
+        match self.state {
+            ExperimentResourceReservationState::Open => self.reserved,
+            ExperimentResourceReservationState::Reconciled => {
+                self.actual.unwrap_or(ExperimentResourceUsage::ZERO).amounts
+            }
+            ExperimentResourceReservationState::Released => ResourceAmounts::ZERO,
+        }
+    }
+
+    /// Returns the overrun outcome persisted by this settled reservation.
+    #[must_use]
+    pub(crate) fn reconcile_outcome(&self) -> ReconcileOutcome {
+        resource_reconcile_outcome(
+            self.reserved,
+            self.actual.unwrap_or(ExperimentResourceUsage::ZERO).amounts,
+        )
+    }
+}
+
 /// Request for capacity ahead of one paid or side-effecting dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentResourceReservationRequest {
     /// Run whose ledger the request is made against.
     pub run_uid: Uuid,
-    /// Trial making the request, when one owns the dispatch.
-    pub trial_uid: Option<Uuid>,
+    /// Trial making the request.
+    pub trial_uid: Uuid,
     /// Deterministic dispatch coordinate, unique inside the run.
     ///
     /// A Restate replay of the same dispatch must produce the same key: that is
@@ -550,7 +629,7 @@ pub struct ExperimentResourceDenial {
 
 /// Ledger level whose limits are being applied to a reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExperimentResourceLimitScope {
+enum ExperimentResourceLimitScope {
     /// Limits shared by every dispatch in the run.
     Run,
     /// Limits shared by every dispatch in one trial.
@@ -560,7 +639,7 @@ pub enum ExperimentResourceLimitScope {
 impl ExperimentResourceDenial {
     /// Converts a runtime resource error into a journalable denial.
     #[must_use]
-    pub fn from_resource_error(
+    fn from_resource_error(
         error: &ResourceError,
         limit_scope: ExperimentResourceLimitScope,
     ) -> Self {
@@ -650,6 +729,144 @@ impl ExperimentResourceAdmission {
     }
 }
 
+/// Pure accounting state stored on one experiment run row.
+///
+/// SQL owns serialization and locking. This type owns every decision about how
+/// the persisted `committed` and `outstanding` values change, so admission and
+/// settlement cannot drift between repository call sites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExperimentResourceLedger {
+    envelope: ExperimentResourceEnvelope,
+    committed: ResourceAmounts,
+    outstanding: ResourceAmounts,
+}
+
+impl ExperimentResourceLedger {
+    /// Rehydrates the resource ledger fields stored on an experiment run.
+    #[must_use]
+    pub(crate) const fn from_persisted(
+        envelope: ExperimentResourceEnvelope,
+        committed: ResourceAmounts,
+        outstanding: ResourceAmounts,
+    ) -> Self {
+        Self {
+            envelope,
+            committed,
+            outstanding,
+        }
+    }
+
+    /// Returns the envelope this ledger enforces.
+    #[must_use]
+    pub(crate) const fn envelope(&self) -> &ExperimentResourceEnvelope {
+        &self.envelope
+    }
+
+    /// Returns actual usage already committed to the run.
+    #[must_use]
+    pub(crate) const fn committed(&self) -> ResourceAmounts {
+        self.committed
+    }
+
+    /// Returns capacity withheld for dispatches that have not settled.
+    #[must_use]
+    pub(crate) const fn outstanding(&self) -> ResourceAmounts {
+        self.outstanding
+    }
+
+    /// Returns capacity still available under the run envelope.
+    #[must_use]
+    pub(crate) fn remaining(&self) -> ResourceAmounts {
+        let used = self
+            .committed
+            .checked_add(&self.outstanding)
+            .unwrap_or(self.envelope.run_limits);
+        self.envelope.run_limits.saturating_sub(&used)
+    }
+
+    /// Checks and applies one reservation against run and trial use.
+    ///
+    /// `trial_used` must be the sum of the trial's open reservations and
+    /// reconciled actual usage. A denial leaves this ledger unchanged.
+    pub(crate) fn try_reserve(
+        &mut self,
+        request: ResourceAmounts,
+        trial_used: ResourceAmounts,
+        now: DateTime<Utc>,
+    ) -> Result<(), ExperimentResourceDenial> {
+        if let Err(error) = self.envelope.validate() {
+            return Err(ExperimentResourceDenial::from_resource_error(
+                &error,
+                ExperimentResourceLimitScope::Run,
+            ));
+        }
+        if request.is_zero() {
+            return Err(ExperimentResourceDenial::from_resource_error(
+                &ResourceError::EmptyReservation,
+                ExperimentResourceLimitScope::Run,
+            ));
+        }
+        if now >= self.envelope.deadline_at {
+            return Err(ExperimentResourceDenial::from_resource_error(
+                &ResourceError::DeadlineExceeded {
+                    deadline: self.envelope.deadline_at,
+                },
+                ExperimentResourceLimitScope::Run,
+            ));
+        }
+
+        let run_used = checked_resource_sum(self.committed, self.outstanding).map_err(|error| {
+            ExperimentResourceDenial::from_resource_error(&error, ExperimentResourceLimitScope::Run)
+        })?;
+        project_resources_within(run_used, request, self.envelope.run_limits).map_err(|error| {
+            ExperimentResourceDenial::from_resource_error(&error, ExperimentResourceLimitScope::Run)
+        })?;
+        project_resources_within(trial_used, request, self.envelope.trial_limits).map_err(
+            |error| {
+                ExperimentResourceDenial::from_resource_error(
+                    &error,
+                    ExperimentResourceLimitScope::Trial,
+                )
+            },
+        )?;
+
+        self.outstanding = checked_resource_sum(self.outstanding, request).map_err(|error| {
+            ExperimentResourceDenial::from_resource_error(&error, ExperimentResourceLimitScope::Run)
+        })?;
+        Ok(())
+    }
+
+    /// Commits actual usage and releases one reservation's withheld capacity.
+    ///
+    /// A failed checked addition leaves the ledger unchanged.
+    pub(crate) fn reconcile(
+        &mut self,
+        reserved: ResourceAmounts,
+        actual: ResourceAmounts,
+    ) -> Result<ReconcileOutcome, ResourceError> {
+        let committed = checked_resource_sum(self.committed, actual)?;
+        self.outstanding = self.outstanding.saturating_sub(&reserved);
+        self.committed = committed;
+        Ok(resource_reconcile_outcome(reserved, actual))
+    }
+
+    /// Returns one open reservation without committing usage.
+    pub(crate) fn release(&mut self, reserved: ResourceAmounts) {
+        self.outstanding = self.outstanding.saturating_sub(&reserved);
+    }
+
+    /// Sums what one trial has reserved or committed across its rows.
+    pub(crate) fn trial_use<'a>(
+        reservations: impl IntoIterator<Item = &'a ExperimentResourceReservationRecord>,
+    ) -> Result<ResourceAmounts, ResourceError> {
+        reservations
+            .into_iter()
+            .try_fold(ResourceAmounts::ZERO, |used, reservation| {
+                checked_resource_sum(used, reservation.accounted_amounts())
+            })
+    }
+}
+
 /// Usage attributed to one metered component of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentComponentUsage {
@@ -677,6 +894,39 @@ pub struct ExperimentResourceLedgerState {
 }
 
 impl ExperimentResourceLedgerState {
+    /// Builds a report from persisted ledger fields and reservation rows.
+    #[must_use]
+    pub(crate) fn from_ledger(
+        ledger: ExperimentResourceLedger,
+        reservations: &[ExperimentResourceReservationRecord],
+    ) -> Self {
+        let open_reservations = reservations
+            .iter()
+            .filter(|record| record.state == ExperimentResourceReservationState::Open)
+            .count() as u64;
+        let by_component = ExperimentResourceComponent::ALL
+            .into_iter()
+            .map(|component| ExperimentComponentUsage {
+                component,
+                usage: reservations
+                    .iter()
+                    .filter(|record| record.component == component)
+                    .filter_map(|record| record.actual)
+                    .fold(ExperimentResourceUsage::ZERO, |total, usage| {
+                        total.saturating_add(&usage)
+                    }),
+            })
+            .collect();
+        Self {
+            remaining: ledger.remaining(),
+            envelope: ledger.envelope,
+            committed: ledger.committed,
+            outstanding: ledger.outstanding,
+            open_reservations,
+            by_component,
+        }
+    }
+
     /// Returns reconciled usage for one component.
     #[must_use]
     pub fn component(&self, component: ExperimentResourceComponent) -> ExperimentResourceUsage {
@@ -685,6 +935,44 @@ impl ExperimentResourceLedgerState {
             .find(|entry| entry.component == component)
             .map(|entry| entry.usage)
             .unwrap_or(ExperimentResourceUsage::ZERO)
+    }
+}
+
+fn checked_resource_sum(
+    left: ResourceAmounts,
+    right: ResourceAmounts,
+) -> Result<ResourceAmounts, ResourceError> {
+    left.checked_add(&right).ok_or(ResourceError::Overflow {
+        kind: ResourceKind::CostMicroUsd,
+    })
+}
+
+fn project_resources_within(
+    used: ResourceAmounts,
+    request: ResourceAmounts,
+    limits: ResourceAmounts,
+) -> Result<(), ResourceError> {
+    let projected = checked_resource_sum(used, request)?;
+    match projected.first_exceeding(&limits) {
+        None => Ok(()),
+        Some(kind) => Err(ResourceError::Exhausted {
+            kind,
+            requested: request.get(kind),
+            remaining: limits.get(kind).saturating_sub(used.get(kind)),
+            limit: limits.get(kind),
+        }),
+    }
+}
+
+fn resource_reconcile_outcome(
+    reserved: ResourceAmounts,
+    actual: ResourceAmounts,
+) -> ReconcileOutcome {
+    let overrun = actual.saturating_sub(&reserved);
+    if overrun.is_zero() {
+        ReconcileOutcome::WithinReservation
+    } else {
+        ReconcileOutcome::Overrun(overrun)
     }
 }
 
@@ -773,27 +1061,6 @@ pub struct ExperimentSimulatorConfig {
     pub token_budget: Option<u32>,
 }
 
-/// Plan expansion metadata used to create deterministic trial rows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentPlanExpansion {
-    /// Artifact revision that defined the plan, when the run came from a plan artifact.
-    pub plan_revision_uid: Option<Uuid>,
-    /// Scenario ID selected from the embedded plan simulation.
-    pub scenario_id: Option<String>,
-    /// Persona ID selected from the embedded plan simulation.
-    pub persona_id: Option<String>,
-    /// Profile ID selected from the embedded plan simulation.
-    pub profile_id: Option<String>,
-    /// Data bundle IDs selected from the embedded plan simulation.
-    pub data_bundle_ids: Vec<String>,
-    /// Additional artifact revisions pinned by the target variant.
-    pub artifact_revision_uids: Vec<Uuid>,
-    /// Stable variant key selected from the plan matrix.
-    pub variant_key: String,
-    /// Optional deterministic simulator seed.
-    pub seed: Option<String>,
-}
-
 /// Input used to create a durable experiment run row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewExperimentRun {
@@ -817,12 +1084,12 @@ pub struct NewExperimentRun {
     pub idempotency_key: Option<String>,
     /// Identity payload that accepted or created the experiment row.
     pub created_by_identity: Value,
-    /// Plan artifact this run expands, when the run came from a plan artifact.
+    /// Plan artifact this run expands.
     ///
     /// Admission quotas group by the artifact rather than by the revision, so a
     /// caller cannot reset its own per-plan allowance by publishing another
     /// revision of the same plan.
-    pub plan_artifact_uid: Option<Uuid>,
+    pub plan_artifact_uid: Uuid,
     /// Trials this run's matrix will mint, consumed by admission quotas.
     ///
     /// A run that mints no trials still consumes a run slot; this is the trial
@@ -830,8 +1097,8 @@ pub struct NewExperimentRun {
     pub expected_trials: u64,
     /// Durable resource ceiling this run and its trials execute inside.
     pub resource_envelope: ExperimentResourceEnvelope,
-    /// Certified simulator policy snapshot for a plan-backed run.
-    pub simulator_policy: Option<ResolvedSimulatorPolicy>,
+    /// Certified simulator policy snapshot pinned by the plan.
+    pub simulator_policy: ResolvedSimulatorPolicy,
 }
 
 /// Input used to create a durable experiment trial row.
@@ -898,8 +1165,8 @@ pub struct ExperimentRunRecord {
     pub idempotency_key: Option<String>,
     /// Identity payload that accepted or created the experiment row.
     pub created_by_identity: Value,
-    /// Plan artifact this run expands, when the run came from a plan artifact.
-    pub plan_artifact_uid: Option<Uuid>,
+    /// Plan artifact this run expands.
+    pub plan_artifact_uid: Uuid,
     /// Exact number of durable trials a plan-backed run must contain.
     ///
     /// Status aggregation compares observed rows against this admission-time
@@ -907,8 +1174,8 @@ pub struct ExperimentRunRecord {
     pub expected_trials: u64,
     /// Durable resource ceiling this run and its trials execute inside.
     pub resource_envelope: ExperimentResourceEnvelope,
-    /// Certified simulator policy snapshot for a plan-backed run.
-    pub simulator_policy: Option<ResolvedSimulatorPolicy>,
+    /// Certified simulator policy snapshot pinned by the plan.
+    pub simulator_policy: ResolvedSimulatorPolicy,
     /// Terminal error message for failed runs.
     pub error: Option<String>,
     /// Timestamp when the row was created and the run was accepted.
@@ -1005,5 +1272,135 @@ impl From<&ExperimentTrialRecord> for NewExperimentTrial {
             seed: record.seed.clone(),
             score_run_id: record.score_run_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn amounts(tokens: u64) -> ResourceAmounts {
+        ResourceAmounts {
+            tokens,
+            ..ResourceAmounts::ZERO
+        }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_000_000, 0)
+            .expect("fixed timestamp is valid")
+            .to_utc()
+    }
+
+    fn ledger(run_tokens: u64, trial_tokens: u64) -> ExperimentResourceLedger {
+        ExperimentResourceLedger::from_persisted(
+            ExperimentResourceEnvelope::new(
+                amounts(run_tokens),
+                amounts(trial_tokens),
+                fixed_now() + chrono::Duration::hours(1),
+            ),
+            ResourceAmounts::ZERO,
+            ResourceAmounts::ZERO,
+        )
+    }
+
+    #[test]
+    fn resource_admission_checks_run_and_trial_before_mutating_offline() {
+        // Pins: a denied reservation leaves the persisted outstanding projection
+        // unchanged and reports which concrete envelope refused it.
+        let mut run_denied = ledger(5, 5);
+        let denial = run_denied
+            .try_reserve(amounts(6), ResourceAmounts::ZERO, fixed_now())
+            .expect_err("run envelope must refuse the oversized reservation");
+        assert_eq!(
+            denial.reason,
+            ExperimentResourceDenialReason::RunEnvelopeExhausted
+        );
+        assert_eq!(run_denied.outstanding(), ResourceAmounts::ZERO);
+
+        let mut trial_denied = ledger(10, 5);
+        let denial = trial_denied
+            .try_reserve(amounts(4), amounts(2), fixed_now())
+            .expect_err("trial envelope must refuse its oversized projection");
+        assert_eq!(
+            denial.reason,
+            ExperimentResourceDenialReason::TrialEnvelopeExhausted
+        );
+        assert_eq!(trial_denied.outstanding(), ResourceAmounts::ZERO);
+
+        trial_denied
+            .try_reserve(amounts(3), amounts(2), fixed_now())
+            .expect("reservation exactly at both limits is admitted");
+        assert_eq!(trial_denied.outstanding(), amounts(3));
+    }
+
+    #[test]
+    fn resource_admission_deadline_is_exclusive_offline() {
+        // Pins: no work starts at the exact persisted deadline, and the failed
+        // decision cannot change the durable counters.
+        let now = fixed_now();
+        let mut ledger = ExperimentResourceLedger::from_persisted(
+            ExperimentResourceEnvelope::new(amounts(5), amounts(5), now),
+            ResourceAmounts::ZERO,
+            ResourceAmounts::ZERO,
+        );
+        let denial = ledger
+            .try_reserve(amounts(1), ResourceAmounts::ZERO, now)
+            .expect_err("the deadline is exclusive");
+        assert_eq!(
+            denial.reason,
+            ExperimentResourceDenialReason::DeadlineExceeded
+        );
+        assert_eq!(denial.deadline_at, Some(now));
+        assert_eq!(ledger.outstanding(), ResourceAmounts::ZERO);
+    }
+
+    #[test]
+    fn reconcile_commits_overrun_and_release_only_frees_capacity_offline() {
+        // Pins: real overrun is committed after dispatch, while releasing work
+        // that never dispatched changes outstanding capacity only.
+        let envelope = ExperimentResourceEnvelope::new(
+            amounts(20),
+            amounts(20),
+            fixed_now() + chrono::Duration::hours(1),
+        );
+        let mut reconciled = ExperimentResourceLedger::from_persisted(
+            envelope.clone(),
+            ResourceAmounts::ZERO,
+            amounts(5),
+        );
+        let outcome = reconciled
+            .reconcile(amounts(5), amounts(7))
+            .expect("actual usage fits the persisted integer domain");
+        assert_eq!(outcome, ReconcileOutcome::Overrun(amounts(2)));
+        assert_eq!(reconciled.committed(), amounts(7));
+        assert_eq!(reconciled.outstanding(), ResourceAmounts::ZERO);
+
+        let mut released =
+            ExperimentResourceLedger::from_persisted(envelope, amounts(3), amounts(5));
+        released.release(amounts(5));
+        assert_eq!(released.committed(), amounts(3));
+        assert_eq!(released.outstanding(), ResourceAmounts::ZERO);
+    }
+
+    #[test]
+    fn turn_resource_shares_preserve_authored_ceiling_offline() {
+        // Pins: every authorized turn reserves one target turn and the simulator
+        // and target shares sum to no more than the authored trial limits.
+        let limits = ResourceAmounts {
+            cost_micro_usd: 1_000,
+            tokens: 800,
+            turns: 8,
+            model_calls: 16,
+            tool_calls: 32,
+        };
+        let shares = ExperimentTurnResourceShares::from_trial_limits(limits);
+        assert_eq!(shares.simulator.turns + shares.target.turns, 1);
+        assert_eq!(shares.simulator.model_calls, 1);
+        assert!(
+            (shares.simulator.cost_micro_usd + shares.target.cost_micro_usd) * limits.turns
+                <= limits.cost_micro_usd
+        );
+        assert!((shares.simulator.tokens + shares.target.tokens) * limits.turns <= limits.tokens);
     }
 }

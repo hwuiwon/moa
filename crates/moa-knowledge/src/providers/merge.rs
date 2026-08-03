@@ -13,9 +13,9 @@ use crate::acl_key::SourceAclKey;
 use crate::{
     domain::{
         CreateLinkTokenRequest, ExchangePublicTokenRequest, InitialSyncStarted, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
-        RemoteRevokeRequest, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync,
-        WebhookEvent,
+        LinkedAccount, LinkedProviderKind, ListChangedRecordsRequest, ProviderIntegration,
+        ProviderRecord, RecordPage, RemoteRevokeRequest, StartInitialSyncRequest,
+        TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -23,6 +23,7 @@ use crate::{
         LinkedIntegrationProvider,
         acl_normalize::principal_namespace,
         http::{self, string_field, trim_base_url},
+        materialization_from_payload,
     },
 };
 
@@ -158,7 +159,7 @@ impl LinkedIntegrationProvider for MergeProvider {
             })?;
         let response: Response = http::json_response(response).await?;
         Ok(LinkToken {
-            provider: "merge".to_string(),
+            provider: LinkedProviderKind::Merge,
             token: response.link_token.ok_or_else(|| {
                 Error::provider("merge", "link token response missing link_token")
             })?,
@@ -199,9 +200,20 @@ impl LinkedIntegrationProvider for MergeProvider {
         // connection on the category the operator linked, instead of silently
         // querying a category the integration cannot serve.
         ensure_integration_supports_category(&integration, category)?;
-        let provider_account_id = response.id.unwrap_or_else(|| stable_id(&account_token));
+        let provider_account_id = match response.id {
+            Some(provider_account_id) => provider_account_id,
+            None => {
+                crate::providers::stable_provider_record_id(&Value::String(account_token.clone()))
+                    .map_err(|error| {
+                    Error::provider(
+                        "merge",
+                        format!("account fallback identity serialization failed: {error}"),
+                    )
+                })?
+            }
+        };
         Ok(LinkedAccount {
-            provider: "merge".to_string(),
+            provider: LinkedProviderKind::Merge,
             connector: category.to_string(),
             provider_account_id,
             credential_material: Some(account_token),
@@ -223,7 +235,7 @@ impl LinkedIntegrationProvider for MergeProvider {
             .map_err(|error| Error::provider("merge", format!("sync trigger failed: {error}")))?;
         let value: Value = http::json_response(response).await?;
         Ok(TriggeredSync {
-            provider: "merge".to_string(),
+            provider: LinkedProviderKind::Merge,
             provider_sync_id: string_field(&value, &["id", "sync_id"]),
             status: string_field(&value, &["status"]).unwrap_or_else(|| "triggered".to_string()),
             metadata: redact_provider_metadata(value),
@@ -250,7 +262,7 @@ impl LinkedIntegrationProvider for MergeProvider {
         let value: Value = http::json_response(response).await?;
         let completed = initial_sync_completed(&value)?;
         Ok(InitialSyncStarted {
-            provider: "merge".to_string(),
+            provider: LinkedProviderKind::Merge,
             provider_sync_id: None,
             completed,
             metadata: redact_provider_metadata(value),
@@ -308,19 +320,20 @@ impl LinkedIntegrationProvider for MergeProvider {
             &req.connection.connector,
             req.connection.connection_uid,
         );
+        let records = match value
+            .get("results")
+            .or_else(|| value.get("records"))
+            .and_then(Value::as_array)
+        {
+            Some(records) => records
+                .iter()
+                .map(|record| value_to_provider_record(&namespace, &req.acl_key, record))
+                .collect::<Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
         Ok(RecordPage {
             next_cursor: string_field(&value, &["next", "next_cursor", "cursor"]),
-            records: value
-                .get("results")
-                .or_else(|| value.get("records"))
-                .and_then(Value::as_array)
-                .map(|records| {
-                    records
-                        .iter()
-                        .map(|record| value_to_provider_record(&namespace, &req.acl_key, record))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            records,
         })
     }
 
@@ -456,13 +469,21 @@ fn value_to_provider_record(
     namespace: &str,
     acl_key: &SourceAclKey,
     value: &Value,
-) -> ProviderRecord {
+) -> Result<ProviderRecord> {
     let payload = redact_provider_metadata(value.clone());
     let acl =
         crate::providers::acl_normalize::record_acl_from_payload(namespace, &payload, acl_key);
-    ProviderRecord {
-        source_id: string_field(&payload, &["id", "remote_id"])
-            .unwrap_or_else(|| stable_id(&payload.to_string())),
+    let source_id = match string_field(&payload, &["id", "remote_id"]) {
+        Some(source_id) => source_id,
+        None => crate::providers::stable_provider_record_id(&payload).map_err(|error| {
+            Error::provider(
+                "merge",
+                format!("record fallback identity serialization failed: {error}"),
+            )
+        })?,
+    };
+    Ok(ProviderRecord {
+        source_id,
         object_type: string_field(&payload, &["model", "object_type", "type"])
             .unwrap_or_else(|| "record".to_string()),
         title: string_field(&payload, &["name", "title", "subject"]),
@@ -479,10 +500,11 @@ fn value_to_provider_record(
         source_updated_at: string_field(&payload, &["modified_at", "updated_at"])
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
             .map(|value| value.with_timezone(&chrono::Utc)),
+        materialization: materialization_from_payload(&payload),
         metadata: Value::Null,
         payload: crate::providers::acl_normalize::strip_acl_principal_carriers(payload),
         acl,
-    }
+    })
 }
 
 fn decode_signature(value: &str) -> Result<Vec<u8>> {
@@ -498,10 +520,6 @@ fn decode_signature(value: &str) -> Result<Vec<u8>> {
         })
 }
 
-fn stable_id(value: &str) -> String {
-    blake3::hash(value.as_bytes()).to_hex().to_string()
-}
-
 fn append_path_segment(url: &mut reqwest::Url, segment: &str) -> Result<()> {
     url.path_segments_mut()
         .map_err(|_| Error::provider("merge", "URL cannot accept path segments"))?
@@ -512,7 +530,7 @@ fn append_path_segment(url: &mut reqwest::Url, segment: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::value_to_provider_record;
-    use crate::acl_key::SourceAclKey;
+    use crate::{acl_key::SourceAclKey, domain::ProviderRecordMaterialization};
     use serde_json::json;
 
     #[test]
@@ -532,10 +550,15 @@ mod tests {
                     "access": "read"
                 }]
             }),
-        );
+        )
+        .expect("provider record converts");
 
         assert!(converted.acl.complete);
         assert_eq!(converted.acl.entries.len(), 1);
+        assert!(matches!(
+            converted.materialization,
+            ProviderRecordMaterialization::InlineText { ref text, .. } if text == "Support guide"
+        ));
         let serialized = serde_json::to_string(&converted).expect("record serializes");
         assert!(!serialized.contains("support@example.com"));
         assert!(serialized.contains("Support guide"));

@@ -3,6 +3,86 @@
 use super::row_mapping::*;
 use super::*;
 
+/// Persistence operations for ingested objects, document versions, blocks, and chunks.
+#[async_trait]
+pub trait KnowledgeIngestionRepository: Send + Sync {
+    /// Saves or updates a knowledge object.
+    async fn upsert_object(&self, object: KnowledgeObject) -> Result<()>;
+    /// Gets a knowledge object by identifier.
+    async fn get_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObject>>;
+    /// Lists source object projections for a tenant.
+    async fn list_objects(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Option<Uuid>,
+        object_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<KnowledgeObjectProjection>>;
+    /// Gets a knowledge object by provider external identifier.
+    async fn get_object_by_source(
+        &self,
+        connection_uid: Uuid,
+        source_id: &str,
+    ) -> Result<Option<KnowledgeObject>>;
+    /// Lists active connection objects absent from the supplied source identifiers.
+    async fn unseen_active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+        tenant_id: TenantId,
+        seen_source_ids: &[String],
+        after: Option<(String, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<KnowledgeObject>>;
+    /// Gets the latest document version for an object.
+    async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>>;
+    /// Gets the chunks attached to one document version.
+    async fn chunks_for_version(&self, version_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
+    /// Returns every currently active chunk for an object across all versions.
+    async fn active_chunks_for_object(&self, object_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
+    /// Returns whether final object ingestion completed after a version timestamp.
+    async fn object_ingestion_completed_since(
+        &self,
+        object_uid: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool>;
+    /// Loads an object inspection projection with bounded rendering inputs.
+    async fn inspect_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>>;
+    /// Saves an immutable document version.
+    async fn insert_document_version(&self, version: DocumentVersion) -> Result<()>;
+    /// Atomically claims graph/vector ingestion for one document content version.
+    async fn claim_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version: DocumentVersion,
+    ) -> Result<DocumentVersionIngestionClaim>;
+    /// Completes a document-version ingestion owned by the supplied claim token.
+    async fn complete_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+        claim_token: Uuid,
+    ) -> Result<()>;
+    /// Fails a document-version ingestion owned by the supplied claim token.
+    async fn fail_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+        claim_token: Uuid,
+    ) -> Result<()>;
+    /// Saves normalized blocks for a document version.
+    async fn replace_blocks(&self, version_uid: Uuid, blocks: Vec<KnowledgeBlock>) -> Result<()>;
+    /// Saves normalized chunks for a document version.
+    async fn replace_chunks(&self, version_uid: Uuid, chunks: Vec<KnowledgeChunk>) -> Result<()>;
+    /// Tombstones chunks in knowledge storage and removes them from active retrieval.
+    async fn tombstone_chunks(&self, chunk_uids: &[Uuid]) -> Result<()>;
+    /// Marks an object deleted by the provider.
+    async fn mark_object_deleted(
+        &self,
+        object_uid: Uuid,
+        deleted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()>;
+}
+
 pub(super) async fn upsert_object(
     repository: &PostgresKnowledgeRepository,
     object: KnowledgeObject,
@@ -766,4 +846,126 @@ pub(super) async fn mark_object_deleted(
     .await
     .map_err(map_sqlx_error)?;
     conn.commit().await.map_err(map_moa_error)
+}
+
+#[async_trait]
+impl KnowledgeIngestionRepository for PostgresKnowledgeRepository {
+    async fn upsert_object(&self, object: KnowledgeObject) -> Result<()> {
+        upsert_object(self, object).await
+    }
+
+    async fn get_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObject>> {
+        get_object(self, object_uid).await
+    }
+
+    async fn list_objects(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Option<Uuid>,
+        object_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<KnowledgeObjectProjection>> {
+        list_objects(self, tenant_id, connection_uid, object_type, limit).await
+    }
+
+    async fn get_object_by_source(
+        &self,
+        connection_uid: Uuid,
+        source_id: &str,
+    ) -> Result<Option<KnowledgeObject>> {
+        get_object_by_source(self, connection_uid, source_id).await
+    }
+
+    async fn unseen_active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+        tenant_id: TenantId,
+        seen_source_ids: &[String],
+        after: Option<(String, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<KnowledgeObject>> {
+        unseen_active_objects_for_connection(
+            self,
+            connection_uid,
+            tenant_id,
+            seen_source_ids,
+            after,
+            limit,
+        )
+        .await
+    }
+
+    async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>> {
+        latest_document_version(self, object_uid).await
+    }
+
+    async fn chunks_for_version(&self, version_uid: Uuid) -> Result<Vec<KnowledgeChunk>> {
+        chunks_for_version(self, version_uid).await
+    }
+
+    async fn active_chunks_for_object(&self, object_uid: Uuid) -> Result<Vec<KnowledgeChunk>> {
+        active_chunks_for_object(self, object_uid).await
+    }
+
+    async fn object_ingestion_completed_since(
+        &self,
+        object_uid: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        object_ingestion_completed_since(self, object_uid, since).await
+    }
+
+    async fn inspect_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>> {
+        inspect_object(self, object_uid).await
+    }
+
+    async fn insert_document_version(&self, version: DocumentVersion) -> Result<()> {
+        insert_document_version(self, version).await
+    }
+
+    async fn claim_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version: DocumentVersion,
+    ) -> Result<DocumentVersionIngestionClaim> {
+        claim_document_version_ingestion(self, sync_run_uid, version).await
+    }
+
+    async fn complete_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+        claim_token: Uuid,
+    ) -> Result<()> {
+        complete_document_version_ingestion(self, sync_run_uid, version_uid, claim_token).await
+    }
+
+    async fn fail_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+        claim_token: Uuid,
+    ) -> Result<()> {
+        fail_document_version_ingestion(self, sync_run_uid, version_uid, claim_token).await
+    }
+
+    async fn replace_blocks(&self, version_uid: Uuid, blocks: Vec<KnowledgeBlock>) -> Result<()> {
+        replace_blocks(self, version_uid, blocks).await
+    }
+
+    async fn replace_chunks(&self, version_uid: Uuid, chunks: Vec<KnowledgeChunk>) -> Result<()> {
+        replace_chunks(self, version_uid, chunks).await
+    }
+
+    async fn tombstone_chunks(&self, chunk_uids: &[Uuid]) -> Result<()> {
+        tombstone_chunks(self, chunk_uids).await
+    }
+
+    async fn mark_object_deleted(
+        &self,
+        object_uid: Uuid,
+        deleted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        mark_object_deleted(self, object_uid, deleted_at).await
+    }
 }

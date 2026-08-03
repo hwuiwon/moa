@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moa-core = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-memory-pii = { workspace = true }
 async-trait.workspace = true

@@ -1,12 +1,11 @@
 //! PostgreSQL contracts for normalized skill-regression compile audits.
 
-use moa_core::traits::SessionStore;
 use moa_core::types::{
     agent::AgentContext,
     contact::SessionActorRef,
     execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlanningAuditEnvelope,
-        ExecutionPlanningAuditPayload, bounded_audit_report, canonical_json_bytes,
+        ExecutionPlanningAuditPayload, bounded_audit_report,
     },
     experience::{
         LearningCandidate, LearningCandidateSourceRef, LearningCandidateStatus,
@@ -16,6 +15,7 @@ use moa_core::types::{
     identifiers::{ModelId, SessionId, TenantId},
     session::SessionMeta,
 };
+use moa_core::{canonical_json::canonical_json_bytes, traits::SessionStore};
 use moa_execution::repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};

@@ -33,8 +33,9 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_artifacts::canonical::{canonical_hash, canonical_json_bytes};
+use moa_artifacts::canonical::canonical_hash;
 use moa_artifacts::release::Digest32;
+use moa_core::canonical_json::canonical_json_bytes;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

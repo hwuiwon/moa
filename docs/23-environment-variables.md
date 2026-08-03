@@ -327,7 +327,6 @@ operator knob for it.
 | `MOA_AUTH_AUTH0_CLIENT_ID` | `auth.auth0.client_id` | _empty_ | Auth0 client id loaded from runtime configuration |
 | `MOA_AUTH_AUTH0_CLIENT_SECRET` | `auth.auth0.client_secret` | _empty_ | Auth0 client secret loaded from runtime configuration **(secret)** |
 | `MOA_AUTH_AUTH0_DOMAIN` | `auth.auth0.domain` | _empty_ | Auth0 tenant domain |
-| `MOA_AUTH_AUTH0_WEBHOOK_SECRET` | `auth.auth0_webhook_secret` | _none_ | Shared secret used to verify Auth0 connection-linked webhooks **(secret)** |
 | `MOA_AUTH_CONTACT_TOKENS_AUDIENCE` | `auth.contact_tokens.audience` | moa-agent-contact | Expected audience for contact JWTs |
 | `MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_HEX` | `auth.contact_tokens.contact_point_hash_key_hex` | _empty_ | 32-byte hex key used for contact point lookup hashes **(secret)** |
 | `MOA_AUTH_CONTACT_TOKENS_ISSUER` | `auth.contact_tokens.issuer` | https://moa.local/contacts | Expected issuer for contact JWTs |
@@ -366,13 +365,6 @@ operator knob for it.
 |---|---|---|---|
 | `MOA_ASYNC_AUTHZ_DEFAULT_TIMEOUT_SECS` | `async_authz.default_timeout_secs` | 900 | Default approval timeout in seconds |
 | `MOA_ASYNC_AUTHZ_PROVIDER` | `async_authz.provider` | builtin | Selected async authorization provider |
-
-### `token_vault`
-
-| Variable | Config path | Default | Description |
-|---|---|---|---|
-| `MOA_TOKEN_VAULT_PROVIDER` | `token_vault.provider` | none | Selected token vault provider |
-| `MOA_TOKEN_VAULT_REFRESH_JSON` | `token_vault.refresh` | {} | JSON map of outbound OAuth refresh settings for the self-hosted Postgres vault, keyed by connection name |
 
 ### `kms`
 

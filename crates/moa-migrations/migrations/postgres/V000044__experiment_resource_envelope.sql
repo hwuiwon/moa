@@ -28,7 +28,7 @@ ALTER TABLE moa.experiment_run
         DEFAULT '{"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0}'::JSONB,
     ADD COLUMN resource_outstanding JSONB NOT NULL
         DEFAULT '{"cost_micro_usd": 0, "tokens": 0, "turns": 0, "model_calls": 0, "tool_calls": 0}'::JSONB,
-    ADD COLUMN plan_artifact_uid UUID REFERENCES moa.artifact(artifact_uid) ON DELETE SET NULL,
+    ADD COLUMN plan_artifact_uid UUID NOT NULL REFERENCES moa.artifact(artifact_uid) ON DELETE RESTRICT,
     ADD COLUMN expected_trials BIGINT NOT NULL DEFAULT 0 CHECK (expected_trials >= 0);
 
 ALTER TABLE moa.experiment_trial
@@ -109,12 +109,10 @@ SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT
         count(*) FILTER (
-            WHERE target_plan_artifact_uid IS NOT NULL
-              AND active.plan_artifact_uid = target_plan_artifact_uid
+            WHERE active.plan_artifact_uid = target_plan_artifact_uid
         ),
         coalesce(sum(active.active_trials) FILTER (
-            WHERE target_plan_artifact_uid IS NOT NULL
-              AND active.plan_artifact_uid = target_plan_artifact_uid
+            WHERE active.plan_artifact_uid = target_plan_artifact_uid
         ), 0),
         count(*) FILTER (
             WHERE active.storage_partition_id IS NOT DISTINCT FROM target_storage_partition_id

@@ -34,11 +34,18 @@ async fn embedding_cardinality_mismatch_rejects_batch_without_graph_write_db_mem
             parser_label: "test_parser".to_string(),
         },
     );
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
             metadata: credentialish_metadata(),
@@ -109,11 +116,18 @@ async fn ingest_record_page_processes_records_concurrently_with_accurate_report_
             parser_label: "test_parser".to_string(),
         },
     );
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
             metadata: credentialish_metadata(),
@@ -222,11 +236,18 @@ async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_gra
         },
     );
 
+    insert_managed_connector_parent(
+        &pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository_a
         .upsert_connection(KnowledgeConnection {
             connection_uid,
             tenant_id,
-            provider: "test_provider".to_string(),
+            provider: moa_knowledge::domain::LinkedProviderKind::Nango,
             connector: "docs".to_string(),
             provider_account_id: "acct_duplicate_workers".to_string(),
             metadata: credentialish_metadata(),

@@ -7,7 +7,10 @@ use moa_knowledge::{
         KnowledgeConnection, KnowledgeCredentialOwnership, LinkClaimReservation, LinkClaimState,
         LinkClaimTransition, NewLinkClaim,
     },
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        PostgresKnowledgeRepository, connection::KnowledgeConnectionRepository,
+        sync::KnowledgeSyncRepository,
+    },
 };
 use moa_test_support::postgres;
 use serde_json::json;
@@ -43,7 +46,7 @@ fn connection(tenant_id: TenantId) -> KnowledgeConnection {
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
-        provider: "merge".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Merge,
         connector: "knowledgebase".to_string(),
         provider_account_id: format!("linked-account-{}", Uuid::now_v7()),
         metadata: json!({}),

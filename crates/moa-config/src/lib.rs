@@ -32,7 +32,6 @@ mod sandbox;
 mod security;
 mod session;
 mod telemetry;
-mod token_vault;
 
 pub use analytics::AnalyticsConfig;
 pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
@@ -92,7 +91,6 @@ pub use telemetry::{
     MetricsConfig, MetricsExporter, ObservabilityConfig, OtlpProtocol, OtlpSignal,
     otlp_signal_endpoint,
 };
-pub use token_vault::{OAuthRefreshConfig, TokenVaultConfig, TokenVaultKind};
 
 use serde::{Deserialize, Serialize};
 
@@ -117,8 +115,6 @@ pub struct MoaConfig {
     pub authz: AuthzConfig,
     /// Authentication provider settings.
     pub auth: AuthConfig,
-    /// Token vault provider settings.
-    pub token_vault: TokenVaultConfig,
     /// Envelope-encryption key-management settings.
     pub kms: KmsConfig,
     /// Async authorization provider settings.
@@ -381,7 +377,6 @@ impl MoaConfig {
         self.providers.validate()?;
         self.metrics.validate()?;
         self.observability.lineage.validate()?;
-        self.token_vault.validate()?;
 
         if self.kms.provider == KmsProviderKind::Postgres {
             if self.kms.root_key_dir.as_os_str().is_empty() {
@@ -439,7 +434,6 @@ mod tests {
         "MOA_AUTHZ_OPENFGA_STORE_ID",
         "MOA_AUTHZ_OPENFGA_MODEL_ID",
         "MOA_AUTHZ_OPENFGA_TIMEOUT_MS",
-        "MOA_AUTH_AUTH0_WEBHOOK_SECRET",
         "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX",
         "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX",
         "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID",
@@ -564,17 +558,12 @@ mod tests {
             std::env::set_var("MOA_AUTHZ_OPENFGA_STORE_ID", "store-1");
             std::env::set_var("MOA_AUTHZ_OPENFGA_MODEL_ID", "model-1");
             std::env::set_var("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "1234");
-            std::env::set_var("MOA_AUTH_AUTH0_WEBHOOK_SECRET", "webhook-secret");
         }
 
         let config = MoaConfig::load_from_env().expect("load config from env");
 
         assert_eq!(config.database.url, "postgres://env.example/moa");
         assert_eq!(config.auth.provider, AuthProviderKind::Disabled);
-        assert_eq!(
-            config.auth.auth0_webhook_secret.as_deref(),
-            Some("webhook-secret")
-        );
         assert_eq!(config.authz.engine, AuthzEngine::Openfga);
         let openfga = config
             .authz

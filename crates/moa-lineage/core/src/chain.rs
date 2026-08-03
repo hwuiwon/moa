@@ -1,9 +1,6 @@
 //! Shared canonical-payload hash-chain primitives for lineage writers and verifiers.
 
 use blake3::{Hash, Hasher};
-use serde::Serialize;
-use serde_canonical_json::CanonicalFormatter;
-
 /// Result type used by lineage hash-chain helpers.
 pub type Result<T> = std::result::Result<T, LineageChainError>;
 
@@ -28,17 +25,9 @@ pub enum LineageChainError {
     },
 }
 
-/// Canonicalizes a serializable payload to deterministic JSON bytes.
-pub fn canonical_json_bytes<T: Serialize>(payload: &T) -> Result<Vec<u8>> {
-    let mut serializer =
-        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-    payload.serialize(&mut serializer)?;
-    Ok(serializer.into_inner())
-}
-
 /// Computes the BLAKE3 hash of canonical JSON payload bytes.
 pub fn canonical_payload_hash(payload: &serde_json::Value) -> Result<Hash> {
-    let canonical = canonical_json_bytes(payload)?;
+    let canonical = moa_core::canonical_json::canonical_json_bytes(payload)?;
     Ok(blake3::hash(&canonical))
 }
 

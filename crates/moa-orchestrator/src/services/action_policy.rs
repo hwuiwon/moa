@@ -21,7 +21,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::connector_catalog::ScopedConnectorCatalogProvider;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
@@ -126,6 +126,7 @@ pub struct ActionPolicyImpl {
     router: Arc<ToolRouter>,
     connector_catalog: ScopedConnectorCatalogProvider,
     rule_store: Arc<dyn ActionPolicyRuleStore>,
+    authz: AuthzEnforcer,
 }
 
 impl ActionPolicyImpl {
@@ -135,11 +136,13 @@ impl ActionPolicyImpl {
         router: Arc<ToolRouter>,
         connector_catalog: ScopedConnectorCatalogProvider,
         rule_store: Arc<dyn ActionPolicyRuleStore>,
+        authz: AuthzEnforcer,
     ) -> Self {
         Self {
             router,
             connector_catalog,
             rule_store,
+            authz,
         }
     }
 }
@@ -182,7 +185,7 @@ impl ActionPolicy for ActionPolicyImpl {
         annotate_restate_handler_span("ActionPolicy", "upsert_rule");
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
-        require_tenant_admin(&identity, request.tenant_id).await?;
+        require_tenant_admin(&self.authz, &identity, request.tenant_id).await?;
         let created_by = UserId::new(identity.id.to_string());
         let rule_store = self.rule_store.clone();
 
@@ -319,10 +322,11 @@ async fn prepare_action_review_inner(
 }
 
 async fn require_tenant_admin(
+    authz: &AuthzEnforcer,
     identity: &moa_core::traits::Identity,
     tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+    let fga = authz.require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         identity,

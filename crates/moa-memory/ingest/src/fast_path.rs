@@ -28,7 +28,7 @@ use tokio::{sync::OnceCell, time::timeout};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::{Conflict, ContradictionContext, ContradictionDetector, Error, current_runtime};
+use crate::{Conflict, ContradictionContext, ContradictionDetector, Error, IngestRuntime};
 
 const JUDGE_TIMEOUT: Duration = Duration::from_millis(250);
 const SUPERSEDE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -308,7 +308,7 @@ pub struct IncidentRecord {
     pub actor_kind: String,
 }
 
-/// Records one durable failure as an `Incident` node using the installed runtime.
+/// Records one durable failure as an `Incident` node using an explicit runtime.
 ///
 /// Fire-and-forget from the brain turn loop: returns `Ok(None)` (rather than an
 /// error) when memory learning is disabled in config, when the same failure was
@@ -316,12 +316,12 @@ pub struct IncidentRecord {
 /// the text. The write is scoped to the session's contact when present and to the
 /// tenant otherwise, mirroring the explicit fast-path write.
 pub async fn record_incident(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     turn_seq: i64,
     attempted: &str,
     failure: &str,
 ) -> Result<Option<Uuid>, FastError> {
-    let runtime = current_runtime()?;
     if !runtime.fact_extraction_enabled() {
         return Ok(None);
     }
@@ -336,7 +336,7 @@ pub async fn record_incident(
         None => (RlsContext::tenant(TenantId::from(tenant_id)), "tenant"),
     };
     let scope_ctx = with_write_barrier_clearance(scope_ctx, barrier.as_ref());
-    let ctx = runtime_fast_ctx(scope_ctx).await?;
+    let ctx = runtime_fast_ctx(runtime, scope_ctx).await?;
     record_incident_with_ctx(
         IncidentRecord {
             tenant_id,
@@ -491,21 +491,22 @@ fn more_restrictive(a: SensitivityClass, b: SensitivityClass) -> SensitivityClas
     if a.rank() >= b.rank() { a } else { b }
 }
 
-/// Executes a memory tool request using the installed orchestrator runtime.
+/// Executes a memory tool request using an explicitly injected runtime.
 pub async fn execute_memory_tool(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     tool_name: &str,
     input: &Value,
 ) -> moa_core::error::Result<ToolOutput> {
     let started = Instant::now();
     let output = match tool_name {
-        "memory_remember" => Ok(execute_remember_tool(session, input, started)
+        "memory_remember" => Ok(execute_remember_tool(runtime, session, input, started)
             .await
             .unwrap_or_else(|error| memory_tool_failure_output(tool_name, &error, started))),
-        "memory_forget" => Ok(execute_forget_tool(session, input, started)
+        "memory_forget" => Ok(execute_forget_tool(runtime, session, input, started)
             .await
             .unwrap_or_else(|error| memory_tool_failure_output(tool_name, &error, started))),
-        "memory_supersede" => Ok(execute_supersede_tool(session, input, started)
+        "memory_supersede" => Ok(execute_supersede_tool(runtime, session, input, started)
             .await
             .unwrap_or_else(|error| memory_tool_failure_output(tool_name, &error, started))),
         _ => Err(FastError::Invalid(format!(
@@ -519,8 +520,18 @@ pub async fn execute_memory_tool(
 }
 
 /// Runtime adapter that lets `moa-hands` execute graph-memory tools without depending on ingest.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct FastMemoryToolExecutor;
+#[derive(Clone)]
+pub struct FastMemoryToolExecutor {
+    runtime: Arc<IngestRuntime>,
+}
+
+impl FastMemoryToolExecutor {
+    /// Creates a fast-memory adapter over the host-owned ingestion runtime.
+    #[must_use]
+    pub fn new(runtime: Arc<IngestRuntime>) -> Self {
+        Self { runtime }
+    }
+}
 
 #[async_trait]
 impl MemoryToolExecutor for FastMemoryToolExecutor {
@@ -530,7 +541,19 @@ impl MemoryToolExecutor for FastMemoryToolExecutor {
         tool_name: &str,
         input: &Value,
     ) -> moa_core::error::Result<ToolOutput> {
-        execute_memory_tool(session, tool_name, input).await
+        execute_memory_tool(self.runtime.as_ref(), session, tool_name, input).await
+    }
+
+    async fn record_memory_incident(
+        &self,
+        session: &SessionMeta,
+        turn_seq: i64,
+        attempted: &str,
+        failure: &str,
+    ) -> moa_core::error::Result<Option<Uuid>> {
+        record_incident(self.runtime.as_ref(), session, turn_seq, attempted, failure)
+            .await
+            .map_err(|error| MoaError::ToolError(error.to_string()))
     }
 }
 
@@ -828,6 +851,7 @@ struct SupersedeToolInput {
 }
 
 async fn execute_remember_tool(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     input: &Value,
     started: Instant,
@@ -843,7 +867,9 @@ async fn execute_remember_tool(
         std::collections::HashMap::new();
     let mut outcomes = Vec::with_capacity(batch.items.len());
     for item in &batch.items {
-        outcomes.push(remember_one_item(session, item, barrier.as_ref(), &mut scope_ctxs).await);
+        outcomes.push(
+            remember_one_item(runtime, session, item, barrier.as_ref(), &mut scope_ctxs).await,
+        );
     }
     Ok(batch_remember_output(&outcomes, started))
 }
@@ -865,6 +891,7 @@ fn validate_remember_batch_len(len: usize) -> Result<(), FastError> {
 /// Writes one batch item, returning a per-item outcome instead of erroring so a
 /// single bad item never aborts the rest of the batch.
 async fn remember_one_item(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     item: &RememberItemInput,
     barrier: Option<&InformationBarrierId>,
@@ -879,7 +906,7 @@ async fn remember_one_item(
     }
     let scope = requested_write_scope(item.scope.as_deref());
     let (ctx, tenant_id, contact_id) =
-        match scoped_ctx_for(session, &scope, barrier, scope_ctxs).await {
+        match scoped_ctx_for(runtime, session, &scope, barrier, scope_ctxs).await {
             Ok(triple) => triple,
             Err(error) => return RememberOutcome::Rejected(remember_item_reason(&error)),
         };
@@ -907,6 +934,7 @@ async fn remember_one_item(
 
 /// Returns the scope's runtime context, building and caching it on first use.
 async fn scoped_ctx_for(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     scope: &str,
     barrier: Option<&InformationBarrierId>,
@@ -915,7 +943,7 @@ async fn scoped_ctx_for(
     if let Some(existing) = scope_ctxs.get(scope) {
         return Ok(existing.clone());
     }
-    let built = runtime_ctx_for_scope(session, scope, barrier).await?;
+    let built = runtime_ctx_for_scope(runtime, session, scope, barrier).await?;
     scope_ctxs.insert(scope.to_string(), built.clone());
     Ok(built)
 }
@@ -995,6 +1023,7 @@ fn batch_remember_output(outcomes: &[RememberOutcome], started: Instant) -> Tool
 }
 
 async fn execute_forget_tool(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     input: &Value,
     started: Instant,
@@ -1003,15 +1032,18 @@ async fn execute_forget_tool(
     let barrier = pinned_write_barrier(session)?;
     let count = match (params.uid, params.name, params.soft_all_contact_id) {
         (Some(uid), None, None) => {
-            let ctx = runtime_ctx_for_visible_session_scope(session, barrier.as_ref()).await?;
+            let ctx =
+                runtime_ctx_for_visible_session_scope(runtime, session, barrier.as_ref()).await?;
             fast_forget(ForgetPattern::Uid(uid), &ctx).await?
         }
         (None, Some(name), None) => {
-            let ctx = runtime_ctx_for_visible_session_scope(session, barrier.as_ref()).await?;
+            let ctx =
+                runtime_ctx_for_visible_session_scope(runtime, session, barrier.as_ref()).await?;
             fast_forget(ForgetPattern::NameMatch(name), &ctx).await?
         }
         (None, None, Some(contact_id)) => {
-            let ctx = runtime_ctx_for_contact(session, contact_id, barrier.as_ref()).await?;
+            let ctx =
+                runtime_ctx_for_contact(runtime, session, contact_id, barrier.as_ref()).await?;
             fast_forget(ForgetPattern::SoftAll(contact_id), &ctx).await?
         }
         _ => {
@@ -1032,6 +1064,7 @@ fn forget_output(count: u64, started: Instant) -> ToolOutput {
 }
 
 async fn execute_supersede_tool(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     input: &Value,
     started: Instant,
@@ -1045,10 +1078,11 @@ async fn execute_supersede_tool(
             supersedes_specific: Some(params.old_uid),
         }],
     };
-    execute_remember_tool(session, &serde_json::to_value(batch)?, started).await
+    execute_remember_tool(runtime, session, &serde_json::to_value(batch)?, started).await
 }
 
 async fn runtime_ctx_for_scope(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     scope: &str,
     barrier: Option<&InformationBarrierId>,
@@ -1068,7 +1102,11 @@ async fn runtime_ctx_for_scope(
         None => RlsContext::tenant(TenantId::from(tenant_id)),
     };
     let scope_ctx = with_write_barrier_clearance(scope_ctx, barrier);
-    Ok((runtime_fast_ctx(scope_ctx).await?, tenant_id, contact_id))
+    Ok((
+        runtime_fast_ctx(runtime, scope_ctx).await?,
+        tenant_id,
+        contact_id,
+    ))
 }
 
 fn requested_contact_scope_without_contact(
@@ -1112,6 +1150,7 @@ fn memory_tool_failure_output(tool_name: &str, error: &FastError, started: Insta
 }
 
 async fn runtime_ctx_for_contact(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     contact_id: Uuid,
     barrier: Option<&InformationBarrierId>,
@@ -1119,17 +1158,18 @@ async fn runtime_ctx_for_contact(
     let tenant_id = tenant_uuid(session);
     let scope_ctx = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let scope_ctx = with_write_barrier_clearance(scope_ctx, barrier);
-    runtime_fast_ctx(scope_ctx).await
+    runtime_fast_ctx(runtime, scope_ctx).await
 }
 
 async fn runtime_ctx_for_visible_session_scope(
+    runtime: &IngestRuntime,
     session: &SessionMeta,
     barrier: Option<&InformationBarrierId>,
 ) -> Result<FastPathCtx, FastError> {
     if let Some(contact) = &session.contact {
-        runtime_ctx_for_contact(session, contact.contact_id.0, barrier).await
+        runtime_ctx_for_contact(runtime, session, contact.contact_id.0, barrier).await
     } else {
-        let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant", barrier).await?;
+        let (ctx, _, _) = runtime_ctx_for_scope(runtime, session, "tenant", barrier).await?;
         Ok(ctx)
     }
 }
@@ -1175,13 +1215,8 @@ fn actor_id_from_session(session: &SessionMeta) -> Uuid {
     }
 }
 
-async fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
-    let runtime = current_runtime()?;
-    runtime_fast_ctx_from_runtime(&runtime, scope).await
-}
-
-async fn runtime_fast_ctx_from_runtime(
-    runtime: &crate::IngestRuntime,
+async fn runtime_fast_ctx(
+    runtime: &IngestRuntime,
     scope: RlsContext,
 ) -> Result<FastPathCtx, FastError> {
     let pool = runtime.pool().clone();
@@ -1254,6 +1289,10 @@ mod tests {
             .clone()
     }
 
+    fn test_runtime() -> IngestRuntime {
+        IngestRuntime::new(lazy_pool(), test_kms()).expect("test ingestion runtime")
+    }
+
     fn session_with_knowledge_policy(policy: AgentKnowledgePolicy) -> SessionMeta {
         let mut agent_context = AgentContext::system_default();
         agent_context.policy_snapshot = json!(AgentPolicySnapshot {
@@ -1319,7 +1358,7 @@ mod tests {
             .entity_blocking_embedder()
             .expect("entity blocking embedder should be configured");
 
-        let fast = runtime_fast_ctx_from_runtime(
+        let fast = runtime_fast_ctx(
             &runtime,
             RlsContext::tenant(TenantId::from(Uuid::from_u128(1))),
         )
@@ -1343,7 +1382,7 @@ mod tests {
         config.memory.vector.embedder.name = "disabled".to_string();
         let runtime = crate::IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
             .expect("disabled embedding should leave fast graph access available");
-        let ctx = runtime_fast_ctx_from_runtime(
+        let ctx = runtime_fast_ctx(
             &runtime,
             RlsContext::tenant(TenantId::from(Uuid::from_u128(3))),
         )
@@ -1429,7 +1468,7 @@ mod tests {
         let runtime = crate::IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
             .expect("disabled embedding should not disable graph deletion");
 
-        let fast = runtime_fast_ctx_from_runtime(
+        let fast = runtime_fast_ctx(
             &runtime,
             RlsContext::tenant(TenantId::from(Uuid::from_u128(2))),
         )
@@ -1571,7 +1610,7 @@ mod tests {
             ]
         });
 
-        let output = execute_remember_tool(&session, &input, Instant::now())
+        let output = execute_remember_tool(&test_runtime(), &session, &input, Instant::now())
             .await
             .expect("batch execution should return per-item results, not error out");
 
@@ -1596,13 +1635,17 @@ mod tests {
         // per-call cap are both rejected before any write is attempted.
         let session = SessionMeta::default();
 
-        let empty = execute_remember_tool(&session, &json!({ "items": [] }), Instant::now()).await;
+        let runtime = test_runtime();
+        let empty =
+            execute_remember_tool(&runtime, &session, &json!({ "items": [] }), Instant::now())
+                .await;
         assert!(matches!(empty, Err(FastError::Invalid(_))), "empty batch");
 
         let oversized_items: Vec<Value> = (0..=MAX_REMEMBER_BATCH)
             .map(|index| json!({ "text": format!("fact {index}") }))
             .collect();
         let oversized = execute_remember_tool(
+            &runtime,
             &session,
             &json!({ "items": oversized_items }),
             Instant::now(),

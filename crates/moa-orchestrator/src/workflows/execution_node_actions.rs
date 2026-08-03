@@ -5,15 +5,11 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::ExecutionFailureClass;
 use moa_execution::{
-    completion::{CompletionEvaluation, CompletionStatus},
     repository::{
         ExecutionMutationMetricEvidence, ExecutionRunRecord, ExecutionRunTransitionEvidence,
         ExecutionTaskRecord, ExecutionTaskTransitionEvidence,
     },
-    state::{
-        ExecutionRunStatus, ExecutionTaskFailure, ExecutionTaskStatus, ExecutionTerminalReason,
-        LogicalTaskKind, TerminalProjection,
-    },
+    state::{ExecutionRunStatus, ExecutionTaskStatus, ExecutionTerminalReason, LogicalTaskKind},
 };
 use moa_observability::{
     ExecutionMetricFailureClass, ExecutionMetricRunState, ExecutionMetricTaskKind,
@@ -24,46 +20,6 @@ use moa_observability::{
     record_execution_run_usage, record_execution_task_duration, record_execution_task_retry,
     record_execution_task_state_transition,
 };
-use serde_json::Value;
-
-/// Converts deterministic completion evidence into the matching terminal projection.
-pub(crate) fn terminal_projection_from_evaluation(
-    evaluation: &CompletionEvaluation,
-    output: Option<Value>,
-    additional_gap: Option<String>,
-) -> TerminalProjection {
-    let mut gaps = evaluation.gaps.clone();
-    if let Some(gap) = additional_gap {
-        gaps.push(gap);
-        gaps.sort();
-        gaps.dedup();
-    }
-    match evaluation.status {
-        CompletionStatus::Completed => TerminalProjection::Completed {
-            output: output.unwrap_or(Value::Null),
-        },
-        CompletionStatus::Partial => TerminalProjection::Partial { output, gaps },
-        CompletionStatus::Blocked => TerminalProjection::Blocked { output, gaps },
-        CompletionStatus::Unsupported => TerminalProjection::Unsupported {
-            reason: gaps
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "required execution path is unsupported".to_string()),
-            gaps,
-        },
-        CompletionStatus::Failed => TerminalProjection::Failed {
-            failure: ExecutionTaskFailure {
-                class: ExecutionFailureClass::Terminal,
-                message: gaps
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "execution produced no required result".to_string()),
-                capability_ref: None,
-            },
-        },
-    }
-}
-
 pub(crate) fn record_applied_run_transition(
     prior: Option<ExecutionRunStatus>,
     run: &ExecutionRunRecord,

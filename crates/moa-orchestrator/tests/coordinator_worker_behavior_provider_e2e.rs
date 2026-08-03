@@ -15,10 +15,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use moa_artifacts::canonical::canonical_json_bytes as artifact_canonical_json_bytes;
 use moa_artifacts::execution_plan::{
     CompletionCheckKind, ExecutionOperation, GeneratedExecutionCandidate,
 };
+use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::traits::Identity;
 use moa_core::{
     events::Event,
@@ -1813,7 +1813,7 @@ async fn assert_generated_plan_audits_and_authorization(
     };
     let expected_compiler_candidate_hash = execution_planning_hash(
         "moa.execution.compile-candidate",
-        &artifact_canonical_json_bytes(&compile_preimage)
+        &canonical_json_bytes(&compile_preimage)
             .context("canonicalize supplementary compiler preimage")?,
     );
 

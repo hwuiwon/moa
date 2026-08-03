@@ -1784,9 +1784,9 @@ async fn seed_experiment_run(
         "INSERT INTO moa.experiment_run \
              (run_uid, tenant_id, storage_partition_id, user_id, name, target_kind, status, \
               target, variant, score_run_id, session_id, created_by_identity, started_at, \
-              completed_at, resource_envelope) \
+              completed_at, plan_artifact_uid, resource_envelope, simulator_policy) \
          VALUES ($1, $2, $3, 'user-1', $4, 'agent_loop', $5, '{}'::jsonb, '{}'::jsonb, $6, $7, \
-              '{}'::jsonb, $8, $9, $10)",
+              '{}'::jsonb, $8, $9, '00000000-0000-4000-8000-0000000d74f0', $10, '{}'::jsonb)",
     )
     .bind(Uuid::now_v7())
     .bind(tenant)

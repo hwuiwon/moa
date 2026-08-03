@@ -1,6 +1,6 @@
 //! Restate-side bridge for compiling one durable session turn request.
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use moa_brain::{
     GraphMemoryPipelineOptions,
@@ -30,11 +30,12 @@ use moa_lineage_core::TurnId;
 use moa_observability::{
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
 };
+use moa_providers::ProviderRegistry;
 use moa_security::inject_canary;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
-use crate::ctx::OrchestratorCtx;
+use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::services::llm_gateway::USER_TURN_METADATA_KEY;
 use crate::tool_invocation::governed::TOOL_CATALOG_PIN_METADATA_KEY;
 
@@ -77,47 +78,91 @@ pub(crate) struct PreparedTurnRequestOutput {
     pub citation_sources: Vec<ChunkRef>,
 }
 
-/// Compiles the next LLM request for a session from durable state.
-pub(crate) async fn prepare_turn_request(
-    session_id: SessionId,
-    turn_id: TurnId,
-    identity: Identity,
-    active_user_sequence_num: Option<u64>,
-    cached_query_rewrite: Option<QueryRewriteCacheEntry>,
-) -> Result<PreparedTurnRequestOutput> {
-    let ctx = OrchestratorCtx::current();
-    let session_store = ctx.session_store();
-    let session = session_store.get_session(session_id).await?;
-    if identity.tenant_id != session.tenant_id {
-        return Err(MoaError::PermissionDenied(
-            "turn identity tenant does not match the loaded session tenant".to_string(),
-        ));
-    }
-    let recent_events = session_store
-        .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
-        .await?;
-    let recent_events = preserve_active_user_event(
-        session_store.as_ref(),
-        session_id,
-        recent_events,
-        active_user_sequence_num,
-    )
-    .await?;
-    if !session_requires_processing(&session, &recent_events) {
-        return Ok(PreparedTurnRequestOutput {
-            prepared: PreparedTurnRequest::Idle,
-            active_canary: None,
-            trusted_sandbox_files: Vec::new(),
-            query_rewrite_cache: None,
-            citation_sources: Vec::new(),
-        });
+/// Explicit dependency owner for compiling durable root-turn requests.
+#[derive(Clone)]
+pub(crate) struct TurnRequestPreparer {
+    session_store: Arc<dyn SessionStore>,
+    config: Arc<moa_config::MoaConfig>,
+    graph_pool: sqlx::PgPool,
+    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+    providers: Arc<ProviderRegistry>,
+    connector_catalogs: ScopedConnectorCatalogProvider,
+    graph_memory_retriever: Arc<moa_brain::pipeline::memory::GraphMemoryRetriever>,
+    skill_injector: Arc<moa_brain::pipeline::skills::SkillInjector>,
+    lineage: Arc<dyn moa_core::traits::LineageHandle>,
+}
+
+impl TurnRequestPreparer {
+    /// Creates a request compiler from the runtime's shared dependencies.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        session_store: Arc<dyn SessionStore>,
+        config: Arc<moa_config::MoaConfig>,
+        graph_pool: sqlx::PgPool,
+        kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+        providers: Arc<ProviderRegistry>,
+        connector_catalogs: ScopedConnectorCatalogProvider,
+        graph_memory_retriever: Arc<moa_brain::pipeline::memory::GraphMemoryRetriever>,
+        skill_injector: Arc<moa_brain::pipeline::skills::SkillInjector>,
+        lineage: Arc<dyn moa_core::traits::LineageHandle>,
+    ) -> Self {
+        Self {
+            session_store,
+            config,
+            graph_pool,
+            kms,
+            providers,
+            connector_catalogs,
+            graph_memory_retriever,
+            skill_injector,
+            lineage,
+        }
     }
 
-    let provider_registry = ctx.provider_registry();
-    let config = ctx.config();
-    let capabilities = provider_registry.capabilities_for_model(Some(session.model.as_str()))?;
-    let query_rewrite_provider =
-        match provider_registry.resolve_rewriter_provider(&config.query_rewrite) {
+    /// Compiles the next LLM request for a session from durable state.
+    pub(crate) async fn prepare(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        identity: Identity,
+        active_user_sequence_num: Option<u64>,
+        cached_query_rewrite: Option<QueryRewriteCacheEntry>,
+    ) -> Result<PreparedTurnRequestOutput> {
+        let session_store = self.session_store.clone();
+        let session = session_store.get_session(session_id).await?;
+        if identity.tenant_id != session.tenant_id {
+            return Err(MoaError::PermissionDenied(
+                "turn identity tenant does not match the loaded session tenant".to_string(),
+            ));
+        }
+        let recent_events = session_store
+            .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
+            .await?;
+        let recent_events = preserve_active_user_event(
+            session_store.as_ref(),
+            session_id,
+            recent_events,
+            active_user_sequence_num,
+        )
+        .await?;
+        if !session_requires_processing(&session, &recent_events) {
+            return Ok(PreparedTurnRequestOutput {
+                prepared: PreparedTurnRequest::Idle,
+                active_canary: None,
+                trusted_sandbox_files: Vec::new(),
+                query_rewrite_cache: None,
+                citation_sources: Vec::new(),
+            });
+        }
+
+        let provider_registry = self.providers.clone();
+        let config = self.config.clone();
+        let capabilities =
+            provider_registry.capabilities_for_model(Some(session.model.as_str()))?;
+        let query_rewrite_provider = match provider_registry
+            .resolve_rewriter_provider(&config.query_rewrite)
+        {
             Ok(provider) => provider,
             Err(error) => {
                 tracing::warn!(
@@ -127,135 +172,137 @@ pub(crate) async fn prepare_turn_request(
                 None
             }
         };
-    let lineage = ctx.lineage();
-    // The root coordinator turn is sandbox-free: hard-exclude sandbox/compute
-    // (hand-routed) tools so the coordinator never provisions a hand. Manifest-backed
-    // `file_read` is kept so selected skill packages can be read without a sandbox.
-    // The worker tool subsets (built from the unfiltered `tool_schemas`)
-    // keep the hand tools, so all compute is delegated.
-    let tool_catalog = ctx
-        .connector_catalogs()
-        .for_session(&identity, &session)
-        .await
-        .map_err(|error| error.into_moa_error())?;
-    let root_tool_schemas = coordinator_tool_schemas(tool_catalog.schemas().as_ref(), |name| {
-        tool_catalog.snapshot().tool_requires_sandbox(name)
-    });
-    let tool_catalog_pin = tool_catalog.pin().clone();
-    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
-        config.as_ref(),
-        session_store.clone(),
-        GraphMemoryPipelineOptions {
-            graph_pool: ctx.graph_pool(),
-            kms: ctx.kms(),
-            shared_graph_memory_retriever: Some(ctx.graph_memory_retriever()),
-            retrieval_embedder: None,
-            shared_skill_injector: Some(ctx.skill_injector()),
-            segment_store: None,
-            compaction_llm_provider: None,
-            query_rewrite_llm_provider: query_rewrite_provider,
-            identity_prompt_override: None,
-            tool_schemas: root_tool_schemas,
-            lineage: lineage.clone(),
-        },
-    );
-    let mut context = WorkingContext::new(&session, capabilities);
-    context.set_caller_identity(identity);
-    let active_user_turn = active_user_turn_text(&recent_events, active_user_sequence_num);
-    context.set_recent_events(recent_events);
-    if let Some(sequence_num) = active_user_sequence_num {
-        context.insert_metadata("_moa.turn_seq", serde_json::json!(sequence_num));
-    }
-    if let Some(user_turn) = active_user_turn {
-        // Memory ingestion reads this durable user-turn text instead of the
-        // compiled messages, so injected reminders and replayed history never
-        // re-enter fact extraction.
-        context.insert_metadata(USER_TURN_METADATA_KEY, serde_json::json!(user_turn));
-    }
-    context.insert_metadata(
-        TURN_ID_METADATA_KEY,
-        serde_json::json!(turn_id.0.to_string()),
-    );
-    if let Some(agent_context) = context.agent_context.as_ref() {
-        let policy = agent_context.parsed_policy_snapshot()?;
-        policy.knowledge_policy.validate()?;
-        if let Some(write_barrier) = policy.knowledge_policy.write_barrier {
+        let lineage = self.lineage.clone();
+        // The root coordinator turn is sandbox-free: hard-exclude sandbox/compute
+        // (hand-routed) tools so the coordinator never provisions a hand. Manifest-backed
+        // `file_read` is kept so selected skill packages can be read without a sandbox.
+        // The worker tool subsets (built from the unfiltered `tool_schemas`)
+        // keep the hand tools, so all compute is delegated.
+        let tool_catalog = self
+            .connector_catalogs
+            .for_session(&identity, &session)
+            .await
+            .map_err(|error| error.into_moa_error())?;
+        let root_tool_schemas = coordinator_tool_schemas(tool_catalog.schemas().as_ref(), |name| {
+            tool_catalog.snapshot().tool_requires_sandbox(name)
+        });
+        let tool_catalog_pin = tool_catalog.pin().clone();
+        let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+            config.as_ref(),
+            session_store.clone(),
+            GraphMemoryPipelineOptions {
+                graph_pool: self.graph_pool.clone(),
+                kms: self.kms.clone(),
+                shared_graph_memory_retriever: Some(self.graph_memory_retriever.clone()),
+                retrieval_embedder: None,
+                shared_skill_injector: Some(self.skill_injector.clone()),
+                segment_store: None,
+                compaction_llm_provider: None,
+                query_rewrite_llm_provider: query_rewrite_provider,
+                identity_prompt_override: None,
+                tool_schemas: root_tool_schemas,
+                lineage: lineage.clone(),
+            },
+        );
+        let mut context = WorkingContext::new(&session, capabilities);
+        context.set_caller_identity(identity);
+        let active_user_turn = active_user_turn_text(&recent_events, active_user_sequence_num);
+        context.set_recent_events(recent_events);
+        if let Some(sequence_num) = active_user_sequence_num {
+            context.insert_metadata("_moa.turn_seq", serde_json::json!(sequence_num));
+        }
+        if let Some(user_turn) = active_user_turn {
+            // Memory ingestion reads this durable user-turn text instead of the
+            // compiled messages, so injected reminders and replayed history never
+            // re-enter fact extraction.
+            context.insert_metadata(USER_TURN_METADATA_KEY, serde_json::json!(user_turn));
+        }
+        context.insert_metadata(
+            TURN_ID_METADATA_KEY,
+            serde_json::json!(turn_id.0.to_string()),
+        );
+        if let Some(agent_context) = context.agent_context.as_ref() {
+            let policy = agent_context.parsed_policy_snapshot()?;
+            policy.knowledge_policy.validate()?;
+            if let Some(write_barrier) = policy.knowledge_policy.write_barrier {
+                context.insert_metadata(
+                    crate::services::llm_gateway::MEMORY_WRITE_BARRIER_METADATA_KEY,
+                    serde_json::json!(write_barrier),
+                );
+            }
+        }
+        if let Some(cache) = cached_query_rewrite
+            .filter(|cache| Some(cache.user_sequence_num) == active_user_sequence_num)
+        {
             context.insert_metadata(
-                crate::services::llm_gateway::MEMORY_WRITE_BARRIER_METADATA_KEY,
-                serde_json::json!(write_barrier),
+                QUERY_REWRITE_METADATA_KEY,
+                serde_json::to_value(cache.result)?,
             );
         }
-    }
-    if let Some(cache) = cached_query_rewrite
-        .filter(|cache| Some(cache.user_sequence_num) == active_user_sequence_num)
-    {
+        let pipeline_span = tracing::info_span!("pipeline_compile");
+        let compile_started = Instant::now();
+        pipeline
+            .run(&mut context)
+            .instrument(pipeline_span.clone())
+            .await?;
+        let compile_duration = compile_started.elapsed();
+        record_pipeline_compile_duration(compile_duration);
+        record_turn_pipeline_compile_duration(compile_duration);
+        let citation_sources = emit_context_lineage(
+            lineage.as_ref(),
+            turn_id,
+            &session,
+            &context,
+            &pipeline_span,
+        )
+        .await;
+        let active_canary = if context.tools().is_empty() {
+            None
+        } else {
+            Some(inject_canary(&mut context))
+        };
+        persist_context_snapshot(
+            session_store.as_ref(),
+            &context,
+            pipeline.snapshot_config().max_size_bytes,
+        )
+        .await;
+        context.insert_metadata("_moa.session_id", serde_json::json!(session.id.to_string()));
         context.insert_metadata(
-            QUERY_REWRITE_METADATA_KEY,
-            serde_json::to_value(cache.result)?,
+            "_moa.tenant_id",
+            serde_json::json!(session.tenant_id.to_string()),
         );
-    }
-    let pipeline_span = tracing::info_span!("pipeline_compile");
-    let compile_started = Instant::now();
-    pipeline
-        .run(&mut context)
-        .instrument(pipeline_span.clone())
-        .await?;
-    let compile_duration = compile_started.elapsed();
-    record_pipeline_compile_duration(compile_duration);
-    record_turn_pipeline_compile_duration(compile_duration);
-    let citation_sources = emit_context_lineage(
-        lineage.as_ref(),
-        turn_id,
-        &session,
-        &context,
-        &pipeline_span,
-    )
-    .await;
-    let active_canary = if context.tools().is_empty() {
-        None
-    } else {
-        Some(inject_canary(&mut context))
-    };
-    persist_context_snapshot(
-        session_store.as_ref(),
-        &context,
-        pipeline.snapshot_config().max_size_bytes,
-    )
-    .await;
-    context.insert_metadata("_moa.session_id", serde_json::json!(session.id.to_string()));
-    context.insert_metadata(
-        "_moa.tenant_id",
-        serde_json::json!(session.tenant_id.to_string()),
-    );
-    if let Some(contact) = session.contact.as_ref() {
+        if let Some(contact) = session.contact.as_ref() {
+            context.insert_metadata(
+                "_moa.contact_id",
+                serde_json::json!(contact.contact_id.to_string()),
+            );
+            context.insert_metadata(
+                "_moa.contact.verification_state",
+                serde_json::json!(contact.state.as_str()),
+            );
+            context.insert_metadata(
+                "_moa.contact.verified",
+                serde_json::json!(contact.state.is_verified()),
+            );
+        }
+        context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
         context.insert_metadata(
-            "_moa.contact_id",
-            serde_json::json!(contact.contact_id.to_string()),
+            TOOL_CATALOG_PIN_METADATA_KEY,
+            serde_json::to_value(tool_catalog_pin)?,
         );
-        context.insert_metadata(
-            "_moa.contact.verification_state",
-            serde_json::json!(contact.state.as_str()),
-        );
-        context.insert_metadata(
-            "_moa.contact.verified",
-            serde_json::json!(contact.state.is_verified()),
-        );
-    }
-    context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
-    context.insert_metadata(
-        TOOL_CATALOG_PIN_METADATA_KEY,
-        serde_json::to_value(tool_catalog_pin)?,
-    );
 
-    let query_rewrite_cache = query_rewrite_cache_from_context(active_user_sequence_num, &context);
-    let trusted_sandbox_files = context.take_trusted_sandbox_files();
-    Ok(PreparedTurnRequestOutput {
-        prepared: PreparedTurnRequest::Request(Box::new(context.into_request())),
-        active_canary,
-        trusted_sandbox_files,
-        query_rewrite_cache,
-        citation_sources,
-    })
+        let query_rewrite_cache =
+            query_rewrite_cache_from_context(active_user_sequence_num, &context);
+        let trusted_sandbox_files = context.take_trusted_sandbox_files();
+        Ok(PreparedTurnRequestOutput {
+            prepared: PreparedTurnRequest::Request(Box::new(context.into_request())),
+            active_canary,
+            trusted_sandbox_files,
+            query_rewrite_cache,
+            citation_sources,
+        })
+    }
 }
 
 async fn preserve_active_user_event(

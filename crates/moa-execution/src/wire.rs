@@ -164,7 +164,7 @@ pub fn execution_template_admission_request_fingerprint(
     request: &ExecutionTemplateAdmissionRequest,
 ) -> Result<ExecutionHash> {
     request.validate()?;
-    let bytes = moa_artifacts::canonical::canonical_json_bytes(&serde_json::json!({
+    let bytes = moa_core::canonical_json::canonical_json_bytes(&serde_json::json!({
         "schema_version": 1,
         "tenant_id": request.tenant_id,
         "contact_id": request.contact_id,
@@ -173,8 +173,7 @@ pub fn execution_template_admission_request_fingerprint(
         "objective": request.objective,
         "input": request.input,
         "idempotency_key": request.idempotency_key,
-    }))
-    .map_err(artifact_contract_error)?;
+    }))?;
     Ok(domain_hash(TEMPLATE_ADMISSION_REQUEST_DOMAIN, &bytes))
 }
 
@@ -324,8 +323,7 @@ impl ExecutionPlanningContextSnapshot {
 /// Computes the canonical domain-separated hash of one immutable planning snapshot.
 pub fn planning_context_hash(snapshot: &ExecutionPlanningContextSnapshot) -> Result<ExecutionHash> {
     snapshot.validate()?;
-    let bytes = moa_artifacts::canonical::canonical_json_bytes(snapshot)
-        .map_err(artifact_contract_error)?;
+    let bytes = moa_core::canonical_json::canonical_json_bytes(snapshot)?;
     Ok(domain_hash(PLANNING_CONTEXT_HASH_DOMAIN, &bytes))
 }
 
@@ -335,13 +333,12 @@ pub fn originating_user_event_hash(
     sequence: u64,
     event: &Event,
 ) -> Result<ExecutionHash> {
-    let bytes = moa_artifacts::canonical::canonical_json_bytes(&serde_json::json!({
+    let bytes = moa_core::canonical_json::canonical_json_bytes(&serde_json::json!({
         "schema_version": 1,
         "session_id": session_id,
         "sequence": sequence,
         "event": event,
-    }))
-    .map_err(artifact_contract_error)?;
+    }))?;
     Ok(domain_hash(ORIGINATING_USER_EVENT_HASH_DOMAIN, &bytes))
 }
 
@@ -704,7 +701,7 @@ pub fn build_execution_terminal_summary(
     gaps: impl IntoIterator<Item = String>,
 ) -> Result<ExecutionTerminalSummary> {
     let complete_output = output.cloned().unwrap_or(Value::Null);
-    let canonical_output = crate::capability::canonical_json_bytes(&complete_output)?;
+    let canonical_output = moa_core::canonical_json::canonical_json_bytes(&complete_output)?;
     let output_hash = *blake3::hash(&canonical_output).as_bytes();
     let output = (canonical_output.len() <= EXECUTION_TERMINAL_INLINE_OUTPUT_MAX_BYTES)
         .then_some(complete_output)
@@ -1008,7 +1005,7 @@ pub struct ExecutionTaskWorkflowRequest {
 
 /// Encodes a cursor as canonical JSON in URL-safe unpadded base64.
 pub fn encode_cursor<T: Serialize + ?Sized>(cursor: &T) -> Result<String> {
-    let bytes = crate::capability::canonical_json_bytes(cursor)?;
+    let bytes = moa_core::canonical_json::canonical_json_bytes(cursor)?;
     Ok(format!("{CURSOR_PREFIX}{}", encode_base64_url(&bytes)))
 }
 
@@ -1159,7 +1156,7 @@ mod tests {
         // Pins: oversized output remains recoverable by hash/table reference without event copying.
         let run_uid = Uuid::from_u128(10);
         let output = serde_json::json!({ "body": "x".repeat(17 * 1024) });
-        let canonical = crate::capability::canonical_json_bytes(&output)
+        let canonical = moa_core::canonical_json::canonical_json_bytes(&output)
             .expect("canonicalize expected full output");
         let summary = build_execution_terminal_summary(
             run_uid,
@@ -1181,7 +1178,7 @@ mod tests {
         let run_uid = Uuid::from_u128(11);
         for (string_bytes, expected_inline) in [(16 * 1024 - 2, true), (16 * 1024 - 1, false)] {
             let output = Value::String("x".repeat(string_bytes));
-            let canonical = crate::capability::canonical_json_bytes(&output)
+            let canonical = moa_core::canonical_json::canonical_json_bytes(&output)
                 .expect("canonicalize boundary output");
             let summary = build_execution_terminal_summary(
                 run_uid,

@@ -8,10 +8,11 @@ use moa_core::{
     types::provider::ModelTier,
     types::session::SessionMeta,
 };
-use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
+use moa_memory_ingest::ingestion_object_key;
 use moa_wire::turn::{RunTurnRequest, TurnTrigger};
 use restate_sdk::prelude::*;
 
+use crate::objects::ingestion::IngestionVOClient;
 use crate::turn_driver::progress as driver_progress;
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::{

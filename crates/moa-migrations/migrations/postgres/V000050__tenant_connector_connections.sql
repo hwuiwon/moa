@@ -359,7 +359,7 @@ VALUES
     (28, 'moa.connector_connections', 'moa', 'connector_connections', 'tenant_id', 'delete');
 
 COMMENT ON TABLE moa.tenant_purge_catalog IS
-    'Closed 132-table tenant-offboarding residue surface. The two nullable-scope simulator certification authority tables are intentionally global and absent.';
+    'Closed 130-table tenant-offboarding residue surface. The two nullable-scope simulator certification authority tables are intentionally global and absent.';
 
 -- New tables were not present when V48 installed its catalog-derived statement
 -- fences, so attach the same typed tenant fence now.
@@ -399,14 +399,14 @@ DECLARE
 BEGIN
     SELECT pg_get_functiondef('moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE)
     INTO predecessor;
-    IF predecessor NOT LIKE '%catalog_count <> 129%'
-       OR predecessor NOT LIKE '%exactly 129 tables%'
+    IF predecessor NOT LIKE '%catalog_count <> 127%'
+       OR predecessor NOT LIKE '%exactly 127 tables%'
     THEN
         RAISE EXCEPTION 'unexpected V48 tenant purge function definition'
             USING ERRCODE = '55000';
     END IF;
-    replacement := replace(predecessor, 'catalog_count <> 129', 'catalog_count <> 132');
-    replacement := replace(replacement, 'exactly 129 tables', 'exactly 132 tables');
+    replacement := replace(predecessor, 'catalog_count <> 127', 'catalog_count <> 130');
+    replacement := replace(replacement, 'exactly 127 tables', 'exactly 130 tables');
     EXECUTE replacement;
 END
 $tenant_connector_purge$;

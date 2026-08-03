@@ -46,6 +46,9 @@ use uuid::Uuid;
 
 static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+const PLATFORM_RELEASE_PLAN_ARTIFACT_UID: Uuid =
+    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_000d_74f0);
+
 fn cancel_signal(tenant_id: TenantId, reason: &str) -> ExperimentCancelSignal {
     ExperimentCancelSignal {
         reason: reason.to_string(),
@@ -74,7 +77,7 @@ async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
         vec![artifact_revision_uid],
     );
     let simulator_policy = support::simulator_policy("gpt-5.1-mini");
-    new_run.simulator_policy = Some(simulator_policy.clone());
+    new_run.simulator_policy = simulator_policy.clone();
 
     let inserted = store.insert_run(&scope, new_run).await?;
     let loaded = store
@@ -97,7 +100,7 @@ async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
     assert_eq!(loaded.artifact_revision_uids, [artifact_revision_uid]);
     assert_eq!(loaded.idempotency_key.as_deref(), Some("round-trip-key"));
     assert_eq!(loaded.created_by_identity["id"], "experimenter");
-    assert_eq!(loaded.simulator_policy, Some(simulator_policy));
+    assert_eq!(loaded.simulator_policy, simulator_policy);
     assert_eq!(loaded.created_at, inserted.created_at);
     assert_score_run_exists(test_db.store().pool(), &scope, loaded.score_run_id).await?;
     assert_artifact_revision_links(
@@ -1380,7 +1383,7 @@ async fn pre_expansion_admission_reserves_projected_trial_count_db() -> Result<(
     let plan_artifact_uid = artifact_uid_for_revision(pool, &scope, plan_revision_uid).await?;
 
     let mut first = new_experiment("projected-admission-first", None, vec![plan_revision_uid]);
-    first.plan_artifact_uid = Some(plan_artifact_uid);
+    first.plan_artifact_uid = plan_artifact_uid;
     first.expected_trials = DEFAULT_MAX_ARTIFACT_ACTIVE_TRIALS;
     let admitted = store.insert_run(&scope, first).await?;
 
@@ -1391,7 +1394,7 @@ async fn pre_expansion_admission_reserves_projected_trial_count_db() -> Result<(
     );
 
     let mut second = new_experiment("projected-admission-second", None, vec![plan_revision_uid]);
-    second.plan_artifact_uid = Some(plan_artifact_uid);
+    second.plan_artifact_uid = plan_artifact_uid;
     second.expected_trials = 1;
     let error = store
         .insert_run(&scope, second)
@@ -1452,7 +1455,7 @@ async fn reservation_rejects_trial_owned_by_another_run_db() -> Result<()> {
             &scope,
             ExperimentResourceReservationRequest {
                 run_uid: other.run_uid,
-                trial_uid: Some(trial.trial_uid),
+                trial_uid: trial.trial_uid,
                 reservation_key: "mismatched-run-trial".to_string(),
                 component: ExperimentResourceComponent::Target,
                 worst_case: ResourceAmounts {
@@ -1484,15 +1487,27 @@ async fn reconciliation_rejects_inconsistent_token_split_without_settling_db() -
     let pool = test_db.store().pool();
     let store = ExperimentStore::new(pool.clone());
     let scope = tenant_scope("experiment-reconciliation-token-split");
+    let plan_revision_uid = insert_artifact_revision(pool, &scope).await?;
     let run = store
         .insert_run(
             &scope,
-            new_experiment("reconciliation-token-split", None, Vec::new()),
+            new_experiment("reconciliation-token-split", None, vec![plan_revision_uid]),
+        )
+        .await?;
+    let trial = store
+        .insert_trial(
+            &scope,
+            new_trial(
+                run.run_uid,
+                "reconciliation-token-split",
+                plan_revision_uid,
+                vec![plan_revision_uid],
+            ),
         )
         .await?;
     let request = ExperimentResourceReservationRequest {
         run_uid: run.run_uid,
-        trial_uid: None,
+        trial_uid: trial.trial_uid,
         reservation_key: "invalid-token-split".to_string(),
         component: ExperimentResourceComponent::Target,
         worst_case: ResourceAmounts {
@@ -1571,7 +1586,10 @@ fn new_experiment(
             artifact_revision_uids: artifact_revision_uids.clone(),
             skill_refs: vec!["skill://experiment-baseline".to_string()],
             execution_template: None,
-            metadata: json!({ "cohort": "db" }),
+            metadata: json!({
+                "cohort": "db",
+                "plan_revision_uid": PLATFORM_RELEASE_PLAN_REVISION_UID,
+            }),
         },
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
@@ -1589,10 +1607,10 @@ fn new_experiment(
             "type": "user",
             "id": "experimenter"
         }),
-        plan_artifact_uid: None,
+        plan_artifact_uid: PLATFORM_RELEASE_PLAN_ARTIFACT_UID,
         expected_trials: 1,
         resource_envelope: fixture_experiment_envelope(),
-        simulator_policy: None,
+        simulator_policy: support::simulator_policy("gpt-5.1"),
     }
 }
 

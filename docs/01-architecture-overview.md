@@ -123,7 +123,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 | `ExecutionRepository` | `moa-execution` | Owns scoped run/task persistence, idempotent materialization, atomic budget accounting, generation-fenced outcomes, amendment history, and cancellation. It depends only on shared database/core types, never on Restate or runtime owners. |
 | `ExecutionRun` | `moa-orchestrator` Restate workflow | Drives one durable plan from persisted state, including amendment, cancellation, progress, and terminal completion. |
 | `ExecutionTask` | `moa-orchestrator` Restate workflow | Executes one stable logical node or map-item instance and records one typed outcome. |
-| Connector definition | `moa-artifacts` | Owns immutable reviewed HTTP transport, schema, credential-slot, policy-floor, and action contracts. |
+| Connector definition | `moa-artifacts` | Owns immutable reviewed HTTP transport, schema, data-class, credential-slot, and action contracts; the platform supplies the fixed external-write/high-risk/admin-review floor. |
 | Connector connection | `moa-connectors` | Owns tenant lifecycle/health/generation, HTTP action bindings, and durable send outcomes. |
 | Knowledge connection | `moa-knowledge` | Owns Nango/Merge provider records, cursor/deletion behavior, ACL capture, parsing, and ingestion beneath code-owned managed parents. |
 
@@ -234,7 +234,13 @@ key, reducer tasks use `r{round}:b{batch}`, and completion verifiers use
 retries increment both, input resumes increment only generation, and stale
 generation results cannot persist.
 
-Behavior Lab uses a single `experiment_plan` artifact. Personas, profiles, data bundles, and scenarios are typed embedded blocks under `definition.spec.simulation`, each with stable IDs for UI round trips, trial fanout, scoring, and analytics. Their product boundary, UI expectations, and verification lanes are documented in [`docs/product/behavior-lab.md`](product/behavior-lab.md).
+Behavior Lab uses a single `experiment_plan` artifact. Every run names one exact
+immutable plan revision; callers cannot submit a raw target, variant, scorecard,
+or resource envelope. Personas, profiles, data bundles, and scenarios are typed
+embedded blocks under `definition.spec.simulation`, each with stable IDs for UI
+round trips, trial fanout, scoring, and analytics. Their product boundary, UI
+expectations, and verification lanes are documented in
+[`docs/product/behavior-lab.md`](product/behavior-lab.md).
 
 Every durable session is created inside one tenant for a contact, or by an
 admin/operator actor, and uses a pinned agent revision. The session row owns the
@@ -424,12 +430,22 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context |
 | `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
 | `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
-| `CredentialVault` | Durable, versioned tenant credential storage and audited resolution | `PostgresCredentialVault` in `moa-auth-providers`, constructed once per process |
+| `CredentialVault` | Staged write/activate/rollback, audited active credential resolution, readiness, revocation, and bounded purge for versioned tenant connector slots | `PostgresCredentialVault` in `moa-auth-providers`, constructed once per process |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
 Runtime entrypoints share these seams through the Restate-backed orchestrator.
-Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
-`AsyncAuthzProvider` to `moa-core::traits`; see ADR-0002.
+Authentication and approval providers expose `AuthProvider` and
+`AsyncAuthzProvider` through `moa-core::traits`; see ADR-0002 and ADR-0006.
+
+Retrieval and tenant knowledge persistence use domain-owned ports rather than
+`moa-core` traits. `moa-retrieval::MemoryRetrievalEngine` is the one scoped
+retrieval implementation used by both the brain context adapter and the
+orchestrator memory handlers. The tenant-scoped `moa-knowledge` repository is
+split across six capabilities: `KnowledgeConnectionRepository`,
+`KnowledgeSyncRepository`, `KnowledgeIngestionRepository`,
+`KnowledgeAclRepository`, `KnowledgeContactGroupRepository`, and
+`KnowledgeEventRepository`. A service or pipeline receives only the capabilities
+it uses.
 
 ## Runtime Modes
 
@@ -472,21 +488,15 @@ separate from the outbound operator-owned agent-tool MCP clients in
 `moa-hands`. Outbound MCP is immutable deployment configuration; tenant
 connector connections do not host MCP servers or MCP actions.
 
-The binary composition root constructs `RuntimeDeps` and passes concrete
-dependencies through implementation constructors before `build_endpoint`
-binds the Restate services, virtual objects, and workflows. The architecture
-scanner constrains raw `OrchestratorCtx` dependency reads under `objects/`,
-`services/`, and `workflows/`. This is a scoped runtime-boundary invariant, not
-a claim that every `OrchestratorCtx` use has been removed from the entire
-repository.
-
-`OrchestratorCtx` dependency reads under those roots are zero — both the bare
-`current()` and every per-accessor `current_*`. The last eight counted
-exceptions were removed by injecting their dependencies through implementation
-constructors: `SessionImpl` takes the admission pool and configuration,
-`ExperimentRunImpl` and `ExperimentTrialRunImpl` take the configuration. No
-allowance remains, so a new read under those roots fails the checker outright.
-`docs/15-architecture-policy.md` holds the authoritative statement.
+The binary composition root constructs one `RuntimeDeps`, including one shared
+`IngestRuntime`, one shared `MemoryRetrievalEngine`, connector services, provider
+delivery, credential storage, and explicit turn/authz dependencies. It passes
+those concrete dependencies through implementation constructors before
+`build_endpoint` binds the Restate services, virtual objects, and workflows.
+There is no process-global `OrchestratorCtx` or ingest-runtime singleton. The
+architecture scanner rejects reintroduced raw context access under `objects/`,
+`services/`, and `workflows/`; `docs/15-architecture-policy.md` holds the
+authoritative composition rule.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -591,9 +601,12 @@ policy.
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
 The central PostgreSQL migration inventory is a fresh-install-only chain of
-exactly 52 files, `V000001..V000052`. The ownership manifest contains one entry
+exactly 53 files, `V000001..V000053`. The ownership manifest contains one entry
 for every logical table family. `xtask check-migrations` rejects gaps, extra
-files, and missing or stale ownership entries.
+files, and missing or stale ownership entries. The 2026-08-03 hard-reset epoch
+removes the retired per-user token-vault tables from their original catalog
+definitions; checksum divergence requires rebuilding Postgres and resetting
+Restate durable state rather than an in-place compatibility migration.
 
 ## Auth Layer
 
@@ -614,16 +627,13 @@ orchestrator trusts these headers, so the Restate handler port (`9080`) must be
 network-isolated in production; see
 [`docs/operations/edge-network-isolation.md`](operations/edge-network-isolation.md).
 
-Local deployments use the zero-dependency provider bundle by default:
-`LocalAuthProvider`, `NullTokenVaultProvider`, and
-`BuiltinAsyncAuthzProvider`. Builtin approvals are documented in
+Local deployments use `LocalAuthProvider` and `BuiltinAsyncAuthzProvider` by
+default. Builtin approvals are documented in
 [`docs/operations/builtin-approvals.md`](operations/builtin-approvals.md).
 Auth0 setup is documented in
 [`docs/operations/auth0-setup.md`](operations/auth0-setup.md).
 Agent lifecycle operations are documented in
-[`docs/operations/agent-lifecycle.md`](operations/agent-lifecycle.md), and the
-Auth0 Token Vault setup is documented in
-[`docs/operations/token-vault-setup.md`](operations/token-vault-setup.md).
+[`docs/operations/agent-lifecycle.md`](operations/agent-lifecycle.md).
 SCIM v2 provisioning is documented in
 [`docs/auth/scim.md`](auth/scim.md). OCSF security-event audit setup is
 documented in [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
@@ -707,7 +717,7 @@ separate surfaces:
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets always create eval-owned
-  `Session` state and queue messages through normal `Session` and
+  `Session` state and submit messages through normal `Session/start_turn` and
   `TurnExecution` routing.
   Experiment plans pin an exact certified simulator policy revision. Admission
   persists its immutable provider/model, decoding, prompt, context, and response

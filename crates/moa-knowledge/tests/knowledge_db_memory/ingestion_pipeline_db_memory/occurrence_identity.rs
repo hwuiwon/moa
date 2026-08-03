@@ -21,12 +21,7 @@ async fn occurrence_pipeline(
     Arc<PostgresKnowledgeRepository>,
     Arc<CountingEmbedder>,
     Arc<FakeGraphWriter>,
-    KnowledgeIngestionPipeline<
-        PostgresKnowledgeRepository,
-        ParagraphParser,
-        CountingEmbedder,
-        FakeGraphWriter,
-    >,
+    KnowledgeIngestionPipeline,
 ) {
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
@@ -45,6 +40,13 @@ async fn occurrence_pipeline(
             parser_label: "test_parser".to_string(),
         },
     );
+    insert_managed_connector_parent(
+        pool,
+        tenant_id,
+        connection_uid,
+        moa_knowledge::domain::LinkedProviderKind::Nango,
+    )
+    .await;
     repository
         .upsert_connection(drive_connection(connection_uid, tenant_id))
         .await

@@ -134,13 +134,11 @@ fn each_service_actor_permits_exactly_one_operation() {
     // Pins: the durable service-actor allowlist is not a general bypass. Each
     // actor is bound to one operation, so a knowledge workflow can never write
     // credential state and the purge actor can never read material.
-    const ALL_OPERATIONS: [CredentialOperation; 8] = [
-        CredentialOperation::Create,
+    const ALL_OPERATIONS: [CredentialOperation; 6] = [
         CredentialOperation::Stage,
         CredentialOperation::Activate,
         CredentialOperation::RollbackActivation,
         CredentialOperation::Resolve,
-        CredentialOperation::Rotate,
         CredentialOperation::Revoke,
         CredentialOperation::Delete,
     ];
@@ -192,7 +190,7 @@ fn rollback_activation_has_a_stable_distinct_audit_name() {
 
 #[test]
 fn caller_principal_records_owner_and_delegation_separately() {
-    // Pins: create stamps the acting identity as owner; acting under delegation
+    // Pins: staging stamps the acting identity as owner; acting under delegation
     // records the delegator without changing who the owner is.
     let identity_id = Uuid::from_u128(0x2301);
     let delegator = Uuid::from_u128(0x2302);
@@ -208,7 +206,7 @@ fn caller_principal_records_owner_and_delegation_separately() {
 
     assert_eq!(direct.owner_identity(), Some(identity_id));
     assert_eq!(delegated.owner_identity(), Some(identity_id));
-    assert!(delegated.permits(CredentialOperation::Rotate));
+    assert!(delegated.permits(CredentialOperation::Stage));
 }
 
 #[test]
@@ -255,22 +253,26 @@ fn staging_token_debug_hides_both_credential_references() {
 }
 
 #[test]
-fn tenant_and_deployment_sources_are_distinct_variants() {
-    // Pins: a deployment-owned transport secret and a tenant connection
-    // credential are different types of thing, so a tenant resolution can never
-    // silently fall back to a deployment credential.
-    let tenant = CredentialSource::TenantConnection {
-        reference: CredentialRef::from_uuid(Uuid::from_u128(0x2304)),
-    };
-    let deployment = CredentialSource::Deployment {
-        secret: DeploymentSecret::PostmarkServerToken,
-    };
+fn deployment_secrets_are_resolved_outside_the_tenant_vault() {
+    // Pins: deployment-owned transport material stays in its own closed,
+    // in-memory source rather than entering tenant credential persistence.
+    let secrets = DeploymentSecrets::new().with(
+        DeploymentSecret::PostmarkServerToken,
+        Some("postmark_test_token".to_string()),
+    );
 
-    assert_ne!(tenant, deployment);
-    assert!(matches!(
-        deployment,
-        CredentialSource::Deployment {
-            secret: DeploymentSecret::PostmarkServerToken
-        }
-    ));
+    assert!(secrets.contains(DeploymentSecret::PostmarkServerToken));
+    assert_eq!(
+        secrets
+            .resolve(DeploymentSecret::PostmarkServerToken)
+            .expect("configured deployment secret resolves")
+            .expose_for_outbound_request(),
+        "postmark_test_token"
+    );
+    assert_eq!(
+        secrets
+            .resolve(DeploymentSecret::TwilioAuthToken)
+            .expect_err("missing deployment secret fails closed"),
+        CredentialError::DeploymentSecretMissing
+    );
 }

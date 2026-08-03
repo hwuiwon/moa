@@ -1,9 +1,8 @@
 //! Durable, Postgres-backed [`CredentialVault`] for tenant connection secrets.
 //!
-//! This is the single owner of MOA-managed connector material. It sits beside
-//! the token vault and deliberately does *not* reuse that table: the token vault
-//! is user/OAuth-shaped and keyed by `(tenant, user, connection_name)`, which
-//! cannot express a versioned, rotatable, tenant-connection credential series.
+//! This is the single owner of MOA-managed connector material. Credentials are
+//! addressed as versioned tenant-connection series so lifecycle fencing and
+//! audited resolution share one durable ownership model.
 //!
 //! Storage access flows through [`ScopedConn`] under the `moa_app` role so the
 //! forced row-level-security policies on both tables are enforced. Material is
@@ -23,8 +22,8 @@ use moa_core::error::MoaError;
 use moa_core::traits::CredentialVault;
 use moa_core::types::credentials::{
     CredentialContext, CredentialError, CredentialIdentity, CredentialKind, CredentialOperation,
-    CredentialPrincipal, CredentialRef, CredentialSlotName, CredentialSource,
-    CredentialStagingToken, CredentialVersion, DeploymentSecrets, RedactedSecret,
+    CredentialPrincipal, CredentialRef, CredentialSlotName, CredentialStagingToken,
+    CredentialVersion, RedactedSecret,
 };
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
@@ -69,25 +68,13 @@ enum AuditRecord {
 pub struct PostgresCredentialVault {
     pool: Arc<PgPool>,
     kms: Arc<dyn KeyManagementProvider>,
-    deployment: DeploymentSecrets,
 }
 
 impl PostgresCredentialVault {
     /// Constructs the vault with its required key-management provider.
     #[must_use]
     pub fn new(pool: Arc<PgPool>, kms: Arc<dyn KeyManagementProvider>) -> Self {
-        Self {
-            pool,
-            kms,
-            deployment: DeploymentSecrets::new(),
-        }
-    }
-
-    /// Attaches the deployment-owned operator secrets.
-    #[must_use]
-    pub fn with_deployment_secrets(mut self, deployment: DeploymentSecrets) -> Self {
-        self.deployment = deployment;
-        self
+        Self { pool, kms }
     }
 
     /// Rejects a principal that may not perform the context's operation.
@@ -733,58 +720,6 @@ impl PostgresCredentialVault {
 
 #[async_trait]
 impl CredentialVault for PostgresCredentialVault {
-    async fn create(
-        &self,
-        identity: CredentialIdentity,
-        material: SecretString,
-        ctx: &CredentialContext,
-    ) -> Result<CredentialVersion, CredentialError> {
-        Self::authorize_principal(ctx)?;
-        if identity.tenant_id != ctx.tenant_id {
-            return Err(CredentialError::WrongTenant);
-        }
-        let (sealed, key_id) = self.seal(&identity, &material).await?;
-
-        let mut conn = self.begin(ctx).await?;
-        let credential_uid = Uuid::now_v7();
-        match Self::record_operation(&mut conn, ctx, credential_uid, &identity, 1, None).await? {
-            AuditRecord::Replay { credential_uid, .. } => {
-                let reference = credential_uid.ok_or(CredentialError::NotFound)?;
-                let row =
-                    Self::load_version(&mut conn, CredentialRef::from_uuid(reference)).await?;
-                conn.commit().await.map_err(map_db_error)?;
-                return Ok(Self::version_from_row(&row));
-            }
-            AuditRecord::Fresh => {}
-        }
-
-        sqlx::query(
-            r#"
-            INSERT INTO tenant_credential_versions (
-                credential_uid, tenant_id, connection_uid, kind, slot_name,
-                version, material_sealed, kms_key_id, active, revoked,
-                owner_identity_id
-            )
-            VALUES ($1, $2, $3, $4, $5, 1, $6, $7, TRUE, FALSE, $8)
-            "#,
-        )
-        .bind(credential_uid)
-        .bind(identity.tenant_id.0)
-        .bind(identity.connection_uid)
-        .bind(identity.kind.as_str())
-        .bind(identity.slot_name.as_str())
-        .bind(&sealed)
-        .bind(&key_id)
-        .bind(ctx.principal.owner_identity())
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_unique_violation)?;
-
-        let row = Self::load_version(&mut conn, CredentialRef::from_uuid(credential_uid)).await?;
-        conn.commit().await.map_err(map_db_error)?;
-        Ok(Self::version_from_row(&row))
-    }
-
     async fn stage(
         &self,
         identity: CredentialIdentity,
@@ -1169,55 +1104,6 @@ impl CredentialVault for PostgresCredentialVault {
         Ok(Self::version_from_row(&row))
     }
 
-    async fn resolve(
-        &self,
-        source: &CredentialSource,
-        ctx: &CredentialContext,
-    ) -> Result<RedactedSecret, CredentialError> {
-        Self::authorize_principal(ctx)?;
-        let reference = match source {
-            CredentialSource::Deployment { secret } => {
-                // Deployment secrets have no tenant credential row and therefore
-                // no per-tenant audit row; they are operator configuration.
-                return self.deployment.resolve(*secret);
-            }
-            CredentialSource::TenantConnection { reference } => *reference,
-        };
-
-        let mut conn = self.begin(ctx).await?;
-        let row = Self::load_version(&mut conn, reference).await?;
-        if row.tenant_id != ctx.tenant_id.0 {
-            return Err(CredentialError::WrongTenant);
-        }
-        if row.revoked {
-            return Err(CredentialError::Revoked);
-        }
-        if !row.active {
-            return Err(CredentialError::StaleVersion);
-        }
-        let identity = CredentialIdentity {
-            tenant_id: TenantId::from(row.tenant_id),
-            connection_uid: row.connection_uid,
-            kind: row.kind,
-            slot_name: row.slot_name.clone(),
-        };
-
-        Self::record_operation(
-            &mut conn,
-            ctx,
-            row.credential_uid,
-            &identity,
-            row.version,
-            None,
-        )
-        .await?;
-        // The audit row is committed before any plaintext exists in memory, so a
-        // resolution can never be observed by the caller without a durable record.
-        conn.commit().await.map_err(map_db_error)?;
-
-        self.open(&row).await
-    }
-
     async fn has_active(
         &self,
         identity: &CredentialIdentity,
@@ -1317,7 +1203,7 @@ impl CredentialVault for PostgresCredentialVault {
         identity: &CredentialIdentity,
         ctx: &CredentialContext,
     ) -> Result<RedactedSecret, CredentialError> {
-        Self::authorize_principal(ctx)?;
+        Self::authorize_operation(ctx, CredentialOperation::Resolve)?;
         if identity.tenant_id != ctx.tenant_id {
             return Err(CredentialError::WrongTenant);
         }
@@ -1362,7 +1248,7 @@ impl CredentialVault for PostgresCredentialVault {
         references: &[(Uuid, CredentialRef)],
         ctx: &CredentialContext,
     ) -> Result<Vec<(Uuid, CredentialVersion)>, CredentialError> {
-        Self::authorize_principal(ctx)?;
+        Self::authorize_operation(ctx, CredentialOperation::Resolve)?;
         if references.is_empty() {
             return Ok(Vec::new());
         }
@@ -1434,100 +1320,12 @@ impl CredentialVault for PostgresCredentialVault {
             .collect()
     }
 
-    async fn rotate(
-        &self,
-        current: CredentialRef,
-        material: SecretString,
-        ctx: &CredentialContext,
-    ) -> Result<CredentialVersion, CredentialError> {
-        Self::authorize_principal(ctx)?;
-
-        let mut conn = self.begin(ctx).await?;
-        let existing = Self::load_version(&mut conn, current).await?;
-        if existing.tenant_id != ctx.tenant_id.0 {
-            return Err(CredentialError::WrongTenant);
-        }
-        let identity = CredentialIdentity {
-            tenant_id: TenantId::from(existing.tenant_id),
-            connection_uid: existing.connection_uid,
-            kind: existing.kind,
-            slot_name: existing.slot_name.clone(),
-        };
-        let next_version = existing.version + 1;
-        let credential_uid = Uuid::now_v7();
-
-        match Self::record_operation(
-            &mut conn,
-            ctx,
-            credential_uid,
-            &identity,
-            next_version,
-            None,
-        )
-        .await?
-        {
-            AuditRecord::Replay { credential_uid, .. } => {
-                let reference = credential_uid.ok_or(CredentialError::NotFound)?;
-                let row =
-                    Self::load_version(&mut conn, CredentialRef::from_uuid(reference)).await?;
-                conn.commit().await.map_err(map_db_error)?;
-                return Ok(Self::version_from_row(&row));
-            }
-            AuditRecord::Fresh => {}
-        }
-
-        // Compare-and-swap: only the caller holding the currently-active version
-        // may supersede it, so a concurrent rotation cannot be silently lost.
-        let deactivated = sqlx::query(
-            r#"
-            UPDATE tenant_credential_versions
-            SET active = FALSE, updated_at = NOW()
-            WHERE credential_uid = $1 AND active = TRUE AND revoked = FALSE
-            "#,
-        )
-        .bind(current.as_uuid())
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-        if deactivated.rows_affected() == 0 {
-            return Err(CredentialError::VersionConflict);
-        }
-
-        let (sealed, key_id) = self.seal(&identity, &material).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO tenant_credential_versions (
-                credential_uid, tenant_id, connection_uid, kind, slot_name,
-                version, material_sealed, kms_key_id, active, revoked,
-                owner_identity_id
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, FALSE, $9)
-            "#,
-        )
-        .bind(credential_uid)
-        .bind(identity.tenant_id.0)
-        .bind(identity.connection_uid)
-        .bind(identity.kind.as_str())
-        .bind(identity.slot_name.as_str())
-        .bind(next_version)
-        .bind(&sealed)
-        .bind(&key_id)
-        .bind(ctx.principal.owner_identity())
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_unique_violation)?;
-
-        let row = Self::load_version(&mut conn, CredentialRef::from_uuid(credential_uid)).await?;
-        conn.commit().await.map_err(map_db_error)?;
-        Ok(Self::version_from_row(&row))
-    }
-
     async fn revoke(
         &self,
         reference: CredentialRef,
         ctx: &CredentialContext,
     ) -> Result<(), CredentialError> {
-        Self::authorize_principal(ctx)?;
+        Self::authorize_operation(ctx, CredentialOperation::Revoke)?;
 
         let mut conn = self.begin(ctx).await?;
         let existing = Self::load_version(&mut conn, reference).await?;
@@ -1605,60 +1403,12 @@ impl CredentialVault for PostgresCredentialVault {
         Ok(revoked)
     }
 
-    async fn delete_connection(
-        &self,
-        connection_uid: Uuid,
-        ctx: &CredentialContext,
-    ) -> Result<u64, CredentialError> {
-        Self::authorize_principal(ctx)?;
-
-        let mut conn = self.begin(ctx).await?;
-        // Unlock audit deletion for this transaction only. Ordinary resolve and
-        // rotate traffic never sets this, so it cannot erase audit history.
-        sqlx::query("SELECT set_config($1, 'true', true)")
-            .bind(PURGE_GUC)
-            .execute(conn.as_mut())
-            .await
-            .map_err(map_sqlx_error)?;
-
-        let deleted = sqlx::query(
-            r#"
-            DELETE FROM tenant_credential_versions
-            WHERE tenant_id = $1 AND connection_uid = $2
-            "#,
-        )
-        .bind(ctx.tenant_id.0)
-        .bind(connection_uid)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
-
-        sqlx::query(
-            r#"
-            DELETE FROM tenant_credential_operations
-            WHERE tenant_id = $1 AND connection_uid = $2
-            "#,
-        )
-        .bind(ctx.tenant_id.0)
-        .bind(connection_uid)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        conn.commit().await.map_err(map_db_error)?;
-        Ok(deleted)
-    }
-
     async fn purge_tenant(
         &self,
         limit: u32,
         ctx: &CredentialContext,
     ) -> Result<u64, CredentialError> {
-        Self::authorize_principal(ctx)?;
-        if ctx.operation != CredentialOperation::Delete {
-            return Err(CredentialError::Unauthorized);
-        }
+        Self::authorize_operation(ctx, CredentialOperation::Delete)?;
         let limit = i64::from(limit.max(1));
 
         let mut conn = self.begin(ctx).await?;

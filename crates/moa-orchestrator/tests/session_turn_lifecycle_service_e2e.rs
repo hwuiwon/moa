@@ -25,12 +25,6 @@ struct StartTurnResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct QueueMessageResponse {
-    queued: bool,
-    started_turn_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct CancelResponse {
     cancelled: bool,
     reason: String,
@@ -161,12 +155,12 @@ async fn start_turn(
         .context("deserialize Session start_turn response")
 }
 
-async fn queue_message(
+async fn start_queued_turn(
     client: &reqwest::Client,
     session: &InitializedSession,
     message: &str,
-) -> Result<QueueMessageResponse> {
-    let request = client.post(session_url(&session.id, "queue_message"));
+) -> Result<StartTurnResponse> {
+    let request = client.post(session_url(&session.id, "start_turn"));
     with_identity(request, &session.identity)
         .json(&serde_json::json!({
             "client_message_id": fresh_client_message_id(),
@@ -174,12 +168,12 @@ async fn queue_message(
         }))
         .send()
         .await
-        .context("send Session queue_message")?
+        .context("send queued Session start_turn")?
         .error_for_status()
-        .context("Session queue_message should succeed")?
-        .json::<QueueMessageResponse>()
+        .context("queued Session start_turn should succeed")?
+        .json::<StartTurnResponse>()
         .await
-        .context("deserialize Session queue_message response")
+        .context("deserialize queued Session start_turn response")
 }
 
 /// Submits one `start_turn` under a caller-chosen retry identity, without asserting success.
@@ -539,7 +533,7 @@ async fn session_progress_combines_snapshot_turn_progress_and_events() -> Result
 
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn queue_message_during_active_turn_is_drained_after_completion() -> Result<()> {
+async fn start_turn_during_active_turn_is_drained_after_completion() -> Result<()> {
     // Pins: a queued message is retained while a turn runs, then drains after completion.
     let client = reqwest::Client::new();
     let session = create_initialized_session(&client, "queue").await?;
@@ -549,9 +543,9 @@ async fn queue_message_during_active_turn_is_drained_after_completion() -> Resul
         .turn_id
         .expect("first start_turn should return the active turn ID");
 
-    let queued = queue_message(&client, &session, "second").await?;
+    let queued = start_queued_turn(&client, &session, "second").await?;
     assert!(queued.queued);
-    assert!(queued.started_turn_id.is_none());
+    assert!(queued.turn_id.is_none());
 
     let queued_snapshot = snapshot(&client, &session).await?;
     assert_eq!(

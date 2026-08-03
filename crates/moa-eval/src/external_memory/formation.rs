@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
+use moa_core::canonical_json::canonical_json_bytes;
 use serde::{Deserialize, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use sha2::{Digest, Sha256};
 
 use super::{ExternalMemoryError, Result};
@@ -199,12 +199,9 @@ impl ResolvedFormationConfig {
     pub fn canonical_hash_value(value: &serde_json::Value) -> Result<String> {
         let config: Self = serde_json::from_value(value.clone())?;
         config.validate()?;
-        let mut serializer =
-            serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-        value.serialize(&mut serializer)?;
         let mut hasher = Sha256::new();
         hasher.update(FORMATION_HASH_DOMAIN);
-        hasher.update(serializer.into_inner());
+        hasher.update(canonical_json_bytes(value)?);
         Ok(format!("{:x}", hasher.finalize()))
     }
 }

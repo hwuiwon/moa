@@ -1,10 +1,6 @@
-//! Runtime context installed by hosts that execute graph-memory ingestion.
+//! Explicit runtime dependencies for hosts that execute graph-memory ingestion.
 
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    sync::{Arc, OnceLock},
-};
+use std::sync::Arc;
 
 use moa_config::MoaConfig;
 use moa_core::{error::MoaError, traits::EmbeddingProvider};
@@ -17,94 +13,16 @@ use sqlx::PgPool;
 
 use crate::model_client::resolved_extraction_config;
 use crate::{
-    ContradictionDetector, EntityMergeVerifier, EntityResolver, Error, FactExtractor,
-    HeuristicFactExtractor, ModelEntityMergeVerifier, ModelFactExtractor, Result,
-    RrfPlusJudgeDetector,
+    ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
+    HeuristicFactExtractor, ModelEntityMergeVerifier, ModelFactExtractor, RrfPlusJudgeDetector,
 };
 
-static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
-
-/// Error returned when installing the process-local ingestion runtime fails.
+/// Error returned when constructing an ingestion runtime fails.
 #[derive(Debug, thiserror::Error)]
-pub enum IngestRuntimeInstallError {
+pub enum IngestRuntimeError {
     /// Runtime configuration could not construct a required dependency.
     #[error("ingestion runtime configuration failed: {0}")]
     Configuration(#[from] MoaError),
-    /// A different runtime has already been installed in this process.
-    #[error(
-        "ingestion runtime already installed with incompatible dependencies: installed={installed}, requested={requested}"
-    )]
-    IncompatibleRuntime {
-        /// Summary of the installed runtime configuration.
-        installed: String,
-        /// Summary of the requested runtime configuration.
-        requested: String,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct IngestRuntimeFingerprint {
-    pool_options_hash: u64,
-    pii_service_url: Option<String>,
-    embedder_available: bool,
-    embedder_model_id: Option<String>,
-    embedder_model_version: Option<i32>,
-    embedder_dimensions: Option<usize>,
-    extractor_name: &'static str,
-    entity_resolver_name: &'static str,
-    entity_blocking_enabled: bool,
-    contradiction_detector_name: &'static str,
-    memory_config_hash: u64,
-    observability_environment: Option<String>,
-}
-
-impl IngestRuntimeFingerprint {
-    fn new(
-        pool: &PgPool,
-        config: &MoaConfig,
-        extractor_name: &'static str,
-        entity_resolver_name: &'static str,
-        entity_blocking_enabled: bool,
-        contradiction_detector_name: &'static str,
-        embedder: Option<&dyn EmbeddingProvider>,
-    ) -> Self {
-        Self {
-            pool_options_hash: hash_debug(pool.connect_options().as_ref()),
-            pii_service_url: config.memory.pii_service_url.clone(),
-            embedder_available: embedder.is_some(),
-            embedder_model_id: embedder.map(|provider| provider.model_id().to_string()),
-            embedder_model_version: embedder.map(EmbeddingProvider::model_version),
-            embedder_dimensions: embedder.map(EmbeddingProvider::dimensions),
-            extractor_name,
-            entity_resolver_name,
-            entity_blocking_enabled,
-            contradiction_detector_name,
-            memory_config_hash: hash_debug(&config.memory),
-            observability_environment: config.observability.environment.clone(),
-        }
-    }
-
-    fn summary(&self) -> String {
-        format!(
-            "pool={}, pii={}, embedder_available={}, embedder_model={}, embedder_version={}, embedder_dimensions={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}, observability_environment={}",
-            self.pool_options_hash,
-            self.pii_service_url.as_deref().unwrap_or("<none>"),
-            self.embedder_available,
-            self.embedder_model_id.as_deref().unwrap_or("<none>"),
-            self.embedder_model_version
-                .map_or_else(|| "<none>".to_string(), |version| version.to_string()),
-            self.embedder_dimensions
-                .map_or_else(|| "<none>".to_string(), |dimensions| dimensions.to_string()),
-            self.extractor_name,
-            self.entity_resolver_name,
-            self.entity_blocking_enabled,
-            self.contradiction_detector_name,
-            self.memory_config_hash,
-            self.observability_environment
-                .as_deref()
-                .unwrap_or("<none>")
-        )
-    }
 }
 
 /// Scope-specific dependencies used by ingestion helpers.
@@ -211,23 +129,20 @@ impl IngestCtx {
     }
 }
 
-/// Process-local runtime inputs needed by Restate ingestion handlers.
+/// Host-owned runtime inputs shared by slow and fast ingestion adapters.
 #[derive(Clone)]
 pub struct IngestRuntime {
     pool: PgPool,
     kms: Arc<dyn KeyManagementProvider>,
-    pii_service_url: Option<String>,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     pii_classifier: Arc<dyn PiiClassifier>,
     extractor: Arc<dyn FactExtractor>,
     extractor_name: &'static str,
     entity_resolver: Arc<EntityResolver>,
-    entity_resolver_name: &'static str,
     entity_blocking_enabled: bool,
     contradiction_detector: Arc<dyn ContradictionDetector>,
     vector_store_factory: VectorStoreFactory,
     fact_extraction_enabled: bool,
-    fingerprint: IngestRuntimeFingerprint,
 }
 
 impl IngestRuntime {
@@ -241,7 +156,7 @@ impl IngestRuntime {
     pub fn new(
         pool: PgPool,
         kms: Arc<dyn KeyManagementProvider>,
-    ) -> std::result::Result<Self, IngestRuntimeInstallError> {
+    ) -> std::result::Result<Self, IngestRuntimeError> {
         let default_config = MoaConfig::default();
         Self::from_config(pool, kms, &default_config)
     }
@@ -252,14 +167,14 @@ impl IngestRuntime {
     ///
     /// Returns an error for invalid embedder selectors, models, dimensions, or
     /// client construction. Disabled selection and missing selected-provider
-    /// credentials install a no-vector runtime instead.
+    /// credentials construct a no-vector runtime instead.
     pub fn from_config(
         pool: PgPool,
         kms: Arc<dyn KeyManagementProvider>,
         config: &MoaConfig,
-    ) -> std::result::Result<Self, IngestRuntimeInstallError> {
+    ) -> std::result::Result<Self, IngestRuntimeError> {
         let (extractor, extractor_name) = extractor_from_config(config);
-        let (entity_resolver, entity_resolver_name) = entity_resolver_from_config(config);
+        let (entity_resolver, _) = entity_resolver_from_config(config);
         let embedder = build_configured_ingestion_embedder(config)?;
         let entity_blocking_enabled = embedder.is_some();
         if let Some(provider) = embedder.as_deref() {
@@ -270,34 +185,21 @@ impl IngestRuntime {
                 "memory entity embedding block installed"
             );
         }
-        let contradiction_detector_name = "rrf_plus_judge";
-        let fingerprint = IngestRuntimeFingerprint::new(
-            &pool,
-            config,
-            extractor_name,
-            entity_resolver_name,
-            entity_blocking_enabled,
-            contradiction_detector_name,
-            embedder.as_deref(),
-        );
         let pii_classifier = build_shared_pii_classifier(config.memory.pii_service_url.as_deref());
         Ok(Self {
             pool,
             kms,
-            pii_service_url: config.memory.pii_service_url.clone(),
             embedder,
             pii_classifier,
             extractor,
             extractor_name,
             entity_resolver,
-            entity_resolver_name,
             entity_blocking_enabled,
             contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
                 config,
             )),
             vector_store_factory: VectorStoreFactory::from_config(config),
             fact_extraction_enabled: config.memory.extraction.enabled,
-            fingerprint,
         })
     }
 
@@ -306,7 +208,6 @@ impl IngestRuntime {
     pub fn with_extractor(mut self, extractor: Arc<dyn FactExtractor>) -> Self {
         self.extractor = extractor;
         self.extractor_name = "custom";
-        self.fingerprint.extractor_name = "custom";
         self
     }
 
@@ -314,8 +215,6 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_resolver(mut self, entity_resolver: Arc<EntityResolver>) -> Self {
         self.entity_resolver = entity_resolver;
-        self.entity_resolver_name = "custom";
-        self.fingerprint.entity_resolver_name = "custom";
         self
     }
 
@@ -323,7 +222,6 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_embedding_blocking(mut self, enabled: bool) -> Self {
         self.entity_blocking_enabled = enabled;
-        self.fingerprint.entity_blocking_enabled = enabled;
         self
     }
 
@@ -331,18 +229,14 @@ impl IngestRuntime {
     /// embedding dependencies.
     ///
     /// This dependency-injection seam keeps exported fast-memory integration
-    /// tests hermetic while preserving the same installed-runtime entry point
-    /// used by production hosts.
+    /// tests hermetic while preserving the same runtime-owned entry point used
+    /// by production hosts.
     #[must_use]
     pub fn with_fast_path_dependencies(
         mut self,
         embedder: Arc<dyn EmbeddingProvider>,
         pii_classifier: Arc<dyn PiiClassifier>,
     ) -> Self {
-        self.fingerprint.embedder_available = true;
-        self.fingerprint.embedder_model_id = Some(embedder.model_id().to_string());
-        self.fingerprint.embedder_model_version = Some(embedder.model_version());
-        self.fingerprint.embedder_dimensions = Some(embedder.dimensions());
         self.embedder = Some(embedder);
         self.pii_classifier = pii_classifier;
         self
@@ -366,16 +260,10 @@ impl IngestRuntime {
         self.kms.clone()
     }
 
-    /// Returns the configured PII classifier sidecar URL.
-    #[must_use]
-    pub fn pii_service_url(&self) -> Option<&str> {
-        self.pii_service_url.as_deref()
-    }
-
     /// Returns the process-shared fact embedder, when a credential is configured.
     ///
     /// The embedder owns a pooled HTTP client and is built once at runtime
-    /// installation so ingestion steps reuse it instead of rebuilding a client
+    /// construction so ingestion steps reuse it instead of rebuilding a client
     /// per turn.
     #[must_use]
     pub fn embedder(&self) -> Option<Arc<dyn EmbeddingProvider>> {
@@ -386,7 +274,7 @@ impl IngestRuntime {
     ///
     /// Resolves to the `openai/privacy-filter` sidecar client when a service URL
     /// is configured and otherwise to the deterministic heuristic classifier.
-    /// Built once at runtime installation so its pooled HTTP client is reused.
+    /// Built once at runtime construction so its pooled HTTP client is reused.
     #[must_use]
     pub fn pii_classifier(&self) -> Arc<dyn PiiClassifier> {
         self.pii_classifier.clone()
@@ -441,14 +329,6 @@ impl IngestRuntime {
     #[must_use]
     pub fn fact_extraction_enabled(&self) -> bool {
         self.fact_extraction_enabled
-    }
-
-    fn is_compatible_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.kms, &other.kms) && self.fingerprint == other.fingerprint
-    }
-
-    fn summary(&self) -> String {
-        self.fingerprint.summary()
     }
 }
 
@@ -556,75 +436,10 @@ fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'stati
     }
 }
 
-/// Installs the process-local ingestion runtime.
-pub fn install_runtime(
-    runtime: IngestRuntime,
-) -> std::result::Result<(), IngestRuntimeInstallError> {
-    match INGEST_RUNTIME.get() {
-        Some(installed) if installed.is_compatible_with(&runtime) => Ok(()),
-        Some(installed) => Err(IngestRuntimeInstallError::IncompatibleRuntime {
-            installed: installed.summary(),
-            requested: runtime.summary(),
-        }),
-        None => match INGEST_RUNTIME.set(runtime) {
-            Ok(()) => Ok(()),
-            Err(runtime) => {
-                let requested = runtime.summary();
-                let Some(installed) = INGEST_RUNTIME.get() else {
-                    return Err(IngestRuntimeInstallError::IncompatibleRuntime {
-                        installed: "<missing after OnceLock set race>".to_string(),
-                        requested,
-                    });
-                };
-                if installed.is_compatible_with(&runtime) {
-                    Ok(())
-                } else {
-                    Err(IngestRuntimeInstallError::IncompatibleRuntime {
-                        installed: installed.summary(),
-                        requested,
-                    })
-                }
-            }
-        },
-    }
-}
-
-/// Installs the process-local ingestion runtime from a Postgres pool.
-pub fn install_runtime_with_pool(
-    pool: PgPool,
-    kms: Arc<dyn KeyManagementProvider>,
-) -> std::result::Result<(), IngestRuntimeInstallError> {
-    install_runtime(IngestRuntime::new(pool, kms)?)
-}
-
-/// Installs the process-local ingestion runtime from a Postgres pool and shared config.
-pub fn install_runtime_with_config(
-    pool: PgPool,
-    kms: Arc<dyn KeyManagementProvider>,
-    config: &MoaConfig,
-) -> std::result::Result<(), IngestRuntimeInstallError> {
-    install_runtime(IngestRuntime::from_config(pool, kms, config)?)
-}
-
-/// Returns the installed process-local ingestion runtime.
-pub fn current_runtime() -> Result<IngestRuntime> {
-    INGEST_RUNTIME
-        .get()
-        .cloned()
-        .ok_or(Error::RuntimeNotInstalled)
-}
-
-fn hash_debug(value: &impl std::fmt::Debug) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    format!("{value:?}").hash(&mut hasher);
-    hasher.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use moa_config::MoaConfig;
     use moa_core::error::MoaError;
@@ -634,9 +449,7 @@ mod tests {
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
-    use super::{IngestRuntime, IngestRuntimeInstallError, install_runtime};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::{IngestRuntime, IngestRuntimeError};
 
     fn test_kms() -> Arc<dyn KeyManagementProvider> {
         static KMS: OnceLock<Arc<dyn KeyManagementProvider>> = OnceLock::new();
@@ -728,13 +541,6 @@ mod tests {
         assert_eq!(fact_embedder.model_version(), 2);
         assert_eq!(fact_embedder.dimensions(), 1_024);
         assert!(Arc::ptr_eq(&fact_embedder, &entity_embedder));
-        assert!(runtime.fingerprint.embedder_available);
-        assert_eq!(
-            runtime.fingerprint.embedder_model_id.as_deref(),
-            Some("gemini-embedding-2")
-        );
-        assert_eq!(runtime.fingerprint.embedder_model_version, Some(2));
-        assert_eq!(runtime.fingerprint.embedder_dimensions, Some(1_024));
     }
 
     #[tokio::test]
@@ -757,8 +563,6 @@ mod tests {
 
         assert!(runtime.embedder().is_none());
         assert!(runtime.entity_blocking_embedder().is_none());
-        assert!(!runtime.fingerprint.embedder_available);
-        assert_eq!(runtime.fingerprint.embedder_model_id, None);
         let warnings = captured.lock().expect("warning capture lock");
         assert_eq!(warnings.len(), 1);
         assert_eq!(
@@ -829,7 +633,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            IngestRuntimeInstallError::Configuration(MoaError::ConfigError(message))
+            IngestRuntimeError::Configuration(MoaError::ConfigError(message))
                 if message == "gemini embedder only supports gemini-embedding-2, got not-a-real-model"
         ));
     }
@@ -882,35 +686,5 @@ mod tests {
         let (_resolver, resolver_name) = super::entity_resolver_from_config(&config);
 
         assert_eq!(resolver_name, "model");
-    }
-
-    #[tokio::test]
-    async fn incompatible_runtime_install_fails_clearly() {
-        // Pins: orchestrator startup fails instead of silently keeping a stale ingest runtime.
-        let _guard = ENV_LOCK.lock().expect("env test lock");
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/moa_test")
-            .expect("lazy test pool should not connect");
-        let mut config = MoaConfig::default();
-        config.memory.pii_service_url = Some("http://pii-a.test".to_string());
-        let installed = IngestRuntime::from_config(pool.clone(), test_kms(), &config)
-            .expect("first runtime configuration should build");
-
-        install_runtime(installed.clone()).expect("first runtime install should succeed");
-        install_runtime(installed).expect("compatible runtime reinstall should be idempotent");
-
-        config.memory.pii_service_url = Some("http://pii-b.test".to_string());
-        let requested = IngestRuntime::from_config(pool, test_kms(), &config)
-            .expect("second runtime configuration should build");
-        let error = install_runtime(requested)
-            .expect_err("incompatible runtime install should fail clearly");
-
-        assert!(
-            error
-                .to_string()
-                .contains("ingestion runtime already installed with incompatible dependencies")
-        );
-        assert!(error.to_string().contains("pii=http://pii-a.test"));
-        assert!(error.to_string().contains("pii=http://pii-b.test"));
     }
 }

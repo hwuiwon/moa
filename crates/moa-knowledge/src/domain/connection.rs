@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::SyncRunStatus;
+use super::{LinkedProviderKind, SyncRunStatus};
 
 /// One linked external account for one tenant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,7 +17,7 @@ pub struct KnowledgeConnection {
     /// Owning tenant.
     pub tenant_id: TenantId,
     /// Linked-account provider.
-    pub provider: String,
+    pub provider: LinkedProviderKind,
     /// Provider connector identifier.
     pub connector: String,
     /// Provider account identifier.

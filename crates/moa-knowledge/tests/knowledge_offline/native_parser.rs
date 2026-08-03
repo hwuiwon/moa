@@ -39,7 +39,7 @@ fn parse_input(file_name: &str, mime_type: &str, text: &str) -> ParseInput {
     let _connection = KnowledgeConnection {
         connection_uid: Uuid::from_u128(3),
         tenant_id: TenantId::from(Uuid::from_u128(1)),
-        provider: "nango".to_string(),
+        provider: moa_knowledge::domain::LinkedProviderKind::Nango,
         connector: "fixture".to_string(),
         provider_account_id: "fixture".to_string(),
         metadata: json!({}),

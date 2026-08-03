@@ -214,10 +214,12 @@ async fn start_edge(
             pool.clone(),
         )),
         fga: None,
-        auth0_webhook_secret: None,
         knowledge_webhooks: KnowledgeWebhookEdgeConfig::default(),
         pool,
         session_store: Arc::new(store.clone()),
+        delivery: Arc::new(moa_messaging::ProviderDeliverySink::empty(
+            "edge-tests@example.invalid",
+        )),
         proxy: Arc::new(OrchestratorProxy::new(upstream).expect("proxy URL is valid")),
         connector_credentials: Arc::new(
             moa_edge::connector_credential_proxy::ConnectorCredentialProxy::new(upstream)

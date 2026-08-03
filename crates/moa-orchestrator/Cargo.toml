@@ -6,11 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-integration = [
-    "moa-security/test-support",
-    "moa-test-support/connector-api-fixture",
-    "moa-test-support/orchestrator-fixture",
-]
+integration = ["moa-security/test-support"]
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
 # Deterministic execution-planning fault hooks used only by service E2E fixtures.
@@ -26,14 +22,6 @@ path = "src/main.rs"
 [[test]]
 name = "agent_revision_simulation_db_memory"
 path = "tests/agent_revision_simulation_db_memory.rs"
-
-[[test]]
-name = "behavior_lab_simulation_e2e"
-path = "tests/behavior_lab_simulation_e2e.rs"
-
-[[test]]
-name = "experiment_agent_loop_e2e"
-path = "tests/experiment_agent_loop_e2e.rs"
 
 [[test]]
 name = "experiment_service"
@@ -65,7 +53,7 @@ moa-agents.workspace = true
 moa-analytics.workspace = true
 moa-analytics-export = { workspace = true }
 moa-artifacts.workspace = true
-moa-brain = { workspace = true, features = ["eval-harness"] }
+moa-brain.workspace = true
 moa-retrieval = { workspace = true }
 moa-contacts = { workspace = true }
 moa-core = { workspace = true }
@@ -127,7 +115,6 @@ clickhouse = { workspace = true, features = ["test-util"] }
 moa-analytics-export = { workspace = true }
 moa-eval-core.workspace = true
 moa-test-support = { workspace = true, features = ["connector-api-fixture", "orchestrator-fixture"] }
-serde_canonical_json.workspace = true
 tempfile.workspace = true
 
 [lints.rust]

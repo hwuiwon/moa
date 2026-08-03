@@ -4,10 +4,12 @@ use std::time::Instant;
 
 use chrono::Utc;
 use moa_core::{types::contact::ContactId, types::identifiers::SessionId};
-use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key};
+use moa_memory_ingest::{SessionTurn, ingestion_object_key};
 use moa_observability::record_memory_operation;
 use moa_wire::memory::{MemoryIngestDocument, MemoryIngestRequest, MemoryIngestResponse};
 use restate_sdk::prelude::*;
+
+use crate::objects::ingestion::IngestionVOClient;
 use uuid::{Builder as UuidBuilder, Variant, Version};
 
 use super::responses::ingest_result_from_report;

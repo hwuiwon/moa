@@ -9,13 +9,15 @@ use moa_artifacts::{
     },
     reference::ArtifactRef,
 };
-use moa_core::types::{
-    action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-    identifiers::{ConnectorConnectionId, TenantId},
-    tools::IdempotencyClass,
+use moa_core::{
+    canonical_json::canonical_json_bytes,
+    types::{
+        action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+        identifiers::{ConnectorConnectionId, TenantId},
+        tools::IdempotencyClass,
+    },
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-use serde_canonical_json::CanonicalFormatter;
 use serde_json::Value;
 
 use crate::{Error, Result};
@@ -740,15 +742,8 @@ pub(crate) fn hash_serializable<T: Serialize + ?Sized>(
     Ok(ExecutionHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
-pub(crate) fn canonical_json_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut serializer =
-        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-    value.serialize(&mut serializer)?;
-    Ok(serializer.into_inner())
-}
-
 pub(crate) fn canonical_sort_key<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    canonical_json_bytes(value)
+    canonical_json_bytes(value).map_err(Into::into)
 }
 
 fn checked_add(left: u64, right: u64, context: &str) -> Result<u64> {

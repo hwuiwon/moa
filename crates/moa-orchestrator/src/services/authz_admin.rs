@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
 
 /// Tenant role relation that public API-key authz administration can write.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,13 +106,14 @@ pub trait Authz {
 #[derive(Clone)]
 pub struct AuthzImpl {
     pool: PgPool,
+    authz: AuthzEnforcer,
 }
 
 impl AuthzImpl {
     /// Creates the authorization administration adapter with its backing pool.
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, authz: AuthzEnforcer) -> Self {
+        Self { pool, authz }
     }
 }
 
@@ -131,7 +132,7 @@ impl Authz for AuthzImpl {
         // resource read. Loading the target API key first would let an
         // authenticated but unauthorized principal probe key existence and
         // cross-tenant ownership through distinguishable pre-authz errors.
-        let fga = require_fga_client()?;
+        let fga = self.authz.require_fga_client()?;
         require_authz_with_delegation(
             &fga,
             &identity,

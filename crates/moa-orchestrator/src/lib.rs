@@ -9,7 +9,6 @@ pub(crate) mod connector_catalog;
 /// Private non-Restate connector credential-ingress boundary types.
 pub mod credential_ingress;
 pub mod ctx;
-pub use ctx::OrchestratorCtx;
 mod delegation;
 pub mod guardrails;
 pub mod handlers;

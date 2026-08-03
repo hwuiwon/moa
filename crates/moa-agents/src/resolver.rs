@@ -453,18 +453,20 @@ impl AgentResolver {
         let connector_revisions = loaded_revisions
             .into_values()
             .filter(|revision| revision.kind == ArtifactKind::Connector)
-            .filter_map(|revision| {
-                let ArtifactDefinition::Connector(definition) = revision.document.definition else {
-                    return None;
-                };
-                Some((
+            .filter(|revision| {
+                matches!(
+                    &revision.document.definition,
+                    ArtifactDefinition::Connector(_)
+                )
+            })
+            .map(|revision| {
+                (
                     revision.name,
                     ResolvedConnectorRevision {
                         artifact_uid: revision.artifact_uid,
                         revision_uid: revision.revision_uid,
-                        definition,
                     },
-                ))
+                )
             })
             .collect();
         Ok(ResolvedAgentDependencies {
@@ -486,7 +488,6 @@ struct ResolvedAgentDependencies {
 struct ResolvedConnectorRevision {
     artifact_uid: Uuid,
     revision_uid: Uuid,
-    definition: moa_artifacts::connector::ConnectorDefinition,
 }
 
 /// Returns the registered tool names one activated skill revision declares.
@@ -740,11 +741,6 @@ fn resolve_connector_bindings(
                 "agent connector binding `{connector_ref}` did not resolve a published revision"
             ))
         })?;
-        if !revision.definition.is_connection_installable() {
-            return Err(MoaError::ValidationError(format!(
-                "agent connector binding `{connector_ref}` targets a legacy connector definition"
-            )));
-        }
         bindings.push(AgentConnectorBinding {
             connector_ref,
             connection_id: binding.connection_id,
@@ -763,20 +759,18 @@ fn resolve_connector_bindings(
         let ArtifactRef::Action { connector, .. } = artifact_ref else {
             continue;
         };
-        let Some(revision) = connector_revisions.get(connector) else {
+        if !connector_revisions.contains_key(connector) {
             return Err(unresolved_dependency(artifact_ref));
-        };
-        if revision.definition.runtime_v1().is_some() {
-            let required_ref = ArtifactRef::connector(connector.clone()).to_string();
-            let count = bindings
-                .iter()
-                .filter(|binding| binding.connector_ref == required_ref)
-                .count();
-            if count != 1 {
-                return Err(MoaError::ValidationError(format!(
-                    "runtime connector action `{artifact_ref}` requires exactly one binding for `{required_ref}`"
-                )));
-            }
+        }
+        let required_ref = ArtifactRef::connector(connector.clone()).to_string();
+        let count = bindings
+            .iter()
+            .filter(|binding| binding.connector_ref == required_ref)
+            .count();
+        if count != 1 {
+            return Err(MoaError::ValidationError(format!(
+                "connector action `{artifact_ref}` requires exactly one binding for `{required_ref}`"
+            )));
         }
     }
     Ok(bindings)
@@ -1355,12 +1349,8 @@ mod tests {
     fn connector_binding_resolution_pins_runtime_revision_and_requires_coverage() {
         // Pins: each referenced runtime connector resolves to one exact
         // connection/artifact/revision tuple; legacy aliases need no binding.
-        let runtime = resolved_connector_test_revision(Uuid::from_u128(31), true);
-        let legacy = resolved_connector_test_revision(Uuid::from_u128(41), false);
-        let revisions = BTreeMap::from([
-            ("billing".to_string(), runtime.clone()),
-            ("legacy-crm".to_string(), legacy),
-        ]);
+        let runtime = resolved_connector_test_revision(Uuid::from_u128(31));
+        let revisions = BTreeMap::from([("billing".to_string(), runtime.clone())]);
         let connection_id = ConnectorConnectionId(Uuid::from_u128(51));
         let definition = ActionPolicy {
             allowed: vec![ArtifactRef::action("billing", "charge")],
@@ -1390,16 +1380,6 @@ mod tests {
             .expect_err("a referenced runtime connector must be bound");
         assert!(matches!(error, MoaError::ValidationError(message)
             if message.contains("requires exactly one binding")));
-
-        let legacy_only = ActionPolicy {
-            allowed: vec![ArtifactRef::action("legacy-crm", "lookup")],
-            ..ActionPolicy::default()
-        };
-        assert_eq!(
-            resolve_connector_bindings(&legacy_only, &revisions)
-                .expect("legacy connector aliases remain binding-free"),
-            Vec::new()
-        );
     }
 
     fn test_policy_hash(revision_uid: Uuid, action_policy: &AgentActionPolicy) -> String {
@@ -1428,53 +1408,10 @@ mod tests {
         .expect("test policy should hash")
     }
 
-    fn resolved_connector_test_revision(
-        revision_uid: Uuid,
-        runtime: bool,
-    ) -> ResolvedConnectorRevision {
-        let spec = if runtime {
-            serde_json::json!({
-                "definition_version": "v1",
-                "display_name": "Billing",
-                "runtime": {"type": "mcp"},
-                "auth": [{"type": "none"}],
-                "actions": [{
-                    "id": "charge",
-                    "binding": {
-                        "type": "mcp",
-                        "remote_operation": "charge",
-                        "contract": {
-                            "input_schema": {"type": "object"},
-                            "output_schema": {"type": "object"},
-                            "data_classes": ["none"],
-                            "action_class": "external_write",
-                            "risk_level": "high",
-                            "minimum_effect": "admin_review",
-                            "idempotency": "non_idempotent"
-                        }
-                    }
-                }]
-            })
-        } else {
-            serde_json::json!({
-                "auth": {},
-                "actions": [{
-                    "id": "lookup",
-                    "description": "legacy lookup",
-                    "tool_name": "file_read",
-                    "input_schema": {"type": "object"},
-                    "output_schema": {"type": "object"},
-                    "admin_review_required": false,
-                    "ui": {}
-                }],
-                "ui": {}
-            })
-        };
+    fn resolved_connector_test_revision(revision_uid: Uuid) -> ResolvedConnectorRevision {
         ResolvedConnectorRevision {
             artifact_uid: Uuid::from_u128(revision_uid.as_u128() + 1_000),
             revision_uid,
-            definition: serde_json::from_value(spec)
-                .expect("connector definition fixture should deserialize"),
         }
     }
 

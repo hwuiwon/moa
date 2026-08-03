@@ -398,13 +398,18 @@ catalog; Merge reports its unified-API categories), and the returned integration
 id is the exact `connector` value the link-token flow accepts. Connect UIs
 should render this list instead of hardcoding integration names.
 
-Record content materializes provider-agnostically: inline `text`/`content`
-payload fields ingest directly, downloadable URLs pass through to parsers, and
-metadata-only records go through the provider's `fetch_record_content` hook
-(Nango implements it via the Nango proxy with a per-integration strategy
-registry — Google Drive today; adding an integration is one strategy module
-plus a registry entry). Auth-walled viewer links such as Drive's `webViewLink`
-are provenance only and are never fetched.
+Provider adapters normalize every record to one explicit materialization intent:
+inline text, a directly fetchable URL, an authenticated provider fetch, or
+metadata-only. The ingestion pipeline consumes that typed intent and never
+probes arbitrary payload keys or substitutes a record title for document
+content. Nango implements authenticated fetch through its proxy with a
+per-integration strategy registry (Google Drive today; adding an integration is
+one strategy module plus a registry entry). A required provider fetch that
+fails, returns no content, or has no registered strategy fails the record; it
+does not silently index metadata. Explicit metadata-only records persist their
+object and ACL snapshot, record a skipped `content_fetched` step, and create no
+document/chunk/vector content. Auth-walled viewer links such as Drive's
+`webViewLink` are provenance only and are never fetched.
 
 ## Inspection And Observability
 

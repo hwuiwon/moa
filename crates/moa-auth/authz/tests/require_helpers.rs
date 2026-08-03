@@ -4,6 +4,7 @@ use httpmock::Method::POST;
 use httpmock::prelude::*;
 use moa_authz::{
     AuthzCheckError, FgaClient, FgaConfig, require_authz, require_authz_with_delegation,
+    require_authz_with_delegation_batch,
 };
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
@@ -505,6 +506,130 @@ async fn delegated_agent_acts_as_agent_subject_not_user() {
     .await
     .expect("granted can_act_as agent should pass the resource check as itself");
 
+    batch.assert_hits(1);
+}
+
+#[tokio::test]
+async fn batch_authorization_checks_multiple_objects_in_input_order() {
+    // Pins: one public batch authorization call sends every requested object in
+    // caller order and succeeds only when OpenFGA allows every decision.
+    let server = MockServer::start();
+    let user_id = Uuid::parse_str("13131313-1313-1313-1313-131313131313").expect("valid user uuid");
+    let object_ids = vec![
+        "14141414-1414-1414-1414-141414141414".to_string(),
+        "15151515-1515-1515-1515-151515151515".to_string(),
+        "16161616-1616-1616-1616-161616161616".to_string(),
+    ];
+    let batch = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/batch-check")
+            .json_body(batch_check_body(&[
+                (
+                    "operator:13131313-1313-1313-1313-131313131313",
+                    "participant",
+                    "session:14141414-1414-1414-1414-141414141414",
+                ),
+                (
+                    "operator:13131313-1313-1313-1313-131313131313",
+                    "participant",
+                    "session:15151515-1515-1515-1515-151515151515",
+                ),
+                (
+                    "operator:13131313-1313-1313-1313-131313131313",
+                    "participant",
+                    "session:16161616-1616-1616-1616-161616161616",
+                ),
+            ]));
+        then.status(200)
+            .json_body(batch_result(&[("c0", true), ("c1", true), ("c2", true)]));
+    });
+
+    require_authz_with_delegation_batch(
+        &fga_client(&server),
+        &user_identity(user_id),
+        ObjectType::Session,
+        &object_ids,
+        Relation::Participant,
+    )
+    .await
+    .expect("all allowed batch decisions should authorize every requested session");
+
+    batch.assert_hits(1);
+}
+
+#[tokio::test]
+async fn delegated_batch_fails_closed_on_the_first_denied_object() {
+    // Pins: delegated batches combine can_act_as and ordered resource checks in
+    // one request, then reject the first denied resource even when other checks
+    // are allowed.
+    let server = MockServer::start();
+    let agent_id =
+        Uuid::parse_str("17171717-1717-1717-1717-171717171717").expect("valid agent uuid");
+    let user_id = Uuid::parse_str("18181818-1818-1818-1818-181818181818").expect("valid user uuid");
+    let object_ids = vec![
+        "19191919-1919-1919-1919-191919191919".to_string(),
+        "20202020-2020-2020-2020-202020202020".to_string(),
+        "21212121-2121-2121-2121-212121212121".to_string(),
+    ];
+    let batch = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/batch-check")
+            .json_body(batch_check_body(&[
+                (
+                    "operator:18181818-1818-1818-1818-181818181818",
+                    "can_act_as",
+                    "agent:17171717-1717-1717-1717-171717171717",
+                ),
+                (
+                    "agent:17171717-1717-1717-1717-171717171717",
+                    "participant",
+                    "session:19191919-1919-1919-1919-191919191919",
+                ),
+                (
+                    "agent:17171717-1717-1717-1717-171717171717",
+                    "participant",
+                    "session:20202020-2020-2020-2020-202020202020",
+                ),
+                (
+                    "agent:17171717-1717-1717-1717-171717171717",
+                    "participant",
+                    "session:21212121-2121-2121-2121-212121212121",
+                ),
+            ]));
+        then.status(200).json_body(batch_result(&[
+            ("c0", true),
+            ("c1", true),
+            ("c2", false),
+            ("c3", true),
+        ]));
+    });
+
+    let error = require_authz_with_delegation_batch(
+        &fga_client(&server),
+        &agent_identity(agent_id, Some(user_id)),
+        ObjectType::Session,
+        &object_ids,
+        Relation::Participant,
+    )
+    .await
+    .expect_err("a denied resource in a mixed batch must fail closed");
+
+    match error {
+        AuthzCheckError::Forbidden {
+            subject,
+            object_type,
+            object_id,
+            relation,
+        } => {
+            assert_eq!(subject, "agent:17171717-1717-1717-1717-171717171717");
+            assert_eq!(object_type, ObjectType::Session);
+            assert_eq!(object_id, "20202020-2020-2020-2020-202020202020");
+            assert_eq!(relation, Relation::Participant);
+        }
+        AuthzCheckError::Engine(engine) => {
+            panic!("expected Forbidden, got Engine({engine})");
+        }
+    }
     batch.assert_hits(1);
 }
 

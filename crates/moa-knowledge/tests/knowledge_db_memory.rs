@@ -10,5 +10,7 @@ mod link_claim_db_memory;
 mod observability_db_memory;
 #[path = "knowledge_db_memory/repository_db_memory.rs"]
 mod repository_db_memory;
+#[path = "knowledge_db_memory/support.rs"]
+mod support;
 #[path = "knowledge_db_memory/sync_run_db_memory.rs"]
 mod sync_run_db_memory;

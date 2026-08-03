@@ -10,6 +10,38 @@
 use super::row_mapping::*;
 use super::*;
 
+/// Persistence operations for provider ACL snapshots and principal bindings.
+#[async_trait]
+pub trait KnowledgeAclRepository: Send + Sync {
+    /// Replaces one object's provider ACL snapshot and moves its current pointer.
+    async fn replace_object_acl_snapshot(
+        &self,
+        snapshot: ProviderAclSnapshot,
+    ) -> Result<ProviderAclSnapshot>;
+    /// Marks one object's ACL stale after the provider announced a new revision.
+    async fn mark_object_acl_stale(
+        &self,
+        object_uid: Uuid,
+        announced_revision: Option<&str>,
+    ) -> Result<()>;
+    /// Reads one object's stored ACL position.
+    async fn object_acl(&self, object_uid: Uuid) -> Result<Option<ObjectAcl>>;
+    /// Reads the fingerprinted entries of one stored snapshot.
+    async fn snapshot_entries(&self, snapshot_uid: Uuid) -> Result<Vec<ProviderAclEntry>>;
+    /// Binds one verified provider principal to a contact or to the whole tenant.
+    async fn upsert_principal_binding(&self, binding: SourcePrincipalBinding) -> Result<()>;
+    /// Loads exact connection-scoped verified bindings by opaque fingerprints.
+    async fn verified_principal_bindings(
+        &self,
+        connection_uid: Uuid,
+        principals: &[SourcePrincipalFingerprint],
+    ) -> Result<Vec<SourcePrincipalBinding>>;
+    /// Records that holders of one principal also hold a group or domain principal.
+    async fn upsert_group_binding(&self, binding: SourcePrincipalGroupBinding) -> Result<()>;
+    /// Removes every principal binding held by one contact.
+    async fn revoke_contact_principals(&self, contact_id: Uuid) -> Result<u64>;
+}
+
 /// Inserts one immutable snapshot with its entries and makes it current.
 ///
 /// The whole replacement is one transaction: an object never observes a snapshot
@@ -531,4 +563,50 @@ pub(super) async fn revoke_contact_principals(
 /// rows rather than duplicates under a fresh random id.
 fn entry_uid(snapshot_uid: Uuid, index: usize) -> Uuid {
     crate::graph_delta::stable_uid(&format!("source-acl-entry:{snapshot_uid}:{index}"))
+}
+
+#[async_trait]
+impl KnowledgeAclRepository for PostgresKnowledgeRepository {
+    async fn replace_object_acl_snapshot(
+        &self,
+        snapshot: ProviderAclSnapshot,
+    ) -> Result<ProviderAclSnapshot> {
+        replace_object_acl_snapshot(self, snapshot).await
+    }
+
+    async fn mark_object_acl_stale(
+        &self,
+        object_uid: Uuid,
+        announced_revision: Option<&str>,
+    ) -> Result<()> {
+        mark_object_acl_stale(self, object_uid, announced_revision).await
+    }
+
+    async fn object_acl(&self, object_uid: Uuid) -> Result<Option<ObjectAcl>> {
+        object_acl(self, object_uid).await
+    }
+
+    async fn snapshot_entries(&self, snapshot_uid: Uuid) -> Result<Vec<ProviderAclEntry>> {
+        snapshot_entries(self, snapshot_uid).await
+    }
+
+    async fn upsert_principal_binding(&self, binding: SourcePrincipalBinding) -> Result<()> {
+        upsert_principal_binding(self, binding).await
+    }
+
+    async fn verified_principal_bindings(
+        &self,
+        connection_uid: Uuid,
+        principals: &[SourcePrincipalFingerprint],
+    ) -> Result<Vec<SourcePrincipalBinding>> {
+        verified_principal_bindings(self, connection_uid, principals).await
+    }
+
+    async fn upsert_group_binding(&self, binding: SourcePrincipalGroupBinding) -> Result<()> {
+        upsert_group_binding(self, binding).await
+    }
+
+    async fn revoke_contact_principals(&self, contact_id: Uuid) -> Result<u64> {
+        revoke_contact_principals(self, contact_id).await
+    }
 }

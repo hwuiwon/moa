@@ -2,7 +2,7 @@
 
 mod signals;
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use chrono::Utc;
 use moa_core::{
@@ -480,7 +480,16 @@ pub(super) async fn run_streamed_turn(
             }
 
             if response.stop_reason == StopReason::EndTurn {
-                spawn_incident_capture(&session, turn_number, durable_failure.take());
+                let memory_executor = match tool_router.as_ref() {
+                    Some(router) => router.memory_tool_executor(),
+                    None => None,
+                };
+                spawn_incident_capture(
+                    memory_executor,
+                    &session,
+                    turn_number,
+                    durable_failure.take(),
+                );
                 record_turn_span_metrics(
                     &turn_span,
                     total_tool_calls,
@@ -630,8 +639,13 @@ fn one_tool_call_budget(budget: ResourceBudget) -> ResourceBudget {
 /// write runs off the turn's critical path and its result is logged at debug, so
 /// a memory-storage hiccup never fails the turn. `record_incident` itself no-ops
 /// when memory learning is disabled or the failure was already recorded.
-fn spawn_incident_capture(session: &SessionMeta, turn_seq: i64, failure: Option<ToolFailure>) {
-    let Some(failure) = failure else {
+fn spawn_incident_capture(
+    memory_executor: Option<Arc<dyn moa_core::traits::MemoryToolExecutor>>,
+    session: &SessionMeta,
+    turn_seq: i64,
+    failure: Option<ToolFailure>,
+) {
+    let (Some(memory_executor), Some(failure)) = (memory_executor, failure) else {
         return;
     };
     let session = session.clone();
@@ -641,13 +655,9 @@ fn spawn_incident_capture(session: &SessionMeta, turn_seq: i64, failure: Option<
         moa_observability::current_turn_root_span().unwrap_or_else(tracing::Span::current);
     tokio::spawn(
         async move {
-            match moa_memory_ingest::record_incident(
-                &session,
-                turn_seq,
-                &failure.tool_name,
-                failure.error_class,
-            )
-            .await
+            match memory_executor
+                .record_memory_incident(&session, turn_seq, &failure.tool_name, failure.error_class)
+                .await
             {
                 Ok(Some(uid)) => {
                     tracing::debug!(session_id = %session.id, %uid, "recorded turn incident");

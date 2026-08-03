@@ -116,8 +116,10 @@ async fn serving_action_revision_enters_capability_catalog_db() -> TestResult {
     assert_eq!(sibling.status, ArtifactStatus::Ready);
 
     let loaded =
-        moa_orchestrator::services::execution::load_serving_revisions_for_test(&registry, &scope)
-            .await?;
+        moa_orchestrator::services::execution::capability_catalog::load_serving_revisions_for_test(
+            &registry, &scope,
+        )
+        .await?;
     assert_eq!(loaded.len(), 1, "only the exact serving Action should load");
     assert_eq!(loaded[0].kind, ArtifactKind::Action);
     assert_eq!(loaded[0].name, name);

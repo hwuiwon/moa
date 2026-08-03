@@ -47,25 +47,6 @@ pub enum Error {
     /// A persisted sensitivity class is not part of the supported hierarchy.
     #[error("invalid sensitivity class `{0}`")]
     InvalidSensitivityClass(String),
-    /// The embedding response count did not match the input count.
-    #[error("embedding response length mismatch: expected {expected}, got {actual}")]
-    EmbeddingResponseLength {
-        /// Expected number of embeddings.
-        expected: usize,
-        /// Actual number of embeddings.
-        actual: usize,
-    },
-    /// The embedding provider returned a non-success status.
-    #[error("embedding provider returned HTTP {status}: {body}")]
-    ProviderStatus {
-        /// HTTP status code.
-        status: u16,
-        /// Response body text.
-        body: String,
-    },
-    /// Embedder configuration is invalid.
-    #[error("invalid embedder configuration: {0}")]
-    EmbedderConfig(String),
     /// A query embedding was empty or did not identify its embedding model.
     #[error("invalid query embedding: {0}")]
     InvalidQueryEmbedding(&'static str),
@@ -220,8 +201,6 @@ impl Error {
         match self {
             Self::DimensionMismatch { .. }
             | Self::InvalidSensitivityClass(_)
-            | Self::EmbeddingResponseLength { .. }
-            | Self::EmbedderConfig(_)
             | Self::InvalidQueryEmbedding(_)
             | Self::EmbedderMismatch { .. }
             | Self::EmbedderModelMismatch { .. }
@@ -238,9 +217,7 @@ impl Error {
             | Self::InvalidVectorSyncOperation(_)
             | Self::UnsupportedVectorBackend { .. }
             | Self::UnsupportedQueryFeature { .. } => true,
-            Self::ProviderStatus { status, .. } | Self::VectorProviderStatus { status, .. } => {
-                is_permanent_http_status(*status)
-            }
+            Self::VectorProviderStatus { status, .. } => is_permanent_http_status(*status),
             Self::TurbopufferResponse(_)
             | Self::Core(_)
             | Self::Sqlx(_)
@@ -262,11 +239,6 @@ impl From<Error> for moa_core::error::MoaError {
     fn from(error: Error) -> Self {
         match error {
             Error::Core(error) => error,
-            Error::ProviderStatus { status, body } => Self::HttpStatus {
-                status,
-                retry_after: None,
-                message: body,
-            },
             Error::VectorProviderStatus { status, body, .. } => Self::HttpStatus {
                 status,
                 retry_after: None,

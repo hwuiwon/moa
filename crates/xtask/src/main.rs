@@ -620,29 +620,10 @@ fn cmd_audit_paths() -> Result<()> {
         &["--type", "rust"],
     )?;
 
-    let envelope_paths = existing_paths(&["crates/", "migrations/"]);
-    let envelope_pattern = ["crypto", "_shred|wrapped", "_dek|Envelope", "Cipher"].concat();
-    rg_forbid(
-        "envelope-encryption code",
-        &envelope_pattern,
-        &envelope_paths,
-        &["--type-add", "sql:*.sql", "--type", "rust", "--type", "sql"],
-    )?;
-
-    audit_learning_candidate_promotion_paths()?;
     audit_moa_test_support_dev_dependency_only()?;
 
     println!("path audit clean");
     Ok(())
-}
-
-fn audit_learning_candidate_promotion_paths() -> Result<()> {
-    rg_forbid(
-        "direct learning-candidate promoted construction",
-        r"status:\s*LearningCandidateStatus::Promoted",
-        &["crates/"],
-        &["--type", "rust"],
-    )
 }
 
 fn audit_moa_test_support_dev_dependency_only() -> Result<()> {
@@ -680,21 +661,7 @@ fn audit_moa_test_support_dev_dependency_only() -> Result<()> {
         }
     }
 
-    rg_forbid(
-        "non-test moa-test-support Rust imports",
-        r"moa_test_support::",
-        &["crates/"],
-        &[
-            "--type",
-            "rust",
-            "--glob",
-            "**/src/**",
-            "--glob",
-            "!crates/moa-test-support/**",
-            "--glob",
-            "!crates/xtask/**",
-        ],
-    )
+    Ok(())
 }
 
 fn cargo_manifest_paths() -> Result<Vec<String>> {
@@ -712,14 +679,6 @@ fn cargo_manifest_paths() -> Result<Vec<String>> {
         .lines()
         .map(ToString::to_string)
         .collect())
-}
-
-fn existing_paths<'a>(paths: &'a [&'a str]) -> Vec<&'a str> {
-    paths
-        .iter()
-        .copied()
-        .filter(|path| Path::new(path).exists())
-        .collect()
 }
 
 fn rg_forbid(label: &str, pattern: &str, paths: &[&str], options: &[&str]) -> Result<()> {

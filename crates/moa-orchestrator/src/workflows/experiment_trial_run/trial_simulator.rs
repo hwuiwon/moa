@@ -111,7 +111,7 @@ fn simulator_context_prompt(
         "scenario": selection.scenario,
         "data_bundles": selection.data_bundles,
     });
-    let bytes = moa_artifacts::canonical::canonical_json_bytes(&payload).map_err(|error| {
+    let bytes = moa_core::canonical_json::canonical_json_bytes(&payload).map_err(|error| {
         TerminalError::new(format!(
             "serialize canonical simulator context failed: {error}"
         ))

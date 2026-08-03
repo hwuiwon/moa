@@ -216,6 +216,7 @@ pub struct SessionStoreImpl {
     /// embeddings still runs. Built once so the provider's pacer and concurrency
     /// limiter are shared across ticks.
     embedder: Option<Arc<dyn EmbeddingProvider>>,
+    authz: crate::handlers::authz_shim::AuthzEnforcer,
 }
 
 impl SessionStoreImpl {
@@ -225,6 +226,7 @@ impl SessionStoreImpl {
         pool: PgPool,
         config: Arc<moa_config::MoaConfig>,
         runtime_cache: Arc<dyn RuntimeCacheStore>,
+        authz: crate::handlers::authz_shim::AuthzEnforcer,
     ) -> Self {
         let embedder = build_learning_embedder(&config, runtime_cache);
         Self {
@@ -232,6 +234,7 @@ impl SessionStoreImpl {
             pool,
             config,
             embedder,
+            authz,
         }
     }
 }

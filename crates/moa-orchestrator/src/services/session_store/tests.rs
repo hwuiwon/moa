@@ -62,6 +62,7 @@ async fn test_service() -> Result<(SessionStoreImpl, String, String)> {
             pool,
             Arc::new(moa_config::MoaConfig::default()),
             Arc::new(moa_runtime_store::MemoryRuntimeCacheStore::new()),
+            crate::handlers::authz_shim::AuthzEnforcer::new(None),
         ),
         database_url,
         schema_name,

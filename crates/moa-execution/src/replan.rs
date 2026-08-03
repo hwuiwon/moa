@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
-    budget::estimate_fits_limit,
+    budget::{BudgetLedger, estimate_fits_limit},
     capability::{ExecutionEstimate, ExecutionHash, FAILURE_HASH_DOMAIN, hash_serializable},
     completion::CompletionStatus,
     state::FailureFingerprintInput,
@@ -98,6 +98,15 @@ pub enum ReplanStopReason {
     BudgetExhausted,
 }
 
+/// Immediately knowable resource exhaustion that prevents another replan attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplanExhaustion {
+    /// Typed terminal stop reason.
+    pub reason: ReplanStopReason,
+    /// Stable human-readable evidence persisted with the stop.
+    pub description: String,
+}
+
 impl ReplanStopReason {
     /// Returns the stable snake-case terminal evidence value for this stop reason.
     #[must_use]
@@ -178,6 +187,71 @@ pub fn evaluate_replan_resource_stop(
         return Some(ReplanStopReason::BudgetExhausted);
     }
     None
+}
+
+/// Detects an elapsed deadline or a fully consumed run-budget dimension.
+#[must_use]
+pub fn replan_exhaustion_reason(
+    ledger: &BudgetLedger,
+    now: DateTime<Utc>,
+) -> Option<ReplanExhaustion> {
+    if ledger
+        .limit
+        .deadline_at
+        .is_some_and(|deadline| now > deadline)
+    {
+        return Some(ReplanExhaustion {
+            reason: ReplanStopReason::DeadlineExceeded,
+            description: "deadline exceeded".to_string(),
+        });
+    }
+    let mut dimensions = Vec::new();
+    if ledger.overrun {
+        dimensions.push("overrun");
+    }
+    if budget_dimension_exhausted(
+        ledger.limit.max_cost_microusd,
+        ledger.consumed.cost_microusd,
+        ledger.reserved.cost_microusd,
+    ) {
+        dimensions.push("cost_microusd");
+    }
+    if budget_dimension_exhausted(
+        ledger.limit.max_tokens,
+        ledger.consumed.tokens,
+        ledger.reserved.tokens,
+    ) {
+        dimensions.push("tokens");
+    }
+    if budget_dimension_exhausted(
+        ledger.limit.max_tasks,
+        ledger.consumed.tasks,
+        ledger.reserved.tasks,
+    ) {
+        dimensions.push("tasks");
+    }
+    if budget_dimension_exhausted(
+        ledger.limit.max_tool_calls,
+        ledger.consumed.tool_calls,
+        ledger.reserved.tool_calls,
+    ) {
+        dimensions.push("tool_calls");
+    }
+    if budget_dimension_exhausted(
+        ledger.limit.max_retrieved_bytes,
+        ledger.consumed.retrieved_bytes,
+        ledger.reserved.retrieved_bytes,
+    ) {
+        dimensions.push("retrieved_bytes");
+    }
+    (!dimensions.is_empty()).then(|| ReplanExhaustion {
+        reason: ReplanStopReason::BudgetExhausted,
+        description: format!("budget exhausted: {}", dimensions.join(", ")),
+    })
+}
+
+fn budget_dimension_exhausted(limit: Option<u64>, consumed: u64, reserved: u64) -> bool {
+    limit.is_some_and(|limit| consumed.saturating_add(reserved) >= limit)
 }
 
 /// Applies operation-loop, repeated-failure, and measurable-progress stop precedence.

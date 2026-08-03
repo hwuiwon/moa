@@ -41,7 +41,7 @@ resources.
 ## Identity And Authorization
 
 API keys are the zero-dependency default. Auth0 or generic OIDC can be enabled
-for SSO, SCIM, Token Vault, and CIBA approvals. `auth.provider = "disabled"` is
+for SSO, SCIM, and CIBA approvals. `auth.provider = "disabled"` is
 for local development or isolated tests only.
 
 OpenFGA is the default authorization engine. Handlers must call
@@ -129,12 +129,18 @@ Supported patterns:
 |---|---|---|
 | Bundled resource access | Git clone/push and tenant setup | Host prepares access without exposing raw token to the model. |
 | Host-side connector injection | Reviewed constrained HTTP operations | Trusted runtime resolves one named slot only after authorization and destination admission. |
-| Token Vault provider | User OAuth tokens | Provider retrieves user-approved tokens for trusted host-side calls. |
 | Environment-backed provider keys | LLMs, embeddings, hand providers | Runtime loads directly injected secrets into typed host-side config, not prompt-visible values. |
 
-Local encrypted vault storage is no longer part of the active runtime. New
-credential sources should implement `CredentialVault` or a typed provider vault
-trait and stay behind the host-side credential boundary.
+Per-user OAuth token brokering is not part of the runtime. Connector credential
+sources implement `CredentialVault` and stay behind the host-side credential
+boundary.
+
+`CredentialVault` deliberately exposes only the connector lifecycle MOA uses:
+stage a candidate, activate or roll it back against an exact predecessor,
+resolve the active version with an append-only audit, report secret-free slot
+status/description, revoke one version or an owning connection, and perform a
+bounded tenant purge. It has no generic credential-source resolver, deployment
+secret accessor, create/rotate shortcut, or ordinary connection-delete method.
 
 MOA-managed tenant connector material lives in one durable owner. A credential
 series identity is `(tenant, owning connection, slot, kind)` with append-only
@@ -153,8 +159,9 @@ reachable only from a transaction that explicitly sets `moa.credential_purge`.
 Plaintext leaves the owner only as a non-serializable, redacted carrier that
 cannot be cloned into a model payload, serialized into Restate state or an
 event, or persisted on a knowledge row. Deployment-owned operator MCP transport
-secrets are a separate typed source and are never available to tenant HTTP
-connector connections.
+secrets are read from operator-selected environment configuration while the tool
+router is constructed; they are never stored in or resolved through the tenant
+credential vault and are never available to tenant HTTP connector connections.
 
 Tenant connector credential writes take a dedicated boundary:
 `moa-edge` authenticates and bounds
@@ -201,8 +208,8 @@ unknown-outcome contract, see
 
 ## Encryption And Key Management
 
-Persisted restricted/PHI memory and self-hosted token-vault values use envelope
-encryption. Postgres owns shared generation metadata and per-subject wrapped
+Persisted restricted/PHI memory and tenant connector credential values use
+envelope encryption. Postgres owns shared generation metadata and per-subject wrapped
 KEKs; Kubernetes supplies generation-named root-key files through the
 externally provisioned `moa-kms-root-keys` Secret. Root keys are never stored in
 Postgres, configuration values, logs, or model-visible context.

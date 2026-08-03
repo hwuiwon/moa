@@ -772,6 +772,145 @@ pub fn task_status_from_outcome(
     }
 }
 
+/// Returns whether one outcome releases the logical task's complete reservation.
+#[must_use]
+pub fn task_outcome_is_terminal(outcome: &ExecutionTaskOutcome) -> bool {
+    !matches!(
+        &outcome.result,
+        ExecutionTaskResult::NeedsInput { .. }
+            | ExecutionTaskResult::NeedsReplan { .. }
+            | ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Retryable,
+                ..
+            }
+    )
+}
+
+/// Selects the run status implied by an accepted task outcome.
+#[must_use]
+pub fn run_status_after_task_outcome(
+    current: ExecutionRunStatus,
+    outcome: &ExecutionTaskOutcome,
+) -> ExecutionRunStatus {
+    match &outcome.result {
+        ExecutionTaskResult::NeedsInput { .. } => ExecutionRunStatus::WaitingInput,
+        ExecutionTaskResult::NeedsReplan { .. } => ExecutionRunStatus::WaitingReplan,
+        ExecutionTaskResult::Completed { .. }
+        | ExecutionTaskResult::Cancelled { .. }
+        | ExecutionTaskResult::Failed { .. }
+            if current == ExecutionRunStatus::WaitingReview =>
+        {
+            ExecutionRunStatus::Running
+        }
+        ExecutionTaskResult::Completed { .. }
+        | ExecutionTaskResult::Cancelled { .. }
+        | ExecutionTaskResult::Failed { .. } => current,
+    }
+}
+
+/// Returns the durable run status represented by one terminal projection.
+#[must_use]
+pub const fn run_status_from_terminal_projection(
+    projection: &TerminalProjection,
+) -> ExecutionRunStatus {
+    match projection {
+        TerminalProjection::Completed { .. } => ExecutionRunStatus::Completed,
+        TerminalProjection::Partial { .. } => ExecutionRunStatus::Partial,
+        TerminalProjection::Blocked { .. } => ExecutionRunStatus::Blocked,
+        TerminalProjection::Unsupported { .. } => ExecutionRunStatus::Unsupported,
+        TerminalProjection::Failed { .. } => ExecutionRunStatus::Failed,
+        TerminalProjection::Cancelled { .. } => ExecutionRunStatus::Cancelled,
+    }
+}
+
+/// Converts an exhausted retryable outcome into the fixed terminal failure.
+#[must_use]
+pub fn exhaust_retry_outcome(
+    attempt: u32,
+    policy: &RetryPolicy,
+    mut outcome: ExecutionTaskOutcome,
+) -> ExecutionTaskOutcome {
+    if attempt >= policy.max_attempts
+        && let ExecutionTaskResult::Failed {
+            class: ExecutionFailureClass::Retryable,
+            message,
+        } = &outcome.result
+    {
+        outcome.result = ExecutionTaskResult::Failed {
+            class: ExecutionFailureClass::Terminal,
+            message: format!("retry policy exhausted after {attempt} attempts: {message}"),
+        };
+    }
+    outcome
+}
+
+/// Computes the bounded exponential backoff before the current retry attempt.
+#[must_use]
+pub fn retry_delay_ms(attempt: u32, policy: &RetryPolicy) -> u64 {
+    let exponent = attempt.saturating_sub(2).min(31);
+    policy
+        .initial_backoff_ms
+        .saturating_mul(1_u64 << exponent)
+        .min(policy.max_backoff_ms)
+}
+
+/// Builds one successful task outcome without citations.
+#[must_use]
+pub fn completed_task_outcome(output: Value, usage: ExecutionUsage) -> ExecutionTaskOutcome {
+    ExecutionTaskOutcome {
+        schema_version: 1,
+        usage,
+        result: ExecutionTaskResult::Completed {
+            output,
+            citations: Vec::new(),
+        },
+    }
+}
+
+/// Builds one failed task outcome.
+#[must_use]
+pub fn failed_task_outcome(
+    class: ExecutionFailureClass,
+    message: String,
+    usage: ExecutionUsage,
+) -> ExecutionTaskOutcome {
+    ExecutionTaskOutcome {
+        schema_version: 1,
+        usage,
+        result: ExecutionTaskResult::Failed { class, message },
+    }
+}
+
+/// Builds one cancelled task outcome.
+#[must_use]
+pub fn cancelled_task_outcome(reason: String, usage: ExecutionUsage) -> ExecutionTaskOutcome {
+    ExecutionTaskOutcome {
+        schema_version: 1,
+        usage,
+        result: ExecutionTaskResult::Cancelled { reason },
+    }
+}
+
+/// Parses an agent's final text as a typed task result or ordinary JSON output.
+#[must_use]
+pub fn parse_agent_task_outcome(text: &str, usage: ExecutionUsage) -> ExecutionTaskOutcome {
+    if let Ok(result) = serde_json::from_str::<ExecutionTaskResult>(text) {
+        return ExecutionTaskOutcome {
+            schema_version: 1,
+            usage,
+            result,
+        };
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(output) => completed_task_outcome(output, usage),
+        Err(error) => failed_task_outcome(
+            ExecutionFailureClass::InvalidOutput,
+            format!("agent final response is not JSON: {error}"),
+            usage,
+        ),
+    }
+}
+
 /// Returns the attempt and generation counters for a durably scheduled retry.
 ///
 /// Retry dispatch keeps the logical task identity and increments both counters.
@@ -864,10 +1003,13 @@ fn append_frame(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::execution_plan::ExecutionFailureClass;
+    use moa_artifacts::execution_plan::{ExecutionFailureClass, ExecutionTaskResult, RetryPolicy};
     use serde_json::json;
 
-    use super::{ExecutionLimitStop, ExecutionTerminalCause};
+    use super::{
+        ExecutionLimitStop, ExecutionTerminalCause, exhaust_retry_outcome, failed_task_outcome,
+        retry_delay_ms,
+    };
     use crate::replan::ReplanStopReason;
 
     #[test]
@@ -937,5 +1079,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn retry_transition_exhausts_and_bounds_backoff_from_one_policy() {
+        // Pins: task workflow retry outcome and delay decisions come from the pure execution
+        // domain and cannot drift between Restate replay and repository persistence.
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 250,
+        };
+        let usage = moa_artifacts::execution_plan::ExecutionUsage {
+            cost_microusd: 0,
+            tokens: 4,
+            tool_calls: 0,
+            retrieved_bytes: 0,
+        };
+
+        assert_eq!(retry_delay_ms(2, &policy), 100);
+        assert_eq!(retry_delay_ms(3, &policy), 200);
+        assert_eq!(retry_delay_ms(4, &policy), 250);
+        assert!(matches!(
+            exhaust_retry_outcome(
+                3,
+                &policy,
+                failed_task_outcome(
+                    ExecutionFailureClass::Retryable,
+                    "provider unavailable".to_string(),
+                    usage,
+                ),
+            )
+            .result,
+            ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Terminal,
+                ..
+            }
+        ));
     }
 }

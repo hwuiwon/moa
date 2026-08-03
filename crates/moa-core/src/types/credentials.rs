@@ -12,8 +12,8 @@
 //!   credential's address.
 //!
 //! Deployment-owned operator secrets (Email/SMS transport credentials) have no
-//! tenant connection, so they are a distinct [`CredentialSource`] variant rather
-//! than a tenant credential with a synthetic connection.
+//! tenant connection and are resolved directly from [`DeploymentSecrets`], never
+//! through the tenant credential vault.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -197,8 +197,8 @@ impl CredentialKind {
 
 /// Persistence identity of a credential *series* for one tenant connection.
 ///
-/// A series accumulates versions through rotation; the active version is the
-/// one resolution returns.
+/// A series accumulates staged versions; the active version is the one
+/// resolution returns.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CredentialIdentity {
     /// Owning tenant.
@@ -362,26 +362,6 @@ impl fmt::Debug for DeploymentSecrets {
     }
 }
 
-/// Where a secret being resolved comes from.
-///
-/// The two variants are the two ownership boundaries in the system; encoding
-/// them as one string was what previously allowed a tenant lookup to silently
-/// fall back to a deployment credential.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "source")]
-pub enum CredentialSource {
-    /// A tenant-owned credential version stored in the vault.
-    TenantConnection {
-        /// Opaque handle to the exact stored version.
-        reference: CredentialRef,
-    },
-    /// A deployment-owned operator secret with no tenant connection.
-    Deployment {
-        /// Which operator secret is requested.
-        secret: DeploymentSecret,
-    },
-}
-
 /// Operation being performed against the credential owner.
 ///
 /// There is deliberately no enumeration/list operation: a caller-selected
@@ -390,8 +370,6 @@ pub enum CredentialSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialOperation {
-    /// Store the first version of a new credential series.
-    Create,
     /// Store a sealed version without changing the active version.
     Stage,
     /// Atomically make one staged version active under compare-and-swap.
@@ -400,8 +378,6 @@ pub enum CredentialOperation {
     RollbackActivation,
     /// Read the active version's plaintext for an authorized outbound request.
     Resolve,
-    /// Store a new active version, superseding the current one.
-    Rotate,
     /// Mark a version unusable without deleting its audit history.
     Revoke,
     /// Remove credential state as part of tenant lifecycle.
@@ -413,12 +389,10 @@ impl CredentialOperation {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Create => "create",
             Self::Stage => "stage",
             Self::Activate => "activate",
             Self::RollbackActivation => "rollback_activation",
             Self::Resolve => "resolve",
-            Self::Rotate => "rotate",
             Self::Revoke => "revoke",
             Self::Delete => "delete",
         }
@@ -501,7 +475,7 @@ pub enum CredentialPrincipal {
 }
 
 impl CredentialPrincipal {
-    /// Returns the owner identity a create operation should stamp, if any.
+    /// Returns the owner identity a staged version should stamp, if any.
     #[must_use]
     pub fn owner_identity(self) -> Option<Uuid> {
         match self {
@@ -546,8 +520,8 @@ pub struct CredentialContext {
 
 /// Non-secret description of a stored credential version.
 ///
-/// Returned by create/rotate so callers can persist the opaque reference and
-/// record the version without ever seeing material.
+/// Returned by staged activation so callers can persist the opaque reference
+/// and record the version without ever seeing material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialVersion {
     /// Opaque handle to this exact version.

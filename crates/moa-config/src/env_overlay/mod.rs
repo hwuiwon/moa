@@ -6,7 +6,7 @@ mod observability;
 mod providers;
 mod security;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -20,8 +20,8 @@ use providers::{deserialize_optional_list, deserialize_optional_provider_ids};
 
 use super::{
     AsyncAuthzKind, AuthProviderKind, AuthzEngine, KmsProviderKind, McpServerConfig, MoaConfig,
-    OAuthClientConfig, OAuthRefreshConfig, OtlpProtocol, RuntimeCacheBackend, SandboxPolicyConfig,
-    SecurityProfile, SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
+    OAuthClientConfig, OtlpProtocol, RuntimeCacheBackend, SandboxPolicyConfig, SecurityProfile,
+    SessionAttachmentBackend, SessionBlobBackend,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -199,8 +199,6 @@ pub struct EnvOverlay {
     pub auth_auth0_client_id: Option<String>,
     /// `MOA_AUTH_AUTH0_CLIENT_SECRET`.
     pub auth_auth0_client_secret: Option<String>,
-    /// `MOA_AUTH_AUTH0_WEBHOOK_SECRET`.
-    pub auth_auth0_webhook_secret: Option<String>,
     /// `MOA_AUTH_OIDC_ISSUER`.
     pub auth_oidc_issuer: Option<String>,
     /// `MOA_AUTH_OIDC_AUDIENCE`.
@@ -252,11 +250,6 @@ pub struct EnvOverlay {
     pub authz_openfga_model_id: Option<String>,
     /// `MOA_AUTHZ_OPENFGA_TIMEOUT_MS`.
     pub authz_openfga_timeout_ms: Option<u64>,
-    /// `MOA_TOKEN_VAULT_PROVIDER`.
-    pub token_vault_provider: Option<TokenVaultKind>,
-    /// `MOA_TOKEN_VAULT_REFRESH_JSON`.
-    #[serde(deserialize_with = "deserialize_optional_token_vault_refresh")]
-    pub token_vault_refresh_json: Option<BTreeMap<String, OAuthRefreshConfig>>,
     /// `MOA_KMS_PROVIDER`.
     pub kms_provider: Option<KmsProviderKind>,
     /// `MOA_KMS_ROOT_KEY_DIR`.
@@ -840,15 +833,6 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_optional_json(deserializer, "MOA_AUTH_OAUTH_CLIENTS_JSON")
-}
-
-fn deserialize_optional_token_vault_refresh<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<BTreeMap<String, OAuthRefreshConfig>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_optional_json(deserializer, "MOA_TOKEN_VAULT_REFRESH_JSON")
 }
 
 fn deserialize_optional_mcp_servers<'de, D>(

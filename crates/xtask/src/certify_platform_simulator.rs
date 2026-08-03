@@ -8,12 +8,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use moa_artifacts::canonical::canonical_json_bytes;
 use moa_artifacts::release::{
     Digest32, PLATFORM_RELEASE_SIMULATOR_CERTIFICATION_MANDATE_UID,
     PLATFORM_RELEASE_SIMULATOR_POLICY_REVISION, PLATFORM_RELEASE_SIMULATOR_POLICY_UID,
 };
 use moa_artifacts::simulation::SimulatorPolicyReference;
+use moa_core::canonical_json::canonical_json_bytes;
 use moa_experiments::simulator_policy::fidelity::{CertificationOutcome, FidelityStudyArtifact};
 use moa_experiments::simulator_policy::store::SimulatorPolicyStore;
 use serde::{Serialize, de::DeserializeOwned};

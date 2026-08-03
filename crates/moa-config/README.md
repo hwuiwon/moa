@@ -15,7 +15,7 @@ touch configuration.
 - `env_overlay/` — flat single-underscore `MOA_*` environment overlay for
   Kubernetes runtime config (`EnvOverlay`)
 - One module per configuration domain: `providers`, `database`, `auth`,
-  `authz`, `async_authz`, `kms`, `token_vault`, `compliance`,
+  `authz`, `async_authz`, `kms`, `compliance`,
   `audit_security`, `llm_dlp`, `memory`, `knowledge`, `session`, `context`,
   `execution`, `learning`, `lineage`, `messaging`, `orchestrator`,
   `runtime_cache`, `sandbox`, `security`, `telemetry`, `analytics`,

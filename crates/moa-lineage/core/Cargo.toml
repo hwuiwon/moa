@@ -10,7 +10,6 @@ chrono = { workspace = true, features = ["serde"] }
 moa-core = { workspace = true }
 moa-memory-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_canonical_json.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

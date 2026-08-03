@@ -6,41 +6,44 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_artifacts::connector::{
-    ConnectorDefinitionVersionV1, RuntimeConnectorAuthRequirementV1, RuntimeConnectorDefinitionV1,
-    RuntimeConnectorKindV1,
+    ConnectorDefinition, ConnectorDefinitionVersionV1, HttpMethodV1, HttpOperationContract,
+    RuntimeConnectorActionV1, RuntimeConnectorAuthRequirementV1, RuntimeOperationPolicyV1,
 };
 use moa_connectors::domain::{
     ConnectionDefinitionRef, ConnectionGeneration, ConnectionHealth, ConnectionStatus,
-    ConnectorConnection, ConnectorInvocationId, ConnectorInvocationRecord,
-    ConnectorInvocationTerminal, InstalledActionBinding, InstalledActionBindingId,
-    ManagedParentClaim, ManagedParentDefinition, ManagedParentDeleteOutcome,
+    ConnectorConnection, InstalledActionBindingId, ManagedParentClaim, ManagedParentDefinition,
+    ManagedParentDeleteOutcome,
 };
 use moa_connectors::repository::{
-    ConnectionActivation, ConnectionRepository, ConnectionUseGrantRepository, ConnectionUseRequest,
-    InvocationReservation, InvocationReservationRequest, NewConnectorConnection,
+    ConnectionActivation, ConnectionLifecycleRepository, ConnectionUseGrantRepository,
+    ConnectionUseRequest, ManagedParentRepository, NewConnectorConnection,
 };
 use moa_connectors::service::{
-    ConnectorService, CredentialSlotReadiness, CredentialSlotVerifier,
-    ManagedParentActivationRequest, ManagedParentClaimRequest, ManagedParentDeleteRequest,
-    RequiredCredentialSlot,
+    ConnectorService, CredentialSlotVerifier, ManagedParentActivationRequest,
+    ManagedParentClaimRequest, ManagedParentDeleteRequest,
 };
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::credentials::{CredentialContext, CredentialKind, CredentialSlotName};
 use moa_core::types::identifiers::{ConnectorConnectionId, TenantId};
-use moa_orchestrator::services::connectors::{
-    ConnectionCredentialRevoker, ConnectorConnectionMutationCommand, ConnectorConnectionSelector,
-    ConnectorConnectionUseCommand, ConnectorCredentialRevocationError,
-    ConnectorDefinitionResolutionError, ConnectorDefinitionResolver,
-    ConnectorDestinationVerificationError, ConnectorDestinationVerifier,
-    ConnectorManagementAuthorizationError, ConnectorManagementAuthorizer, ConnectorManagementError,
+use moa_orchestrator::services::connectors::authz::{
+    ConnectorManagementAuthorizationError, ConnectorManagementAuthorizer,
+};
+use moa_orchestrator::services::connectors::credentials::{
+    ConnectionCredentialRevoker, ConnectorCredentialRevocationError,
+};
+use moa_orchestrator::services::connectors::definitions::{
+    ConnectorDefinitionResolutionError, ConnectorDefinitionResolver, ResolvedConnectorDefinition,
+};
+use moa_orchestrator::services::connectors::management::{
+    ConnectorDestinationVerificationError, ConnectorDestinationVerifier, ConnectorManagementError,
     ConnectorManagementService, ManagedKnowledgeConnectionOperationError,
-    ManagedKnowledgeConnectorDefinitionResolver, ResolvedConnectorDefinition,
 };
 use moa_wire::connectors::{
-    ConnectorConnectionCreateRequest, ConnectorConnectionHealth,
-    ConnectorConnectionMutationRequest, ConnectorConnectionStatus, ConnectorConnectionUseRequest,
-    ConnectorCredentialWriteMetadata, ConnectorDefinitionReference, ConnectorUseSubject,
-    ConnectorVerificationState,
+    ConnectorArtifactReference, ConnectorConnectionCreateRequest, ConnectorConnectionHealth,
+    ConnectorConnectionMutationCommand, ConnectorConnectionMutationRequest,
+    ConnectorConnectionSelector, ConnectorConnectionStatus, ConnectorConnectionUseCommand,
+    ConnectorConnectionUseRequest, ConnectorCredentialWriteMetadata, ConnectorDefinitionReference,
+    ConnectorUseSubject, ConnectorVerificationState,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -72,31 +75,49 @@ fn identity(tenant_id: TenantId) -> Identity {
 }
 
 fn definition_ref() -> ConnectionDefinitionRef {
-    ConnectionDefinitionRef::BuiltIn {
-        key: "billing".to_string(),
-        version: NonZeroU64::new(1).expect("fixture definition version must be positive"),
+    ConnectionDefinitionRef::Artifact {
+        artifact_uid: Uuid::from_u128(0xa471),
+        revision_uid: Uuid::from_u128(0xae71),
     }
 }
 
-fn wire_definition_ref() -> ConnectorDefinitionReference {
-    ConnectorDefinitionReference::BuiltIn {
-        key: "billing".to_string(),
-        version: NonZeroU64::new(1).expect("fixture definition version must be positive"),
+fn wire_definition_ref() -> ConnectorArtifactReference {
+    ConnectorArtifactReference {
+        artifact_uid: Uuid::from_u128(0xa471),
+        revision_uid: Uuid::from_u128(0xae71),
     }
 }
 
-fn definition() -> RuntimeConnectorDefinitionV1 {
-    RuntimeConnectorDefinitionV1 {
+fn definition() -> ConnectorDefinition {
+    ConnectorDefinition {
         definition_version: ConnectorDefinitionVersionV1::V1,
         display_name: "Billing".to_string(),
         description: String::new(),
-        runtime: RuntimeConnectorKindV1::BuiltInManaged {
-            provider: "billing".to_string(),
-        },
-        auth: vec![RuntimeConnectorAuthRequirementV1::ManagedOauth {
-            slot: CredentialSlotName::PRIMARY,
+        auth: vec![RuntimeConnectorAuthRequirementV1::None],
+        actions: vec![RuntimeConnectorActionV1 {
+            id: "create_invoice".to_string(),
+            description: "Create one invoice".to_string(),
+            contract: HttpOperationContract {
+                method: HttpMethodV1::Post,
+                path_template: "/invoices".to_string(),
+                path_inputs: Vec::new(),
+                query_inputs: Vec::new(),
+                body_input: None,
+                credential_slot: None,
+                upstream_idempotency_header: None,
+                response_pointer: None,
+                max_request_bytes: 1024,
+                max_response_bytes: 1024,
+                connect_timeout_ms: 1000,
+                total_timeout_ms: 2000,
+                policy: RuntimeOperationPolicyV1 {
+                    input_schema: json!({"type": "object"}),
+                    output_schema: json!({"type": "object"}),
+                    data_classes: Vec::new(),
+                    idempotency: moa_core::types::tools::IdempotencyClass::NonIdempotent,
+                },
+            },
         }],
-        actions: Vec::new(),
     }
 }
 
@@ -112,6 +133,7 @@ fn connection(
         tenant_id,
         display_name: "Billing account".to_string(),
         definition: definition_ref(),
+        origin: Some("https://api.example.test".parse().expect("fixture origin")),
         non_secret_config: json!({}),
         generation: generation(current_generation),
         status,
@@ -167,7 +189,7 @@ impl ConnectorManagementAuthorizer for FakeAuthorizer {
 #[derive(Clone)]
 struct FakeDefinitions {
     events: Events,
-    definition: RuntimeConnectorDefinitionV1,
+    definition: ConnectorDefinition,
 }
 
 #[async_trait]
@@ -175,27 +197,17 @@ impl ConnectorDefinitionResolver for FakeDefinitions {
     async fn resolve_for_install(
         &self,
         _tenant_id: TenantId,
-        reference: &ConnectorDefinitionReference,
+        reference: &ConnectorArtifactReference,
     ) -> Result<ResolvedConnectorDefinition, ConnectorDefinitionResolutionError> {
         record(&self.events, "definition_install");
-        let definition_ref = match reference {
-            ConnectorDefinitionReference::Artifact {
-                artifact_uid,
-                revision_uid,
-            } => ConnectionDefinitionRef::Artifact {
-                artifact_uid: *artifact_uid,
-                revision_uid: *revision_uid,
-            },
-            ConnectorDefinitionReference::BuiltIn { key, version } => {
-                ConnectionDefinitionRef::BuiltIn {
-                    key: key.clone(),
-                    version: *version,
-                }
-            }
+        let definition_ref = ConnectionDefinitionRef::Artifact {
+            artifact_uid: reference.artifact_uid,
+            revision_uid: reference.revision_uid,
         };
         Ok(ResolvedConnectorDefinition {
             definition_ref,
-            definition: self.definition.clone(),
+            definition: Some(self.definition.clone()),
+            credential_requirements: self.definition.auth.clone(),
         })
     }
 
@@ -204,61 +216,35 @@ impl ConnectorDefinitionResolver for FakeDefinitions {
         _tenant_id: TenantId,
         reference: &ConnectionDefinitionRef,
     ) -> Result<ResolvedConnectorDefinition, ConnectorDefinitionResolutionError> {
-        record(&self.events, "definition_installed");
+        let managed = [
+            ManagedParentDefinition::KnowledgeNangoV1,
+            ManagedParentDefinition::KnowledgeMergeV1,
+        ]
+        .into_iter()
+        .find(|managed| managed.definition_ref() == *reference);
+        if managed.is_none() {
+            record(&self.events, "definition_installed");
+        }
         Ok(ResolvedConnectorDefinition {
             definition_ref: reference.clone(),
-            definition: self.definition.clone(),
+            definition: managed.is_none().then(|| self.definition.clone()),
+            credential_requirements: managed.map_or_else(
+                || self.definition.auth.clone(),
+                ManagedParentDefinition::credential_requirements,
+            ),
         })
     }
-}
 
-#[derive(Clone)]
-struct ArtifactOnlyDefinitions;
-
-#[async_trait]
-impl ConnectorDefinitionResolver for ArtifactOnlyDefinitions {
-    async fn resolve_for_install(
+    async fn resolve_installed_batch(
         &self,
-        _tenant_id: TenantId,
-        reference: &ConnectorDefinitionReference,
-    ) -> Result<ResolvedConnectorDefinition, ConnectorDefinitionResolutionError> {
-        match reference {
-            ConnectorDefinitionReference::BuiltIn { .. } => {
-                Err(ConnectorDefinitionResolutionError::BuiltInUnavailable)
-            }
-            ConnectorDefinitionReference::Artifact {
-                artifact_uid,
-                revision_uid,
-            } => Ok(ResolvedConnectorDefinition {
-                definition_ref: ConnectionDefinitionRef::Artifact {
-                    artifact_uid: *artifact_uid,
-                    revision_uid: *revision_uid,
-                },
-                definition: definition(),
-            }),
+        tenant_id: TenantId,
+        references: &[ConnectionDefinitionRef],
+    ) -> Result<Vec<ResolvedConnectorDefinition>, ConnectorDefinitionResolutionError> {
+        let mut resolved = Vec::with_capacity(references.len());
+        for reference in references {
+            resolved.push(self.resolve_installed(tenant_id, reference).await?);
         }
-    }
-
-    async fn resolve_installed(
-        &self,
-        _tenant_id: TenantId,
-        reference: &ConnectionDefinitionRef,
-    ) -> Result<ResolvedConnectorDefinition, ConnectorDefinitionResolutionError> {
-        match reference {
-            ConnectionDefinitionRef::BuiltIn { .. } => {
-                Err(ConnectorDefinitionResolutionError::BuiltInUnavailable)
-            }
-            ConnectionDefinitionRef::Artifact {
-                artifact_uid,
-                revision_uid,
-            } => Ok(ResolvedConnectorDefinition {
-                definition_ref: ConnectionDefinitionRef::Artifact {
-                    artifact_uid: *artifact_uid,
-                    revision_uid: *revision_uid,
-                },
-                definition: definition(),
-            }),
-        }
+        Ok(resolved)
     }
 }
 
@@ -266,10 +252,11 @@ impl ConnectorDefinitionResolver for ArtifactOnlyDefinitions {
 struct FakeRepository {
     events: Events,
     connection: Arc<Mutex<ConnectorConnection>>,
+    fail_transition: Arc<Mutex<Option<ConnectionStatus>>>,
 }
 
 #[async_trait]
-impl ConnectionRepository for FakeRepository {
+impl ConnectionLifecycleRepository for FakeRepository {
     async fn create(
         &self,
         request: NewConnectorConnection,
@@ -283,6 +270,7 @@ impl ConnectionRepository for FakeRepository {
         );
         created.display_name = request.display_name;
         created.definition = request.definition_ref;
+        created.origin = request.origin;
         created.non_secret_config = request.non_secret_config;
         created.created_by_identity_id = request.created_by_identity_id;
         created.owner_identity_id = Some(request.owner_identity_id);
@@ -303,28 +291,29 @@ impl ConnectionRepository for FakeRepository {
         )
     }
 
-    async fn list(&self, tenant_id: TenantId) -> moa_connectors::Result<Vec<ConnectorConnection>> {
+    async fn list(
+        &self,
+        tenant_id: TenantId,
+        _request: moa_connectors::repository::ConnectionListRequest,
+    ) -> moa_connectors::Result<moa_connectors::repository::ConnectionListPage> {
         record(&self.events, "repository_list");
         let current = lock(&self.connection).clone();
-        Ok((current.tenant_id == tenant_id)
-            .then_some(current)
-            .into_iter()
-            .collect())
+        Ok(moa_connectors::repository::ConnectionListPage {
+            connections: (current.tenant_id == tenant_id
+                && current.status != ConnectionStatus::Deleted)
+                .then_some(current)
+                .into_iter()
+                .collect(),
+            next_cursor: None,
+        })
     }
 
-    async fn claim_managed_parent(
-        &self,
-        _request: ManagedParentClaimRequest,
-    ) -> moa_connectors::Result<ManagedParentClaim> {
-        Err(unavailable())
-    }
-
-    async fn load_binding(
+    async fn load_pinned_action(
         &self,
         _tenant_id: TenantId,
         _connection_id: ConnectorConnectionId,
         _binding_id: InstalledActionBindingId,
-    ) -> moa_connectors::Result<Option<InstalledActionBinding>> {
+    ) -> moa_connectors::Result<Option<moa_connectors::repository::PinnedConnectorAction>> {
         Err(unavailable())
     }
 
@@ -336,6 +325,9 @@ impl ConnectionRepository for FakeRepository {
         target: ConnectionStatus,
     ) -> moa_connectors::Result<ConnectorConnection> {
         record(&self.events, format!("repository_transition:{target}"));
+        if *lock(&self.fail_transition) == Some(target) {
+            return Err(unavailable());
+        }
         let mut current = lock(&self.connection);
         if current.tenant_id != tenant_id || current.connection_id != connection_id {
             return Err(moa_connectors::Error::ConnectionNotFound { connection_id });
@@ -396,6 +388,16 @@ impl ConnectionRepository for FakeRepository {
         current.status = ConnectionStatus::Active;
         Ok(current.clone())
     }
+}
+
+#[async_trait]
+impl ManagedParentRepository for FakeRepository {
+    async fn claim_managed_parent(
+        &self,
+        _request: ManagedParentClaimRequest,
+    ) -> moa_connectors::Result<ManagedParentClaim> {
+        Err(unavailable())
+    }
 
     async fn activate_managed_knowledge_parent(
         &self,
@@ -410,38 +412,6 @@ impl ConnectionRepository for FakeRepository {
     ) -> moa_connectors::Result<ManagedParentDeleteOutcome> {
         Err(unavailable())
     }
-
-    async fn reserve_invocation(
-        &self,
-        _request: InvocationReservationRequest,
-    ) -> moa_connectors::Result<InvocationReservation> {
-        Err(unavailable())
-    }
-
-    async fn load_invocation(
-        &self,
-        _tenant_id: TenantId,
-        _invocation_id: ConnectorInvocationId,
-    ) -> moa_connectors::Result<Option<ConnectorInvocationRecord>> {
-        Err(unavailable())
-    }
-
-    async fn mark_transmitting(
-        &self,
-        _tenant_id: TenantId,
-        _invocation_id: ConnectorInvocationId,
-    ) -> moa_connectors::Result<ConnectorInvocationRecord> {
-        Err(unavailable())
-    }
-
-    async fn finish_invocation(
-        &self,
-        _tenant_id: TenantId,
-        _invocation_id: ConnectorInvocationId,
-        _terminal: ConnectorInvocationTerminal,
-    ) -> moa_connectors::Result<ConnectorInvocationRecord> {
-        Err(unavailable())
-    }
 }
 
 #[derive(Clone)]
@@ -452,20 +422,23 @@ struct FakeCredentials {
 
 #[async_trait]
 impl CredentialSlotVerifier for FakeCredentials {
-    async fn credential_slot_readiness(
+    async fn credential_slot_readiness_batch(
         &self,
         _tenant_id: TenantId,
-        _connection_id: ConnectorConnectionId,
-        slots: &[RequiredCredentialSlot],
-    ) -> moa_connectors::Result<Vec<CredentialSlotReadiness>> {
+        slots: &[moa_connectors::service::ConnectionCredentialSlot],
+    ) -> moa_connectors::Result<Vec<moa_connectors::service::ConnectionCredentialSlotReadiness>>
+    {
         record(&self.events, "credential_readiness");
         Ok(slots
             .iter()
-            .map(|slot| CredentialSlotReadiness {
-                slot: slot.slot.clone(),
-                kind: slot.kind,
-                ready: *lock(&self.ready),
-            })
+            .map(
+                |slot| moa_connectors::service::ConnectionCredentialSlotReadiness {
+                    connection_id: slot.connection_id,
+                    slot: slot.slot.clone(),
+                    kind: slot.kind,
+                    ready: *lock(&self.ready),
+                },
+            )
             .collect())
     }
 }
@@ -501,7 +474,6 @@ struct FakeDestination {
 impl ConnectorDestinationVerifier for FakeDestination {
     async fn verify_local(
         &self,
-        _definition: &RuntimeConnectorDefinitionV1,
         _connection: &ConnectorConnection,
     ) -> Result<(), ConnectorDestinationVerificationError> {
         record(&self.events, "destination_verify");
@@ -546,7 +518,7 @@ fn fixture_with_definition(
     current_generation: u64,
     managed_definition: Option<ConnectionDefinitionRef>,
     use_managed_resolver: bool,
-    runtime_definition: RuntimeConnectorDefinitionV1,
+    runtime_definition: ConnectorDefinition,
 ) -> Fixture {
     let events = Arc::new(Mutex::new(Vec::new()));
     let tenant_id = TenantId::from(Uuid::from_u128(0x7eaa));
@@ -558,6 +530,7 @@ fn fixture_with_definition(
     let repository = FakeRepository {
         events: events.clone(),
         connection: Arc::new(Mutex::new(initial_connection)),
+        fail_transition: Arc::new(Mutex::new(None)),
     };
     let authorizer = FakeAuthorizer {
         events: events.clone(),
@@ -567,11 +540,8 @@ fn fixture_with_definition(
         events: events.clone(),
         definition: runtime_definition,
     });
-    let definitions: Arc<dyn ConnectorDefinitionResolver> = if use_managed_resolver {
-        Arc::new(ManagedKnowledgeConnectorDefinitionResolver::new(artifacts))
-    } else {
-        artifacts
-    };
+    let _ = use_managed_resolver;
+    let definitions: Arc<dyn ConnectorDefinitionResolver> = artifacts;
     let credentials = FakeCredentials {
         events: events.clone(),
         ready: Arc::new(Mutex::new(true)),
@@ -588,7 +558,12 @@ fn fixture_with_definition(
         events: events.clone(),
         contexts: Arc::new(Mutex::new(Vec::new())),
     };
-    let domain_service = ConnectorService::new(Arc::new(repository.clone()), Arc::new(credentials));
+    let repository_port = Arc::new(repository.clone());
+    let domain_service = ConnectorService::new(
+        repository_port.clone(),
+        repository_port,
+        Arc::new(credentials),
+    );
     let service = ConnectorManagementService::new(
         Arc::new(authorizer.clone()),
         definitions,
@@ -660,51 +635,6 @@ fn restate_command_shapes_match_secret_free_edge_translation_offline() {
 }
 
 #[tokio::test]
-async fn managed_knowledge_definition_is_installed_only_and_artifacts_still_delegate_offline() {
-    // Pins: public creation cannot turn a managed knowledge key into an
-    // arbitrary connector, while artifact references keep their existing path.
-    let resolver =
-        ManagedKnowledgeConnectorDefinitionResolver::new(Arc::new(ArtifactOnlyDefinitions));
-    let tenant_id = TenantId::from(Uuid::from_u128(0x7eaa));
-    let managed = ManagedParentDefinition::KnowledgeNangoV1;
-    let error = resolver
-        .resolve_for_install(
-            tenant_id,
-            &ConnectorDefinitionReference::BuiltIn {
-                key: managed.key().to_string(),
-                version: NonZeroU64::MIN,
-            },
-        )
-        .await
-        .expect_err("managed knowledge keys must not be publicly installable");
-    assert_eq!(
-        error,
-        ConnectorDefinitionResolutionError::BuiltInUnavailable
-    );
-
-    let artifact_uid = Uuid::from_u128(0xa471fac7);
-    let revision_uid = Uuid::from_u128(0xae71_5101);
-    let artifact = resolver
-        .resolve_installed(
-            tenant_id,
-            &ConnectionDefinitionRef::Artifact {
-                artifact_uid,
-                revision_uid,
-            },
-        )
-        .await
-        .expect("artifact resolution must remain delegated unchanged");
-    assert_eq!(
-        artifact.definition_ref,
-        ConnectionDefinitionRef::Artifact {
-            artifact_uid,
-            revision_uid,
-        }
-    );
-    assert_eq!(artifact.definition, definition());
-}
-
-#[tokio::test]
 async fn create_authorizes_admin_before_definition_and_repository_offline() {
     // Pins: a create request cannot use definition lookup as an authorization oracle.
     let fixture = fixture(ConnectionStatus::PendingAuth, 1);
@@ -718,7 +648,7 @@ async fn create_authorizes_admin_before_definition_and_repository_offline() {
                 connection_id,
                 display_name: "Billing account".to_string(),
                 definition_ref: wire_definition_ref(),
-                origin: None,
+                origin: "https://billing.example.com".to_string(),
                 non_secret_config: json!({"region": "us-east-1"}),
             },
         )
@@ -731,8 +661,7 @@ async fn create_authorizes_admin_before_definition_and_repository_offline() {
     );
     assert_eq!(response.connection_id, connection_id);
     assert_eq!(response.status, ConnectorConnectionStatus::PendingAuth);
-    assert_eq!(response.credential_slots.len(), 1);
-    assert!(!response.credential_slots[0].ready);
+    assert!(response.credential_slots.is_empty());
     let encoded = serde_json::to_value(&response).expect("response should serialize");
     let response_fields = encoded
         .as_object()
@@ -788,7 +717,7 @@ async fn managed_knowledge_parent_resolves_for_installed_list_and_get_offline() 
 
     let listed = fixture
         .service
-        .list(&identity)
+        .list(&identity, Default::default())
         .await
         .expect("installed managed parent should remain listable");
     assert_eq!(listed.connections.len(), 1);
@@ -825,65 +754,160 @@ async fn managed_knowledge_parent_resolves_for_installed_list_and_get_offline() 
 
 #[tokio::test]
 async fn managed_knowledge_parent_generic_operations_stop_after_auth_and_load_offline() {
-    // Pins: generic lifecycle and credential ingress cannot bypass knowledge's
-    // provider journal, but the protected parent is not inspected before auth.
-    let fixture = fixture_with_definition(
-        ConnectionStatus::PendingAuth,
-        1,
-        Some(ManagedParentDefinition::KnowledgeMergeV1.definition_ref()),
-        true,
-        definition(),
-    );
-    let identity = fixture_identity(&fixture);
-    let connection_id = fixture_connection_id(&fixture);
+    // Pins: every generic mutation rejects both closed managed providers after
+    // authorization and protected load, before definition, vault, or writes.
+    #[derive(Clone, Copy, Debug)]
+    enum Operation {
+        Activate,
+        Suspend,
+        Resume,
+        Verify,
+        GrantUse,
+        RevokeUse,
+        PrepareCredential,
+        AdvanceCredential,
+        Disconnect,
+        Delete,
+    }
 
-    let lifecycle = fixture
-        .service
-        .activate(
-            &identity,
-            connection_id,
-            ConnectorConnectionMutationRequest {
+    let operations = [
+        Operation::Activate,
+        Operation::Suspend,
+        Operation::Resume,
+        Operation::Verify,
+        Operation::GrantUse,
+        Operation::RevokeUse,
+        Operation::PrepareCredential,
+        Operation::AdvanceCredential,
+        Operation::Disconnect,
+        Operation::Delete,
+    ];
+    for managed in [
+        ManagedParentDefinition::KnowledgeNangoV1,
+        ManagedParentDefinition::KnowledgeMergeV1,
+    ] {
+        for operation in operations {
+            let status = match operation {
+                Operation::Resume => ConnectionStatus::Suspended,
+                Operation::Suspend
+                | Operation::GrantUse
+                | Operation::RevokeUse
+                | Operation::AdvanceCredential
+                | Operation::Disconnect => ConnectionStatus::Active,
+                Operation::Activate
+                | Operation::Verify
+                | Operation::PrepareCredential
+                | Operation::Delete => ConnectionStatus::PendingAuth,
+            };
+            let fixture = if matches!(operation, Operation::AdvanceCredential) {
+                fixture(status, 1)
+            } else {
+                fixture_with_definition(
+                    status,
+                    1,
+                    Some(managed.definition_ref()),
+                    true,
+                    definition(),
+                )
+            };
+            let identity = fixture_identity(&fixture);
+            let connection_id = fixture_connection_id(&fixture);
+            let mutation = ConnectorConnectionMutationRequest {
                 expected_generation: 1,
-            },
-        )
-        .await
-        .expect_err("generic activation must not own a managed knowledge parent");
-    assert!(matches!(
-        lifecycle,
-        ConnectorManagementError::ManagedKnowledgeOperation(
-            ManagedKnowledgeConnectionOperationError
-        )
-    ));
-    assert_eq!(
-        lock(&fixture.events).as_slice(),
-        ["auth_manage", "repository_load"]
-    );
-
-    lock(&fixture.events).clear();
-    let credential = fixture
-        .service
-        .prepare_credential_write(
-            &identity,
-            &ConnectorCredentialWriteMetadata {
+            };
+            let use_request = ConnectorConnectionUseRequest {
+                subject: ConnectorUseSubject::Agent {
+                    id: Uuid::from_u128(0xa6e17),
+                },
+            };
+            let credential_metadata = ConnectorCredentialWriteMetadata {
                 connection_id,
                 expected_generation: 1,
                 slot_name: CredentialSlotName::PRIMARY,
-                kind: CredentialKind::ProviderApiKey,
+                kind: CredentialKind::OAuth,
                 operation_id: Uuid::from_u128(0xc1a1),
-            },
-        )
-        .await
-        .expect_err("generic credential ingress must not own a managed knowledge parent");
-    assert!(matches!(
-        credential,
-        ConnectorManagementError::ManagedKnowledgeOperation(
-            ManagedKnowledgeConnectionOperationError
-        )
-    ));
-    assert_eq!(
-        lock(&fixture.events).as_slice(),
-        ["auth_manage", "repository_load"]
-    );
+            };
+
+            let result: Result<(), ConnectorManagementError> = match operation {
+                Operation::Activate => fixture
+                    .service
+                    .activate(&identity, connection_id, mutation)
+                    .await
+                    .map(|_| ()),
+                Operation::Suspend => fixture
+                    .service
+                    .suspend(&identity, connection_id, mutation)
+                    .await
+                    .map(|_| ()),
+                Operation::Resume => fixture
+                    .service
+                    .resume(&identity, connection_id, mutation)
+                    .await
+                    .map(|_| ()),
+                Operation::Verify => fixture
+                    .service
+                    .verify(&identity, connection_id, mutation)
+                    .await
+                    .map(|_| ()),
+                Operation::GrantUse => {
+                    fixture
+                        .service
+                        .grant_use(&identity, connection_id, use_request)
+                        .await
+                }
+                Operation::RevokeUse => {
+                    fixture
+                        .service
+                        .revoke_use(&identity, connection_id, use_request)
+                        .await
+                }
+                Operation::PrepareCredential => fixture
+                    .service
+                    .prepare_credential_write(&identity, &credential_metadata)
+                    .await
+                    .map(|_| ()),
+                Operation::AdvanceCredential => {
+                    let prepared = fixture
+                        .service
+                        .prepare_credential_write(&identity, &credential_metadata)
+                        .await
+                        .expect("artifact credential write should prepare before managed swap");
+                    lock(&fixture.repository.connection).definition = managed.definition_ref();
+                    lock(&fixture.events).clear();
+                    fixture
+                        .service
+                        .advance_credential_generation(&identity, &prepared)
+                        .await
+                        .map(|_| ())
+                }
+                Operation::Disconnect => fixture
+                    .service
+                    .disconnect(&identity, connection_id, mutation)
+                    .await
+                    .map(|_| ()),
+                Operation::Delete => fixture
+                    .service
+                    .delete(&identity, connection_id, mutation)
+                    .await
+                    .map(|_| ()),
+            };
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ConnectorManagementError::ManagedKnowledgeOperation(
+                        ManagedKnowledgeConnectionOperationError
+                    ))
+                ),
+                "{managed:?} {operation:?} must remain knowledge-owned"
+            );
+            assert_eq!(
+                lock(&fixture.events).as_slice(),
+                ["auth_manage", "repository_load"],
+                "{managed:?} {operation:?} must stop after authorization and protected load"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -1009,6 +1033,88 @@ async fn disconnect_fences_before_audit_preserving_connection_revocation_offline
 }
 
 #[tokio::test]
+async fn delete_fences_pending_and_active_connections_before_revocation_offline() {
+    // Pins: every delete path durably disables execution before vault teardown,
+    // then records the terminal lifecycle only after revocation succeeds.
+    for initial_status in [ConnectionStatus::PendingAuth, ConnectionStatus::Active] {
+        let fixture = fixture(initial_status, 3);
+        let identity = fixture_identity(&fixture);
+        let connection_id = fixture_connection_id(&fixture);
+
+        let response = fixture
+            .service
+            .delete(
+                &identity,
+                connection_id,
+                ConnectorConnectionMutationRequest {
+                    expected_generation: 3,
+                },
+            )
+            .await
+            .expect("authorized delete should fence, revoke, and terminate");
+
+        assert_eq!(response.status, ConnectorConnectionStatus::Deleted);
+        assert_eq!(response.credential_slots.len(), 1);
+        assert!(!response.credential_slots[0].ready);
+        assert_eq!(
+            lock(&fixture.events).as_slice(),
+            [
+                "auth_manage",
+                "repository_load",
+                "definition_installed",
+                "repository_transition:disconnecting",
+                "credential_revoke_connection",
+                "repository_transition:deleted",
+            ],
+            "{initial_status} delete must preserve the teardown boundary"
+        );
+        assert_eq!(lock(&fixture.revoker.contexts).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn delete_does_not_revoke_credentials_when_disconnect_fence_fails_offline() {
+    // Pins: a failed optimistic transition cannot tear down credentials while
+    // the connection may still admit executions at its observed generation.
+    let fixture = fixture(ConnectionStatus::Active, 3);
+    *lock(&fixture.repository.fail_transition) = Some(ConnectionStatus::Disconnecting);
+    let identity = fixture_identity(&fixture);
+    let connection_id = fixture_connection_id(&fixture);
+
+    let result = fixture
+        .service
+        .delete(
+            &identity,
+            connection_id,
+            ConnectorConnectionMutationRequest {
+                expected_generation: 3,
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ConnectorManagementError::Connector(
+            moa_connectors::Error::InvalidContract { .. }
+        ))
+    ));
+    assert_eq!(
+        lock(&fixture.events).as_slice(),
+        [
+            "auth_manage",
+            "repository_load",
+            "definition_installed",
+            "repository_transition:disconnecting",
+        ]
+    );
+    assert!(lock(&fixture.revoker.contexts).is_empty());
+    assert_eq!(
+        lock(&fixture.repository.connection).status,
+        ConnectionStatus::Active
+    );
+}
+
+#[tokio::test]
 async fn verification_is_sanitized_unverified_without_reviewed_remote_contract_offline() {
     // Pins: current V1 definitions never invent a remote authentication probe;
     // local admission plus ready slots remains explicitly unverified.
@@ -1071,7 +1177,7 @@ async fn direct_use_grant_authorizes_manage_before_repository_write_offline() {
 
     assert_eq!(
         lock(&fixture.events).as_slice(),
-        ["auth_manage", "grant_use"]
+        ["auth_manage", "repository_load", "grant_use"]
     );
     let requests = lock(&fixture.use_grants.requests);
     assert_eq!(requests.len(), 1);

@@ -23,10 +23,11 @@ use moa_core::{
 use moa_execution::{
     completion::{
         CompletionEvaluation, CompletionEvaluationRequest, CompletionStatus, evaluate_completion,
-        execution_terminal_reason, terminal_evidence_from_evaluation,
+        execution_terminal_reason, terminal_cause, terminal_evidence_from_evaluation,
+        terminal_projection_from_evaluation, terminal_projection_matches_completion,
     },
     interpreter::{ScheduleRequest, ready_empty_map_nodes, schedule},
-    replan::{replan_stop_gaps, replan_stop_status},
+    replan::{ReplanExhaustion, replan_exhaustion_reason, replan_stop_gaps, replan_stop_status},
     repository::{
         CompileAuditWriteOutcome, ExecutionNodeMaterialization, ExecutionRepository,
         ExecutionRunRecord, ExecutionScope, FinalizationOutcome, MaterializationOutcome,
@@ -34,8 +35,8 @@ use moa_execution::{
         TransitionOutcome, WakeAckOutcome,
     },
     state::{
-        ExecutionLimitStop, ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus,
-        ExecutionTerminalCause, ScheduleDecision, TerminalProjection, WaitingReason,
+        ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus, ExecutionTerminalCause,
+        ScheduleDecision, TerminalProjection, WaitingReason,
     },
     wire::{
         ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshot,
@@ -57,7 +58,6 @@ use crate::objects::session::SessionClient;
 use crate::services::{execution::ExecutionClient, llm_gateway::LLMGatewayClient};
 use crate::workflows::execution_node_actions::{
     record_applied_run_transition, record_applied_task_transition,
-    terminal_projection_from_evaluation,
 };
 use crate::workflows::execution_task::ExecutionTaskClient;
 
@@ -723,7 +723,7 @@ async fn prepare_amendment_planning(
 
 fn bounded_failure_evidence(reason: &str, evidence: &Value) -> Result<Value, HandlerError> {
     let failure_evidence = json!({"reason": reason, "evidence": evidence});
-    let encoded = moa_artifacts::canonical::canonical_json_bytes(&failure_evidence)
+    let encoded = moa_core::canonical_json::canonical_json_bytes(&failure_evidence)
         .map_err(|error| TerminalError::new(error.to_string()))?;
     if encoded.len() > EXECUTION_REPORT_MAX_BYTES {
         return Err(TerminalError::new_with_code(
@@ -1065,7 +1065,10 @@ async fn drive_once(
                     "scheduler made no progress with pending nodes: {}",
                     pending_node_ids.join(", ")
                 )),
-            );
+                None,
+                None,
+            )
+            .map_err(execution_error)?;
             let terminal_evidence = terminal_evidence_from_evaluation(
                 ExecutionTerminalCause::SchedulerNoProgress,
                 &evaluation,
@@ -1144,8 +1147,14 @@ async fn finalize_replan_stop(
     evaluation.gaps.extend(stop_gaps.iter().cloned());
     evaluation.gaps.sort();
     evaluation.gaps.dedup();
-    let terminal =
-        terminal_projection_from_evaluation(&evaluation, snapshot.run.output.clone(), None);
+    let terminal = terminal_projection_from_evaluation(
+        &evaluation,
+        snapshot.run.output.clone(),
+        None,
+        None,
+        None,
+    )
+    .map_err(execution_error)?;
     let terminal_evidence = terminal_evidence_from_evaluation(
         ExecutionTerminalCause::ReplanStop { reason },
         &evaluation,
@@ -1215,143 +1224,6 @@ fn immediately_knowable_replan_stop(
         return None;
     }
     replan_exhaustion_reason(&snapshot.budget_ledger, chrono::Utc::now())
-}
-
-fn replan_exhaustion_reason(
-    ledger: &moa_execution::budget::BudgetLedger,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<ReplanExhaustion> {
-    if ledger
-        .limit
-        .deadline_at
-        .is_some_and(|deadline| now > deadline)
-    {
-        return Some(ReplanExhaustion {
-            reason: moa_execution::ReplanStopReason::DeadlineExceeded,
-            description: "deadline exceeded".to_string(),
-        });
-    }
-    let mut dimensions = Vec::new();
-    if ledger.overrun {
-        dimensions.push("overrun");
-    }
-    if budget_dimension_exhausted(
-        ledger.limit.max_cost_microusd,
-        ledger.consumed.cost_microusd,
-        ledger.reserved.cost_microusd,
-    ) {
-        dimensions.push("cost_microusd");
-    }
-    if budget_dimension_exhausted(
-        ledger.limit.max_tokens,
-        ledger.consumed.tokens,
-        ledger.reserved.tokens,
-    ) {
-        dimensions.push("tokens");
-    }
-    if budget_dimension_exhausted(
-        ledger.limit.max_tasks,
-        ledger.consumed.tasks,
-        ledger.reserved.tasks,
-    ) {
-        dimensions.push("tasks");
-    }
-    if budget_dimension_exhausted(
-        ledger.limit.max_tool_calls,
-        ledger.consumed.tool_calls,
-        ledger.reserved.tool_calls,
-    ) {
-        dimensions.push("tool_calls");
-    }
-    if budget_dimension_exhausted(
-        ledger.limit.max_retrieved_bytes,
-        ledger.consumed.retrieved_bytes,
-        ledger.reserved.retrieved_bytes,
-    ) {
-        dimensions.push("retrieved_bytes");
-    }
-    (!dimensions.is_empty()).then(|| ReplanExhaustion {
-        reason: moa_execution::ReplanStopReason::BudgetExhausted,
-        description: format!("budget exhausted: {}", dimensions.join(", ")),
-    })
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ReplanExhaustion {
-    reason: moa_execution::ReplanStopReason,
-    description: String,
-}
-
-fn budget_dimension_exhausted(limit: Option<u64>, consumed: u64, reserved: u64) -> bool {
-    limit.is_some_and(|limit| consumed.saturating_add(reserved) >= limit)
-}
-
-fn terminal_cause(
-    projection: &moa_execution::state::ExecutionProjection,
-    budget_ledger: &moa_execution::budget::BudgetLedger,
-    terminal: &TerminalProjection,
-    now: chrono::DateTime<chrono::Utc>,
-) -> ExecutionTerminalCause {
-    let deadline_exceeded = budget_ledger
-        .limit
-        .deadline_at
-        .is_some_and(|deadline| now > deadline);
-    let unfinished_work = projection.node_statuses.values().any(|status| {
-        !matches!(
-            status,
-            moa_execution::state::ExecutionNodeStatus::Completed
-                | moa_execution::state::ExecutionNodeStatus::Skipped
-                | moa_execution::state::ExecutionNodeStatus::Failed
-                | moa_execution::state::ExecutionNodeStatus::Cancelled
-        )
-    });
-    if deadline_exceeded && unfinished_work {
-        return ExecutionTerminalCause::LimitStop {
-            reason: ExecutionLimitStop::DeadlineExceeded,
-        };
-    }
-    if let Some(class) = projection.tasks.iter().find_map(|task| {
-        task.outcome
-            .as_ref()
-            .and_then(|outcome| match &outcome.result {
-                moa_artifacts::execution_plan::ExecutionTaskResult::Failed { class, .. } => {
-                    Some(class.clone())
-                }
-                _ => None,
-            })
-    }) {
-        return ExecutionTerminalCause::TaskFailure { class };
-    }
-    let budget_stopped_dispatch = matches!(
-        terminal,
-        TerminalProjection::Failed { failure }
-            if failure.class == moa_artifacts::execution_plan::ExecutionFailureClass::BudgetExceeded
-    ) || matches!(
-        terminal,
-        TerminalProjection::Partial { gaps, .. }
-            if gaps.iter().any(|gap| gap == "execution budget cannot reserve required work")
-    );
-    if budget_stopped_dispatch {
-        return ExecutionTerminalCause::LimitStop {
-            reason: ExecutionLimitStop::BudgetExceeded,
-        };
-    }
-    if matches!(terminal, TerminalProjection::Cancelled { .. }) {
-        return ExecutionTerminalCause::Cancellation;
-    }
-    if let TerminalProjection::Failed { failure } = terminal {
-        return ExecutionTerminalCause::TaskFailure {
-            class: failure.class.clone(),
-        };
-    }
-    let limit_stop = if deadline_exceeded {
-        Some(ExecutionLimitStop::DeadlineExceeded)
-    } else if budget_ledger.overrun {
-        Some(ExecutionLimitStop::BudgetExceeded)
-    } else {
-        None
-    };
-    ExecutionTerminalCause::Completion { limit_stop }
 }
 
 async fn finalize_internal_failure(
@@ -1473,8 +1345,10 @@ async fn finalize(
     evaluation.gaps.extend(task_failure_gaps);
     evaluation.gaps.sort();
     evaluation.gaps.dedup();
-    if !terminal_projection_matches_evaluation(&terminal, evaluation.status) {
-        terminal = terminal_projection_from_evaluation(&evaluation, terminal_output, None);
+    if !terminal_projection_matches_completion(&terminal, evaluation.status) {
+        terminal =
+            terminal_projection_from_evaluation(&evaluation, terminal_output, None, None, None)
+                .map_err(execution_error)?;
     }
     let terminal_reason = format!("execution run reached terminal projection {terminal:?}");
     let terminal_evidence =
@@ -1514,29 +1388,6 @@ async fn finalize(
             Err(TerminalError::new_with_code(404, "execution run not found").into())
         }
     }
-}
-
-fn terminal_projection_matches_evaluation(
-    terminal: &TerminalProjection,
-    status: CompletionStatus,
-) -> bool {
-    matches!(
-        (terminal, status),
-        (
-            TerminalProjection::Completed { .. },
-            CompletionStatus::Completed
-        ) | (
-            TerminalProjection::Partial { .. },
-            CompletionStatus::Partial
-        ) | (
-            TerminalProjection::Blocked { .. },
-            CompletionStatus::Blocked
-        ) | (
-            TerminalProjection::Unsupported { .. },
-            CompletionStatus::Unsupported
-        ) | (TerminalProjection::Failed { .. }, CompletionStatus::Failed)
-            | (TerminalProjection::Cancelled { .. }, _)
-    )
 }
 
 fn terminal_step(
@@ -2007,7 +1858,7 @@ mod tests {
             expected_plan_revision: 1,
             amendment,
         };
-        let applied = crate::services::execution::apply_amendment_for_test(
+        let applied = crate::services::execution::handlers::apply_amendment_for_test(
             pool.clone(),
             moa_config::ExecutionConfig::default(),
             amendment_request.clone(),
@@ -2021,7 +1872,7 @@ mod tests {
             ),
             "planned amendment should apply revision two: {applied:?}"
         );
-        let replayed = crate::services::execution::apply_amendment_for_test(
+        let replayed = crate::services::execution::handlers::apply_amendment_for_test(
             pool,
             moa_config::ExecutionConfig::default(),
             amendment_request.clone(),
@@ -2371,9 +2222,9 @@ mod tests {
             persisted_source.catalog.catalog_hash
         );
         assert_eq!(
-            moa_artifacts::canonical::canonical_json_bytes(&narrowed.catalog)
+            moa_core::canonical_json::canonical_json_bytes(&narrowed.catalog)
                 .expect("narrowed catalog should serialize canonically"),
-            moa_artifacts::canonical::canonical_json_bytes(&persisted_source.catalog)
+            moa_core::canonical_json::canonical_json_bytes(&persisted_source.catalog)
                 .expect("persisted catalog should serialize canonically")
         );
         assert_eq!(

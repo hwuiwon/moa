@@ -5,7 +5,6 @@ use super::*;
 
 pub(super) async fn status_response(
     pool: sqlx::PgPool,
-    session_store: Arc<PostgresSessionStore>,
     request: ExperimentRunStatusRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let tenant_id = request.tenant_id;
@@ -17,23 +16,14 @@ pub(super) async fn status_response(
         .ok_or_else(|| run_not_found(request.run_uid))?;
     let scope = run.scope;
 
-    if plan_revision_uid_from_run(&run).is_some() {
-        let aggregate = aggregate_plan_status_from_store(pool.clone(), scope, run.run_uid).await?;
-        if aggregate.status != run.status || aggregate.error != run.error {
-            run.status = aggregate.status;
-            run.error = aggregate.error;
-        }
-        return status_response_from_record(tenant_id, run);
+    plan_revision_uid_from_run(&run).ok_or_else(|| {
+        TerminalError::new("experiment run is missing its required plan revision")
+    })?;
+    let aggregate = aggregate_plan_status_from_store(pool, scope, run.run_uid).await?;
+    if aggregate.status != run.status || aggregate.error != run.error {
+        run.status = aggregate.status;
+        run.error = aggregate.error;
     }
-
-    if run.target_kind == ExperimentTargetKind::AgentLoop
-        && let Some(status) =
-            derived_session_status(run.status, run.session_id, session_store.as_ref()).await?
-        && status != run.status
-    {
-        run.status = status;
-    }
-
     status_response_from_record(tenant_id, run)
 }
 
@@ -41,49 +31,13 @@ pub(super) async fn run_status_response(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunStatusRequest,
     pool: &sqlx::PgPool,
-    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let pool = pool.clone();
-    let session_store = session_store.clone();
     Ok(ctx
-        .run(|| async move {
-            status_response(pool, session_store, request)
-                .await
-                .map(Json::from)
-        })
+        .run(|| async move { status_response(pool, request).await.map(Json::from) })
         .name("experiment_run_response")
         .await?
         .into_inner())
-}
-
-async fn derived_session_status(
-    row_status: ExperimentRunStatus,
-    session_id: Option<SessionId>,
-    session_store: &PostgresSessionStore,
-) -> Result<Option<ExperimentRunStatus>, HandlerError> {
-    if matches!(
-        row_status,
-        ExperimentRunStatus::Completed
-            | ExperimentRunStatus::Failed
-            | ExperimentRunStatus::Cancelled
-    ) {
-        return Ok(Some(row_status));
-    }
-
-    let Some(session_id) = session_id else {
-        return Ok(Some(row_status));
-    };
-    let session = session_store
-        .get_session(session_id)
-        .await
-        .map_err(moa_error_to_handler_error)?;
-    Ok(Some(match session.status {
-        SessionStatus::Created => row_status,
-        SessionStatus::Running => ExperimentRunStatus::Running,
-        SessionStatus::Paused | SessionStatus::Completed => ExperimentRunStatus::Completed,
-        SessionStatus::Cancelled => ExperimentRunStatus::Cancelled,
-        SessionStatus::Failed => ExperimentRunStatus::Failed,
-    }))
 }
 
 fn status_response_from_record(

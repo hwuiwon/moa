@@ -3,6 +3,47 @@
 use super::row_mapping::*;
 use super::*;
 
+/// Persistence operations for knowledge synchronization runs and their step ledger.
+#[async_trait]
+pub trait KnowledgeSyncRepository: Send + Sync {
+    /// Records that one sync run's provider trigger durably dispatched.
+    async fn mark_provider_trigger_completed(&self, sync_run_uid: Uuid) -> Result<()>;
+    /// Saves a sync run.
+    async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
+    /// Atomically claims the active sync slot for one tenant connection.
+    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> Result<SyncRunClaim>;
+    /// Gets one sync run by identifier.
+    async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>>;
+    /// Gets the latest sync run for a connection, optionally restricted by statuses.
+    async fn latest_sync_run_for_connection(
+        &self,
+        connection_uid: Uuid,
+        statuses: &[SyncRunStatus],
+    ) -> Result<Option<KnowledgeSyncRun>>;
+    /// Updates a sync run.
+    async fn update_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
+    /// Adds ingestion counters to a sync run.
+    async fn add_sync_counters(
+        &self,
+        sync_run_uid: Uuid,
+        counters: KnowledgeSyncCounters,
+    ) -> Result<()>;
+    /// Records one ingestion step.
+    async fn record_ingestion_step(&self, step: KnowledgeIngestionStep) -> Result<()>;
+    /// Records one ingestion step once and applies counters only when inserted.
+    async fn record_ingestion_step_once(
+        &self,
+        step: KnowledgeIngestionStep,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> Result<bool>;
+    /// Loads a redacted ingestion timeline for one sync run.
+    async fn sync_run_steps(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+    ) -> Result<Vec<KnowledgeIngestionStep>>;
+}
+
 pub(super) async fn create_sync_run(
     repository: &PostgresKnowledgeRepository,
     run: KnowledgeSyncRun,
@@ -520,4 +561,63 @@ pub(super) async fn sync_run_steps(
     .map_err(map_sqlx_error)?;
     conn.commit().await.map_err(map_moa_error)?;
     rows.iter().map(step_from_row).collect()
+}
+
+#[async_trait]
+impl KnowledgeSyncRepository for PostgresKnowledgeRepository {
+    async fn mark_provider_trigger_completed(&self, sync_run_uid: Uuid) -> Result<()> {
+        mark_provider_trigger_completed(self, sync_run_uid).await
+    }
+
+    async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
+        create_sync_run(self, run).await
+    }
+
+    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> Result<SyncRunClaim> {
+        claim_sync_run(self, run).await
+    }
+
+    async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>> {
+        get_sync_run(self, sync_run_uid).await
+    }
+
+    async fn latest_sync_run_for_connection(
+        &self,
+        connection_uid: Uuid,
+        statuses: &[SyncRunStatus],
+    ) -> Result<Option<KnowledgeSyncRun>> {
+        latest_sync_run_for_connection(self, connection_uid, statuses).await
+    }
+
+    async fn update_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
+        update_sync_run(self, run).await
+    }
+
+    async fn add_sync_counters(
+        &self,
+        sync_run_uid: Uuid,
+        counters: KnowledgeSyncCounters,
+    ) -> Result<()> {
+        add_sync_counters(self, sync_run_uid, counters).await
+    }
+
+    async fn record_ingestion_step(&self, step: KnowledgeIngestionStep) -> Result<()> {
+        record_ingestion_step(self, step).await
+    }
+
+    async fn record_ingestion_step_once(
+        &self,
+        step: KnowledgeIngestionStep,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> Result<bool> {
+        record_ingestion_step_once(self, step, counter_delta).await
+    }
+
+    async fn sync_run_steps(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+    ) -> Result<Vec<KnowledgeIngestionStep>> {
+        sync_run_steps(self, sync_run_uid, object_uid).await
+    }
 }

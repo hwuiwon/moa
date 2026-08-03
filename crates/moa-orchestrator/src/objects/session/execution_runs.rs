@@ -18,16 +18,12 @@ use moa_core::types::execution_planning::{
 use moa_core::types::identifiers::ModelId;
 use moa_core::types::model::ModelCapabilities;
 use moa_execution::repository::{
-    CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope, PlannerCallAuditWriteOutcome,
-    RouteAuditWriteOutcome,
+    CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope,
+    ExecutionTemplateAdmissionRecord, PlannerCallAuditWriteOutcome, RouteAuditWriteOutcome,
 };
 use moa_session::PostgresSessionStore;
 
 use super::*;
-use crate::services::execution::{
-    record_execution_template_admission_origin, record_execution_template_admission_run,
-    reserve_execution_template_admission,
-};
 use crate::workflows::execution_run::ExecutionRunClient;
 
 const EXECUTION_SYNTHESIS_TURN_NAMESPACE: uuid::Uuid =
@@ -106,14 +102,14 @@ pub(super) async fn admit_execution_template(
     let reserved_fingerprint = request_fingerprint.clone();
     let replay = ctx
         .run(|| async move {
-            let record = reserve_execution_template_admission(
-                &pool,
-                &reserved_request,
-                operation_uid,
-                &reserved_fingerprint,
-            )
-            .await
-            .map_err(admission_persistence_error)?;
+            let record = ExecutionRepository::new(pool)
+                .reserve_execution_template_admission(
+                    &reserved_request,
+                    operation_uid,
+                    &reserved_fingerprint,
+                )
+                .await
+                .map_err(admission_persistence_error)?;
             Ok::<_, HandlerError>(Json::from(replay_state(record)))
         })
         .name(format!(
@@ -132,15 +128,15 @@ pub(super) async fn admit_execution_template(
             let fingerprint = request_fingerprint.clone();
             let sequence = persisted.sequence_num;
             ctx.run(|| async move {
-                let record = record_execution_template_admission_origin(
-                    &pool,
-                    request.tenant_id,
-                    operation_uid,
-                    &fingerprint,
-                    sequence,
-                )
-                .await
-                .map_err(admission_persistence_error)?;
+                let record = ExecutionRepository::new(pool)
+                    .record_execution_template_admission_origin(
+                        request.tenant_id,
+                        operation_uid,
+                        &fingerprint,
+                        sequence,
+                    )
+                    .await
+                    .map_err(admission_persistence_error)?;
                 Ok::<_, HandlerError>(Json::from(replay_state(record)))
             })
             .name(format!(
@@ -184,15 +180,15 @@ pub(super) async fn admit_execution_template(
     let fingerprint = request_fingerprint.clone();
     let completed = ctx
         .run(|| async move {
-            let record = record_execution_template_admission_run(
-                &pool,
-                request.tenant_id,
-                operation_uid,
-                &fingerprint,
-                execution_run_uid,
-            )
-            .await
-            .map_err(admission_persistence_error)?;
+            let record = ExecutionRepository::new(pool)
+                .record_execution_template_admission_run(
+                    request.tenant_id,
+                    operation_uid,
+                    &fingerprint,
+                    execution_run_uid,
+                )
+                .await
+                .map_err(admission_persistence_error)?;
             Ok::<_, HandlerError>(Json::from(replay_state(record)))
         })
         .name(format!("execution_template_admission_run_{operation_uid}"))
@@ -208,9 +204,7 @@ pub(super) async fn admit_execution_template(
     }
 }
 
-fn replay_state(
-    record: crate::services::execution::ExecutionTemplateAdmissionRecord,
-) -> ExecutionTemplateAdmissionReplayState {
+fn replay_state(record: ExecutionTemplateAdmissionRecord) -> ExecutionTemplateAdmissionReplayState {
     ExecutionTemplateAdmissionReplayState {
         operation_uid: record.operation_uid,
         request_fingerprint: record.request_fingerprint,
@@ -234,10 +228,16 @@ fn admission_resume(
         })
 }
 
-fn admission_persistence_error(error: MoaError) -> HandlerError {
+fn admission_persistence_error(error: moa_execution::Error) -> HandlerError {
     match error {
-        MoaError::ValidationError(_) => TerminalError::new_with_code(409, error.to_string()).into(),
-        other => crate::workflows::errors::moa_error_to_handler_error(other),
+        moa_execution::Error::InvalidRepositoryInput { .. } => {
+            TerminalError::new_with_code(409, error.to_string()).into()
+        }
+        moa_execution::Error::Storage { message }
+        | moa_execution::Error::InvalidRepositoryData { message } => {
+            crate::workflows::errors::moa_error_to_handler_error(MoaError::StorageError(message))
+        }
+        other => TerminalError::new(other.to_string()).into(),
     }
 }
 

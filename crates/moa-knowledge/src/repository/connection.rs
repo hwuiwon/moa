@@ -3,6 +3,93 @@
 use super::row_mapping::*;
 use super::*;
 
+/// Persistence operations for knowledge connection projections and link ledgers.
+#[async_trait]
+pub trait KnowledgeConnectionRepository: Send + Sync {
+    /// Saves or updates a linked connection.
+    async fn upsert_connection(
+        &self,
+        connection: KnowledgeConnection,
+    ) -> Result<KnowledgeConnection>;
+
+    /// Gets a linked connection by identifier.
+    async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>>;
+
+    /// Deletes a newly-created knowledge projection while compensating a failed link.
+    async fn delete_connection_projection(&self, connection_uid: Uuid) -> Result<bool>;
+
+    /// Advances one active connection's successful sync watermark.
+    async fn mark_connection_synced(
+        &self,
+        connection_uid: Uuid,
+        completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()>;
+
+    /// Gets the connection an upsert of this provider account would replace.
+    async fn connection_by_provider_account(
+        &self,
+        provider: LinkedProviderKind,
+        connector: &str,
+        provider_account_id: &str,
+    ) -> Result<Option<KnowledgeConnection>>;
+
+    /// Reserves the operation-fenced claim that owns one link.
+    async fn reserve_link_claim(&self, claim: NewLinkClaim) -> Result<LinkClaimReservation>;
+
+    /// Advances one link claim by compare-and-swap.
+    async fn advance_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+        transition: LinkClaimTransition,
+    ) -> Result<Option<LinkClaim>>;
+
+    /// Reads one link claim.
+    async fn get_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+    ) -> Result<Option<LinkClaim>>;
+
+    /// Reserves the one remote-revocation operation for a connection.
+    async fn reserve_connection_disconnect(
+        &self,
+        disconnect: NewKnowledgeConnectionDisconnect,
+    ) -> Result<KnowledgeDisconnectReservation>;
+
+    /// Advances one remote-revocation ledger row by compare-and-swap.
+    async fn advance_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+        transition: KnowledgeDisconnectTransition,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>>;
+
+    /// Reads the durable remote-revocation progress for one connection.
+    async fn get_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>>;
+
+    /// Removes at most `limit` link claims for this repository's tenant.
+    async fn purge_tenant_link_claims(&self, limit: u32) -> Result<u64>;
+
+    /// Updates provider-native selected source state and clears the sync watermark.
+    async fn update_connection_source_selection(
+        &self,
+        connection_uid: Uuid,
+        source_selection: serde_json::Value,
+    ) -> Result<KnowledgeConnection>;
+
+    /// Lists linked-connection projections for a tenant.
+    async fn list_connections(
+        &self,
+        tenant_id: TenantId,
+        provider: Option<LinkedProviderKind>,
+    ) -> Result<Vec<KnowledgeConnectionProjection>>;
+}
+
 pub(super) async fn upsert_connection(
     repository: &PostgresKnowledgeRepository,
     connection: KnowledgeConnection,
@@ -31,7 +118,7 @@ pub(super) async fn upsert_connection(
     .bind(connection.connection_uid)
     .bind(connection.tenant_id.0)
     .bind(storage_partition_id(connection.tenant_id))
-    .bind(&connection.provider)
+    .bind(connection.provider.as_str())
     .bind(&connection.connector)
     .bind(&connection.provider_account_id)
     .bind(redact_provider_metadata(connection.metadata))
@@ -130,7 +217,7 @@ pub(super) async fn mark_connection_synced(
 
 pub(super) async fn connection_by_provider_account(
     repository: &PostgresKnowledgeRepository,
-    provider: &str,
+    provider: LinkedProviderKind,
     connector: &str,
     provider_account_id: &str,
 ) -> Result<Option<KnowledgeConnection>> {
@@ -150,7 +237,7 @@ pub(super) async fn connection_by_provider_account(
         "#,
     )
     .bind(repository.scoped_tenant_id().0)
-    .bind(provider)
+    .bind(provider.as_str())
     .bind(connector)
     .bind(provider_account_id)
     .fetch_optional(conn.as_mut())
@@ -201,7 +288,7 @@ pub(super) async fn update_connection_source_selection(
 pub(super) async fn list_connections(
     repository: &PostgresKnowledgeRepository,
     tenant_id: TenantId,
-    provider: Option<&str>,
+    provider: Option<LinkedProviderKind>,
 ) -> Result<Vec<KnowledgeConnectionProjection>> {
     let mut conn = repository.begin().await?;
     let rows = sqlx::query(
@@ -229,7 +316,7 @@ pub(super) async fn list_connections(
         "#,
     )
     .bind(tenant_id.0)
-    .bind(provider)
+    .bind(provider.map(LinkedProviderKind::as_str))
     .bind(LIST_CONNECTIONS_LIMIT)
     .fetch_all(conn.as_mut())
     .await
@@ -238,53 +325,108 @@ pub(super) async fn list_connections(
     rows.iter().map(connection_projection_from_row).collect()
 }
 
-pub(super) async fn record_provider_event(
-    repository: &PostgresKnowledgeRepository,
-    event: KnowledgeProviderEventRecord,
-) -> Result<KnowledgeProviderEventRecord> {
-    let mut conn = repository.begin().await?;
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO moa.knowledge_provider_events (
-            provider_event_uid, tenant_id, storage_partition_id, connection_id,
-            provider, provider_event_id, event_type, status, payload
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (tenant_id, provider, provider_event_id) DO NOTHING
-        RETURNING provider_event_uid, tenant_id, connection_id, provider, provider_event_id,
-                  event_type, status, payload, FALSE AS duplicate
-        "#,
-    )
-    .bind(event.provider_event_uid)
-    .bind(event.tenant_id.0)
-    .bind(storage_partition_id(event.tenant_id))
-    .bind(event.connection_uid)
-    .bind(&event.provider)
-    .bind(&event.provider_event_id)
-    .bind(&event.event_type)
-    .bind(&event.status)
-    .bind(redact_provider_metadata(event.payload.clone()))
-    .fetch_optional(conn.as_mut())
-    .await
-    .map_err(map_sqlx_error)?;
+#[async_trait]
+impl KnowledgeConnectionRepository for PostgresKnowledgeRepository {
+    async fn upsert_connection(
+        &self,
+        connection: KnowledgeConnection,
+    ) -> Result<KnowledgeConnection> {
+        upsert_connection(self, connection).await
+    }
 
-    let row = match inserted {
-        Some(row) => row,
-        None => sqlx::query(
-            r#"
-                SELECT provider_event_uid, tenant_id, connection_id, provider,
-                       provider_event_id, event_type, status, payload, TRUE AS duplicate
-                FROM moa.knowledge_provider_events
-                WHERE tenant_id = $1 AND provider = $2 AND provider_event_id = $3
-                "#,
+    async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>> {
+        get_connection(self, connection_uid).await
+    }
+
+    async fn delete_connection_projection(&self, connection_uid: Uuid) -> Result<bool> {
+        delete_connection_projection(self, connection_uid).await
+    }
+
+    async fn mark_connection_synced(
+        &self,
+        connection_uid: Uuid,
+        completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        mark_connection_synced(self, connection_uid, completed_at).await
+    }
+
+    async fn connection_by_provider_account(
+        &self,
+        provider: LinkedProviderKind,
+        connector: &str,
+        provider_account_id: &str,
+    ) -> Result<Option<KnowledgeConnection>> {
+        connection_by_provider_account(self, provider, connector, provider_account_id).await
+    }
+
+    async fn reserve_link_claim(&self, claim: NewLinkClaim) -> Result<LinkClaimReservation> {
+        super::link_claim::reserve_link_claim(self, claim).await
+    }
+
+    async fn advance_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+        transition: LinkClaimTransition,
+    ) -> Result<Option<LinkClaim>> {
+        super::link_claim::advance_link_claim(self, tenant_id, operation_id, transition).await
+    }
+
+    async fn get_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+    ) -> Result<Option<LinkClaim>> {
+        super::link_claim::get_link_claim(self, tenant_id, operation_id).await
+    }
+
+    async fn reserve_connection_disconnect(
+        &self,
+        disconnect: NewKnowledgeConnectionDisconnect,
+    ) -> Result<KnowledgeDisconnectReservation> {
+        super::disconnect::reserve_connection_disconnect(self, disconnect).await
+    }
+
+    async fn advance_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+        transition: KnowledgeDisconnectTransition,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>> {
+        super::disconnect::advance_connection_disconnect(
+            self,
+            tenant_id,
+            connection_uid,
+            transition,
         )
-        .bind(event.tenant_id.0)
-        .bind(&event.provider)
-        .bind(&event.provider_event_id)
-        .fetch_one(conn.as_mut())
         .await
-        .map_err(map_sqlx_error)?,
-    };
-    conn.commit().await.map_err(map_moa_error)?;
-    provider_event_from_row(&row)
+    }
+
+    async fn get_connection_disconnect(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> Result<Option<KnowledgeConnectionDisconnectProgress>> {
+        super::disconnect::get_connection_disconnect(self, tenant_id, connection_uid).await
+    }
+
+    async fn purge_tenant_link_claims(&self, limit: u32) -> Result<u64> {
+        super::link_claim::purge_tenant_link_claims(self, limit).await
+    }
+
+    async fn update_connection_source_selection(
+        &self,
+        connection_uid: Uuid,
+        source_selection: serde_json::Value,
+    ) -> Result<KnowledgeConnection> {
+        update_connection_source_selection(self, connection_uid, source_selection).await
+    }
+
+    async fn list_connections(
+        &self,
+        tenant_id: TenantId,
+        provider: Option<LinkedProviderKind>,
+    ) -> Result<Vec<KnowledgeConnectionProjection>> {
+        list_connections(self, tenant_id, provider).await
+    }
 }

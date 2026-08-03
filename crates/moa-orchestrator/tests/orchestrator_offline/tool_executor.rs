@@ -17,10 +17,9 @@ use moa_core::{
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::tool_executor::{
-    ToolExecutorImpl, build_tool_run_plan, has_prior_non_idempotent_result, tool_run_name,
-    trusted_sandbox_files_from_manifest_payload,
+    has_prior_non_idempotent_result, tool_run_name, trusted_sandbox_files_from_manifest_payload,
 };
-use moa_wire::tools::ToolDescriptor;
+use moa_wire::tools::{ToolDescriptor, tool_descriptor};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -224,24 +223,6 @@ fn trusted_sandbox_manifest_payload_rejects_hash_mismatch() {
 }
 
 #[test]
-fn build_tool_run_plan_uses_max_attempts_one_for_idempotent_tools() {
-    let definition = tool_definition(
-        "mock_read",
-        IdempotencyClass::Idempotent,
-        read_tool_policy(ToolInputShape::Json),
-    );
-    let request = tool_request(ToolCallId::new(), "mock_read");
-
-    let run_plan = build_tool_run_plan(&definition, &request).expect("build idempotent run plan");
-
-    assert_eq!(run_plan.max_attempts, 1);
-    assert_eq!(
-        run_plan.name,
-        tool_run_name(&definition, &request).expect("build idempotent run name")
-    );
-}
-
-#[test]
 fn non_idempotent_refuses_after_event_log_hit() {
     let tool_call_id = ToolCallId::new();
     let records = vec![tool_result_record(tool_call_id)];
@@ -269,8 +250,8 @@ fn run_name_encodes_tool_call_id() {
     assert!(run_name.starts_with("tool_execute:idempotent:mock_read:"));
 }
 
-#[tokio::test]
-async fn list_tools_returns_workspace_tools() {
+#[test]
+fn list_tools_returns_workspace_tools() {
     let registry = registry_with_tools(vec![
         Arc::new(CountingTool::new(
             "read_tool",
@@ -283,14 +264,16 @@ async fn list_tools_returns_workspace_tools() {
             write_tool_policy(ToolInputShape::Json, ToolDiffStrategy::None),
         )),
     ]);
-    let router = Arc::new(ToolRouter::new(
+    let router = ToolRouter::new(
         registry,
         HashMap::new(),
         moa_hands::local_development_sandbox_policy(),
-    ));
-    let executor = ToolExecutorImpl::new(router);
-
-    let descriptors = executor.list_descriptors();
+    );
+    let descriptors = router
+        .tool_definitions()
+        .into_iter()
+        .map(tool_descriptor)
+        .collect::<Vec<_>>();
 
     assert!(descriptors.iter().any(|descriptor: &ToolDescriptor| {
         descriptor.name == "read_tool"

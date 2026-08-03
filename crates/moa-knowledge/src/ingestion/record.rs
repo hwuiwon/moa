@@ -3,13 +3,7 @@
 use super::steps::record_span_outcome;
 use super::*;
 
-impl<R, P, E, G> KnowledgeIngestionPipeline<R, P, E, G>
-where
-    R: KnowledgeRepository,
-    P: DocumentParser,
-    E: EmbeddingProvider,
-    G: KnowledgeGraphWriter,
-{
+impl KnowledgeIngestionPipeline {
     /// Parses `input`, routing text-only records to the native parser.
     ///
     /// When the input carries neither bytes nor a `source_url`, an external
@@ -46,7 +40,7 @@ where
         record: ProviderRecord,
     ) -> Result<RecordIngestionOutcome> {
         let existing = self
-            .repository
+            .ingestion_repository
             .get_object_by_source(object.connection_uid, &object.source_id)
             .await?;
 
@@ -54,13 +48,61 @@ where
         // brand-new object lands `incomplete` — invisible — and only the capture
         // below can make it readable.
         if existing.is_none() {
-            self.repository.upsert_object(object.clone()).await?;
+            self.ingestion_repository
+                .upsert_object(object.clone())
+                .await?;
         }
         // Ahead of BOTH content fences: an unshared folder must stop being
         // retrievable on the next sync pass even though not one byte changed,
         // and re-parsing a document to learn that is pure waste.
         self.capture_record_acl(sync_run_uid, &object, &record)
             .await?;
+
+        if record.materialization.is_metadata_only() {
+            let changed = existing.as_ref().is_none_or(|existing| {
+                existing.change_token != object.change_token || existing.status != object.status
+            });
+            self.ingestion_repository
+                .upsert_object(object.clone())
+                .await?;
+            self.record_counter_step(
+                sync_run_uid,
+                Some(object.object_uid),
+                "object_change_checked",
+                StepOutcome {
+                    status: IngestionStepStatus::Skipped,
+                    counters: json!({
+                        "records_seen": 1,
+                        "records_changed": u64::from(changed)
+                    }),
+                    summary: Some("provider declared record metadata-only".to_string()),
+                    retry_count: 0,
+                    error_code: None,
+                    duration_ms: None,
+                },
+                KnowledgeSyncCounters {
+                    records_seen: 1,
+                    records_changed: u64::from(changed),
+                    ..KnowledgeSyncCounters::default()
+                },
+            )
+            .await?;
+            self.record_step(
+                sync_run_uid,
+                Some(object.object_uid),
+                "content_fetched",
+                StepOutcome {
+                    status: IngestionStepStatus::Skipped,
+                    counters: json!({ "bytes_fetched": 0 }),
+                    summary: Some("metadata-only record has no indexable content".to_string()),
+                    retry_count: 0,
+                    error_code: None,
+                    duration_ms: None,
+                },
+            )
+            .await?;
+            return Ok(RecordIngestionOutcome::Skipped);
+        }
 
         if let Some(existing) = existing
             && existing.status == crate::domain::ObjectStatus::Active
@@ -91,7 +133,9 @@ where
             return Ok(RecordIngestionOutcome::Skipped);
         }
 
-        self.repository.upsert_object(object.clone()).await?;
+        self.ingestion_repository
+            .upsert_object(object.clone())
+            .await?;
         self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -191,6 +235,11 @@ where
             metadata: redact_provider_metadata(record.metadata.clone()),
             status: if record.deleted {
                 crate::domain::ObjectStatus::Deleted
+            } else if record.materialization.is_metadata_only() {
+                // Metadata-only objects retain control-plane metadata and ACLs,
+                // but `pending` keeps any previously indexed chunks outside
+                // retrieval until the provider returns indexable content again.
+                crate::domain::ObjectStatus::Pending
             } else {
                 crate::domain::ObjectStatus::Active
             },
@@ -213,7 +262,7 @@ where
         // unchanged change token alone is not completion proof: there must be a
         // completed document version with graph-linked chunks.
         let Some(version) = self
-            .repository
+            .ingestion_repository
             .latest_document_version(existing.object_uid)
             .await?
         else {
@@ -221,12 +270,11 @@ where
         };
         // Records carrying real inline text must also match the stored version
         // hash, so an inline edit delivered under an unchanged change token is
-        // not skipped. Records that rely on the content-fetch hook or the
-        // title-only fallback have no inline text to hash against the
-        // fetched/parsed content — hashing their title would never match and
-        // would force a re-fetch every sync — so the unchanged change token plus
-        // a completed version is the authority for them.
-        if record_materializes_inline(record) {
+        // not skipped. Provider-fetched records have no inline text to hash
+        // against the fetched and
+        // parsed content, so the unchanged change token plus a completed version
+        // is the authority for them.
+        if record.materialization.inline_text().is_some() {
             let input = match parse_input_from_record(&self.provider, incoming, record) {
                 Ok(input) => input,
                 Err(_) => return Ok(false),
@@ -244,228 +292,155 @@ where
         // `graph_node_uid = chunk_uid`), so identity presence proves nothing about
         // completion. Only the recorded terminal ingestion step does.
         if !self
-            .repository
+            .ingestion_repository
             .object_ingestion_completed_since(existing.object_uid, version.created_at)
             .await?
         {
             return Ok(false);
         }
         let chunks = self
-            .repository
+            .ingestion_repository
             .chunks_for_version(version.version_uid)
             .await?;
         Ok(!chunks.is_empty())
     }
 
-    /// Resolves the parse input for one record, downloading provider content
-    /// when the record carries neither inline text nor a fetchable URL.
+    /// Resolves the parse input for one provider-normalized materialization intent.
     ///
-    /// Records that already materialize (inline text or a directly fetchable
-    /// URL) skip the fetch entirely. Otherwise, when a content fetcher is wired,
-    /// a successful fetch yields a bytes-backed [`ParseInput`]; a fetch that
-    /// returns nothing or errors records a distinct soft signal and falls back
-    /// to the title-only behavior. The `content_fetched` step is recorded here
-    /// exactly once, and a record with no title still fails with the pinned
-    /// `materializable text` classification.
+    /// Inline text and directly fetchable URLs skip the provider hook. A
+    /// `ProviderFetch` record requires a configured fetcher and non-empty bytes;
+    /// unsupported, empty, or failed fetches are recorded as failures and never
+    /// degrade to title content. Metadata-only records are handled before this
+    /// method after their object and ACL snapshot are captured.
     pub(super) async fn resolve_record_parse_input(
         &self,
         sync_run_uid: Uuid,
         object: &KnowledgeObject,
         record: &ProviderRecord,
     ) -> Result<ParseInput> {
-        if record_has_materializable_content(record) {
-            let input = parse_input_from_record(&self.provider, object.clone(), record)?;
-            return self
-                .record_resolved_parse_input(sync_run_uid, object, input, None)
-                .await;
+        if record.materialization.is_metadata_only() {
+            return Err(Error::provider(
+                &self.provider,
+                "metadata-only provider record cannot be parsed",
+            ));
         }
-
-        let mut fetch_note: Option<&'static str> = None;
-        if let Some(fetcher) = &self.content_fetcher {
-            match fetcher.fetch_record_content(record).await {
-                Ok(Some(content)) if !content.bytes.is_empty() => {
-                    let input = parse_input_from_fetched_content(object.clone(), record, content);
-                    return self
-                        .record_resolved_parse_input(sync_run_uid, object, input, None)
-                        .await;
+        if record.materialization.requires_provider_fetch() {
+            let fetched = match &self.content_fetcher {
+                Some(fetcher) => fetcher.fetch_record_content(record).await,
+                None => Err(Error::provider(
+                    &self.provider,
+                    "provider record requires content fetch but no fetcher is configured",
+                )),
+            };
+            let content = match fetched {
+                Ok(Some(content)) if !content.bytes.is_empty() => content,
+                Ok(Some(_)) => {
+                    let error = Error::provider(
+                        &self.provider,
+                        "provider content fetch returned empty bytes",
+                    );
+                    self.record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "content_fetched",
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
                 }
-                Ok(_) => {
-                    fetch_note = Some("provider_content_fetch_empty");
+                Ok(None) => {
+                    let error = Error::provider(
+                        &self.provider,
+                        "provider does not support the record's required content fetch",
+                    );
+                    self.record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "content_fetched",
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
                 }
                 Err(error) => {
-                    fetch_note = Some("provider_content_fetch_failed");
-                    tracing::warn!(
-                        sync_run_id = %sync_run_uid,
-                        object_id = %object.object_uid,
-                        provider = %self.provider,
-                        error = %error,
-                        "provider content fetch failed; falling back to record title"
-                    );
+                    self.record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "content_fetched",
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
                 }
-            }
+            };
+            let input = parse_input_from_fetched_content(object.clone(), record, content);
+            self.record_resolved_parse_input(sync_run_uid, object, input)
+                .await
+        } else {
+            let input = parse_input_from_record(&self.provider, object.clone(), record)?;
+            self.record_resolved_parse_input(sync_run_uid, object, input)
+                .await
         }
-
-        let input = match parse_input_from_record(&self.provider, object.clone(), record) {
-            Ok(input) => input,
-            Err(error) => {
-                self.record_failure_step(
-                    sync_run_uid,
-                    Some(object.object_uid),
-                    "content_fetched",
-                    &error,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
-        self.record_resolved_parse_input(sync_run_uid, object, input, fetch_note)
-            .await
     }
 
     /// Records the `content_fetched` step for a resolved parse input.
     ///
-    /// A `fetch_note` marks a soft content-fetch fallback: the step still
-    /// completes (the title-only input is usable) but carries a distinct
-    /// `error_code` so operators can tell "content fetch failed" apart from a
-    /// plain metadata-only record.
     pub(super) async fn record_resolved_parse_input(
         &self,
         sync_run_uid: Uuid,
         object: &KnowledgeObject,
         input: ParseInput,
-        fetch_note: Option<&'static str>,
     ) -> Result<ParseInput> {
         let bytes_fetched = input.bytes.as_ref().map_or_else(
             || input.text.as_ref().map_or(0, |text| text.len()),
             Vec::len,
         );
-        let outcome = match fetch_note {
-            Some(note) => StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "bytes_fetched": bytes_fetched }),
-                summary: Some(
-                    "provider content fetch unavailable; indexed record title".to_string(),
-                ),
-                retry_count: 0,
-                error_code: Some(note.to_string()),
-                duration_ms: None,
-            },
-            None => StepOutcome::completed_with_counters(json!({ "bytes_fetched": bytes_fetched })),
-        };
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
             "content_fetched",
-            outcome,
+            StepOutcome::completed_with_counters(json!({ "bytes_fetched": bytes_fetched })),
         )
         .await?;
         Ok(input)
     }
 }
 
-/// Payload fields, in priority order, that carry already-materialized record
-/// text. The first present string is used as inline `text` for the parser.
-const RECORD_INLINE_TEXT_FIELDS: &[&str] = &[
-    "text",
-    "content",
-    "body",
-    "plain_text",
-    "plaintext",
-    "markdown",
-    "html",
-];
-
-/// Payload fields, in priority order, that carry a directly fetchable document
-/// URL. The first present string becomes `source_url` so an external parser can
-/// download the file.
-///
-/// These are download/content links only. Auth-walled browser viewers such as
-/// Google Drive's `webViewLink`/`web_view_link`, and the ambiguous generic
-/// `url` (which providers map to the human-facing `source_uri`), are
-/// deliberately excluded: they are not fetchable by an unauthenticated parser,
-/// so a record carrying only such a link routes to the provider content-fetch
-/// hook or the title-only fallback instead of a doomed download.
-const RECORD_SOURCE_URL_FIELDS: &[&str] = &[
-    "download_url",
-    "file_url",
-    "content_url",
-    "web_content_link",
-    "webContentLink",
-];
-
-/// Metadata and payload fields, in priority order, that carry a MIME type.
-const RECORD_MIME_TYPE_FIELDS: &[&str] = &["mime_type", "mimeType", "content_type", "contentType"];
-
-/// Builds a [`ParseInput`] from a normalized provider record using a
-/// provider-agnostic payload convention shared by every
-/// [`LinkedIntegrationProvider`](crate::providers::LinkedIntegrationProvider)
-/// adapter.
-///
-/// Resolution order:
-///
-/// 1. Inline text from the first present of [`RECORD_INLINE_TEXT_FIELDS`] is
-///    used directly as `text` (no fetch or upload needed).
-/// 2. Otherwise `source_url` is populated from the first present of
-///    [`RECORD_SOURCE_URL_FIELDS`] so an external document parser can fetch the
-///    file, and any [`RECORD_MIME_TYPE_FIELDS`] value is passed through.
-/// 3. Otherwise the record `title` is indexed as `text`, preserving the prior
-///    title-only fallback behavior.
+/// Builds a [`ParseInput`] from one explicit provider-normalized materialization intent.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Provider`] when a record carries no inline text, no
-/// fetchable URL, and no title. The message retains the `materializable text`
-/// marker used by failure classification.
+/// Returns [`Error::Provider`] for provider-fetch and metadata-only intents,
+/// which require pipeline-level handling instead of direct parser submission.
 pub fn parse_input_from_record(
     provider: &str,
     object: KnowledgeObject,
     record: &ProviderRecord,
 ) -> Result<ParseInput> {
-    let inline_text = first_record_string(record, RECORD_INLINE_TEXT_FIELDS);
-    let source_url = if inline_text.is_none() {
-        first_record_string(record, RECORD_SOURCE_URL_FIELDS)
+    let (text, source_url) = if let Some(text) = record.materialization.inline_text() {
+        (Some(text.to_owned()), None)
+    } else if let Some(url) = record.materialization.fetchable_url() {
+        (None, Some(url.to_owned()))
+    } else if record.materialization.requires_provider_fetch() {
+        return Err(Error::provider(
+            provider,
+            "provider-fetch record requires the content-fetch pipeline",
+        ));
     } else {
-        None
-    };
-    let text = match (&inline_text, &source_url) {
-        (Some(_), _) => inline_text,
-        (None, Some(_)) => None,
-        (None, None) => Some(record.title.clone().ok_or_else(|| {
-            Error::Provider {
-                provider: provider.to_string(),
-                message:
-                    "provider record did not include materializable text or a fetchable source URL"
-                        .to_string(),
-            }
-        })?),
+        return Err(Error::provider(
+            provider,
+            "metadata-only provider record has no indexable content",
+        ));
     };
     Ok(ParseInput {
         object,
         file_name: record.title.clone(),
-        mime_type: first_record_string(record, RECORD_MIME_TYPE_FIELDS),
+        mime_type: record.materialization.mime_type().map(ToOwned::to_owned),
         source_url,
         bytes: None,
         text,
         options: json!({}),
     })
-}
-
-/// Returns whether a record carries inline text materialized directly from its
-/// own payload fields.
-///
-/// This is the signal distinguishing records whose stored content is the record
-/// text (so the version hash is meaningful for change detection) from records
-/// whose content comes from the fetch hook or the title-only fallback (where the
-/// change token, not a title hash, is the completion authority).
-fn record_materializes_inline(record: &ProviderRecord) -> bool {
-    first_record_string(record, RECORD_INLINE_TEXT_FIELDS).is_some()
-}
-
-/// Returns whether a record already materializes without a provider content
-/// fetch, i.e. it carries inline text or a directly fetchable source URL.
-fn record_has_materializable_content(record: &ProviderRecord) -> bool {
-    record_materializes_inline(record)
-        || first_record_string(record, RECORD_SOURCE_URL_FIELDS).is_some()
 }
 
 /// Builds a [`ParseInput`] from provider-fetched byte content.
@@ -484,7 +459,7 @@ fn parse_input_from_fetched_content(
         file_name: record.title.clone(),
         mime_type: content
             .mime_type
-            .or_else(|| first_record_string(record, RECORD_MIME_TYPE_FIELDS)),
+            .or_else(|| record.materialization.mime_type().map(ToOwned::to_owned)),
         source_url: None,
         bytes: Some(content.bytes),
         text: None,
@@ -505,33 +480,19 @@ fn use_native_document_fallback(input: &ParseInput, parser_label: &str) -> bool 
         && crate::parser::is_external_document_parser(parser_label)
 }
 
-/// Returns the first of `keys` present as a non-empty string in the record
-/// payload, then metadata. Payload wins because it holds the raw source fields.
-fn first_record_string(record: &ProviderRecord, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        record
-            .payload
-            .get(*key)
-            .or_else(|| record.metadata.get(*key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::types::identifiers::TenantId;
 
     use super::{
         ParseInput, parse_input_from_fetched_content, parse_input_from_record,
-        record_has_materializable_content, use_native_document_fallback,
+        use_native_document_fallback,
     };
     use crate::domain::{
         FetchedRecordContent, KnowledgeObject, ObjectStatus, ProviderRecord, ProviderRecordAcl,
+        ProviderRecordMaterialization,
     };
-    use serde_json::{Value, json};
+    use serde_json::json;
     use uuid::Uuid;
 
     fn object() -> KnowledgeObject {
@@ -553,7 +514,11 @@ mod tests {
         }
     }
 
-    fn record(title: Option<&str>, source_uri: Option<&str>, payload: Value) -> ProviderRecord {
+    fn record(
+        title: Option<&str>,
+        source_uri: Option<&str>,
+        materialization: ProviderRecordMaterialization,
+    ) -> ProviderRecord {
         ProviderRecord {
             acl: ProviderRecordAcl {
                 provider_revision: "fixture-acl-rev".to_string(),
@@ -567,8 +532,9 @@ mod tests {
             change_token: None,
             deleted: false,
             source_updated_at: None,
+            materialization,
             metadata: json!({}),
-            payload,
+            payload: json!({ "ignored_by_ingestion": "display metadata" }),
         }
     }
 
@@ -595,7 +561,10 @@ mod tests {
         let record = record(
             Some("Doc"),
             Some("https://web.example/doc"),
-            json!({ "content": "hello world", "mime_type": "text/plain" }),
+            ProviderRecordMaterialization::InlineText {
+                text: "hello world".to_string(),
+                mime_type: Some("text/plain".to_string()),
+            },
         );
         let input = parse_input_from_record("nango", object(), &record).expect("materializes");
         assert_eq!(input.text.as_deref(), Some("hello world"));
@@ -611,10 +580,10 @@ mod tests {
         let record = record(
             Some("Report.pdf"),
             None,
-            json!({
-                "download_url": "https://files.example/report.pdf",
-                "mime_type": "application/pdf"
-            }),
+            ProviderRecordMaterialization::FetchableUrl {
+                url: "https://files.example/report.pdf".to_string(),
+                mime_type: Some("application/pdf".to_string()),
+            },
         );
         let input = parse_input_from_record("nango", object(), &record).expect("materializes");
         assert_eq!(
@@ -626,90 +595,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_input_falls_back_to_title_when_no_body_or_url() {
-        // Pins: prior title-only behavior. A record with neither inline text nor
-        // a fetchable download URL indexes its title as text; the human-facing
-        // source_uri web link is not treated as a fetchable source_url.
+    fn parse_input_rejects_metadata_only_even_when_title_exists() {
+        // Pins: display metadata is never substituted for document content.
         let record = record(
             Some("Just A Title"),
             Some("https://web.example/x"),
-            json!({ "irrelevant": "field" }),
+            ProviderRecordMaterialization::MetadataOnly,
         );
-        let input = parse_input_from_record("nango", object(), &record).expect("materializes");
-        assert_eq!(input.text.as_deref(), Some("Just A Title"));
-        assert_eq!(input.source_url, None);
+        let error = parse_input_from_record("nango", object(), &record)
+            .expect_err("metadata-only record must not parse");
+        assert!(error.to_string().contains("metadata-only"));
     }
 
     #[test]
-    fn parse_input_errors_without_text_url_or_title() {
-        // Pins: a record with no inline text, no fetchable URL, and no title
-        // fails with the `materializable text` classification marker.
+    fn parse_input_rejects_provider_fetch_before_content_is_downloaded() {
+        // Pins: provider-fetch intent must go through the authenticated fetcher;
+        // direct parser materialization cannot guess from payload or title.
         let record = record(
-            None,
+            Some("Display Title"),
             Some("https://web.example/x"),
-            json!({ "safe": "meta" }),
+            ProviderRecordMaterialization::ProviderFetch {
+                mime_type: Some("application/pdf".to_string()),
+            },
         );
-        let error = parse_input_from_record("nango", object(), &record).expect_err("no content");
-        let message = error.to_string();
-        assert!(
-            message.contains("materializable text"),
-            "unexpected error: {message}"
-        );
-    }
-
-    #[test]
-    fn parse_input_ignores_auth_walled_web_view_link() {
-        // Pins the web_view_link hazard fix: a record whose only link is an
-        // auth-walled Google Drive browser viewer (webViewLink/web_view_link) or
-        // a generic `url` is not treated as a fetchable source_url. With a title
-        // it falls back to title-only text; the viewer link never routes to a
-        // doomed unauthenticated download.
-        for field in ["web_view_link", "webViewLink", "url"] {
-            let record = record(
-                Some("Drive Doc"),
-                None,
-                json!({ field: "https://drive.google.com/file/d/abc/view" }),
-            );
-            let input = parse_input_from_record("nango", object(), &record).expect("materializes");
-            assert_eq!(
-                input.source_url, None,
-                "field `{field}` must not be fetchable"
-            );
-            assert_eq!(input.text.as_deref(), Some("Drive Doc"));
-            assert!(
-                !record_has_materializable_content(&record),
-                "field `{field}` must not count as materializable content"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_input_still_accepts_genuine_download_links() {
-        // Pins: real download/content links remain fetchable after the
-        // web_view_link fix removed the auth-walled viewer candidates.
-        for field in [
-            "download_url",
-            "file_url",
-            "content_url",
-            "web_content_link",
-            "webContentLink",
-        ] {
-            let record = record(
-                Some("File"),
-                None,
-                json!({ field: "https://files.example/x" }),
-            );
-            let input = parse_input_from_record("nango", object(), &record).expect("materializes");
-            assert_eq!(
-                input.source_url.as_deref(),
-                Some("https://files.example/x"),
-                "field `{field}` should remain fetchable"
-            );
-            assert!(
-                record_has_materializable_content(&record),
-                "field `{field}` should count as materializable content"
-            );
-        }
+        let error = parse_input_from_record("nango", object(), &record)
+            .expect_err("unfetched provider content must not parse");
+        assert!(error.to_string().contains("content-fetch pipeline"));
     }
 
     #[test]
@@ -720,7 +631,9 @@ mod tests {
         let record = record(
             Some("Report"),
             None,
-            json!({ "mime_type": "application/pdf" }),
+            ProviderRecordMaterialization::ProviderFetch {
+                mime_type: Some("application/pdf".to_string()),
+            },
         );
         let content = FetchedRecordContent {
             bytes: b"fetched-bytes".to_vec(),

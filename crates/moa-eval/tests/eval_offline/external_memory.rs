@@ -664,8 +664,9 @@ fn external_memory_report_serialization_is_clock_normalized_and_keeps_failures()
 }
 
 #[test]
-fn external_memory_neutral_modules_do_not_import_moa_crates() {
-    // Pins: benchmark contracts stay reusable by non-MOA backends.
+fn external_memory_neutral_modules_only_use_the_shared_canonical_primitive() {
+    // Pins: benchmark contracts stay independent of MOA backends while sharing the workspace's
+    // one canonical-byte contract instead of maintaining another serializer.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/external_memory");
     for name in [
         "answer.rs",
@@ -676,11 +677,16 @@ fn external_memory_neutral_modules_do_not_import_moa_crates() {
         "report.rs",
     ] {
         let source = std::fs::read_to_string(root.join(name)).expect("read neutral module");
+        let moa_imports = source
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("use moa_"))
+            .collect::<Vec<_>>();
         assert!(
-            !source
-                .lines()
-                .any(|line| line.trim_start().starts_with("use moa_")),
-            "{name} must not import MOA crates"
+            moa_imports
+                .iter()
+                .all(|line| *line == "use moa_core::canonical_json::canonical_json_bytes;"),
+            "{name} must not import MOA backend/runtime crates: {moa_imports:?}"
         );
     }
 }

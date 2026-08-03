@@ -388,7 +388,7 @@ CREATE TRIGGER simulator_fidelity_study_no_update
     FOR EACH ROW EXECUTE FUNCTION moa.reject_simulator_certification_mutation();
 
 ALTER TABLE moa.experiment_run
-    ADD COLUMN simulator_policy JSONB;
+    ADD COLUMN simulator_policy JSONB NOT NULL;
 
 SELECT moa.apply_three_tier_rls('moa.simulator_policy'::REGCLASS);
 SELECT moa.apply_three_tier_rls('moa.simulator_certification_mandate'::REGCLASS);

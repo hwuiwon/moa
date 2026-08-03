@@ -6,10 +6,13 @@ use moa_artifacts::execution_plan::{
     CapabilityReference, ExecutionFailureClass, ExecutionGoalContract, ExecutionTaskResult,
     ExecutionUsage,
 };
-use moa_core::types::execution_planning::{
-    ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
-    ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
-    ExecutionRouteKind, ExecutionRouteStage, ExecutionSourceProvenance, ExecutionStrategy,
+use moa_core::{
+    canonical_json::canonical_json_bytes,
+    types::execution_planning::{
+        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
+        ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+        ExecutionRouteKind, ExecutionRouteStage, ExecutionSourceProvenance, ExecutionStrategy,
+    },
 };
 use moa_eval_core::{Error, Result};
 use moa_execution::{
@@ -23,7 +26,6 @@ use moa_execution::{
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -544,12 +546,9 @@ fn normalize_audit(audit: &ExecutionPlanningAuditEnvelope) -> ExecutionPlanningA
 }
 
 fn canonical_terminal_output_hash(value: &Value) -> Result<String> {
-    let mut serializer =
-        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-    value.serialize(&mut serializer)?;
     let mut hasher = Sha256::new();
     hasher.update(TERMINAL_OUTPUT_HASH_DOMAIN);
-    hasher.update(serializer.into_inner());
+    hasher.update(canonical_json_bytes(value)?);
     Ok(format!("{:x}", hasher.finalize()))
 }
 

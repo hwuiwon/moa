@@ -17,7 +17,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | `Hand` | `HandProvider` implementation | `moa-hands` |
 | `Log` | `SessionStore` (Postgres) | `moa-session` |
 | `Memory` | graph memory store, ingestion, and hybrid retrieval | `moa-memory-graph`, `moa-memory-ingest`, `moa-brain` |
-| `Vault` | `CredentialVault` (environment-backed) | `moa-security` |
+| `Vault` | Durable tenant connector `CredentialVault` | `moa-auth-providers` |
 | `Cron` | Scheduled-task runner (Restate `CronJob` virtual object) | `moa-orchestrator` |
 
 ---
@@ -43,9 +43,10 @@ sequenceDiagram
 
     User->>Platform: "deploy to staging"
     Platform->>Messaging: InboundMessage {tenant, contact/user, text}
-    Messaging->>Orch: start_session / signal(QueueMessage)
-    Orch->>Log: create_session + emit UserMessage
-    Orch->>Brain: spawn / wake
+    Messaging->>Orch: Session/start_turn(StartTurnRequest)
+    Orch->>Orch: admit client_message_id and record active turn
+    Orch->>Brain: send TurnExecution/run
+    Brain->>Log: append UserMessage
 
     Brain->>Log: get_events(session_id)
     Log-->>Brain: EventRecord[]
@@ -98,9 +99,11 @@ sequenceDiagram
 
 ---
 
-## 2. Session start and brain wake
+## 2. Session initialization and turn admission
 
-How a new message becomes a running brain. Shows the split between `start_session` (brand new) and `signal(QueueMessage)` (already running).
+Session metadata is initialized separately when needed. Every message then enters
+through `Session/start_turn`, whose admission fence either starts a durable
+`TurnExecution` or records the message in the bounded FIFO queue.
 
 ```mermaid
 sequenceDiagram
@@ -112,23 +115,31 @@ sequenceDiagram
     participant Log as SessionStore
 
     Platform->>Messaging: InboundMessage
-    Messaging->>Orch: route by session mapping
+    Messaging->>Orch: resolve session mapping
 
-    alt No active session for this thread
+    opt Session metadata is not initialized
         Orch->>Log: create_session(meta)
         Log-->>Orch: session_id
-        Orch->>Orch: invoke Session virtual object<br/>(durable per-session execution)
-        Orch->>Brain: TurnExecution(session_id, ...)
-        Brain->>Log: update_status(Running)
-    else Session already running
-        Orch->>Brain: signal(QueueMessage)
-        Brain->>Log: emit QueuedMessage
-        Note over Brain: Processed after current turn
+        Orch->>Orch: Session/set_meta(meta)
     end
 
-    Brain->>Log: wake → get_events(from last Checkpoint)
+    Messaging->>Orch: Session/start_turn(StartTurnRequest)
+    Orch->>Orch: check client_message_id admission fence
+
+    alt No active turn
+        Orch->>Orch: record active turn id + Running status
+        Orch->>Brain: send TurnExecution/run(turn_id, message)
+        Brain->>Log: append UserMessage
+    else Turn already active
+        Orch->>Log: append QueuedMessage
+        Orch->>Orch: persist message in bounded FIFO queue
+        Orch-->>Messaging: StartTurnResponse {queued: true}
+        Note over Orch: Session/record_turn_outcome dispatches<br/>the next queued message
+    end
+
+    Brain->>Log: get_events(from last Checkpoint)
     Log-->>Brain: EventRecord[]
-    Note over Brain: Brain holds no pre-wake state —<br/>the log is the recovery mechanism
+    Note over Brain: TurnExecution owns the long-running brain loop;<br/>Session/start_turn remains a short VO mutation
 ```
 
 ---

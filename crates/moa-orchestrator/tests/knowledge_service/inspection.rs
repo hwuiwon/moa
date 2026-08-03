@@ -42,6 +42,10 @@ async fn knowledge_service_accepts_injected_ingestion_runner_without_global_conf
     let page = RecordPage {
         records: vec![ProviderRecord {
             acl: provider_record_acl(),
+            materialization: moa_knowledge::domain::ProviderRecordMaterialization::InlineText {
+                text: "hello".to_string(),
+                mime_type: Some("text/plain".to_string()),
+            },
             source_id: "doc-1".to_string(),
             object_type: "document".to_string(),
             title: Some("Doc 1".to_string()),

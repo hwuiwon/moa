@@ -28,8 +28,8 @@
 --
 -- This is a control-plane compliance table written by the admin-gated privacy
 -- surface and read by the guarded operation's execute path. RLS mirrors
--- moa.legal_hold / token_vault_connections: tenant-scoped transactions are pinned
--- to their own tenant for both read and write, with a control-plane escape hatch.
+-- moa.legal_hold: tenant-scoped transactions are pinned to their own tenant for
+-- both read and write, with a control-plane escape hatch.
 
 CREATE TABLE moa.dual_control_request (
     id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -3,10 +3,10 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::canonical_json::canonical_json_bytes;
 use crate::types::{
     contact::ContactId,
     identifiers::{SessionId, TenantId},
@@ -248,7 +248,8 @@ impl DurableUpgradeSignal {
                 &evidence.summary,
                 4_096,
             )?;
-            let bytes = canonical_json_bytes(&evidence.value)?;
+            let bytes = canonical_json_bytes(&evidence.value)
+                .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
             if bytes.len() > 16_384 {
                 return Err(ExecutionPlanningContractError::BoundExceeded {
                     field: format!("evidence[{index}].value"),
@@ -257,7 +258,8 @@ impl DurableUpgradeSignal {
                 });
             }
         }
-        let vector_bytes = canonical_json_bytes(&self.evidence)?;
+        let vector_bytes = canonical_json_bytes(&self.evidence)
+            .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
         if vector_bytes.len() > 262_144 {
             return Err(ExecutionPlanningContractError::BoundExceeded {
                 field: "evidence".to_string(),
@@ -856,24 +858,6 @@ where
     D: Deserializer<'de>,
 {
     Option::<Uuid>::deserialize(deserializer)
-}
-
-/// Stable semantic result returned by Session planning-audit append.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionPlanningAuditWriteResult {
-    /// The record was inserted.
-    Applied {
-        /// First persisted envelope.
-        envelope: ExecutionPlanningAuditEnvelope,
-    },
-    /// The exact semantic record already existed.
-    Replayed {
-        /// First persisted envelope with its original measurements.
-        envelope: ExecutionPlanningAuditEnvelope,
-    },
-    /// The logical key already exists with a different semantic payload.
-    Conflict,
 }
 
 /// Typed execution-planning contract error.
@@ -1571,7 +1555,8 @@ pub fn bounded_audit_report(
     let preimage = canonical_json_bytes(&serde_json::json!({
         "schema_version": 1,
         "violations": violations,
-    }))?;
+    }))
+    .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
     let domain = if compiler {
         "moa.execution.compiler-report"
     } else {
@@ -1661,40 +1646,6 @@ fn validate_hash(field: &str, value: &str) -> Result<(), ExecutionPlanningContra
     Ok(())
 }
 
-/// Serializes a value using MOA's canonical JSON formatter and valid control escapes.
-pub fn canonical_json_bytes<T: Serialize>(
-    value: &T,
-) -> Result<Vec<u8>, ExecutionPlanningContractError> {
-    let mut serializer =
-        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-    value
-        .serialize(&mut serializer)
-        .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
-    let canonical = serializer.into_inner();
-    if !canonical.iter().any(|byte| *byte <= 0x1f) {
-        return Ok(canonical);
-    }
-
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut escaped = Vec::with_capacity(canonical.len());
-    for byte in canonical {
-        match byte {
-            b'\x08' => escaped.extend_from_slice(br"\b"),
-            b'\t' => escaped.extend_from_slice(br"\t"),
-            b'\n' => escaped.extend_from_slice(br"\n"),
-            b'\x0c' => escaped.extend_from_slice(br"\f"),
-            b'\r' => escaped.extend_from_slice(br"\r"),
-            control @ 0x00..=0x1f => {
-                escaped.extend_from_slice(br"\u00");
-                escaped.push(HEX[(control >> 4) as usize]);
-                escaped.push(HEX[(control & 0x0f) as usize]);
-            }
-            _ => escaped.push(byte),
-        }
-    }
-    Ok(escaped)
-}
-
 fn canonical_enum_string<T: Serialize>(
     value: &T,
 ) -> Result<String, ExecutionPlanningContractError> {
@@ -1716,7 +1667,8 @@ fn validate_canonical_document(
             message: format!("must be valid JSON: {error}"),
         }
     })?;
-    let canonical = canonical_json_bytes(&value)?;
+    let canonical = canonical_json_bytes(&value)
+        .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
     if canonical != document.as_bytes() {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: field.to_string(),
@@ -1780,47 +1732,6 @@ mod tests {
                 duration_micros: 0,
             }
         }
-    }
-
-    #[test]
-    fn canonical_json_bytes_escapes_newlines_and_tabs_and_round_trips() {
-        // Pins: multiline planner evidence remains valid canonical JSON without
-        // changing the established control-free representation.
-        let multiline = serde_json::json!({"text": "first\n\tsecond"});
-        let canonical = canonical_json_bytes(&multiline).expect("canonicalize multiline JSON");
-
-        assert_eq!(canonical, br#"{"text":"first\n\tsecond"}"#);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&canonical).expect("canonical JSON should parse"),
-            multiline
-        );
-        assert_eq!(
-            canonical_json_bytes(&serde_json::json!({"z": 2, "a": "plain"}))
-                .expect("canonicalize control-free JSON"),
-            br#"{"a":"plain","z":2}"#
-        );
-    }
-
-    #[test]
-    fn canonical_json_bytes_escapes_remaining_controls_with_lowercase_hex() {
-        // Pins: every other JSON-forbidden ASCII control uses a stable lowercase
-        // unicode escape and survives deserialization unchanged.
-        let controls = String::from_utf8(vec![
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0b, 0x0e, 0x0f, 0x10, 0x11, 0x12,
-            0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-        ])
-        .expect("ASCII controls are valid UTF-8");
-        let value = serde_json::json!({"value": controls});
-        let canonical = canonical_json_bytes(&value).expect("canonicalize ASCII controls");
-
-        assert_eq!(
-            canonical,
-            br#"{"value":"\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u000b\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f"}"#
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&canonical).expect("canonical JSON should parse"),
-            value
-        );
     }
 
     #[test]

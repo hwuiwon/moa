@@ -24,9 +24,7 @@ use moa_wire::admin::{
 use restate_sdk::prelude::*;
 
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{
-    authorize_tenant, require_fga_client, require_identity, translate_authz_error,
-};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
 
 /// Restate service for user-facing administrative maintenance operations.
 #[restate_sdk::service]
@@ -73,13 +71,18 @@ pub trait AdminMaintenance {
 pub struct AdminMaintenanceImpl {
     pool: sqlx::PgPool,
     config: Arc<MoaConfig>,
+    authz: AuthzEnforcer,
 }
 
 impl AdminMaintenanceImpl {
     /// Creates the maintenance adapter with its storage and backend configuration.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, config: Arc<MoaConfig>) -> Self {
-        Self { pool, config }
+    pub fn new(pool: sqlx::PgPool, config: Arc<MoaConfig>, authz: AuthzEnforcer) -> Self {
+        Self {
+            pool,
+            config,
+            authz,
+        }
     }
 }
 
@@ -92,7 +95,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "promote_tenant_vector");
         let request = request.into_inner();
-        authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant_admin_for_tenant(&self.authz, &ctx, request.tenant_id).await?;
         let pool = self.pool.clone();
         let config = self.config.clone();
 
@@ -140,7 +143,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "rollback_promotion");
         let request = request.into_inner();
-        authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant_admin_for_tenant(&self.authz, &ctx, request.tenant_id).await?;
         validate_promotion_action(&request.action, "rollback")?;
         let pool = self.pool.clone();
 
@@ -169,7 +172,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "finalize_promotion");
         let request = request.into_inner();
-        authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
+        authorize_tenant_admin_for_tenant(&self.authz, &ctx, request.tenant_id).await?;
         validate_promotion_action(&request.action, "finalize")?;
         let pool = self.pool.clone();
 
@@ -197,7 +200,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         request: Json<CheckpointCreateRequest>,
     ) -> Result<Json<CheckpointCreateResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_create");
-        authorize_platform_maintenance(&ctx).await?;
+        authorize_platform_maintenance(&self.authz, &ctx).await?;
         let request = request.into_inner();
         let config = self.config.clone();
 
@@ -222,7 +225,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         _request: Json<serde_json::Value>,
     ) -> Result<Json<CheckpointListResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_list");
-        authorize_platform_maintenance(&ctx).await?;
+        authorize_platform_maintenance(&self.authz, &ctx).await?;
         let config = self.config.clone();
 
         Ok(ctx
@@ -246,7 +249,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         request: Json<CheckpointRollbackRequest>,
     ) -> Result<Json<CheckpointRollbackResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_rollback");
-        authorize_platform_maintenance(&ctx).await?;
+        authorize_platform_maintenance(&self.authz, &ctx).await?;
         let request = request.into_inner();
         let config = self.config.clone();
 
@@ -283,7 +286,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         _request: Json<serde_json::Value>,
     ) -> Result<Json<CheckpointCleanupResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_cleanup");
-        authorize_platform_maintenance(&ctx).await?;
+        authorize_platform_maintenance(&self.authz, &ctx).await?;
         let config = self.config.clone();
 
         Ok(ctx
@@ -349,10 +352,13 @@ fn validate_promotion_action(actual: &str, expected: &str) -> Result<(), Handler
 }
 
 async fn authorize_tenant_admin_for_tenant(
+    authz: &AuthzEnforcer,
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
-    authorize_tenant(ctx, tenant_id, Relation::Admin).await?;
+    authz
+        .authorize_tenant(ctx, tenant_id, Relation::Admin)
+        .await?;
     Ok(())
 }
 
@@ -360,9 +366,12 @@ async fn authorize_tenant_admin_for_tenant(
 ///
 /// Checkpoint branches are platform resources, so callers must be service
 /// identities with the canonical deployment workspace admin relation.
-pub async fn authorize_platform_maintenance(ctx: &impl RequestHeaders) -> Result<(), HandlerError> {
+pub async fn authorize_platform_maintenance(
+    authz: &AuthzEnforcer,
+    ctx: &impl RequestHeaders,
+) -> Result<(), HandlerError> {
     let identity = platform_maintenance_identity(ctx)?;
-    let fga = require_fga_client()?;
+    let fga = authz.require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,

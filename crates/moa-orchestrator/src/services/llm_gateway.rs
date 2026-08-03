@@ -14,7 +14,7 @@ use moa_core::{
     types::provider::ModelTier, types::resource::DeadlineGuard, types::resource::ResourceAmounts,
     types::resource::ResourceBudget,
 };
-use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
+use moa_memory_ingest::{SessionTurn, ingestion_object_key, turn_transcript};
 use moa_observability::record_llm_cost_cents;
 use moa_providers::{CancellableLLMProvider, ProviderRegistry};
 use moa_wire::session_store::AppendEventRequest;
@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::objects::ingestion::IngestionVOClient;
 use crate::services::narration::NarrateSessionRequest;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::errors::moa_error_to_handler_error;
