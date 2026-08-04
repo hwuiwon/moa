@@ -71,9 +71,9 @@ tool pressure.
 Physical backpressure is supplied independently:
 
 - Restate scoped concurrency queues invocations. Expensive tenant-scoped work
-  uses the `tenant-{tenant_id}` scope; the default wildcard rule is
-  `concurrency 1000` per scope. Inspect `sys_rules` and `sys_user_limits` before
-  changing it.
+  uses the tenant UUID directly as its Restate scope; the default wildcard rule
+  is `concurrency 1000` per scope. Inspect `sys_rules` and `sys_user_limits`
+  before changing it.
 - Provider calls acquire an in-flight permit before request/input pacing and
   hold it for the request. Tune
   `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT`,

@@ -120,8 +120,9 @@ The edge only issues request-response calls, so it never uses the fire-and-forge
 Restate 1.7 flow control (experimental vqueues,
 `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true`) caps concurrent invocations per
 **scope**. A scope is a single opaque path segment on the scoped ingress form,
-`POST /restate/scope/{scopeKey}/call/{service}/{key}/{handler}`. MOA's scope-key
-convention is `tenant-{tenant_id}` (the tenant UUID is one segment). The edge
+`POST /restate/scope/{scopeKey}/call/{service}/{key}/{handler}`. MOA uses the
+36-character tenant UUID directly as the scope key, satisfying Restate's scope
+length limit while preserving one independent counter per tenant. The edge
 tags only the invocations that start expensive agent work — posting a message
 (`Contacts/send_message`, which queues on the `Session` VO and starts a turn) —
 with the tenant scope. Cheap reads and status polls (`Session/progress`,
@@ -132,7 +133,7 @@ stay unscoped so a poll can never consume a tenant's turn concurrency.
 Limits live in a cluster-wide **rule book**, not on individual scopes. A rule
 matches either an exact scope key or the wildcard `*`. The `*` rule is
 per-scope, not shared: it gives **every** distinct scope key its own counter at
-that limit, so `tenant-a` and `tenant-b` each get an independent budget. MOA
+that limit, so distinct tenant UUIDs each get an independent budget. MOA
 seeds one default rule, `* → concurrency 1000`, via restate-cli
 (`restate rules set "*" --concurrency 1000 --description "scope default"`, backed
 by the admin API); the local compose stack runs it from the one-shot

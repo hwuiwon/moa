@@ -46,7 +46,7 @@ spec:
         # Converge the required per-scope Restate rule before this pod can
         # accept work. `rules set` is idempotent across replica startups.
         - name: restate-rules-bootstrap
-          image: docker.restate.dev/restatedev/restate-cli:1.7.0
+          image: docker.restate.dev/restatedev/restate-cli:1.7.2
           env:
             - name: RESTATE_ADMIN_URL
               value: http://restate.moa-restate.svc.cluster.local:9070

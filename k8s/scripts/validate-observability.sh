@@ -359,7 +359,7 @@ assert_contains "${RESTATE_PATCH_TEXT}" 'tracing-filter = "warn,restate_ingress_
   "production Restate trace filtering is not scoped"
 assert_contains "${RESTATE_PATCH_TEXT}" 'log-filter = "warn,restate=info"' \
   "production Restate logging is not scoped"
-assert_contains "${RESTATE_PATCH_TEXT}" "experimental_enable_vqueues = true" \
+assert_contains "${RESTATE_PATCH_TEXT}" "experimental-enable-vqueues = true" \
   "production's replacement Restate config drops the base vqueues setting"
 
 echo "Checking that nothing blocks the push path to the collector..."

@@ -14,4 +14,4 @@
     # v1.7 limitation: vqueues can only be enabled on a fresh cluster (no
     # in-flight invocations); a cluster with in-flight invocations will
     # refuse to boot with this flag set.
-    experimental_enable_vqueues = true
+    experimental-enable-vqueues = true

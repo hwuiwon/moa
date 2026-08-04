@@ -29,7 +29,7 @@ Status: early active development. The architecture is stable enough to document,
 
 - Postgres with pgvector and pgaudit on `localhost:10040`
 - `moa-edge` on `localhost:10000`
-- Restate Server 1.7.0 on `localhost:10010` for ingress and `localhost:10011` for the UI
+- Restate Server 1.7.2 on `localhost:10010` for ingress and `localhost:10011` for the UI
 - `moa-orchestrator` with an internal-only Restate handler port and `localhost:10021` for health
 - PII filter on `localhost:10050`
 - audit log shipper with no exposed port

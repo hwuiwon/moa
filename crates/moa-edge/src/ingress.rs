@@ -28,20 +28,19 @@ use moa_core::types::identifiers::TenantId;
 pub(crate) enum IngressScope {
     /// No flow-control scope; the call bypasses per-tenant admission control.
     Unscoped,
-    /// Per-tenant admission-control scope, rendered as the single path segment
-    /// `tenant-{tenant_id}`.
+    /// Per-tenant admission-control scope, rendered as the tenant UUID.
     Tenant(TenantId),
 }
 
 impl IngressScope {
     /// Render the opaque scope-key path segment, or `None` when unscoped.
     ///
-    /// A tenant id is a hyphenated UUID and contains no `/`, so `tenant-{id}` is
-    /// always a single path segment as the scoped ingress form requires.
+    /// A tenant id is a 36-character hyphenated UUID, which is both a single
+    /// path segment and the maximum scope length accepted by Restate 1.7.
     fn scope_key(&self) -> Option<String> {
         match self {
             IngressScope::Unscoped => None,
-            IngressScope::Tenant(tenant_id) => Some(format!("tenant-{tenant_id}")),
+            IngressScope::Tenant(tenant_id) => Some(tenant_id.to_string()),
         }
     }
 }
@@ -51,7 +50,7 @@ impl IngressScope {
 /// `service_path` is the leading-slash `/{Service}/{handler}` (or keyed
 /// `/{Service}/{key}/{handler}`) segment. Unscoped calls become
 /// `/restate/call{service_path}`; tenant-scoped calls become
-/// `/restate/scope/tenant-{tenant_id}/call{service_path}`.
+/// `/restate/scope/{tenant_id}/call{service_path}`.
 pub(crate) fn call_path(scope: &IngressScope, service_path: &str) -> String {
     match scope.scope_key() {
         Some(scope_key) => format!("/restate/scope/{scope_key}/call{service_path}"),
@@ -89,24 +88,29 @@ mod tests {
     #[test]
     fn tenant_scoped_service_call_uses_scope_prefix() {
         // Pins: a turn-starting call is enrolled in per-tenant flow control via the
-        // `/restate/scope/{scopeKey}/call` form, where scopeKey is `tenant-{uuid}`.
+        // `/restate/scope/{scopeKey}/call` form, where scopeKey is the tenant UUID.
         assert_eq!(
             call_path(&IngressScope::Tenant(tenant()), "/Contacts/send_message"),
-            "/restate/scope/tenant-11111111-2222-3333-4444-555555555555/call/Contacts/send_message"
+            "/restate/scope/11111111-2222-3333-4444-555555555555/call/Contacts/send_message"
         );
     }
 
     #[test]
     fn tenant_scope_key_is_a_single_path_segment() {
         // Pins: the scope key stays one path segment (no interior `/`) so Restate reads
-        // exactly `tenant-{uuid}` as the opaque scopeKey and the service path after `/call`.
+        // exactly the UUID as the opaque scopeKey and the service path after `/call`.
         let path = call_path(&IngressScope::Tenant(tenant()), "/Contacts/send_message");
         let scope_key = path
             .strip_prefix("/restate/scope/")
             .and_then(|rest| rest.split_once("/call/"))
             .map(|(scope_key, _)| scope_key)
             .expect("scoped path has a scope key before /call/");
-        assert_eq!(scope_key, "tenant-11111111-2222-3333-4444-555555555555");
+        assert_eq!(scope_key, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(
+            scope_key.len(),
+            36,
+            "Restate rejects flow-control scope keys longer than 36 characters"
+        );
         assert!(!scope_key.contains('/'), "scope key must be one segment");
     }
 

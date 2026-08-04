@@ -41,4 +41,4 @@
     tracing-filter = "info"
     # Preserve the base feature flag: replacing spec.config without this entry
     # would silently disable vqueues in the local cluster.
-    experimental_enable_vqueues = true
+    experimental-enable-vqueues = true

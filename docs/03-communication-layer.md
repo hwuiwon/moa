@@ -255,7 +255,8 @@ contract. The edge issues only request-response calls, never the fire-and-forget
 Turn-starting invocations are tagged for per-tenant flow control. Posting a
 message (`POST /v1/sessions/{session_id}/messages` →
 `Contacts/send_message`) starts a turn, so the edge forwards it on the scoped
-form `POST /restate/scope/tenant-{tenant_id}/call/...`. Every cheap read, status
+form `POST /restate/scope/{tenant_id}/call/...`, using the 36-character tenant
+UUID directly as Restate's bounded scope key. Every cheap read, status
 poll (`Session/progress`, `Contacts/progress`), authorization check, and
 session-lifecycle call stays unscoped, so a status poll can never wait behind a
 tenant's turn concurrency. `docs/12-restate-architecture.md` describes the

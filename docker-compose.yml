@@ -176,7 +176,7 @@ services:
       MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
 
   restate:
-    image: docker.restate.dev/restatedev/restate:1.7.0
+    image: docker.restate.dev/restatedev/restate:1.7.2
     container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate
     restart: unless-stopped
     command: ["--node-name=restate-dev"]
@@ -391,11 +391,11 @@ services:
         exit 1
 
   # Seeds the cluster-wide Restate flow-control rule book once the node is healthy.
-  # The `*` rule gives every scope key (the edge uses `tenant-{tenant_id}`) its own
+  # The `*` rule gives every scope key (the edge uses the tenant UUID) its own
   # concurrency counter capped at 1000, so no tenant can exhaust cluster capacity.
   # `rules set` is idempotent, so a re-run just overwrites the same default.
   restate-rules-bootstrap:
-    image: docker.restate.dev/restatedev/restate-cli:1.7.0
+    image: docker.restate.dev/restatedev/restate-cli:1.7.2
     container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate-rules-bootstrap
     restart: "no"
     depends_on:

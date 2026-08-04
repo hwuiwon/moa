@@ -318,7 +318,7 @@ validate_manifests() {
     "production Restate trace filter is not scoped"
   assert_contains "${production_restate}" 'log-filter = "warn,restate=info"' \
     "production Restate log filter is not scoped"
-  assert_contains "${production_restate}" "experimental_enable_vqueues = true" \
+  assert_contains "${production_restate}" "experimental-enable-vqueues = true" \
     "production Restate replacement config drops vqueues"
   assert_contains "${production_alloy}" "name: restate-otlp" \
     "production Alloy does not expose the dedicated Restate OTLP receiver"
