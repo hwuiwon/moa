@@ -109,7 +109,6 @@ impl SpawnedEdge {
                 "MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM",
                 "http://127.0.0.1:1",
             )
-            .env("MOA_OBSERVABILITY_ENABLED", "false")
             .env("MOA_METRICS_EXPORTER", "disabled")
             // The shutdown arms log at info; the process default is warn, which
             // would leave the distinguishing line out of stdout entirely.

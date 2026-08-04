@@ -9,7 +9,7 @@ use moa_core::{
     types::tools::IdempotencyClass, types::tools::SecuredToolOutput, types::tools::ToolDefinition,
     types::tools::ToolOutput,
 };
-use moa_observability::{record_tool_failure, record_tool_reprovision, record_tool_retry};
+use moa_observability::{record_tool_failure, record_tool_reprovision};
 use tracing::Instrument;
 
 use super::dispatch::McpDispatch;
@@ -734,7 +734,6 @@ impl ToolRouter {
         attempt: u32,
         backoff_hint: Duration,
     ) {
-        record_tool_retry(provider, attempt);
         let retry_span = tracing::info_span!(
             "tool_retry",
             provider,

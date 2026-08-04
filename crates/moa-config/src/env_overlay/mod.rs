@@ -482,8 +482,6 @@ pub struct EnvOverlay {
     pub restate_llm_gateway_url: Option<String>,
     /// `MOA_ORCHESTRATOR_ENDPOINT`.
     pub orchestrator_endpoint: Option<String>,
-    /// `MOA_OBSERVABILITY_ENABLED`.
-    pub observability_enabled: Option<bool>,
     /// `MOA_OBSERVABILITY_SERVICE_NAME`.
     pub observability_service_name: Option<String>,
     /// `MOA_OBSERVABILITY_OTLP_ENDPOINT`.

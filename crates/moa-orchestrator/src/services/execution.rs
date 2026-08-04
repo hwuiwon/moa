@@ -96,9 +96,6 @@ use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::{ExecutionRunStartedDelivery, SessionClient};
 use crate::restate_identity::with_identity_headers;
 use crate::workflows::errors::moa_error_to_status_handler_error;
-use crate::workflows::execution_node_actions::{
-    record_applied_execution_mutation, record_applied_run_transition,
-};
 use crate::workflows::execution_run::ExecutionRunClient;
 use crate::workflows::execution_task::ExecutionTaskClient;
 

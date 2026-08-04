@@ -772,55 +772,6 @@ pub struct AmendmentCommit {
     pub task_ids_to_release: Vec<ExecutionTaskId>,
 }
 
-/// Persisted run-state evidence returned only by a first-applied mutation.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExecutionRunTransitionEvidence {
-    /// Locked run status before the transaction committed.
-    pub prior_status: ExecutionRunStatus,
-    /// Persisted run status after the transaction committed.
-    pub status: ExecutionRunStatus,
-    /// Database-owned queue timestamp.
-    pub queued_at: Option<DateTime<Utc>>,
-    /// Database-owned first-start timestamp.
-    pub started_at: Option<DateTime<Utc>>,
-    /// Persisted outstanding reservation after the transition.
-    pub reserved: ExecutionEstimate,
-    /// Persisted reconciled usage after the transition.
-    pub consumed: ExecutionEstimate,
-    /// Persisted terminal coverage evidence, when terminal.
-    pub terminal_evidence: Option<ExecutionTerminalEvidence>,
-    /// Persisted closed terminal reason, when terminal.
-    pub terminal_reason: Option<ExecutionTerminalReason>,
-}
-
-/// Persisted task-state evidence returned only by a first-applied mutation.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExecutionTaskTransitionEvidence {
-    /// Locked task status before the transaction committed.
-    pub prior_status: ExecutionTaskStatus,
-    /// Persisted task status after the transaction committed.
-    pub status: ExecutionTaskStatus,
-    /// Persisted closed logical task kind.
-    pub kind: LogicalTaskKind,
-    /// Database-owned task creation timestamp.
-    pub created_at: DateTime<Utc>,
-    /// Database-owned last-mutation timestamp.
-    pub updated_at: DateTime<Utc>,
-    /// Database-owned first-start timestamp.
-    pub started_at: Option<DateTime<Utc>>,
-    /// Database-owned terminal timestamp.
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Complete metric evidence for one first-applied run mutation transaction.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExecutionMutationMetricEvidence {
-    /// Actual run transition committed by the transaction.
-    pub run: ExecutionRunTransitionEvidence,
-    /// Actual task transitions committed by the transaction.
-    pub tasks: Vec<ExecutionTaskTransitionEvidence>,
-}
-
 /// Result of checking persisted amendment identity before current-revision validation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AmendmentReplayOutcome {
@@ -838,12 +789,7 @@ pub enum AmendmentReplayOutcome {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AmendmentWrite {
     /// The revision was fenced, history appended, and waiting task superseded.
-    Applied {
-        /// Durable mutation and workflow-handoff result.
-        commit: Box<AmendmentCommit>,
-        /// First-apply-only persisted transition evidence.
-        metrics: Box<ExecutionMutationMetricEvidence>,
-    },
+    Applied(Box<AmendmentCommit>),
     /// The same revision/hash/audit identity was already committed.
     Replayed(Box<AmendmentCommit>),
     /// No visible run exists.
@@ -874,12 +820,7 @@ pub struct CancellationRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CancellationOutcome {
     /// The run and all nonterminal tasks were cancelled atomically.
-    Cancelled {
-        /// Durable mutation and workflow-handoff result.
-        commit: Box<CancellationCommit>,
-        /// First-apply-only persisted transition evidence.
-        metrics: Box<ExecutionMutationMetricEvidence>,
-    },
+    Cancelled(Box<CancellationCommit>),
     /// The exact reason was already committed with the same task handoff set.
     Replayed(Box<CancellationCommit>),
     /// No visible run exists.

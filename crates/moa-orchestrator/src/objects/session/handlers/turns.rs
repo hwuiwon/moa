@@ -47,10 +47,9 @@ impl SessionImpl {
         // the turn was still running always saw the original response.
         let mut admissions = load_message_admissions(&ctx).await?;
         let terminal_at = durable_utc_now(&ctx).await?;
-        let (resolved_admission, evicted) =
-            admissions.mark_terminal_for_turn(&outcome.turn_id, terminal_at);
+        let resolved_admission = admissions.mark_terminal_for_turn(&outcome.turn_id, terminal_at);
         if resolved_admission {
-            persist_message_admissions(&ctx, &admissions, evicted);
+            persist_message_admissions(&ctx, &admissions);
         }
 
         // A stale or replayed callback for a turn that is no longer active is a
@@ -183,7 +182,7 @@ impl SessionImpl {
             // The dequeued message's admission now owns a running turn. Its recorded
             // response still says `queued`, which is exactly what its caller was told.
             if admissions.mark_running(&next.client_message_id, &next_turn_id) {
-                persist_message_admissions(&ctx, &admissions, 0);
+                persist_message_admissions(&ctx, &admissions);
             }
             let drained = state.drain_unread_child_signals();
             state.persist(&ctx);

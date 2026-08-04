@@ -175,7 +175,6 @@ impl MpscSink {
                 metrics::counter!(
                     "moa_lineage_failed_total",
                     "mode" => "best_effort",
-                    "event_class" => event_class,
                     "reason" => "channel_closed"
                 )
                 .increment(1);

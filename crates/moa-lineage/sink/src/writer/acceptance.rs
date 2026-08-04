@@ -158,18 +158,14 @@ impl LineageJournal {
         .await?;
         tx.commit().await?;
 
-        let claimed = rows
+        Ok(rows
             .into_iter()
             .map(|row| ClaimedRow {
                 journal_id: row.get("journal_id"),
                 payload: row.get("payload"),
                 attempts: row.get("attempts"),
             })
-            .collect::<Vec<_>>();
-        if !claimed.is_empty() {
-            metrics::counter!("moa_lineage_journal_claimed_total").increment(claimed.len() as u64);
-        }
-        Ok(claimed)
+            .collect())
     }
 
     /// Begins a transaction scoped to the internal control plane.

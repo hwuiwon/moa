@@ -782,20 +782,13 @@ impl RestateSessionStore for SessionStoreImpl {
 
         Ok(ctx
             .run(|| async move {
-                let filed = moa_skills::rollback::monitor_and_file_skill_regressions(
+                moa_skills::rollback::monitor_and_file_skill_regressions(
                     &store,
                     &config.learning.regression_monitor,
                     chrono::Utc::now(),
                 )
                 .await
                 .map_err(HandlerError::from)?;
-                // Recorded inside the durable step so a replay reuses the journaled
-                // result instead of re-incrementing the counter.
-                moa_observability::runtime_metrics::record_skill_learning_candidates_filed(
-                    "rollback_monitor",
-                    "regression",
-                    filed as u64,
-                );
                 Ok::<(), HandlerError>(())
             })
             .name("monitor_skill_regressions")

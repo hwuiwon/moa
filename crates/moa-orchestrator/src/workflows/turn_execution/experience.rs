@@ -141,15 +141,6 @@ async fn mine_segment_weakness_patterns(
                     Utc::now(),
                 )
                 .await;
-                // Recorded inside the durable step so a workflow replay reuses the
-                // journaled result instead of re-incrementing the counter.
-                if let Ok(filed) = &result {
-                    moa_observability::runtime_metrics::record_skill_learning_candidates_filed(
-                        "mined",
-                        "weakness",
-                        *filed as u64,
-                    );
-                }
                 Ok::<_, HandlerError>(Json::from(result.err().map(|error| error.to_string())))
             }
         })

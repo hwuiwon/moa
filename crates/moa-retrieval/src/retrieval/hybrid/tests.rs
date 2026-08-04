@@ -83,7 +83,25 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::*;
-use crate::retrieval::types::{GraphPathTrace, GraphSeedSource, KnowledgeChunkHydration};
+use crate::retrieval::types::{
+    GraphPathTrace, GraphSeedSource, KnowledgeChunkHydration, RetrievalLeg,
+};
+
+#[test]
+fn retrieval_leg_metric_labels_are_stable_offline() {
+    // Pins: duration and degradation metrics share one bounded label vocabulary
+    // across the hybrid retriever and the query-embedding owner.
+    assert_eq!(
+        [
+            RetrievalLeg::Vector.as_str(),
+            RetrievalLeg::Lexical.as_str(),
+            RetrievalLeg::Graph.as_str(),
+            RetrievalLeg::Rerank.as_str(),
+            RetrievalLeg::Embedding.as_str(),
+        ],
+        ["vector", "lexical", "graph", "rerank", "embedding"]
+    );
+}
 
 fn tenant_scope() -> MemoryScope {
     MemoryScope::Tenant {
@@ -1431,35 +1449,38 @@ fn empty_fusion_vector_retry_respects_timeout_override() {
 async fn run_leg_classifies_success_transient_fatal_and_timeout() {
     // Pins: F09 — run_leg threads the reason a leg produced no hits instead of
     // collapsing everything to an empty default.
-    let success = run_leg::<Vec<LegCandidate>, _>(false, "vector", VECTOR_BUDGET, async {
-        Ok(vec![leg_candidate(Uuid::from_u128(1))])
-    })
-    .await;
+    let success =
+        run_leg::<Vec<LegCandidate>, _>(false, RetrievalLeg::Vector, VECTOR_BUDGET, async {
+            Ok(vec![leg_candidate(Uuid::from_u128(1))])
+        })
+        .await;
     assert!(matches!(success, LegOutcome::Completed(ref hits) if hits.len() == 1));
 
-    let transient = run_leg::<Vec<LegCandidate>, _>(false, "vector", VECTOR_BUDGET, async {
-        Err(RetrievalError::Vector(VectorError::VectorProviderStatus {
-            provider: "turbopuffer",
-            status: 503,
-            body: "unavailable".to_string(),
-        }))
-    })
-    .await;
+    let transient =
+        run_leg::<Vec<LegCandidate>, _>(false, RetrievalLeg::Vector, VECTOR_BUDGET, async {
+            Err(RetrievalError::Vector(VectorError::VectorProviderStatus {
+                provider: "turbopuffer",
+                status: 503,
+                body: "unavailable".to_string(),
+            }))
+        })
+        .await;
     assert!(matches!(transient, LegOutcome::Transient(_)));
 
-    let fatal = run_leg::<Vec<LegCandidate>, _>(false, "vector", VECTOR_BUDGET, async {
-        Err(RetrievalError::Vector(
-            VectorError::TurbopufferUnavailable {
-                storage_partition_id: "sp".to_string(),
-            },
-        ))
-    })
-    .await;
+    let fatal =
+        run_leg::<Vec<LegCandidate>, _>(false, RetrievalLeg::Vector, VECTOR_BUDGET, async {
+            Err(RetrievalError::Vector(
+                VectorError::TurbopufferUnavailable {
+                    storage_partition_id: "sp".to_string(),
+                },
+            ))
+        })
+        .await;
     assert!(matches!(fatal, LegOutcome::Fatal(_)));
 
     let timeout = run_leg::<Vec<LegCandidate>, _>(
         false,
-        "vector",
+        RetrievalLeg::Vector,
         std::time::Duration::from_millis(1),
         async {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1476,7 +1497,7 @@ fn reduce_leg_degrades_transient_and_timeout_but_aborts_fatal() {
     // (keeping peers), while a fatal error aborts. This is the degrade-keeps-
     // peer decision: mutating the Transient arm to return Err breaks this.
     let transient = reduce_leg::<Vec<LegCandidate>>(
-        "vector",
+        RetrievalLeg::Vector,
         LegOutcome::Transient(RetrievalError::Vector(VectorError::VectorProviderStatus {
             provider: "turbopuffer",
             status: 503,
@@ -1487,13 +1508,13 @@ fn reduce_leg_degrades_transient_and_timeout_but_aborts_fatal() {
     assert!(transient.value.is_empty());
     assert!(!transient.timed_out);
 
-    let timeout = reduce_leg::<Vec<LegCandidate>>("vector", LegOutcome::Timeout)
+    let timeout = reduce_leg::<Vec<LegCandidate>>(RetrievalLeg::Vector, LegOutcome::Timeout)
         .expect("a timed-out leg must degrade, not abort");
     assert!(timeout.value.is_empty());
     assert!(timeout.timed_out);
 
     let completed = reduce_leg::<Vec<LegCandidate>>(
-        "vector",
+        RetrievalLeg::Vector,
         LegOutcome::Completed(vec![leg_candidate(Uuid::from_u128(1))]),
     )
     .expect("a completed leg passes through");
@@ -1501,7 +1522,7 @@ fn reduce_leg_degrades_transient_and_timeout_but_aborts_fatal() {
     assert!(!completed.timed_out);
 
     let fatal = reduce_leg::<Vec<LegCandidate>>(
-        "vector",
+        RetrievalLeg::Vector,
         LegOutcome::Fatal(RetrievalError::Scope(
             moa_core::error::MoaError::StorageError("rls setup failed".to_string()),
         )),

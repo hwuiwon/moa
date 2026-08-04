@@ -1,12 +1,9 @@
 //! Safe source-object inspection and query-trace projection logic for Knowledge.
 
-use std::time::Duration;
-
 use chrono::Utc;
 use moa_core::{error::MoaError, types::identifiers::StoragePartitionId};
 use moa_knowledge::normalize::redact_provider_metadata;
 use moa_lineage_core::{LineageEvent, RecordKind, RetrievalLineage};
-use moa_observability::{record_knowledge_retrieval_duration, record_knowledge_retrieval_hits};
 use moa_wire::knowledge::{
     KnowledgeObjectChunkInspectView, KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse,
     KnowledgeObjectListRequest, KnowledgeObjectListResponse, KnowledgeQueryTraceHit,
@@ -236,7 +233,6 @@ impl KnowledgeService {
         tracing::Span::current().record("error_code", "none");
         tracing::Span::current().record("stage_count", response.stages.len() as u64);
         tracing::Span::current().record("hit_count", response.hits.len() as u64);
-        record_query_trace_metrics(&response);
         Ok(response)
     }
 }
@@ -290,29 +286,6 @@ fn render_query_trace_response(
         stages,
         hits,
         created_at: first.ts,
-    }
-}
-
-fn record_query_trace_metrics(response: &KnowledgeQueryTraceResponse) {
-    for stage in &response.stages {
-        record_knowledge_retrieval_duration(
-            &stage.stage,
-            "success",
-            Duration::from_millis(stage.latency_ms),
-        );
-    }
-    for hit in &response.hits {
-        let legs = hit
-            .citation
-            .get("legs")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for leg in legs {
-            if let Some(leg) = leg.as_str() {
-                record_knowledge_retrieval_hits(&hit.source_tier, leg, 1);
-            }
-        }
     }
 }
 

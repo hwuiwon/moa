@@ -6,37 +6,6 @@ use super::{
     sql::*,
 };
 
-pub(super) fn run_transition_evidence(
-    prior_status: ExecutionRunStatus,
-    run: &ExecutionRunRecord,
-) -> ExecutionRunTransitionEvidence {
-    ExecutionRunTransitionEvidence {
-        prior_status,
-        status: run.status,
-        queued_at: run.queued_at,
-        started_at: run.started_at,
-        reserved: run.reserved,
-        consumed: run.consumed,
-        terminal_evidence: run.terminal_evidence.clone(),
-        terminal_reason: run.terminal_reason,
-    }
-}
-
-pub(super) fn task_transition_evidence(
-    prior_status: ExecutionTaskStatus,
-    task: &ExecutionTaskRecord,
-) -> ExecutionTaskTransitionEvidence {
-    ExecutionTaskTransitionEvidence {
-        prior_status,
-        status: task.status,
-        kind: task.kind.clone(),
-        created_at: task.created_at,
-        updated_at: task.updated_at,
-        started_at: task.started_at,
-        completed_at: task.completed_at,
-    }
-}
-
 pub(super) fn task_outcome_is_exact_replay(
     task: &ExecutionTaskRecord,
     generation: u64,

@@ -125,10 +125,6 @@ pub(super) async fn write_dead_letter_in_tx(
     .await?;
 
     metrics::counter!("moa_lineage_dead_lettered_total").increment(summary.row_count as u64);
-    // Batch-level commit counter: one increment per durably committed dead-letter
-    // batch (distinct from the row counter above), so operators can track
-    // dead-letter volume and drive redrive/alerting off the table.
-    metrics::counter!("moa_lineage_dead_letter_commits_total").increment(1);
     Ok(dead_letter_id)
 }
 

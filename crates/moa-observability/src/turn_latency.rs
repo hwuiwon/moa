@@ -10,14 +10,6 @@ tokio::task_local! {
     static TURN_LATENCY_COUNTERS: Arc<TurnLatencyCounters>;
 }
 
-fn record_compaction_tier_applied(tier: u8) {
-    metrics::counter!(
-        "moa_compaction_tier_applied_total",
-        "tier" => tier.to_string()
-    )
-    .increment(1);
-}
-
 /// Snapshot of per-turn latency breakdown metrics.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnLatencySnapshot {
@@ -320,15 +312,6 @@ pub fn record_turn_compaction(
     tokens_reclaimed: usize,
     messages_elided: usize,
 ) {
-    if tier1 {
-        record_compaction_tier_applied(1);
-    }
-    if tier2 {
-        record_compaction_tier_applied(2);
-    }
-    if tier3 {
-        record_compaction_tier_applied(3);
-    }
     let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
         counters.record_compaction(tier1, tier2, tier3, tokens_reclaimed, messages_elided);
     });

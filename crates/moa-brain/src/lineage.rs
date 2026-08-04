@@ -322,18 +322,7 @@ async fn build_citation_lineage(
     citation_sources: &[ChunkRef],
     response_event: Option<&EventRecord>,
 ) -> (CitationLineage, Vec<String>) {
-    metrics::histogram!(
-        "moa_citation_source_count",
-        "tenant_id" => session.tenant_id.to_string()
-    )
-    .record(citation_sources.len() as f64);
-    metrics::histogram!(
-        "moa_citation_answer_bytes",
-        "tenant_id" => session.tenant_id.to_string()
-    )
-    .record(response.text.len() as f64);
     let answer_sentence_offsets = sentence_offsets(&response.text);
-    let verifier_started = std::time::Instant::now();
     let citations = if citation_sources.is_empty() || response.text.trim().is_empty() {
         Vec::new()
     } else {
@@ -346,11 +335,6 @@ async fn build_citation_lineage(
             )
             .await
     };
-    metrics::histogram!(
-        "moa_citation_verifier_seconds",
-        "tenant_id" => session.tenant_id.to_string()
-    )
-    .record(verifier_started.elapsed().as_secs_f64());
 
     // Redact only now — after verification has matched original answer against
     // original sources — so grounding quality is preserved while stored text is

@@ -47,6 +47,8 @@ spec:
               containerPort: 4317
             - name: otlp-http
               containerPort: 4318
+            - name: restate-otlp
+              containerPort: 4319
             - name: http
               containerPort: 12345
           envFrom:
@@ -104,3 +106,6 @@ spec:
     - name: otlp-http
       port: 4318
       targetPort: otlp-http
+    - name: restate-otlp
+      port: 4319
+      targetPort: restate-otlp

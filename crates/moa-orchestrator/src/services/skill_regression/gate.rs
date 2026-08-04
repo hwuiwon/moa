@@ -187,7 +187,6 @@ pub(super) async fn evaluate(
                     "skill regression compile audit persistence failed: {error}"
                 ))
             })?;
-        moa_brain::execution_planning::request::record_applied_planning_audit(&audit_outcome);
         if matches!(audit_outcome, CompileAuditWriteOutcome::Conflict { .. }) {
             return Err(MoaError::ValidationError(format!(
                 "skill regression planning audit conflicts for operation `{operation_key}`"

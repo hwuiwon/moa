@@ -630,37 +630,12 @@ async fn ten_thousand_tasks_materialize_cancel_and_replay_without_residual_reser
 
     let reason = "cancel 10,000-task fanout".to_string();
     let request = cancellation_request(&repository, scope, run.run_uid, reason.clone()).await?;
-    let CancellationOutcome::Cancelled {
-        commit: cancelled,
-        metrics,
-    } = repository.cancel_run(scope, run.run_uid, request).await?
+    let CancellationOutcome::Cancelled(cancelled) =
+        repository.cancel_run(scope, run.run_uid, request).await?
     else {
         panic!("10,000-task cancellation must commit");
     };
     assert_eq!(cancelled.task_ids_to_release.len(), 10_000);
-    assert_eq!(metrics.tasks.len(), 10_000);
-    assert_eq!(
-        metrics
-            .tasks
-            .iter()
-            .filter(|transition| transition.prior_status == ExecutionTaskStatus::Reserved)
-            .count(),
-        100
-    );
-    assert_eq!(
-        metrics
-            .tasks
-            .iter()
-            .filter(|transition| transition.prior_status == ExecutionTaskStatus::Pending)
-            .count(),
-        9_900
-    );
-    assert!(
-        metrics
-            .tasks
-            .iter()
-            .all(|transition| transition.status == ExecutionTaskStatus::Cancelled)
-    );
     assert_eq!(cancelled.run.progress_total_tasks, 10_000);
     assert_eq!(cancelled.run.progress_cancelled_tasks, 10_000);
     assert_eq!(cancelled.run.consumed.tasks, 10_000);

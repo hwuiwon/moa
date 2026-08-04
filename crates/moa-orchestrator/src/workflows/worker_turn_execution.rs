@@ -32,6 +32,7 @@ use moa_core::{
     types::worker::state::WorkerInputTarget, types::worker::state::WorkerPendingInput,
     types::worker::state::WorkerSignal, types::worker::tool_schema::ChildReportTool,
 };
+use moa_hands::truncate_tool_span_text;
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, emit_turn_coordination_summary, llm_call_span,
     tool_dispatch_span, worker_turn_span,
@@ -164,11 +165,12 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
             Err(error) => {
                 // The error is logged for operators and never persisted: it can
                 // carry provider, tool, and prompt material.
+                let error = truncate_tool_span_text(format!("{error:?}"));
                 tracing::error!(
                     worker_id = %request.worker_id,
                     parent_session = %parent_session,
                     turn_id = %request.turn_id,
-                    error = ?error,
+                    error = %error,
                     "worker turn workflow failed at its catch-all boundary"
                 );
                 TurnOutcome {

@@ -3,8 +3,8 @@
 //! These tests install a `tracing-opentelemetry` layer backed by an in-memory
 //! OpenTelemetry span exporter, run one emitter against a span, then read the
 //! exported `SpanData` attributes back. This pins the GenAI/OpenInference
-//! attribute contract, the 20-document cap on retrieval, and the
-//! `unwrap_or("unknown")` data-source fallback.
+//! attribute contract, bounded retrieval aggregates, and the
+//! `unwrap_or("unknown")` data-source fallback without exporting document IDs.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,8 +15,8 @@ use moa_core::{
 };
 use moa_lineage_core::{
     BackendIntrospection, ContextChunk, ContextLineage, GenerationLineage, GenerationTokenUsage,
-    GraphIntrospection, PgvectorIntrospection, RetrievalLineage, RetrievalStage, StageTimings,
-    TruncationEvent, TurbopufferIntrospection, TurnId, VecHit,
+    GraphIntrospection, PgvectorIntrospection, RetrievalLineage, RetrievalSelectedHit,
+    RetrievalStage, StageTimings, TruncationEvent, TurbopufferIntrospection, TurnId, VecHit,
 };
 use moa_lineage_sink::otel::{emit_context_attrs, emit_generation_attrs, emit_retrieval_attrs};
 use moa_memory_types::MemoryScope;
@@ -115,9 +115,9 @@ fn retrieval_record(
 }
 
 #[test]
-fn emit_retrieval_attrs_snapshots_core_attributes_and_caps_documents_at_20() {
-    // 25 hits, first source "pgvector": the emitter caps per-document attributes
-    // at 20 and reports the first hit's source as the data source.
+fn emit_retrieval_attrs_exports_exact_aggregates_without_document_attributes() {
+    // Pins: retrieval spans export fixed aggregate values and backend
+    // introspection without document-shaped keys or tenant-derived values.
     let hits = (0..25)
         .map(|idx| vec_hit(idx, "pgvector"))
         .collect::<Vec<_>>();
@@ -142,7 +142,22 @@ fn emit_retrieval_attrs_snapshots_core_attributes_and_caps_documents_at_20() {
             client_wall_clock_ms: 8,
         }),
     };
-    let record = retrieval_record(hits, introspection);
+    let mut record = retrieval_record(hits, introspection);
+    record.selected_hits = vec![RetrievalSelectedHit {
+        graph_node_uid: Uuid::from_u128(0xfeed),
+        chunk_uid: Some(Uuid::from_u128(0xbeef)),
+        fact_uid: None,
+        source_tier: "tenant_knowledge".to_string(),
+        label: "KnowledgeChunk".to_string(),
+        title: "OAuth setup".to_string(),
+        snippet: "tenant-specific evidence".to_string(),
+        score: 0.9,
+        legs: vec!["vector".to_string()],
+        prompt_included: true,
+        source_uri: Some("https://tenant.invalid/oauth".to_string()),
+        source_title: Some("OAuth setup".to_string()),
+        citation: serde_json::json!({"chunk_uid": Uuid::from_u128(0xbeef)}),
+    }];
 
     let attrs = capture_span_attributes(|span| emit_retrieval_attrs(span, &record));
 
@@ -150,36 +165,87 @@ fn emit_retrieval_attrs_snapshots_core_attributes_and_caps_documents_at_20() {
     assert_attr(&attrs, "openinference.span.kind", Value::from("RETRIEVER"));
     assert_attr(&attrs, "gen_ai.data_source.id", Value::from("pgvector"));
     assert_attr(&attrs, "moa.retrieval.total_ms", Value::from(1234_i64));
+    assert_attr(
+        &attrs,
+        "moa.retrieval.vector_hit_count",
+        Value::from(25_i64),
+    );
+    assert_attr(
+        &attrs,
+        "moa.retrieval.selected_hit_count",
+        Value::from(1_i64),
+    );
+    assert_attr(&attrs, "moa.retrieval.top_k_count", Value::from(2_i64));
+    assert_attr(
+        &attrs,
+        "moa.retrieval.vector_score.max",
+        Value::from(0.5_f64),
+    );
+    assert_attr(
+        &attrs,
+        "moa.retrieval.vector_score.mean",
+        Value::from(0.5_f64),
+    );
 
     // Introspection branches.
     assert_attr(&attrs, "moa.pgvector.ef_search", Value::from(64_i64));
     assert_attr(&attrs, "moa.pgvector.buffers_hit", Value::from(10_i64));
     assert_attr(&attrs, "moa.graph.path_length", Value::from(4_i64));
     assert_attr(&attrs, "moa.graph.edges_walked", Value::from(12_i64));
-    assert_attr(&attrs, "moa.tpuf.namespace", Value::from("ns-otel"));
     assert_attr(&attrs, "moa.tpuf.consistency", Value::from("strong"));
+    assert_attr(&attrs, "moa.tpuf.billed_units", Value::from(7.0_f64));
 
-    // 20-document cap: index 19 present, index 20 absent.
     assert!(
-        attrs.contains_key("retrieval.documents.19.document.id"),
-        "the 20th document (index 19) should be emitted"
+        !attrs.contains_key("gen_ai.retrieval.documents"),
+        "serialized top-k document IDs must not be emitted"
     );
     assert!(
-        !attrs.contains_key("retrieval.documents.20.document.id"),
-        "documents beyond the 20-item cap must not be emitted"
+        attrs
+            .keys()
+            .all(|key| !key.starts_with("retrieval.documents.")),
+        "indexed document attributes must not be emitted"
+    );
+    assert!(
+        attrs
+            .values()
+            .all(|value| !value.to_string().contains("00000000-0000-0000-0000-")),
+        "retrieval attributes must not contain UUID JSON blobs"
+    );
+    assert!(
+        !attrs.contains_key("moa.tpuf.namespace"),
+        "tenant-derived Turbopuffer namespaces must not be emitted"
     );
 }
 
 #[test]
 fn emit_retrieval_attrs_uses_unknown_data_source_when_no_vector_hits() {
+    // Pins: an empty retrieval emits exact zero counts and no undefined score
+    // summaries or document-shaped attributes.
     let record = retrieval_record(Vec::new(), BackendIntrospection::default());
 
     let attrs = capture_span_attributes(|span| emit_retrieval_attrs(span, &record));
 
     assert_attr(&attrs, "gen_ai.data_source.id", Value::from("unknown"));
+    assert_attr(&attrs, "moa.retrieval.vector_hit_count", Value::from(0_i64));
+    assert_attr(
+        &attrs,
+        "moa.retrieval.selected_hit_count",
+        Value::from(0_i64),
+    );
+    assert_attr(&attrs, "moa.retrieval.top_k_count", Value::from(2_i64));
     assert!(
-        !attrs.contains_key("retrieval.documents.0.document.id"),
-        "no documents should be emitted when there are no vector hits"
+        !attrs.contains_key("moa.retrieval.vector_score.max"),
+        "empty retrievals have no maximum vector score"
+    );
+    assert!(
+        !attrs.contains_key("moa.retrieval.vector_score.mean"),
+        "empty retrievals have no mean vector score"
+    );
+    assert!(
+        attrs
+            .keys()
+            .all(|key| !key.starts_with("retrieval.documents.")),
+        "no document-shaped attributes should be emitted"
     );
     assert!(
         !attrs.contains_key("moa.pgvector.ef_search"),

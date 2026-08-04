@@ -240,7 +240,6 @@ impl SessionStore for PostgresSessionStore {
         if use_recent_order {
             events.reverse();
         }
-        record_session_event_load(events.len() as u64);
         record_session_event_replay(events.len(), decoded_bytes, started_at.elapsed());
         Ok(events)
     }

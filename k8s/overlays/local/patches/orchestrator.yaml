@@ -13,6 +13,11 @@
     limits:
       cpu: "1"
       memory: 2Gi
+# Restate operator 2.8.1 registers only Ready pods. Use process liveness for
+# this local bootstrap; edge still gates traffic on registered-service readiness.
+- op: replace
+  path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
+  value: /_health/live
 - op: add
   path: /spec/template/spec/initContainers/0
   value:
@@ -45,13 +50,23 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_OBSERVABILITY_ENABLED
-    value: "false"
+    name: MOA_OBSERVABILITY_OTLP_ENDPOINT
+    value: http://moa-lgtm.moa-system.svc.cluster.local:4317
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_OBSERVABILITY_SAMPLE_RATE
+    value: "1.0"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
     name: MOA_OBSERVABILITY_ENVIRONMENT
     value: local
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_LINEAGE_SINK
+    value: postgres
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:

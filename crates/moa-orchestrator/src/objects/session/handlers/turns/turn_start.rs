@@ -119,7 +119,7 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
             };
             // A delivered reply has no later callback: the target either applied it or
             // definitively did not, so this admission is terminal at admission time.
-            let evicted = admissions.record(
+            admissions.record(
                 client_message_id,
                 request_hash,
                 response.clone(),
@@ -130,7 +130,7 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
                 now,
             );
             state.persist_into(ctx);
-            persist_message_admissions(ctx, &admissions, evicted);
+            persist_message_admissions(ctx, &admissions);
             sync_status(ctx, session_id, &state).await?;
             record_admission_decision("admitted_reply");
             return Ok(response);
@@ -184,7 +184,7 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
             queued: true,
             stream_cursor: request.stream_cursor,
         };
-        let evicted = admissions.record(
+        admissions.record(
             client_message_id,
             request_hash,
             response.clone(),
@@ -192,7 +192,7 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
             now,
         );
         persist_pending_state(ctx, &pending_state);
-        persist_message_admissions(ctx, &admissions, evicted);
+        persist_message_admissions(ctx, &admissions);
         record_admission_decision("admitted_queued");
         return Ok(response);
     }
@@ -220,7 +220,7 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
         queued: false,
         stream_cursor: request.stream_cursor,
     };
-    let evicted = admissions.record(
+    admissions.record(
         client_message_id,
         request_hash,
         response.clone(),
@@ -231,7 +231,7 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
     );
     state.persist_into(ctx);
     persist_pending_state(ctx, &pending_state);
-    persist_message_admissions(ctx, &admissions, evicted);
+    persist_message_admissions(ctx, &admissions);
     sync_status(ctx, session_id, &state).await?;
     dispatch_turn_execution(
         ctx,

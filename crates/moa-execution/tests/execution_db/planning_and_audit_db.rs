@@ -600,7 +600,7 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
         repository
             .cancel_run(scope, run.run_uid, terminal_request)
             .await?,
-        CancellationOutcome::Cancelled { .. }
+        CancellationOutcome::Cancelled(_)
     ));
     assert_eq!(
         repository
@@ -681,25 +681,12 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
             .await?,
         AmendmentWrite::Conflict
     );
-    let AmendmentWrite::Applied {
-        commit: amended,
-        metrics,
-    } = repository
+    let AmendmentWrite::Applied(amended) = repository
         .append_amendment(scope, run.run_uid, 1, validated.clone())
         .await?
     else {
         panic!("expected applied amendment");
     };
-    assert_eq!(metrics.run.prior_status, ExecutionRunStatus::WaitingReplan);
-    assert_eq!(metrics.run.status, ExecutionRunStatus::Running);
-    assert_eq!(metrics.tasks.len(), 1);
-    assert_eq!(
-        metrics.tasks[0].prior_status,
-        ExecutionTaskStatus::WaitingReplan
-    );
-    assert_eq!(metrics.tasks[0].status, ExecutionTaskStatus::Cancelled);
-    assert_eq!(metrics.tasks[0].kind, task.kind);
-    assert!(metrics.tasks[0].completed_at.is_some());
     assert_eq!(amended.task_ids_to_release, vec![task.task_id]);
     let applied_wake_epoch = amended.run.wake_epoch;
     let AmendmentWrite::Replayed(replayed) = repository

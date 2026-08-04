@@ -217,7 +217,7 @@ pub(super) async fn embed_texts(
         started.elapsed().as_secs_f64() / texts.len() as f64
     };
     for _ in texts {
-        metrics::histogram!("moa_retrieval_embedder_seconds").record(per_text);
+        metrics::histogram!("perf_gate_embedder_seconds").record(per_text);
     }
     Ok(embeddings)
 }

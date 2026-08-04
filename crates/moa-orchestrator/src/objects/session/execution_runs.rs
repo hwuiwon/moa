@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use moa_brain::execution_planning::request::record_applied_planning_audit;
-use moa_brain::execution_planning::routing::record_applied_route_audit;
 use moa_brain::execution_planning::{
     ExecutionPlanningRequest, ExecutionPlanningResultKind, ExecutionRoutingInput, plan_execution,
     route_execution,
@@ -541,7 +539,6 @@ pub(super) async fn persist_execution_planning_audit(
                 .name(format!("execution_route_audit_{durable_step_suffix}"))
                 .await?
                 .into_inner();
-            record_applied_route_audit(&result);
             if matches!(result, RouteAuditWriteOutcome::Conflict { .. }) {
                 return Err(planning_audit_conflict());
             }
@@ -560,7 +557,6 @@ pub(super) async fn persist_execution_planning_audit(
                 .name(format!("execution_planner_audit_{durable_step_suffix}"))
                 .await?
                 .into_inner();
-            record_applied_planning_audit(&result);
             if matches!(result, PlannerCallAuditWriteOutcome::Conflict { .. }) {
                 return Err(planning_audit_conflict());
             }
@@ -579,7 +575,6 @@ pub(super) async fn persist_execution_planning_audit(
                 .name(format!("execution_compile_audit_{durable_step_suffix}"))
                 .await?
                 .into_inner();
-            record_applied_planning_audit(&result);
             if matches!(result, CompileAuditWriteOutcome::Conflict { .. }) {
                 return Err(planning_audit_conflict());
             }

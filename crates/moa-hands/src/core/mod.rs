@@ -56,6 +56,7 @@ pub use registration::{
     HandRoute, MCP_TOOL_REFERENCE_PREFIX, ToolExecution, ToolRegistry,
     governed_tool_contract_revision, installed_connector_tool_name, mcp_tool_reference,
 };
+pub use telemetry::truncate_tool_span_text;
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);

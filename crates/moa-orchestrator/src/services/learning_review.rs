@@ -322,13 +322,6 @@ impl LearningReviewStore for SessionLearningReviewStore {
     }
 }
 
-/// Records one skill-learning review decision.
-///
-/// Best-effort telemetry: recording never changes the review result.
-fn record_review_decision(action: &str, outcome: &str) {
-    moa_observability::runtime_metrics::record_skill_learning_review_decision(action, outcome);
-}
-
 async fn replay_terminal_review(
     store: &PostgresSessionStore,
     request: &LearningCandidateReviewRequest,
@@ -431,7 +424,6 @@ pub async fn accept_skill_candidate_after_authz(
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
     ensure_requested_action(request.action, LearningCandidateReviewAction::Accept)?;
     if let Some(replay) = replay_terminal_review(store.as_ref(), &request).await? {
-        record_review_decision("accept_skill", "replayed");
         return Ok(replay);
     }
     let request_digest = request.replay_digest();
@@ -476,7 +468,6 @@ pub async fn accept_skill_candidate_after_authz(
                     "failed to release claimed skill candidate after gate error"
                 );
             }
-            record_review_decision("accept_skill", "error");
             return Err(moa_error_to_status_handler_error(error));
         }
     };
@@ -494,7 +485,6 @@ pub async fn accept_skill_candidate_after_authz(
         .await
         .map_err(skill_review_error_to_handler_error)?;
 
-        record_review_decision("accept_skill", "gate_rejected");
         return Ok(review_response_from_outcome(outcome));
     }
 
@@ -511,7 +501,6 @@ pub async fn accept_skill_candidate_after_authz(
     .await
     .map_err(skill_review_error_to_handler_error)?;
 
-    record_review_decision("accept_skill", "promoted");
     Ok(review_response_from_outcome(outcome))
 }
 
@@ -607,7 +596,6 @@ pub async fn accept_rollback_candidate_after_authz(
 
     ensure_rollback_proposal_kind(&candidate)?;
     if let Some(replay) = replay_terminal_review(store.as_ref(), &request).await? {
-        record_review_decision("accept_rollback", "replayed");
         return Ok(replay);
     }
     ensure_proposed_rollback(&candidate)?;
@@ -665,10 +653,7 @@ pub async fn accept_rollback_candidate_after_authz(
     .await;
 
     match executed {
-        Ok(RollbackOutcome::Applied(response)) => {
-            record_review_decision("accept_rollback", "promoted");
-            Ok(response)
-        }
+        Ok(RollbackOutcome::Applied(response)) => Ok(response),
         Ok(RollbackOutcome::Superseded {
             serving_revision_uid,
         }) => {
@@ -728,11 +713,9 @@ pub async fn accept_rollback_candidate_after_authz(
             conn.commit()
                 .await
                 .map_err(moa_error_to_status_handler_error)?;
-            record_review_decision("accept_rollback", "superseded");
             Ok(response)
         }
         Err(error) => {
-            record_review_decision("accept_rollback", "error");
             // Release the claim so the operator can retry once the fault is fixed.
             let release = LearningCandidateStatusUpdate {
                 candidate_id: candidate.id,
@@ -1148,7 +1131,6 @@ pub async fn dismiss_learning_candidate_after_authz(
     // A replay of the same dismissal is a success, not a conflict: the caller
     // asked for a state the candidate already holds and nothing else changed it.
     if candidate.status == LearningCandidateStatus::Dismissed {
-        record_review_decision("dismiss", "replayed");
         return Ok(dismissal_response(candidate.id));
     }
     let from_status = candidate.status;
@@ -1219,7 +1201,6 @@ pub async fn dismiss_learning_candidate_after_authz(
         .await
         .map_err(moa_error_to_status_handler_error)?;
 
-    record_review_decision("dismiss", "dismissed");
     Ok(dismissal_response(candidate.id))
 }
 
@@ -1241,7 +1222,6 @@ pub async fn reject_learning_candidate_after_authz(
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
     ensure_requested_action(request.action, LearningCandidateReviewAction::Reject)?;
     if let Some(replay) = replay_terminal_review(store.as_ref(), &request).await? {
-        record_review_decision("reject", "replayed");
         return Ok(replay);
     }
     let request_digest = request.replay_digest();
@@ -1252,7 +1232,6 @@ pub async fn reject_learning_candidate_after_authz(
         .await
         .map_err(skill_review_error_to_handler_error)?;
 
-    record_review_decision("reject", "rejected");
     Ok(review_response_from_outcome(outcome))
 }
 

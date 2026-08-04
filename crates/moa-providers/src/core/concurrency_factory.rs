@@ -147,12 +147,6 @@ pub(crate) fn record_coordination_degraded(
         "control" => control.label(),
     )
     .increment(1);
-    metrics::histogram!(
-        "moa_provider_coordination_degraded_duration_seconds",
-        "provider" => provider.to_string(),
-        "control" => control.label(),
-    )
-    .record(elapsed.as_secs_f64());
 }
 
 /// Records that a distributed control rejected admission rather than enforcing a

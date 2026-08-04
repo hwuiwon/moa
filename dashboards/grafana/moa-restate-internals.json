@@ -9,10 +9,11 @@
     "from": "now-6h",
     "to": "now"
   },
+  "annotations": { "list": [] },
   "panels": [
     {
       "id": 1,
-      "title": "Ingress Requests / State",
+      "title": "Ingress Requests / Status",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -20,8 +21,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(restate_ingress_requests_total[5m])) by (state)",
-          "legendFormat": "{{state}}",
+          "expr": "sum(rate(restate_ingress_requests_total[5m])) by (status)",
+          "legendFormat": "{{status}}",
           "refId": "A"
         }
       ],
@@ -29,7 +30,7 @@
     },
     {
       "id": 2,
-      "title": "Invoker Tasks / Handler",
+      "title": "Invoker Tasks / Status",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -37,8 +38,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(restate_invoker_invocation_task_total[5m])) by (handler)",
-          "legendFormat": "{{handler}}",
+          "expr": "sum(rate(restate_invoker_invocation_tasks_total[5m])) by (status)",
+          "legendFormat": "{{status}}",
           "refId": "A"
         }
       ],
@@ -94,5 +95,24 @@
       ],
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 }
     }
-  ]
+  ],
+  "refresh": "30s",
+  "tags": ["moa", "operations", "restate"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
+  }
 }

@@ -174,15 +174,6 @@ impl LLMSpanRecorder {
             },
         );
 
-        tracing::info!(
-            model = %response.model,
-            input_uncached = usage.input_tokens_uncached,
-            input_cache_read = usage.input_tokens_cache_read,
-            input_cache_write = usage.input_tokens_cache_write,
-            output = usage.output_tokens,
-            cache_hit_rate = %format!("{:.1}%", provider_cache_hit_rate * 100.0),
-            "completion received"
-        );
         let provider = self.system;
         let request_model = self.request_model.as_str();
         let model = response.model.to_string();

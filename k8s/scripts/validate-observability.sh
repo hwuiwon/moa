@@ -24,6 +24,8 @@ ALLOY_PVC="${REPO_ROOT}/k8s/observability/25-alloy-pvc.yaml"
 ALLOY_RBAC="${REPO_ROOT}/k8s/observability/15-alloy-rbac.yaml"
 ALERTS_DIR="${REPO_ROOT}/ops/prometheus/alerts"
 LIVE_SMOKE="${REPO_ROOT}/k8s/scripts/observability-smoke.sh"
+CANONICAL_DASHBOARD_DIR="${REPO_ROOT}/dashboards/grafana"
+LOCAL_PHASE0_REPORT="${REPO_ROOT}/k8s/overlays/local/phase0-observability-report.sh"
 
 # Pinned tool versions. A validator that accepts whatever binary happens to be on
 # PATH cannot tell "this config is valid" from "this version of the checker did
@@ -94,6 +96,28 @@ require_tool alloy "${ALLOY_VERSION}" \
 require_tool promtool "${PROMTOOL_VERSION}" \
   "Install promtool ${PROMTOOL_VERSION} from https://github.com/prometheus/prometheus/releases."
 
+echo "Checking the local Phase 0 telemetry contract..."
+LOCAL_PHASE0_REPORT_TEXT="$(<"${LOCAL_PHASE0_REPORT}")"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" \
+  'count by (service_name, __name__) ({__name__=~"moa_.+|gen_ai_.+"})' \
+  "the local report does not inventory active MOA series by service and metric"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" \
+  'otelcol_receiver_accepted_log_records' \
+  "the local report does not verify direct OTLP log acceptance"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" \
+  'otelcol_exporter_send_failed_log_records' \
+  "the local report does not surface OTLP log export failures"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" \
+  'count_over_time({service_name=~"moa-.+"}[1h])' \
+  "the local report does not measure stored MOA logs by service"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" \
+  'sum by (service) (increase({__name__=~"traces_span.*_calls_total"}[1h]))' \
+  "the local report groups Tempo span metrics by a label Tempo does not emit"
+assert_excludes "${LOCAL_PHASE0_REPORT_TEXT}" "phase0_" \
+  "the local report still depends on deleted custom-collector count connectors"
+assert_excludes "${LOCAL_PHASE0_REPORT_TEXT}" "loki_distributor_bytes_received_total" \
+  "the local report still depends on a custom backend self-scrape"
+
 echo "Validating the Alloy collector configuration..."
 # Catches broken component references and unrecognized argument names - the two
 # ways an Alloy config is wrong in a manner YAML validation cannot see, because
@@ -108,6 +132,18 @@ assert_contains "${ALLOY_CONFIG_TEXT}" "add_metric_suffixes = false" \
   "Alloy would append type/unit suffixes to MOA metric names, renaming every series out from under the alert rules and dashboards"
 assert_contains "${ALLOY_CONFIG_TEXT}" "resource_to_telemetry_conversion = true" \
   "Alloy would drop service.name/deployment.environment from metric labels, leaving no way to scope a query to a service"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'otelcol.processor.attributes "loki_labels"' \
+  "direct OTLP logs do not promote bounded resource identity into queryable Loki labels"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'value  = "service.name, deployment.environment, service.version"' \
+  "direct OTLP logs do not expose the bounded service identity needed for log/trace joins"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'discovery.relabel "pod_logs"' \
+  "production pod-log discovery has no application-log deduplication stage"
+assert_contains "${ALLOY_CONFIG_TEXT}" '"__meta_kubernetes_pod_container_name"' \
+  "production application-log deduplication is pod-wide and would drop init-container logs"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'regex  = "moa-edge;edge|moa-orchestrator;orchestrator"' \
+  "production tails edge/orchestrator runtime stdout in addition to their direct OTLP logs"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'targets    = discovery.relabel.pod_logs.output' \
+  "the Kubernetes log source bypasses the MOA application-log deduplication stage"
 assert_contains "${ALLOY_CONFIG_TEXT}" "mimir.rules.kubernetes" \
   "no PrometheusRule synchronizer is configured, so the checked-in alert rules reach Mimir by no path at all"
 assert_contains "${ALLOY_CONFIG_TEXT}" "moa.dev/rule-sync" \
@@ -128,6 +164,21 @@ assert_contains "${ALLOY_CONFIG_TEXT}" "__meta_kubernetes_pod_container_port_num
   "Restate pod discovery does not select one metrics target per pod"
 assert_contains "${ALLOY_CONFIG_TEXT}" 'replacement   = "$1:5122"' \
   "Restate pod discovery does not target each pod's metrics port"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'otelcol.receiver.otlp "restate"' \
+  "Restate traces do not have a dedicated OTLP receiver"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'endpoint = "0.0.0.0:4319"' \
+  "the dedicated Restate OTLP receiver is not listening on port 4319"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'otelcol.processor.probabilistic_sampler "restate"' \
+  "Restate traces bypass the dedicated probabilistic sampler"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'sampling_percentage = 1' \
+  "Restate trace sampling is not fixed at one percent"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'forward_to      = [prometheus.relabel.restate.receiver]' \
+  "Restate metrics bypass their ingestion keep-list"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'source_labels = ["__name__"]' \
+  "the Restate metric keep-list does not filter by metric name"
+RESTATE_METRIC_KEEP='up|restate_ingress_requests_total|restate_invoker_invocation_tasks_total|restate_ingress_request_duration_seconds|restate_rocksdb_estimate_live_data_size_bytes'
+assert_contains "${ALLOY_CONFIG_TEXT}" "regex         = \"${RESTATE_METRIC_KEEP}\"" \
+  "the Restate metric keep-list drifted from the dashboard and smoke contract"
 
 echo "Checking the Alloy deployment contract..."
 ALLOY_DEPLOYMENT_TEXT="$(<"${ALLOY_DEPLOYMENT}")"
@@ -143,6 +194,12 @@ assert_excludes "${ALLOY_DEPLOYMENT_TEXT}" "grafana/alloy:latest" \
   "Alloy image is unpinned; a collector picking up a new version on an unrelated restart changes pipeline semantics silently"
 assert_contains "${ALLOY_DEPLOYMENT_TEXT}" "image: grafana/alloy:v" \
   "Alloy image is not pinned to an exact release tag"
+assert_contains "${ALLOY_DEPLOYMENT_TEXT}" "name: restate-otlp" \
+  "Alloy does not expose the dedicated Restate OTLP receiver"
+assert_contains "${ALLOY_DEPLOYMENT_TEXT}" "containerPort: 4319" \
+  "Alloy's dedicated Restate OTLP container port is not 4319"
+assert_contains "${ALLOY_DEPLOYMENT_TEXT}" "port: 4319" \
+  "Alloy's Service does not expose the dedicated Restate OTLP port"
 
 ALLOY_PVC_TEXT="$(<"${ALLOY_PVC}")"
 assert_contains "${ALLOY_PVC_TEXT}" "ReadWriteOnce" "Alloy PVC is not ReadWriteOnce"
@@ -182,11 +239,8 @@ assert_excludes "${LIVE_SMOKE_TEXT}" 'psql "${SMOKE_DATABASE_URL}"' \
   "the live smoke exposes the database credential in psql process arguments"
 
 echo "Checking that the exporters and the collector agree on transport..."
-# The link nothing else checks. Production names an OTLP endpoint and protocol in
-# a kustomize patch; the collector declares its receivers in a different language
-# in a different directory. Move either one and telemetry stops with no error
-# anywhere: the exporter retries into its buffer, every pod stays Ready, and the
-# only symptom is a dashboard that goes quiet.
+# MOA's endpoint-only contract uses its gRPC default. The endpoint and Alloy
+# receiver live in different files, so keep their ports linked explicitly.
 python3 - "${REPO_ROOT}" <<'PY' || exit 1
 import pathlib
 import re
@@ -204,26 +258,33 @@ for workload, path in patches.items():
     endpoint = re.search(
         r"name:\s*MOA_OBSERVABILITY_OTLP_ENDPOINT\s*\n\s*value:\s*(\S+)", text
     )
-    protocol = re.search(
-        r"name:\s*MOA_OBSERVABILITY_OTLP_PROTOCOL\s*\n\s*value:\s*(\S+)", text
-    )
-    if not endpoint or not protocol:
+    if not endpoint:
         raise SystemExit(
-            f"{path} does not set both MOA_OBSERVABILITY_OTLP_ENDPOINT and "
-            "_PROTOCOL; a half-configured exporter falls back to the SDK default "
-            "collector, which is localhost"
+            f"{path} does not set MOA_OBSERVABILITY_OTLP_ENDPOINT; without an "
+            "endpoint the MOA exporter remains disabled"
         )
+    for redundant in (
+        "MOA_OBSERVABILITY_ENABLED",
+        "MOA_OBSERVABILITY_OTLP_PROTOCOL",
+        "OTEL_METRIC_EXPORT_INTERVAL",
+    ):
+        if redundant in text:
+            raise SystemExit(
+                f"{path} still sets redundant {redundant}; endpoint-only defaults "
+                "must stay single-sourced in MOA"
+            )
     port = re.search(r":(\d+)/?$", endpoint.group(1))
     if not port:
         raise SystemExit(f"{path} OTLP endpoint {endpoint.group(1)!r} names no port")
-    configured[workload] = (protocol.group(1), port.group(1))
+    configured[workload] = port.group(1)
 
 if len(set(configured.values())) != 1:
     raise SystemExit(
         "production workloads disagree about the OTLP transport: "
         f"{configured}. One of them is pointed at a receiver that is not there."
     )
-protocol, port = next(iter(configured.values()))
+port = next(iter(configured.values()))
+protocol = "grpc"
 
 alloy = (root / "k8s/observability/config.alloy").read_text(encoding="utf-8")
 receiver = re.search(
@@ -247,8 +308,59 @@ if block.group(1) != port:
         f"production exports {protocol} to port {port}, but the collector's "
         f"{protocol} receiver listens on {block.group(1)}"
     )
-print(f"  OK production exports {protocol} to :{port} and the collector listens there")
+print(f"  OK production uses the MOA {protocol} default at :{port} and Alloy listens there")
 PY
+
+echo "Checking the production telemetry controls..."
+ORCHESTRATOR_BASE_TEXT="$(<"${REPO_ROOT}/k8s/base/20-orchestrator-deployment.yaml")"
+EDGE_BASE_TEXT="$(<"${REPO_ROOT}/k8s/base/50-edge-deployment.yaml")"
+SCOPED_RUST_LOG='value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off'
+assert_contains "${ORCHESTRATOR_BASE_TEXT}" "${SCOPED_RUST_LOG}" \
+  "orchestrator logging is not scoped to MOA targets"
+assert_contains "${EDGE_BASE_TEXT}" "${SCOPED_RUST_LOG}" \
+  "edge logging is not scoped to MOA targets"
+assert_excludes "${ORCHESTRATOR_BASE_TEXT}" $'name: RUST_LOG\n              value: info' \
+  "orchestrator still enables unscoped INFO logging"
+assert_excludes "${EDGE_BASE_TEXT}" $'name: RUST_LOG\n              value: info' \
+  "edge still enables unscoped INFO logging"
+
+ORCHESTRATOR_PATCH_TEXT="$(<"${REPO_ROOT}/k8s/overlays/production/patches/orchestrator-observability.yaml")"
+EDGE_PATCH_TEXT="$(<"${REPO_ROOT}/k8s/overlays/production/patches/edge-observability.yaml")"
+RESTATE_PATCH_TEXT="$(<"${REPO_ROOT}/k8s/overlays/production/patches/restate-observability.yaml")"
+LOCAL_ORCHESTRATOR_PATCH_TEXT="$(<"${REPO_ROOT}/k8s/overlays/local/patches/orchestrator.yaml")"
+LOCAL_EDGE_PATCH_TEXT="$(<"${REPO_ROOT}/k8s/overlays/local/patches/edge.yaml")"
+for patch in \
+  "${ORCHESTRATOR_PATCH_TEXT}" \
+  "${EDGE_PATCH_TEXT}" \
+  "${LOCAL_ORCHESTRATOR_PATCH_TEXT}" \
+  "${LOCAL_EDGE_PATCH_TEXT}"; do
+  assert_contains "${patch}" "name: MOA_OBSERVABILITY_OTLP_ENDPOINT" \
+    "a MOA workload does not configure its OTLP endpoint"
+  assert_contains "${patch}" ":4317" \
+    "a MOA workload does not use the default OTLP/gRPC receiver"
+  assert_excludes "${patch}" "name: MOA_OBSERVABILITY_ENABLED" \
+    "a MOA workload still duplicates endpoint-derived enablement"
+  assert_excludes "${patch}" "name: MOA_OBSERVABILITY_OTLP_PROTOCOL" \
+    "a MOA workload still duplicates the default OTLP transport"
+  assert_excludes "${patch}" "name: OTEL_METRIC_EXPORT_INTERVAL" \
+    "a MOA workload still overrides the code-owned metric export cadence"
+done
+assert_contains "${ORCHESTRATOR_PATCH_TEXT}" "name: MOA_LINEAGE_SINK" \
+  "production does not enable its monitored lineage sink"
+assert_contains "${ORCHESTRATOR_PATCH_TEXT}" "value: postgres" \
+  "production lineage does not use the durable Postgres sink"
+assert_contains "${ORCHESTRATOR_PATCH_TEXT}" "name: MOA_MEMORY_RETRIEVAL_LINEAGE_SAMPLE_RATE" \
+  "production does not cap retrieval lineage detail sampling"
+assert_contains "${ORCHESTRATOR_PATCH_TEXT}" 'value: "0.10"' \
+  "production retrieval lineage sampling is not ten percent"
+assert_contains "${RESTATE_PATCH_TEXT}" 'tracing-endpoint = "http://alloy.observability.svc.cluster.local:4319"' \
+  "production Restate traces do not use the sampled receiver"
+assert_contains "${RESTATE_PATCH_TEXT}" 'tracing-filter = "warn,restate_ingress_http=info,restate_invoker_impl=info"' \
+  "production Restate trace filtering is not scoped"
+assert_contains "${RESTATE_PATCH_TEXT}" 'log-filter = "warn,restate=info"' \
+  "production Restate logging is not scoped"
+assert_contains "${RESTATE_PATCH_TEXT}" "experimental_enable_vqueues = true" \
+  "production's replacement Restate config drops the base vqueues setting"
 
 echo "Checking that nothing blocks the push path to the collector..."
 # MOA pushes telemetry out; nothing scrapes it. That makes egress from moa-system
@@ -353,5 +465,129 @@ if [[ "${DECLARED_ALERTS}" != "${EXPECTED_SORTED}" ]]; then
     "$(comm -23 "${WORK_DIR}/expected-alerts" "${WORK_DIR}/declared-alerts" | tr '\n' ' ')" \
     "$(comm -13 "${WORK_DIR}/expected-alerts" "${WORK_DIR}/declared-alerts" | tr '\n' ' ')")"
 fi
+
+echo "Cross-checking emitted metrics against repository consumers..."
+[[ -d "${CANONICAL_DASHBOARD_DIR}" ]] \
+  || die "canonical Grafana dashboard directory is missing: ${CANONICAL_DASHBOARD_DIR}"
+GRAFANA_SYNC_SCRIPT_TEXT="$(<"${REPO_ROOT}/scripts/observability/sync-grafana-dashboards.sh")"
+GRAFANA_SYNC_WORKFLOW_TEXT="$(<"${REPO_ROOT}/.github/workflows/sync-grafana-dashboards.yml")"
+assert_contains "${GRAFANA_SYNC_SCRIPT_TEXT}" "dashboards/grafana" \
+  "Grafana sync does not publish the canonical dashboard directory"
+assert_contains "${GRAFANA_SYNC_WORKFLOW_TEXT}" "sync-grafana-dashboards.sh" \
+  "the dashboard sync workflow does not invoke the canonical publisher"
+python3 - "${REPO_ROOT}" "${CANONICAL_DASHBOARD_DIR}" <<'PY' || exit 1
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+dashboard_dir = pathlib.Path(sys.argv[2])
+
+# These low-volume degradation and incident signals are intentionally retained
+# for ad-hoc backend queries even when no checked-in dashboard or alert consumes
+# them. Keeping the exception list here makes every other unconsumed instrument
+# fail closed.
+keepers = {
+    "moa_tool_failure_total",
+    "moa_tool_call_duration_seconds",
+    "moa_tool_reprovision_total",
+    "moa_turn_outcomes_total",
+    "moa_memory_operations_total",
+    "moa_knowledge_sync_runs_total",
+    "moa_retrieval_leg_degraded_total",
+    "moa_retrieval_window_abstained_total",
+    "moa_retrieval_evidence_floor_dropped_total",
+    "moa_retrieval_enrichment_dropped_total",
+    "moa_retrieval_lexical_backend_total",
+    "moa_provider_coordination_degraded_total",
+    "moa_provider_coordination_rejected_total",
+    "moa_llm_retry_budget_exhausted_total",
+    "moa_lineage_malformed_total",
+    "moa_cron_bootstrap_configure_failures_total",
+    "moa_turn_admission_decisions_total",
+    "moa_session_message_admission_decisions_total",
+}
+
+metric_token = re.compile(
+    r"(?:moa|perf_gate)_[a-z0-9_]+|gen_ai(?:\.[a-z0-9_]+)+|gen_ai_[a-z0-9_]+"
+)
+constant = re.compile(
+    r"(?:pub\s+)?const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"
+    r'"((?:moa|perf_gate)_[a-z0-9_]+|gen_ai(?:\.[a-z0-9_]+)+|gen_ai_[a-z0-9_]+)"'
+)
+emission = re.compile(
+    r"(?<!describe_)\b(?:metrics::)?(?:counter|gauge|histogram)!\s*\(\s*"
+    r'(?:"((?:moa|perf_gate)_[a-z0-9_]+|gen_ai(?:\.[a-z0-9_]+)+|gen_ai_[a-z0-9_]+)"'
+    r"|([A-Z][A-Z0-9_]*))"
+)
+
+
+def canonical(name: str) -> str:
+    """Normalize OTLP dotted names and Prometheus histogram series names."""
+    name = name.replace(".", "_")
+    for suffix in ("_bucket", "_sum", "_count", "_created"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+source_files = sorted((root / "crates").glob("**/src/**/*.rs"))
+source_text = {path: path.read_text(encoding="utf-8") for path in source_files}
+constants = {}
+for text in source_text.values():
+    constants.update(constant.findall(text))
+
+emitted = set()
+for path, text in source_text.items():
+    for literal, constant_name in emission.findall(text):
+        name = literal or constants.get(constant_name)
+        if not name:
+            raise SystemExit(
+                f"{path} emits metric through unresolved constant {constant_name}; "
+                "teach validate-observability.sh how to resolve it"
+            )
+        emitted.add(canonical(name))
+
+consumer_files = []
+consumer_files.extend(sorted(dashboard_dir.glob("*.json")))
+consumer_files.extend(sorted((root / "ops/prometheus/alerts").glob("*.yaml")))
+consumer_files.extend(sorted((root / "crates/moa-loadtest").glob("**/*")))
+consumer_files.extend(
+    path
+    for path in sorted((root / "docs").glob("**/*"))
+    if path.is_file() and "engineering-discipline/plans" not in path.as_posix()
+)
+
+referenced = set()
+for path in consumer_files:
+    if not path.is_file():
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    referenced.update(canonical(name) for name in metric_token.findall(text))
+
+canonical_keepers = {canonical(name) for name in keepers}
+stale_keepers = canonical_keepers - emitted
+if stale_keepers:
+    raise SystemExit(
+        "ad-hoc metric keeper allowlist names instruments that are no longer "
+        f"emitted: {', '.join(sorted(stale_keepers))}"
+    )
+
+unreferenced = emitted - referenced - canonical_keepers
+if unreferenced:
+    raise SystemExit(
+        "metrics are emitted but have no alert, canonical dashboard, docs, or "
+        "load-test consumer and are not deliberate ad-hoc keepers: "
+        + ", ".join(sorted(unreferenced))
+    )
+
+print(
+    f"  OK {len(emitted)} emitted metrics are consumed or explicitly retained; "
+    f"canonical dashboards: {dashboard_dir.relative_to(root)}"
+)
+PY
 
 echo "Observability validation OK"

@@ -6,7 +6,6 @@ use restate_sdk::prelude::*;
 pub mod artifact_release_evaluation;
 pub mod consolidate;
 pub(crate) mod errors;
-pub mod execution_node_actions;
 pub mod execution_run;
 pub mod execution_task;
 pub(crate) mod experiment_cancel;

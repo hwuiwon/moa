@@ -78,6 +78,13 @@ manifest_document() {
   ' "${manifest}"
 }
 
+readiness_probe_path() {
+  awk '
+    $1 == "readinessProbe:" { seen_readiness = 1; next }
+    seen_readiness && $1 == "path:" { print $2; exit }
+  ' <<<"$1"
+}
+
 # Pinned kubeconform. A different version can disagree about what strict mode
 # accepts, so a local pass would not predict CI.
 KUBECONFORM_VERSION="v0.7.0"
@@ -130,7 +137,9 @@ validate_manifests() {
   local local_edge_service production_edge_service
   local local_runtime_config production_runtime_config local_key_secret
   local local_restate production_restate
-  local rewrap_job application_content
+  local production_alloy production_alloy_service
+  local local_orchestrator_readiness production_orchestrator_readiness
+  local rewrap_job application_content scoped_rust_log
   work_dir="$(mktemp -d)"
   trap 'rm -rf -- "${work_dir}"' RETURN
   local_manifest="${work_dir}/local.yaml"
@@ -145,6 +154,8 @@ validate_manifests() {
   production_orchestrator="$(manifest_document "${production_manifest}" RestateDeployment moa-orchestrator)"
   local_edge="$(manifest_document "${local_manifest}" Deployment moa-edge)"
   production_edge="$(manifest_document "${production_manifest}" Deployment moa-edge)"
+  local_orchestrator_readiness="$(readiness_probe_path "${local_orchestrator}")"
+  production_orchestrator_readiness="$(readiness_probe_path "${production_orchestrator}")"
   local_orchestrator_service="$(manifest_document "${local_manifest}" Service moa-orchestrator)"
   production_orchestrator_service="$(manifest_document "${production_manifest}" Service moa-orchestrator)"
   local_orchestrator_policy="$(manifest_document "${local_manifest}" NetworkPolicy moa-orchestrator-ingress)"
@@ -153,6 +164,8 @@ validate_manifests() {
   production_edge_service="$(manifest_document "${production_manifest}" Service moa-edge)"
   local_restate="$(manifest_document "${local_manifest}" RestateCluster moa-restate)"
   production_restate="$(manifest_document "${production_manifest}" RestateCluster moa-restate)"
+  production_alloy="$(manifest_document "${production_manifest}" Deployment alloy)"
+  production_alloy_service="$(manifest_document "${production_manifest}" Service alloy)"
   local_runtime_config="$(manifest_document "${local_manifest}" ConfigMap moa-runtime-config)"
   production_runtime_config="$(manifest_document "${production_manifest}" ConfigMap moa-runtime-config)"
   local_key_secret="$(manifest_document "${local_manifest}" Secret moa-kms-root-keys)"
@@ -174,6 +187,14 @@ validate_manifests() {
     "local runtime and migration init must use the same orchestrator image"
   assert_occurrences "${production_orchestrator}" 2 "image: ghcr.io/hwuiwon/moa-orchestrator:latest" \
     "production runtime and migration init must use the same orchestrator image"
+  [[ "${local_orchestrator_readiness}" == "/_health/live" ]] \
+    || die "local orchestrator readiness must use /_health/live for Restate registration bootstrap; found '${local_orchestrator_readiness}'"
+  [[ "${production_orchestrator_readiness}" == "/_health/ready" ]] \
+    || die "production orchestrator readiness must remain /_health/ready; found '${production_orchestrator_readiness}'"
+  assert_contains "${local_edge}" "http://moa-orchestrator:9081/_health/ready" \
+    "local edge init no longer gates traffic on registered orchestrator readiness"
+  assert_excludes "${local_edge}" "http://moa-orchestrator:9081/_health/live" \
+    "local edge init must not admit traffic on orchestrator liveness alone"
   for runtime_config in "${local_runtime_config}" "${production_runtime_config}"; do
     assert_contains "${runtime_config}" "MOA_KMS_PROVIDER: postgres" "runtime config does not select Postgres KMS"
     assert_contains "${runtime_config}" "MOA_KMS_ROOT_KEY_DIR: /var/run/secrets/moa-kms/root-keys" "runtime config has the wrong keyring directory"
@@ -256,6 +277,31 @@ validate_manifests() {
     assert_contains "${workload}" "fieldPath: metadata.uid" \
       "MOA workload telemetry identity is not sourced from the pod UID"
   done
+  scoped_rust_log="value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off"
+  for orchestrator in "${local_orchestrator}" "${production_orchestrator}"; do
+    assert_occurrences "${orchestrator}" 2 "${scoped_rust_log}" \
+      "orchestrator runtime and migration logging must use the exact scoped filter"
+  done
+  for edge in "${local_edge}" "${production_edge}"; do
+    assert_occurrences "${edge}" 1 "${scoped_rust_log}" \
+      "edge logging must use the exact scoped filter"
+  done
+  for workload in \
+    "${local_orchestrator}" \
+    "${production_orchestrator}" \
+    "${local_edge}" \
+    "${production_edge}"; do
+    assert_excludes "${workload}" "name: OTEL_METRIC_EXPORT_INTERVAL" \
+      "MOA workload overrides the code-owned 120 second metric export interval"
+  done
+  assert_contains "${production_orchestrator}" "name: MOA_LINEAGE_SINK" \
+    "production orchestrator does not enable lineage"
+  assert_contains "${production_orchestrator}" "value: postgres" \
+    "production lineage sink is not durable Postgres"
+  assert_contains "${production_orchestrator}" "name: MOA_MEMORY_RETRIEVAL_LINEAGE_SAMPLE_RATE" \
+    "production orchestrator does not cap retrieval lineage detail"
+  assert_contains "${production_orchestrator}" 'value: "0.10"' \
+    "production retrieval lineage sampling is not ten percent"
   for restate in "${local_restate}" "${production_restate}"; do
     assert_contains "${restate}" "node:" \
       "Restate networkPeers does not configure access to the node metrics port"
@@ -264,6 +310,24 @@ validate_manifests() {
     assert_contains "${restate}" "app.kubernetes.io/name: alloy" \
       "Restate networkPeers does not allow the Alloy collector"
   done
+  assert_contains "${production_restate}" \
+    'tracing-endpoint = "http://alloy.observability.svc.cluster.local:4319"' \
+    "production Restate does not send traces to the sampled Alloy receiver"
+  assert_contains "${production_restate}" \
+    'tracing-filter = "warn,restate_ingress_http=info,restate_invoker_impl=info"' \
+    "production Restate trace filter is not scoped"
+  assert_contains "${production_restate}" 'log-filter = "warn,restate=info"' \
+    "production Restate log filter is not scoped"
+  assert_contains "${production_restate}" "experimental_enable_vqueues = true" \
+    "production Restate replacement config drops vqueues"
+  assert_contains "${production_alloy}" "name: restate-otlp" \
+    "production Alloy does not expose the dedicated Restate OTLP receiver"
+  assert_contains "${production_alloy}" "containerPort: 4319" \
+    "production Alloy does not listen for Restate OTLP on port 4319"
+  assert_contains "${production_alloy_service}" "name: restate-otlp" \
+    "production Alloy Service does not expose the Restate OTLP receiver"
+  assert_contains "${production_alloy_service}" "port: 4319" \
+    "production Alloy Service uses the wrong Restate OTLP port"
   for application in "${local_manifest}" "${production_manifest}"; do
     application_content="$(<"${application}")"
     assert_excludes "${application_content}" "name: moa-kms-rewrap" "application overlay installs the KMS rewrap Job"

@@ -55,7 +55,6 @@ impl PostgresSessionStore {
         let tenant_id = meta.tenant_id;
         let tenant_storage_key = StoragePartitionId::for_tenant(tenant_id);
         let actor_storage_key = session_actor_storage_key(meta.created_by.as_ref());
-        let status = meta.status.clone();
         let agent_context = meta.agent_context.clone();
         let sessions = self.table_name("sessions");
         let insert_result = sqlx::query(&format!(
@@ -124,18 +123,15 @@ impl PostgresSessionStore {
         // A conflict means a committed creation is being replayed with the same
         // replay-stable id; leave the existing row and its sidecar untouched so
         // the caller can short-circuit dependent writes.
-        if inserted {
-            if let Some(agent_context) = agent_context.as_ref() {
-                self.insert_session_agent_context_in_tx(
-                    tx,
-                    session_id,
-                    tenant_id,
-                    actor_storage_key.as_str(),
-                    agent_context,
-                )
-                .await?;
-            }
-            record_session_created(&tenant_id, &status);
+        if inserted && let Some(agent_context) = agent_context.as_ref() {
+            self.insert_session_agent_context_in_tx(
+                tx,
+                session_id,
+                tenant_id,
+                actor_storage_key.as_str(),
+                agent_context,
+            )
+            .await?;
         }
 
         Ok(SessionCreateOutcome {

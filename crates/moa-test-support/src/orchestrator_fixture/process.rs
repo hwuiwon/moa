@@ -187,7 +187,6 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env_remove("MOA_MCP_SERVERS_JSON")
         .env_remove("MOA_PROVIDERS_OVERRIDE")
         .env_remove("MOA_SCRIPTED_PROVIDER_REQUEST_LOG")
-        .env_remove("MOA_OBSERVABILITY_ENABLED")
         .env_remove("MOA_OBSERVABILITY_SERVICE_NAME")
         .env_remove("MOA_OBSERVABILITY_OTLP_ENDPOINT")
         .env_remove("MOA_OBSERVABILITY_OTLP_PROTOCOL")
@@ -246,7 +245,6 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         command.env(key, value);
     }
     command
-        .env("MOA_OBSERVABILITY_ENABLED", "true")
         .env(
             "MOA_OBSERVABILITY_SERVICE_NAME",
             config.observability_service_name,

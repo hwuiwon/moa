@@ -476,14 +476,9 @@ async fn load_message_admissions<R: VoReader>(
         .unwrap_or_default())
 }
 
-/// Persists the admission projection and publishes its bounded-cache observability.
-fn persist_message_admissions(
-    ctx: &ObjectContext<'_>,
-    admissions: &SessionMessageAdmissions,
-    evicted: usize,
-) {
+/// Persists the admission projection.
+fn persist_message_admissions(ctx: &ObjectContext<'_>, admissions: &SessionMessageAdmissions) {
     ctx.set(K_MESSAGE_ADMISSIONS, Json::from(admissions.clone()));
-    message_admission::record_admission_evictions(evicted, admissions.len());
 }
 
 fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {

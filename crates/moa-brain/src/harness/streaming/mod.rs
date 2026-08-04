@@ -128,9 +128,14 @@ pub(super) async fn run_streamed_turn(
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
             register_selected_skill_files(tool_router.as_deref(), &session, &mut ctx).await;
             augment_agentic_memory_tools(&mut ctx, tool_router.as_deref());
-            let citation_sources =
-                emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span)
-                    .await;
+            let citation_sources = emit_context_lineage(
+                lineage.as_ref(),
+                turn_id,
+                &session,
+                &ctx,
+                &pipeline_compile_span,
+            )
+            .await;
 
             let mut emit_runtime = |event| {
                 let _ = runtime_tx.send(event);
@@ -147,10 +152,8 @@ pub(super) async fn run_streamed_turn(
             .await?;
 
             let model_dispatch_budget = *resource_budget;
-            let estimated_input_token_count = ctx
-                .tools()
-                .iter()
-                .fold(ctx.token_count, |total, tool| {
+            let estimated_input_token_count =
+                ctx.tools().iter().fold(ctx.token_count, |total, tool| {
                     total.saturating_add(estimate_text_tokens(&tool.to_string()))
                 });
             let estimated_input_tokens =
@@ -179,10 +182,9 @@ pub(super) async fn run_streamed_turn(
             )?;
             let mut request = ctx.into_request();
             if let Some(remaining) = model_dispatch_budget.remaining {
-                let token_budget_cap = usize::try_from(
-                    remaining.tokens.saturating_sub(estimated_input_tokens),
-                )
-                .unwrap_or(usize::MAX);
+                let token_budget_cap =
+                    usize::try_from(remaining.tokens.saturating_sub(estimated_input_tokens))
+                        .unwrap_or(usize::MAX);
                 let cost_budget_cap = affordable_output_tokens(
                     &pricing,
                     usize::try_from(estimated_input_tokens).unwrap_or(usize::MAX),
@@ -290,12 +292,18 @@ pub(super) async fn run_streamed_turn(
                 None,
             )
             .await;
-            llm_call_span.record("gen_ai.response.model", tracing::field::display(&response.model));
+            llm_call_span.record(
+                "gen_ai.response.model",
+                tracing::field::display(&response.model),
+            );
             llm_call_span.record(
                 "gen_ai.usage.input_tokens",
                 response_usage.total_input_tokens() as i64,
             );
-            llm_call_span.record("gen_ai.usage.output_tokens", response_usage.output_tokens as i64);
+            llm_call_span.record(
+                "gen_ai.usage.output_tokens",
+                response_usage.output_tokens as i64,
+            );
             llm_call_span.record(
                 "gen_ai.usage.cache_read.input_tokens",
                 response_usage.input_tokens_cache_read as i64,
@@ -341,7 +349,10 @@ pub(super) async fn run_streamed_turn(
                 if let Err(err) = runtime_tx.send(RuntimeEvent::AssistantFinished {
                     text: streamed.streamed_text,
                 }) {
-                    tracing::warn!(?err, "runtime receiver dropped while sending AssistantFinished");
+                    tracing::warn!(
+                        ?err,
+                        "runtime receiver dropped while sending AssistantFinished"
+                    );
                 }
             }
 
@@ -423,7 +434,8 @@ pub(super) async fn run_streamed_turn(
                                 return Ok(Some(StreamedTurnResult::Cancelled));
                             }
                         }
-                        CompletionContent::Text(_) | CompletionContent::ProviderToolResult { .. } => {}
+                        CompletionContent::Text(_)
+                        | CompletionContent::ProviderToolResult { .. } => {}
                     }
                 }
                 Ok(None)
@@ -445,13 +457,9 @@ pub(super) async fn run_streamed_turn(
                 "moa.session.cache_hit_rate",
                 updated_session.cache_hit_rate(),
             );
-
-            tracing::info!(
-                session_id = %session_id,
-                tool_calls = emitted_tool_calls,
-                stop_reason = ?response.stop_reason,
-                session_cache_hit_rate = %format!("{:.1}%", updated_session.cache_hit_rate() * 100.0),
-                "streamed brain turn completed"
+            turn_span.record(
+                "moa.turn.stop_reason",
+                tracing::field::debug(&response.stop_reason),
             );
 
             if *soft_cancel_requested {

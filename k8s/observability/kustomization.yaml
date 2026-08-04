@@ -29,23 +29,3 @@ configMapGenerator:
     namespace: observability
     files:
       - config.alloy
-
-  # Bundle the checked-in operator dashboards into a ConfigMap. The
-  # `grafana_dashboard` label is the Grafana sidecar convention: a sidecar (or the
-  # Grafana Cloud dashboard-sync job) watches ConfigMaps carrying it and imports
-  # each JSON value as a dashboard. See dashboards/README.md for the import flow
-  # when Grafana runs in Grafana Cloud rather than in-cluster.
-  - name: moa-observability-dashboards
-    namespace: observability
-    files:
-      - dashboards/01-session-health.json
-      - dashboards/02-llm-gateway.json
-      - dashboards/03-restate-internals.json
-      - dashboards/04-sandbox-fleet.json
-    options:
-      # The Grafana sidecar convention selects by this label, and the import flow
-      # in dashboards/README.md refers to the ConfigMap by name, so this one keeps
-      # a stable name.
-      disableNameSuffixHash: true
-      labels:
-        grafana_dashboard: "1"

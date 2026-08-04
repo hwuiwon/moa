@@ -211,10 +211,10 @@ fn cron_bootstrap_client() -> Result<Client> {
 /// retried on the next pass rather than aborting the remaining jobs, so a single
 /// failing job can no longer silently omit later ones (vector-outbox drains,
 /// consolidation, or materialized-view maintenance). The delay between passes
-/// grows exponentially up to `backoff.max`. A degraded gauge and per-pass warn
-/// remain published until every required job is installed. This intentionally
-/// never gives up: leaving required maintenance uninstalled until process
-/// restart is worse than a bounded-backoff background retry.
+/// grows exponentially up to `backoff.max`. A per-pass warning remains published
+/// until every required job is installed. This intentionally never gives up:
+/// leaving required maintenance uninstalled until process restart is worse than
+/// a bounded-backoff background retry.
 async fn reconcile_default_cron_jobs(
     client: &Client,
     ingress_url: &str,
@@ -222,14 +222,12 @@ async fn reconcile_default_cron_jobs(
     backoff: CronReconcileBackoff,
 ) {
     let required = jobs.len();
-    set_cron_pending_gauge(required);
     let mut pending = jobs;
     let mut delay = backoff.initial;
     let mut pass: u32 = 0;
     loop {
         pass += 1;
         pending = configure_pending_cron_jobs(client, ingress_url, pending, pass).await;
-        set_cron_pending_gauge(pending.len());
         if pending.is_empty() {
             tracing::info!(required, passes = pass, "all default cron jobs installed");
             return;
@@ -312,14 +310,6 @@ async fn configure_cron_job(
     }
 
     Ok(())
-}
-
-/// Publishes the count of default cron jobs not yet installed as a degraded gauge.
-///
-/// A non-zero value signals degraded background maintenance readiness; the gauge
-/// returns to zero once every required job is installed.
-fn set_cron_pending_gauge(pending: usize) {
-    metrics::gauge!("moa_cron_bootstrap_jobs_pending").set(pending as f64);
 }
 
 struct DefaultCronJob {

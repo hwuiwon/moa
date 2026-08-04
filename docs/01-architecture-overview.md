@@ -799,9 +799,12 @@ surfaces. Regression eval is never exposed through MCP: MCP must not publish
 domain models, or bypass service-level authorization.
 
 Grafana dashboards live in `dashboards/grafana/` and alert rules live in
-`ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource named
-`DS_POSTGRES` and a Prometheus datasource named `DS_PROMETHEUS`; the tenant
-selector is populated from `analytics.turn_lineage`.
+`ops/prometheus/alerts/`. The `sync-grafana-dashboards` workflow imports the
+dashboards after changes land on `main`, using repository secrets for the
+Grafana URL and dashboard-write service-account token. Postgres panels select a
+datasource named `DS_POSTGRES`; Prometheus panels separately select
+`DS_PROMETHEUS`. The tenant selector is populated from
+`analytics.turn_lineage`.
 
 Telemetry leaves MOA by push, never by scrape: both binaries export traces and
 runtime metrics over OTLP to one collector base URL, and neither exposes a

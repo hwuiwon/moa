@@ -36,8 +36,6 @@ pub(crate) struct BuiltinChallengeDecisionRow {
     pub(crate) status: String,
     /// Persisted denial reason, when denied.
     pub(crate) deny_reason: Option<String>,
-    /// Time when the approval was created, used for decision-latency metrics.
-    pub(crate) created_at: DateTime<Utc>,
     /// Time when a pending decision expires.
     pub(crate) expires_at: DateTime<Utc>,
     /// Time when the terminal decision was delivered to Restate.
@@ -86,7 +84,7 @@ pub(crate) async fn load_builtin_challenge_for_update(
     let row = sqlx::query_as(
         r#"
         SELECT id, deciding_user_id, tenant_id, awakeable_id, status, deny_reason,
-               created_at, expires_at, resolved_at
+               expires_at, resolved_at
         FROM builtin_pending_approvals
         WHERE id = $1
         FOR UPDATE
@@ -113,7 +111,7 @@ pub(crate) async fn update_builtin_challenge_decision(
             decided_by_user_id = $4
         WHERE id = $1
         RETURNING id, deciding_user_id, tenant_id, awakeable_id, status, deny_reason,
-                  created_at, expires_at, resolved_at
+                  expires_at, resolved_at
         "#,
     )
     .bind(update.id)
@@ -125,21 +123,12 @@ pub(crate) async fn update_builtin_challenge_decision(
     .map_err(|error| TerminalError::new(format!("update authz challenge: {error}")).into())
 }
 
-/// Creation-to-decision timing for one builtin approval, for decision metrics.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct BuiltinApprovalTiming {
-    /// When the approval was created.
-    pub(crate) created_at: DateTime<Utc>,
-    /// When the approval reached its terminal decision.
-    pub(crate) decided_at: DateTime<Utc>,
-}
-
 /// Result of one reaper sweep over builtin approvals.
 pub(crate) struct BuiltinChallengeSweep {
     /// Terminal rows still awaiting awakeable delivery.
     pub(crate) unresolved: Vec<UnresolvedBuiltinChallenge>,
-    /// Rows this sweep newly transitioned from pending to timeout.
-    pub(crate) timed_out: Vec<BuiltinApprovalTiming>,
+    /// IDs of rows this sweep newly transitioned from pending to timeout.
+    pub(crate) timed_out: Vec<Uuid>,
 }
 
 /// Mark expired pending challenges and list every terminal row still awaiting delivery.
@@ -148,7 +137,7 @@ pub(crate) async fn unresolved_terminal_builtin_challenges(
 ) -> Result<BuiltinChallengeSweep, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let claim_token = Uuid::new_v4();
-    let timed_out: Vec<BuiltinApprovalTiming> = sqlx::query_as(
+    let timed_out: Vec<Uuid> = sqlx::query_scalar(
         r#"
         UPDATE builtin_pending_approvals
         SET status = 'timeout',
@@ -156,7 +145,7 @@ pub(crate) async fn unresolved_terminal_builtin_challenges(
         WHERE status = 'pending'
           AND expires_at <= NOW()
           AND resolved_at IS NULL
-        RETURNING created_at, decided_at
+        RETURNING id
         "#,
     )
     .fetch_all(&mut *tx)

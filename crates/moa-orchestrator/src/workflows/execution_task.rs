@@ -63,9 +63,6 @@ use crate::{
         GovernedInvocationDisposition, GovernedInvocationOrigin, GovernedInvocationOutcome,
         GovernedInvocationRequest, invoke_governed_tool,
     },
-    workflows::execution_node_actions::{
-        record_applied_run_transition, record_applied_task_retry, record_applied_task_transition,
-    },
     workflows::execution_run::ExecutionRunClient,
 };
 
@@ -222,20 +219,13 @@ impl ExecutionTask for ExecutionTaskImpl {
             let outcome =
                 exhaust_retry_outcome(prepared.task.attempt, &prepared.task.retry, outcome);
             let repository = self.repository.clone();
-            let persist_run = prepared.run.clone();
             let persist_task = prepared.task.clone();
             let persist_outcome = outcome.clone();
             let persisted = ctx
                 .run(|| async move {
-                    persist_task_outcome(
-                        repository,
-                        scope,
-                        persist_run,
-                        persist_task,
-                        persist_outcome,
-                    )
-                    .await
-                    .map(Json::from)
+                    persist_task_outcome(repository, scope, persist_task, persist_outcome)
+                        .await
+                        .map(Json::from)
                 })
                 .name(format!("execution_task_outcome_{operation_index}"))
                 .await?
@@ -456,8 +446,6 @@ async fn prepare_task(
     {
         return Err(TerminalError::new_with_code(409, "execution task scope mismatch").into());
     }
-    let prior_run_status = run.status;
-    let mut run_transition_applied = false;
     let mut task = repository
         .load_task(scope, request.run_uid, request.task_id)
         .await
@@ -479,20 +467,14 @@ async fn prepare_task(
         });
     }
     if task.status == ExecutionTaskStatus::Pending {
-        let prior_status = task.status;
         task = match repository
             .reserve_task(scope, task.run_uid, task.task_id, task.generation)
             .await
             .map_err(execution_error)?
         {
-            ReservationOutcome::Reserved(task) => {
-                record_applied_task_transition(Some(prior_status), &task);
-                task
-            }
+            ReservationOutcome::Reserved(task) => task,
             ReservationOutcome::AlreadyReserved(task) => task,
             ReservationOutcome::Terminalized(terminalized) => {
-                record_applied_run_transition(Some(run.status), &terminalized.run);
-                record_applied_task_transition(Some(prior_status), &terminalized.task);
                 return Ok(PreparedTask {
                     run: terminalized.run,
                     task: terminalized.task,
@@ -519,17 +501,12 @@ async fn prepare_task(
     }
     let mut wake_run = task.status.is_terminal();
     if task.status == ExecutionTaskStatus::Reserved {
-        let prior_task_status = task.status;
         task = match repository
             .mark_task_running(scope, task.run_uid, task.task_id, task.generation)
             .await
             .map_err(execution_error)?
         {
-            TransitionOutcome::Applied(task) => {
-                run_transition_applied = true;
-                record_applied_task_transition(Some(prior_task_status), &task);
-                task
-            }
+            TransitionOutcome::Applied(task) => task,
             TransitionOutcome::AlreadyApplied(task) => task,
             other => {
                 return Err(TerminalError::new(format!(
@@ -545,9 +522,6 @@ async fn prepare_task(
         .await
         .map_err(execution_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?;
-    if run_transition_applied {
-        record_applied_run_transition(Some(prior_run_status), &run);
-    }
     Ok(PreparedTask {
         run,
         task,
@@ -1216,19 +1190,17 @@ async fn invoke_capability_tool(
 async fn persist_task_outcome(
     repository: ExecutionRepository,
     scope: ExecutionScope,
-    prior_run: ExecutionRunRecord,
     task: ExecutionTaskRecord,
     outcome: ExecutionTaskOutcome,
 ) -> Result<PreparedTask, HandlerError> {
-    let prior_task_status = task.status;
     let write = repository
         .record_task_outcome(scope, task.run_uid, task.task_id, task.generation, outcome)
         .await
         .map_err(execution_error)?;
-    let (task, applied, persisted_run) = match write {
-        TaskOutcomeWrite::Applied { run, task, .. } => (task, true, Some(run)),
-        TaskOutcomeWrite::Replayed { run, task, .. } => (task, false, Some(run)),
-        TaskOutcomeWrite::Rejected { task, .. } => (task, false, None),
+    let (task, persisted_run) = match write {
+        TaskOutcomeWrite::Applied { run, task, .. }
+        | TaskOutcomeWrite::Replayed { run, task, .. } => (task, Some(run)),
+        TaskOutcomeWrite::Rejected { task, .. } => (task, None),
         TaskOutcomeWrite::NotFound => {
             return Err(TerminalError::new_with_code(404, "execution task not found").into());
         }
@@ -1241,10 +1213,6 @@ async fn persist_task_outcome(
             .map_err(execution_error)?
             .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?,
     };
-    if applied {
-        record_applied_task_transition(Some(prior_task_status), &task);
-        record_applied_run_transition(Some(prior_run.status), &run);
-    }
     Ok(PreparedTask {
         run,
         task,
@@ -1257,14 +1225,12 @@ async fn retry_task_generation(
     scope: ExecutionScope,
     task: ExecutionTaskRecord,
 ) -> Result<PreparedTask, HandlerError> {
-    let prior_status = task.status;
-    let (task, applied) = match repository
+    let task = match repository
         .retry_task(scope, task.run_uid, task.task_id, task.generation)
         .await
         .map_err(execution_error)?
     {
-        TransitionOutcome::Applied(task) => (task, true),
-        TransitionOutcome::AlreadyApplied(task) => (task, false),
+        TransitionOutcome::Applied(task) | TransitionOutcome::AlreadyApplied(task) => task,
         other => {
             return Err(TerminalError::new(format!(
                 "execution retry transition rejected: {other:?}"
@@ -1277,10 +1243,6 @@ async fn retry_task_generation(
         .await
         .map_err(execution_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?;
-    if applied {
-        record_applied_task_transition(Some(prior_status), &task);
-        record_applied_task_retry(&task);
-    }
     Ok(PreparedTask {
         run,
         task,

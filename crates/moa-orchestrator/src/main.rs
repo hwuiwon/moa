@@ -421,7 +421,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // No task that records metrics or spans remains. Flush both signals only
+    // No task that records logs, metrics, or spans remains. Flush all signals only
     // after their producers have stopped so final drain counters are included.
     telemetry.shutdown();
     Ok(())

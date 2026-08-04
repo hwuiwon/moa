@@ -24,27 +24,30 @@ pub fn emit_retrieval_attrs(span: &Span, record: &RetrievalLineage) {
         ),
     );
     span.set_attribute("openinference.span.kind", Value::from("RETRIEVER"));
-    if let Ok(top_k) = serde_json::to_string(&record.top_k) {
-        span.set_attribute("gen_ai.retrieval.documents", Value::from(top_k));
-    }
-
-    for (idx, hit) in record.vector_hits.iter().take(20).enumerate() {
+    span.set_attribute(
+        "moa.retrieval.vector_hit_count",
+        Value::from(record.vector_hits.len() as i64),
+    );
+    span.set_attribute(
+        "moa.retrieval.selected_hit_count",
+        Value::from(record.selected_hits.len() as i64),
+    );
+    span.set_attribute(
+        "moa.retrieval.top_k_count",
+        Value::from(record.top_k.len() as i64),
+    );
+    if !record.vector_hits.is_empty() {
+        let (maximum, sum) = record
+            .vector_hits
+            .iter()
+            .map(|hit| f64::from(hit.score))
+            .fold((f64::NEG_INFINITY, 0.0), |(maximum, sum), score| {
+                (maximum.max(score), sum + score)
+            });
+        span.set_attribute("moa.retrieval.vector_score.max", Value::from(maximum));
         span.set_attribute(
-            format!("retrieval.documents.{idx}.document.id"),
-            Value::from(hit.chunk_id.to_string()),
-        );
-        span.set_attribute(
-            format!("retrieval.documents.{idx}.document.score"),
-            Value::from(hit.score as f64),
-        );
-        let metadata = serde_json::json!({
-            "source": hit.source,
-            "embedder": hit.embedder,
-            "embed_dim": hit.embed_dim,
-        });
-        span.set_attribute(
-            format!("retrieval.documents.{idx}.document.metadata"),
-            Value::from(metadata.to_string()),
+            "moa.retrieval.vector_score.mean",
+            Value::from(sum / record.vector_hits.len() as f64),
         );
     }
 
@@ -78,10 +81,6 @@ pub fn emit_retrieval_attrs(span: &Span, record: &RetrievalLineage) {
         );
     }
     if let Some(turbopuffer) = &record.introspection.turbopuffer {
-        span.set_attribute(
-            "moa.tpuf.namespace",
-            Value::from(turbopuffer.namespace.clone()),
-        );
         span.set_attribute(
             "moa.tpuf.consistency",
             Value::from(turbopuffer.consistency.clone()),

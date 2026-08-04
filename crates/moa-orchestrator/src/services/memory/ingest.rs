@@ -1,7 +1,5 @@
 //! Document-ingestion request orchestration for the memory service.
 
-use std::time::Instant;
-
 use chrono::Utc;
 use moa_core::{types::contact::ContactId, types::identifiers::SessionId};
 use moa_memory_ingest::{SessionTurn, ingestion_object_key};
@@ -41,7 +39,6 @@ pub(super) async fn ingest_documents_inner(
     request: MemoryIngestRequest,
     contact_id: Option<ContactId>,
 ) -> Result<MemoryIngestResponse, HandlerError> {
-    let started = Instant::now();
     let tenant_id = request.tenant_id;
     let information_barrier = request.information_barrier.clone();
     let mut results = Vec::with_capacity(request.documents.len());
@@ -111,12 +108,7 @@ pub(super) async fn ingest_documents_inner(
         }
     }
 
-    record_memory_operation(
-        "ingest_documents",
-        "success",
-        results.len() as u64,
-        started.elapsed(),
-    );
+    record_memory_operation("ingest_documents", "success");
 
     Ok(MemoryIngestResponse { tenant_id, results })
 }

@@ -302,6 +302,22 @@ fn response_frame_observation_wait(data: &str) -> Option<Duration> {
         .ok()
 }
 
+fn contact_token_issue_request(tenant_id: TenantId) -> ContactTokenIssueRequest {
+    ContactTokenIssueRequest {
+        tenant_id,
+        contact_points: Vec::new(),
+        display_name: Some("moa-loadtest".to_string()),
+        profile: serde_json::Value::Null,
+        metadata: serde_json::Value::Null,
+        requested_scopes: vec![
+            "agent:session:create".to_string(),
+            "contact:session:message:send".to_string(),
+        ],
+        permissions: serde_json::Value::Null,
+        agent_ids: vec![SYSTEM_DEFAULT_AGENT_REVISION_UID.to_string()],
+    }
+}
+
 /// Builds one edge target per pool identity: API key row, FGA grants, and a
 /// contact token per caller. Requires `MOA_DATABASE_URL` for key minting.
 pub(crate) async fn build_edge_backend_pool(
@@ -356,16 +372,7 @@ pub(crate) async fn build_edge_backend_pool(
         let token_response = http
             .post(format!("{edge_endpoint}/v1/contacts/tokens"))
             .bearer_auth(issued.key.expose_secret())
-            .json(&ContactTokenIssueRequest {
-                tenant_id: entry.tenant_id,
-                contact_points: Vec::new(),
-                display_name: Some("moa-loadtest".to_string()),
-                profile: serde_json::Value::Null,
-                metadata: serde_json::Value::Null,
-                requested_scopes: Vec::new(),
-                permissions: serde_json::Value::Null,
-                agent_ids: Vec::new(),
-            })
+            .json(&contact_token_issue_request(entry.tenant_id))
             .send()
             .await
             .map_err(|error| {
@@ -409,6 +416,22 @@ mod tests {
     use moa_core::{events::EventType, types::identifiers::SessionId};
 
     use super::*;
+
+    #[test]
+    fn edge_contact_token_request_allows_default_agent_session_and_messages() {
+        // Pins: the edge load-test client must satisfy the production contact-token
+        // contract instead of sending the now-invalid empty scope and agent lists.
+        let request = contact_token_issue_request(TenantId(Uuid::now_v7()));
+
+        assert_eq!(
+            request.requested_scopes,
+            ["agent:session:create", "contact:session:message:send"]
+        );
+        assert_eq!(
+            request.agent_ids,
+            [SYSTEM_DEFAULT_AGENT_REVISION_UID.to_string()]
+        );
+    }
 
     #[test]
     fn response_frame_observation_wait_uses_event_timestamp() {

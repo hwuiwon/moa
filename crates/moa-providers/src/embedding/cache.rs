@@ -91,14 +91,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             }
         }
 
-        let model = || self.inner.model_id().to_string();
-        metrics::counter!("moa_embedding_cache_hits_total", "model" => model())
-            .increment((inputs.len() - miss_texts.len()) as u64);
-
         if !miss_texts.is_empty() {
-            metrics::counter!("moa_embedding_cache_misses_total", "model" => model())
-                .increment(miss_texts.len() as u64);
-
             let embedded = self.inner.embed(&miss_texts).await?;
             for (position, vector) in miss_positions.iter().zip(embedded) {
                 self.cache

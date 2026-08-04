@@ -22,8 +22,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use moa_brain::execution_planning::request::record_applied_planning_audit;
-use moa_brain::execution_planning::routing::record_applied_route_audit;
 use moa_brain::execution_planning::{
     ExecutionPlanningRequest, ExecutionPlanningResultKind, ExecutionRoutingInput, plan_execution,
     route_execution,
@@ -582,11 +580,7 @@ async fn execute_turn_inside_workflow(
 
                 let turn_latency_snapshot = turn_latency_counters.snapshot();
                 record_turn_latency(turn_started.elapsed());
-                emit_turn_latency_summary(
-                    &turn_root_span,
-                    turn_number as i64,
-                    &turn_latency_snapshot,
-                );
+                emit_turn_latency_summary(&turn_root_span, &turn_latency_snapshot);
                 // Persist gated per-turn coordination/replay/latency for cost analysis and tests.
                 // Snapshots are taken before this append so the telemetry record cannot count
                 // itself.
@@ -607,7 +601,7 @@ async fn execute_turn_inside_workflow(
         )
         .await?;
         let turn_snapshot = turn_counters.snapshot();
-        emit_turn_replay_summary(&turn_root_span, turn_number as i64, &turn_snapshot);
+        emit_turn_replay_summary(&turn_root_span, &turn_snapshot);
         let turn_coordination_snapshot = turn_coordination_counters.snapshot();
         emit_turn_coordination_summary(&turn_root_span, &turn_coordination_snapshot);
 
@@ -891,7 +885,6 @@ async fn persist_planning_audit(
                 .name(format!("execution_route_audit_{durable_step_suffix}"))
                 .await?
                 .into_inner();
-            record_applied_route_audit(&result);
             if matches!(result, RouteAuditWriteOutcome::Conflict { .. }) {
                 return Err(planning_audit_conflict());
             }
@@ -910,7 +903,6 @@ async fn persist_planning_audit(
                 .name(format!("execution_planner_audit_{durable_step_suffix}"))
                 .await?
                 .into_inner();
-            record_applied_planning_audit(&result);
             if matches!(result, PlannerCallAuditWriteOutcome::Conflict { .. }) {
                 return Err(planning_audit_conflict());
             }
@@ -929,7 +921,6 @@ async fn persist_planning_audit(
                 .name(format!("execution_compile_audit_{durable_step_suffix}"))
                 .await?
                 .into_inner();
-            record_applied_planning_audit(&result);
             if matches!(result, CompileAuditWriteOutcome::Conflict { .. }) {
                 return Err(planning_audit_conflict());
             }

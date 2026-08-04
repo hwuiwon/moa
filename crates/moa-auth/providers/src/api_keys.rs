@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng as SaltOsRng};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, Utc};
-use moa_observability::record_api_key_validation_duration;
 use moka::future::Cache;
 use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};
@@ -341,9 +340,8 @@ pub struct ResolvedKey {
 
 /// Validate a presented key and return its owner identity.
 pub async fn validate(pool: &sqlx::PgPool, presented: &str) -> Result<ResolvedKey, ApiKeyError> {
-    let started = Instant::now();
     let cache_key = validation_cache_key(presented);
-    let result = if let Some(cached) = validation_cache().get(&cache_key).await {
+    if let Some(cached) = validation_cache().get(&cache_key).await {
         validate_cached_resolution(pool, cache_key, cached).await
     } else {
         let result = validate_inner(pool, presented).await;
@@ -351,10 +349,7 @@ pub async fn validate(pool: &sqlx::PgPool, presented: &str) -> Result<ResolvedKe
             cache_successful_validation(cache_key, resolved).await;
         }
         result
-    };
-    let label = if result.is_ok() { "success" } else { "failure" };
-    record_api_key_validation_duration(label, started.elapsed());
-    result
+    }
 }
 
 async fn validate_cached_resolution(

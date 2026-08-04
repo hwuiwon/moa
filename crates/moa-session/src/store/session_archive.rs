@@ -354,7 +354,6 @@ impl PostgresSessionStore {
                 token_count: archived.token_count.map(|count| count as usize),
             });
         }
-        record_session_event_load(records.len() as u64);
         record_session_event_replay(
             records.len(),
             archive.payload_bytes.max(0) as u64,

@@ -42,8 +42,7 @@ pub use routing::{
     EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS, EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS,
     EXECUTION_ROUTER_MAX_OUTPUT_TOKENS, EXECUTION_ROUTER_PROMPT_VERSION,
     EXECUTION_ROUTER_RESPONSE_MAX_BYTES, ExecutionRouteClassifierLabel,
-    ExecutionRouteClassifierOutput, ExecutionRoutingInput, record_applied_route_audit,
-    route_execution,
+    ExecutionRouteClassifierOutput, ExecutionRoutingInput, route_execution,
 };
 
 /// Raw planner candidate bytes are capped before parse or compilation.

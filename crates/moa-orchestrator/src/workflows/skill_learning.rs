@@ -321,8 +321,6 @@ pub async fn run_skill_learning_for_experience(
     )
     .await?;
 
-    record_distilled_candidate_filed(&outcome, candidate_source(&request));
-
     // For a recurrence dispatch, feed the remaining cluster members through the
     // sibling-accumulation path so each member's suite remains held-out from the
     // draft it later evaluates. Best-effort per member: a load or suite-generation
@@ -373,15 +371,6 @@ fn dispatch_evidence(config: &MoaConfig, request: &RunSkillLearningRequest) -> D
                 relaxed_min_tool_calls: config.learning.recurrence.relaxed_min_tool_calls,
             })
         }
-    }
-}
-
-/// The loop-stage `source` label a filed candidate is metered under.
-fn candidate_source(request: &RunSkillLearningRequest) -> &'static str {
-    if request.recurrence.is_some() {
-        "recurrence_mined"
-    } else {
-        "distilled"
     }
 }
 
@@ -511,35 +500,6 @@ async fn sanitize_experience_evidence(
             rejection.code()
         )
     })
-}
-
-/// Records a filed skill candidate for loop observability under a source stage.
-///
-/// `source` is the loop stage that filed it: `distilled` for a single-session
-/// dispatch, `recurrence_mined` for a recurrence-cron dispatch. Metric recording
-/// never affects the distillation outcome. See [`distilled_candidate_kind`] for
-/// the outcome-to-kind mapping.
-fn record_distilled_candidate_filed(outcome: &DistillationOutcome, source: &str) {
-    if let Some(kind) = distilled_candidate_kind(outcome) {
-        moa_observability::runtime_metrics::record_skill_learning_candidates_filed(source, kind, 1);
-    }
-}
-
-/// Maps a distillation outcome onto the bounded `kind` label it files under, or
-/// `None` when the outcome filed no new candidate.
-///
-/// A new-skill draft counts as `created` and an accepted improvement draft as
-/// `improved`. Dedupe hits, unchanged improvements, and skips file nothing.
-fn distilled_candidate_kind(outcome: &DistillationOutcome) -> Option<&'static str> {
-    match outcome {
-        DistillationOutcome::NewSkillProposed { .. } => Some("created"),
-        DistillationOutcome::ImprovementProposed {
-            proposal: Some(_), ..
-        } => Some("improved"),
-        DistillationOutcome::DedupedOntoOpenProposal { .. }
-        | DistillationOutcome::ImprovementProposed { .. }
-        | DistillationOutcome::Skipped { .. } => None,
-    }
 }
 
 /// Appends the warning event used when detached skill-learning generation fails.
@@ -696,68 +656,7 @@ fn skipped_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::types::memory::SkillMetadata;
     use moa_skills::distiller::DistillationSkipReason;
-    use moa_skills::proposals::{EditableSurface, SkillDraftProposal, SkillProposalOperation};
-
-    fn proposal() -> SkillDraftProposal {
-        SkillDraftProposal {
-            candidate_id: Uuid::now_v7(),
-            draft_artifact_revision_uid: Uuid::now_v7(),
-            metadata: SkillMetadata {
-                artifact_revision_uid: None,
-                path: "tenants/x/skills/resynth-flow/SKILL.md".to_string(),
-                name: "resynth-flow".to_string(),
-                description: "recurring workflow".to_string(),
-                tags: Vec::new(),
-                allowed_tools: Vec::new(),
-                actions: Vec::new(),
-                has_execution_plan: false,
-                estimated_tokens: 100,
-            },
-            operation: SkillProposalOperation::Created,
-            surface: EditableSurface::SkillMarkdown,
-        }
-    }
-
-    #[test]
-    fn distilled_candidate_kind_maps_each_filed_outcome() {
-        // Pins: the bounded `kind` label the loop metric files under. A fresh new/improved
-        // draft files created/improved; every non-filing outcome (dedupe, unchanged
-        // improvement, skip) files nothing.
-        assert_eq!(
-            distilled_candidate_kind(&DistillationOutcome::NewSkillProposed {
-                proposal: proposal(),
-            }),
-            Some("created")
-        );
-        assert_eq!(
-            distilled_candidate_kind(&DistillationOutcome::ImprovementProposed {
-                existing_skill_id: "resynth-flow".to_string(),
-                proposal: Some(proposal()),
-            }),
-            Some("improved")
-        );
-        assert_eq!(
-            distilled_candidate_kind(&DistillationOutcome::DedupedOntoOpenProposal {
-                proposal: proposal(),
-            }),
-            None
-        );
-        assert_eq!(
-            distilled_candidate_kind(&DistillationOutcome::ImprovementProposed {
-                existing_skill_id: "resynth-flow".to_string(),
-                proposal: None,
-            }),
-            None
-        );
-        assert_eq!(
-            distilled_candidate_kind(&DistillationOutcome::Skipped {
-                reason: DistillationSkipReason::UnlearnableOutcome,
-            }),
-            None
-        );
-    }
 
     #[test]
     fn proposed_generation_reports_candidate_and_draft_ids() {

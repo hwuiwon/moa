@@ -17,8 +17,6 @@ use moa_core::{
         identifiers::ModelId,
     },
 };
-use moa_execution::repository::RouteAuditWriteOutcome;
-use moa_observability::record_execution_route;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -267,20 +265,6 @@ pub async fn route_execution(
             duration_micros,
         },
     })
-}
-
-/// Emits route metrics only when the durable audit boundary inserted first evidence.
-pub fn record_applied_route_audit(result: &RouteAuditWriteOutcome) {
-    let RouteAuditWriteOutcome::Applied(evidence) = result else {
-        return;
-    };
-    record_execution_route(
-        evidence.decision,
-        evidence.strategy,
-        evidence.provenance.source,
-        evidence.provenance.classifier_outcome,
-        evidence.provenance.duration_micros,
-    );
 }
 
 fn classifier_request(input: &ExecutionRoutingInput<'_>) -> Result<CompletionRequest> {

@@ -169,7 +169,6 @@ impl SharedWriterState {
             Ordering::Relaxed,
         );
         metrics::counter!("moa_lineage_written_total").increment(rows);
-        metrics::counter!("moa_lineage_flushed_total").increment(rows);
     }
 
     pub(super) fn record_claim_poll(&self) {

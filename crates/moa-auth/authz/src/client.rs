@@ -150,7 +150,7 @@ impl FgaClient {
     }
 
     /// Check whether `user` has `relation` on `object`.
-    #[tracing::instrument(skip(self), fields(store_id = %self.inner.store_id, relation = %relation, object = %object))]
+    #[tracing::instrument(level = "debug", skip(self), fields(store_id = %self.inner.store_id, relation = %relation, object = %object))]
     pub async fn check(
         &self,
         user: &str,

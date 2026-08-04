@@ -122,7 +122,7 @@ impl SessionMessageAdmissions {
         response: StartTurnResponse,
         state: MessageAdmissionState,
         now: DateTime<Utc>,
-    ) -> usize {
+    ) {
         let state = self.assign_terminal_ordinal(state);
         self.entries.push(MessageAdmission {
             client_message_id,
@@ -130,7 +130,7 @@ impl SessionMessageAdmissions {
             response,
             state,
         });
-        self.evict_expired(now)
+        self.evict_expired(now);
     }
 
     /// Binds a queued admission to the turn the queue just dispatched for it.
@@ -157,24 +157,21 @@ impl SessionMessageAdmissions {
     }
 
     /// Marks the admission that started `turn_id` terminal and evicts past the window.
-    pub(super) fn mark_terminal_for_turn(
-        &mut self,
-        turn_id: &str,
-        now: DateTime<Utc>,
-    ) -> (bool, usize) {
+    pub(super) fn mark_terminal_for_turn(&mut self, turn_id: &str, now: DateTime<Utc>) -> bool {
         let matched = self
             .entries
             .iter()
             .position(|entry| matches!(&entry.state, MessageAdmissionState::Running { turn_id: running } if running == turn_id));
         let Some(index) = matched else {
-            return (false, 0);
+            return false;
         };
         let state = self.assign_terminal_ordinal(MessageAdmissionState::Terminal {
             at: now,
             ordinal: 0,
         });
         self.entries[index].state = state;
-        (true, self.evict_expired(now))
+        self.evict_expired(now);
+        true
     }
 
     /// Marks one admission terminal directly, for work that resolves without a turn.
@@ -201,7 +198,8 @@ impl SessionMessageAdmissions {
         true
     }
 
-    /// Returns how many live admissions are recorded, for observability and tests.
+    /// Returns how many live admissions are recorded for projection tests.
+    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -319,18 +317,6 @@ pub(super) fn resolve_message_routing(
 pub(super) fn record_admission_decision(outcome: &'static str) {
     metrics::counter!("moa_session_message_admission_decisions_total", "outcome" => outcome)
         .increment(1);
-}
-
-/// Records how many terminal admissions left the guarantee window.
-///
-/// A nonzero count means those client message ids are admissible again as new work, so
-/// this is the signal that the declared 24-hour / 256-newer-entry window is binding.
-pub(super) fn record_admission_evictions(evicted: usize, live: usize) {
-    if evicted > 0 {
-        metrics::counter!("moa_session_message_admission_evictions_total")
-            .increment(evicted as u64);
-    }
-    metrics::gauge!("moa_session_message_admissions_live").set(live as f64);
 }
 
 #[cfg(test)]
@@ -518,8 +504,7 @@ mod tests {
             now,
         );
 
-        let (matched, _) = admissions.mark_terminal_for_turn("turn-1", now);
-        assert!(matched);
+        assert!(admissions.mark_terminal_for_turn("turn-1", now));
         assert!(matches!(
             admissions.state_of(&first),
             Some(MessageAdmissionState::Terminal { .. })
@@ -529,7 +514,7 @@ mod tests {
             Some(&MessageAdmissionState::Queued)
         );
         assert!(
-            !admissions.mark_terminal_for_turn("turn-unknown", now).0,
+            !admissions.mark_terminal_for_turn("turn-unknown", now),
             "an outcome for an unknown turn resolves no admission"
         );
     }

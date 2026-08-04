@@ -2,11 +2,8 @@
 
 use super::*;
 use super::{
-    materialize::reconcile_outcome_usage,
-    outcome_support::*,
-    rows::*,
-    sql::*,
-    transition::{run_transition_evidence, task_outcome_is_exact_replay, task_transition_evidence},
+    materialize::reconcile_outcome_usage, outcome_support::*, rows::*, sql::*,
+    transition::task_outcome_is_exact_replay,
 };
 
 impl ExecutionRepository {
@@ -468,7 +465,6 @@ impl ExecutionRepository {
             "recorded_at": Utc::now(),
         });
         let active_plan = serde_json::to_value(&validated.active_plan)?;
-        let prior_run_status = run.status;
         let row = sqlx::query(APPEND_AMENDMENT_SQL)
             .bind(run_uid)
             .bind(to_i64(expected_revision, "expected plan revision")?)
@@ -509,7 +505,7 @@ impl ExecutionRepository {
             return Ok(AmendmentWrite::Conflict);
         };
         let run = run_from_row(&row)?;
-        let superseded_task_row = sqlx::query(SUPERSEDE_REPLAN_TASK_SQL)
+        sqlx::query(SUPERSEDE_REPLAN_TASK_SQL)
             .bind(run_uid)
             .bind(task.task_id.as_uuid())
             .bind(task_audit)
@@ -517,18 +513,10 @@ impl ExecutionRepository {
             .fetch_one(conn.as_mut())
             .await
             .map_err(sqlx_error)?;
-        let superseded_task = task_from_row(&superseded_task_row)?;
-        let metrics = ExecutionMutationMetricEvidence {
-            run: run_transition_evidence(prior_run_status, &run),
-            tasks: vec![task_transition_evidence(task.status, &superseded_task)],
-        };
         conn.commit().await.map_err(storage_error)?;
-        Ok(AmendmentWrite::Applied {
-            commit: Box::new(AmendmentCommit {
-                run,
-                task_ids_to_release: vec![task.task_id],
-            }),
-            metrics: Box::new(metrics),
-        })
+        Ok(AmendmentWrite::Applied(Box::new(AmendmentCommit {
+            run,
+            task_ids_to_release: vec![task.task_id],
+        })))
     }
 }

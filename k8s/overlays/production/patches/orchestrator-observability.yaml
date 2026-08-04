@@ -1,23 +1,23 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_OBSERVABILITY_ENABLED
-    value: "true"
-- op: add
-  path: /spec/template/spec/containers/0/env/-
-  value:
     name: MOA_OBSERVABILITY_OTLP_ENDPOINT
-    value: http://alloy.observability.svc.cluster.local:4318
-- op: add
-  path: /spec/template/spec/containers/0/env/-
-  value:
-    name: MOA_OBSERVABILITY_OTLP_PROTOCOL
-    value: http
+    value: http://alloy.observability.svc.cluster.local:4317
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
     name: MOA_OBSERVABILITY_ENVIRONMENT
     value: production
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_LINEAGE_SINK
+    value: postgres
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_MEMORY_RETRIEVAL_LINEAGE_SAMPLE_RATE
+    value: "0.10"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:

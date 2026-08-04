@@ -107,7 +107,7 @@ the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 |---|---|
 | Neon branching | Database checkpoint/rollback support |
 | External secret manager | Deployment-time injection for provider/operator secrets; tenant connector credential series remain in the Postgres/KMS-backed `CredentialVault` |
-| Grafana/Tempo/Mimir stack | Metrics and traces. MOA pushes both signals over OTLP to one collector base URL and exposes no scrape port; `MOA_METRICS_EXPORTER=prometheus` is a development-only mode |
+| Grafana/Loki/Tempo/Mimir stack | Logs, metrics, and traces. MOA pushes all three signals over OTLP to one collector base URL and exposes no scrape port; `MOA_METRICS_EXPORTER=prometheus` is a development-only mode |
 | Messaging platforms | Slack adapter |
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
 | Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
@@ -155,7 +155,7 @@ exclusive transitive dependencies add about nine seconds to a cold build.
 
 ## Observability Collection And Alert Delivery
 
-MOA pushes both signals; nothing scrapes MOA. Production runs the orchestrator
+MOA pushes application logs, metrics, and traces; nothing scrapes MOA. Production runs the orchestrator
 and edge behind non-sticky Services with autoscaled replica counts, so a scrape
 through the Service lands on an arbitrary replica each interval and produces a
 series that blends unrelated processes — counters go backwards, gauges flip, and
@@ -179,6 +179,13 @@ Alert rules are `PrometheusRule` resources under `ops/prometheus/alerts/`,
 rendered by `k8s/observability` and synchronized into Mimir by that component.
 A rule missing the `moa.dev/rule-sync` label is deployed to the cluster and
 evaluated by nothing.
+
+Grafana dashboards are separate from Kubernetes delivery. Their canonical JSON
+lives under `dashboards/grafana/`, and the `sync-grafana-dashboards` GitHub
+workflow imports every dashboard through Grafana's dashboard API after changes
+land on `main`. Stable dashboard UIDs plus overwrite mode make that operation
+idempotent. The required service-account credentials and optional destination
+folder are documented beside the dashboards.
 
 Two settings on `otelcol.exporter.prometheus` are load-bearing and easy to
 misread as defaults worth keeping. `add_metric_suffixes = false` stops the

@@ -12,4 +12,4 @@ Useful eval references:
 - [Evaluation spec](../../docs/16-evaluation.md)
 - [Memory eval pipeline](../../docs/eval/memory-eval-pipeline.md)
 - [Recording protocol](scenarios/long_conversation/RECORDING.md)
-- [Grafana dashboard](../../dashboards/long-conversation-eval.json)
+- [Grafana dashboard](../../dashboards/grafana/moa-long-conversation-eval.json)

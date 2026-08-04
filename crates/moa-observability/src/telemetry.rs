@@ -2,11 +2,13 @@
 
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::tonic_types::metadata::MetadataMap;
 use opentelemetry_otlp::{
-    Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
+    LogExporter, Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -26,14 +28,15 @@ use moa_core::{error::MoaError, error::Result};
 
 /// Owns the configured OTLP providers for the process lifetime.
 ///
-/// Both signals live here. A guard that owned only the tracer would flush spans
-/// at shutdown and silently discard whatever the metric exporter had buffered,
-/// which is exactly the window in which the most interesting metrics (the drain,
-/// the backlog, the final counters) are produced.
+/// All three OTLP signal providers live here. A guard that owned only the tracer
+/// would flush spans at shutdown and silently discard buffered metrics and logs,
+/// which is exactly the window in which the most interesting drain and failure
+/// telemetry is produced.
 #[derive(Debug, Default)]
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
 }
 
 impl TelemetryGuard {
@@ -42,16 +45,17 @@ impl TelemetryGuard {
         Self {
             provider: None,
             meter_provider: None,
+            logger_provider: None,
         }
     }
 
-    /// Flushes and shuts both providers down, in the order that keeps data.
+    /// Flushes and shuts all providers down, in the order that keeps data.
     ///
     /// Consuming, so a binary cannot call it and then keep exporting into a
     /// provider that has already been shut down. Metrics are flushed before
     /// traces because the metric exporter aggregates over an interval and holds
-    /// the most unexported state; tracing is span-per-event and its batch
-    /// exporter is closer to caught up at any instant.
+    /// the most unexported state. Logs shut down last so warnings from metric or
+    /// trace shutdown still have an active structured-log path.
     ///
     /// [`Drop`] remains a best-effort backstop for paths that exit without
     /// calling this, but it cannot report failures and runs at an unpredictable
@@ -67,6 +71,11 @@ impl TelemetryGuard {
         {
             tracing::warn!(%error, "OTLP tracer provider shutdown failed; traces may be lost");
         }
+        if let Some(logger_provider) = self.logger_provider.take()
+            && let Err(error) = logger_provider.shutdown()
+        {
+            tracing::warn!(%error, "OTLP logger provider shutdown failed; logs may be lost");
+        }
     }
 }
 
@@ -77,6 +86,9 @@ impl Drop for TelemetryGuard {
         }
         if let Some(provider) = self.provider.take() {
             let _ = provider.shutdown();
+        }
+        if let Some(logger_provider) = self.logger_provider.take() {
+            let _ = logger_provider.shutdown();
         }
     }
 }
@@ -116,30 +128,26 @@ pub fn init_observability(
         )
     };
 
-    // The resource identity is built once and used for BOTH signals. Traces and
-    // metrics that disagree about service.name, deployment.environment or
-    // service.version cannot be correlated at all, and the disagreement is
-    // invisible until someone tries to join them in a query.
+    // The resource identity is built once and used for all three signals.
+    // Traces, metrics, and logs that disagree about service.name,
+    // deployment.environment, or service.version cannot be correlated at all,
+    // and the disagreement is invisible until someone tries to join them.
     let resource = build_resource(&config.observability);
     let otlp_base = config.observability.otlp_endpoint.as_deref();
     let otlp_protocol = config.observability.otlp_protocol;
 
-    if !config.observability.enabled {
+    if otlp_base.is_none() {
         let _ = tracing_subscriber::registry()
             .with(console_layer)
             .try_init();
-        // `observability.enabled` is the master switch for OTLP export, and it
-        // governs BOTH signals. Installing an OTLP meter provider here would
-        // have every default-config process pushing at a collector the operator
-        // never said existed, while traces stayed correctly off - the same
-        // one-signal-on, one-signal-off split this task exists to remove. The
-        // scrape and disabled exporters are unaffected: neither needs a
-        // collector.
+        // Collector endpoint presence is the sole OTLP switch and governs all
+        // signals. The scrape and disabled metric exporters are unaffected:
+        // neither needs a collector.
         let metrics = match config.metrics.exporter {
             MetricsExporter::Otlp => {
                 tracing::info!(
                     "runtime metrics are not exported: metrics.exporter is `otlp` but \
-                     observability.enabled is false, so there is no configured collector"
+                     observability.otlp_endpoint is absent, so there is no configured collector"
                 );
                 &MetricsConfig {
                     exporter: MetricsExporter::Disabled,
@@ -158,23 +166,32 @@ pub fn init_observability(
         return Ok(TelemetryGuard {
             provider: None,
             meter_provider,
+            logger_provider: None,
         });
     }
 
-    let exporter = build_span_exporter(&config.observability)?;
+    let span_exporter = build_span_exporter(&config.observability)?;
     let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
+        .with_batch_exporter(span_exporter)
         .with_resource(resource.clone())
         .with_sampler(build_sampler(config.observability.sample_rate))
         .build();
     let tracer = provider.tracer(config.observability.service_name.clone());
-    let otel_layer = tracing_opentelemetry::layer()
+    let span_layer = tracing_opentelemetry::layer()
         .with_tracer(tracer)
         .with_filter(LevelFilter::INFO);
+    let log_exporter = build_log_exporter(&config.observability)?;
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(log_exporter)
+        .with_resource(resource.clone())
+        .build();
+    let log_layer =
+        OpenTelemetryTracingBridge::new(&logger_provider).with_filter(configured_otlp_log_filter());
 
     let _ = tracing_subscriber::registry()
         .with(console_layer)
-        .with(otel_layer)
+        .with(span_layer)
+        .with(log_layer)
         .try_init();
     let meter_provider = init_metrics(
         &config.metrics,
@@ -187,12 +204,34 @@ pub fn init_observability(
     Ok(TelemetryGuard {
         provider: Some(provider),
         meter_provider,
+        logger_provider: Some(logger_provider),
     })
 }
 
 fn configured_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_env_filter_directive()))
+}
+
+fn configured_otlp_log_filter() -> EnvFilter {
+    let mut filter = configured_env_filter();
+    // Exporter dependencies can log failures through `tracing`. Sending those
+    // records back through the same failing exporter creates a telemetry loop.
+    // Static directives cannot fail in practice; retaining the prior filter on
+    // a parse failure is safer than making logging initialization fallible.
+    for directive in [
+        "opentelemetry=off",
+        "opentelemetry_otlp=off",
+        "hyper=off",
+        "h2=off",
+        "tonic=off",
+        "reqwest=off",
+    ] {
+        if let Ok(directive) = directive.parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
+    filter
 }
 
 fn default_env_filter_directive() -> &'static str {
@@ -230,6 +269,45 @@ fn build_span_exporter(config: &ObservabilityConfig) -> Result<SpanExporter> {
                     endpoint,
                     OtlpProtocol::Http,
                     moa_config::OtlpSignal::Traces,
+                )?);
+            }
+            if !config.otlp_headers.is_empty() {
+                exporter = exporter.with_headers(config.otlp_headers.clone());
+            }
+            exporter
+                .build()
+                .map_err(|error| MoaError::ProviderError(error.to_string()))
+        }
+    }
+}
+
+fn build_log_exporter(config: &ObservabilityConfig) -> Result<LogExporter> {
+    match config.otlp_protocol {
+        OtlpProtocol::Grpc => {
+            let mut exporter = LogExporter::builder().with_tonic();
+            if let Some(endpoint) = config.otlp_endpoint.as_ref() {
+                exporter = exporter.with_endpoint(moa_config::otlp_signal_endpoint(
+                    endpoint,
+                    OtlpProtocol::Grpc,
+                    moa_config::OtlpSignal::Logs,
+                )?);
+            }
+            if !config.otlp_headers.is_empty() {
+                exporter = exporter.with_metadata(build_grpc_metadata(&config.otlp_headers)?);
+            }
+            exporter
+                .build()
+                .map_err(|error| MoaError::ProviderError(error.to_string()))
+        }
+        OtlpProtocol::Http => {
+            let mut exporter = LogExporter::builder()
+                .with_http()
+                .with_protocol(Protocol::HttpBinary);
+            if let Some(endpoint) = config.otlp_endpoint.as_ref() {
+                exporter = exporter.with_endpoint(moa_config::otlp_signal_endpoint(
+                    endpoint,
+                    OtlpProtocol::Http,
+                    moa_config::OtlpSignal::Logs,
                 )?);
             }
             if !config.otlp_headers.is_empty() {
@@ -280,16 +358,18 @@ fn build_sampler(sample_rate: f64) -> Sampler {
         1.0
     };
 
-    if normalized <= 0.0 {
+    let root_sampler = if normalized <= 0.0 {
         Sampler::AlwaysOff
     } else if normalized < 1.0 {
         Sampler::TraceIdRatioBased(normalized)
     } else {
         Sampler::AlwaysOn
-    }
+    };
+
+    Sampler::ParentBased(Box::new(root_sampler))
 }
 
-/// Builds validated gRPC metadata shared by trace and metric OTLP exporters.
+/// Builds validated gRPC metadata shared by trace, metric, and log OTLP exporters.
 pub(crate) fn build_grpc_metadata(
     headers: &std::collections::HashMap<String, String>,
 ) -> Result<MetadataMap> {
@@ -312,14 +392,95 @@ fn build_http_headers(headers: &std::collections::HashMap<String, String>) -> Re
 
 #[cfg(test)]
 mod tests {
-    use opentelemetry::{Key, Value};
+    use opentelemetry::trace::{
+        SamplingDecision, SpanContext, SpanId, SpanKind, TraceContextExt, TraceFlags, TraceId,
+        TraceState,
+    };
+    use opentelemetry::{Context, Key, Value};
+    use opentelemetry_sdk::trace::ShouldSample;
 
     use super::*;
 
+    fn sampling_decision(
+        sampler: &Sampler,
+        parent_context: Option<&Context>,
+        trace_id: TraceId,
+    ) -> SamplingDecision {
+        sampler
+            .should_sample(
+                parent_context,
+                trace_id,
+                "sampler-test",
+                &SpanKind::Internal,
+                &[],
+                &[],
+            )
+            .decision
+    }
+
+    fn remote_parent_context(sampled: bool) -> Context {
+        let trace_flags = if sampled {
+            TraceFlags::SAMPLED
+        } else {
+            TraceFlags::default()
+        };
+        Context::new().with_remote_span_context(SpanContext::new(
+            TraceId::from(1),
+            SpanId::from(1),
+            trace_flags,
+            true,
+            TraceState::default(),
+        ))
+    }
+
+    #[test]
+    fn sampler_honors_parent_decisions_for_every_root_policy() {
+        // Pins: an upstream sampled or unsampled decision wins even when this
+        // service's normalized root policy would make the opposite decision.
+        let sampled_parent = remote_parent_context(true);
+        let unsampled_parent = remote_parent_context(false);
+
+        for sample_rate in [0.0, 0.5, 1.0] {
+            let sampler = build_sampler(sample_rate);
+            assert_eq!(
+                sampling_decision(&sampler, Some(&sampled_parent), TraceId::from(u128::MAX)),
+                SamplingDecision::RecordAndSample,
+                "sampled parent must override the root policy at sample_rate={sample_rate}"
+            );
+            assert_eq!(
+                sampling_decision(&sampler, Some(&unsampled_parent), TraceId::from(1)),
+                SamplingDecision::Drop,
+                "unsampled parent must override the root policy at sample_rate={sample_rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampler_preserves_normalized_policy_for_root_spans() {
+        // Pins: wrapping the sampler to honor parents does not change the
+        // AlwaysOff, ratio-based, or AlwaysOn decisions for root spans.
+        assert_eq!(
+            sampling_decision(&build_sampler(0.0), None, TraceId::from(1)),
+            SamplingDecision::Drop
+        );
+        assert_eq!(
+            sampling_decision(&build_sampler(0.5), None, TraceId::from(1)),
+            SamplingDecision::RecordAndSample
+        );
+        assert_eq!(
+            sampling_decision(&build_sampler(0.5), None, TraceId::from(u128::MAX)),
+            SamplingDecision::Drop
+        );
+        assert_eq!(
+            sampling_decision(&build_sampler(1.0), None, TraceId::from(u128::MAX)),
+            SamplingDecision::RecordAndSample
+        );
+    }
+
     #[test]
     fn resource_shares_environment_release_and_instance_identity() {
-        // Pins: traces and metrics clone one resource whose instance identity
-        // separates otherwise identical replicas in the telemetry backend.
+        // Pins: traces, metrics, and logs clone one resource whose instance
+        // identity separates otherwise identical replicas in the backend.
         let resource = build_resource_with_instance(
             &ObservabilityConfig {
                 service_name: "moa".to_string(),
@@ -349,12 +510,10 @@ mod tests {
     }
 
     #[test]
-    fn init_observability_disabled_exports_neither_signal() {
-        // Pins: `observability.enabled = false` turns OFF both signals. The
-        // metrics exporter now defaults to `otlp`, so without this the default
-        // configuration would push runtime metrics at a collector nobody
-        // configured while traces stayed off - one signal on and one off, which
-        // is the exact split this task removes.
+    fn missing_endpoint_exports_no_otlp_signals() {
+        // Pins: endpoint absence turns off all OTLP signals. The metrics exporter
+        // defaults to `otlp`, so it must not push at the SDK's localhost default
+        // while traces and logs remain off.
         let config = MoaConfig::default();
         assert_eq!(
             config.metrics.exporter,
@@ -374,31 +533,39 @@ mod tests {
             guard.meter_provider.is_none(),
             "no meter provider either: OTLP export is disabled, so there is no collector"
         );
+        assert!(
+            guard.logger_provider.is_none(),
+            "no logger provider when there is no collector endpoint"
+        );
     }
 
     #[tokio::test]
-    async fn the_guard_owns_the_meter_provider_whenever_otlp_metrics_are_selected() {
-        // Pins: the guard actually HOLDS the meter provider. A shutdown that
-        // flushes traces and not metrics is invisible in any assertion about the
-        // shutdown call itself - the call succeeds either way - so what has to be
-        // pinned is ownership. Without the provider here there is nothing to
-        // flush, and every metric buffered in the final export interval (the
-        // drain, the backlog, the closing counters) is lost silently.
+    async fn endpoint_installs_and_guard_owns_all_otlp_signal_providers() {
+        // Pins: one endpoint installs trace, metric, and log providers and the
+        // guard holds all three so process shutdown can flush every signal.
         // Async because the default transport is gRPC, and building a tonic
         // exporter needs a live reactor. That is production's situation too; a
         // sync test here would only prove the HTTP arm.
         let mut config = MoaConfig::default();
-        config.observability.enabled = true;
+        config.observability.otlp_endpoint = Some("http://127.0.0.1:4317".to_string());
         config.metrics.exporter = moa_config::MetricsExporter::Otlp;
 
         let guard = init_observability(&config, &TelemetryConfig::default())
-            .expect("otlp metrics should initialize");
+            .expect("endpoint-driven OTLP should initialize");
 
+        assert!(
+            guard.provider.is_some(),
+            "the guard must own the tracer provider"
+        );
         assert!(
             guard.meter_provider.is_some(),
             "the telemetry guard must own the meter provider so shutdown can flush it; \
              exporter was {:?}",
             config.metrics.exporter
+        );
+        assert!(
+            guard.logger_provider.is_some(),
+            "the guard must own the logger provider so shutdown can flush logs"
         );
     }
 
@@ -408,7 +575,7 @@ mod tests {
         // provider unconditionally would satisfy the assertion while exporting
         // nothing, and the pin would prove only that a field can be non-None.
         let mut config = MoaConfig::default();
-        config.observability.enabled = true;
+        config.observability.otlp_endpoint = Some("http://127.0.0.1:4317".to_string());
         config.metrics.exporter = moa_config::MetricsExporter::Disabled;
 
         let guard = init_observability(&config, &TelemetryConfig::default())
@@ -417,6 +584,11 @@ mod tests {
         assert!(
             guard.meter_provider.is_none(),
             "a disabled exporter must own no provider to flush"
+        );
+        assert!(guard.provider.is_some(), "traces still use the endpoint");
+        assert!(
+            guard.logger_provider.is_some(),
+            "logs still use the endpoint"
         );
     }
 

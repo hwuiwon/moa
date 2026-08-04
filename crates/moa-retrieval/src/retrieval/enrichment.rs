@@ -169,8 +169,6 @@ impl EnrichmentHandle {
     }
 
     fn try_send(&self, job: EnrichmentJob) {
-        let depth = self.tx.max_capacity().saturating_sub(self.tx.capacity());
-        metrics::gauge!("moa_retrieval_enrichment_queue_depth").set(depth as f64);
         match self.tx.try_send(job) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -257,8 +255,6 @@ impl EnrichmentWorker {
                     Err(_elapsed) => break,
                 }
             }
-            metrics::counter!("moa_retrieval_enrichment_batch_size_total")
-                .increment(batch.len() as u64);
             self.flush(batch).await;
             if senders_closed {
                 break;

@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: MOA local Postgres
+    type: postgres
+    uid: moa-postgres
+    access: proxy
+    url: postgres.moa-system.svc.cluster.local:5432
+    user: moa_owner
+    database: moa
+    editable: true
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: dev

@@ -1,7 +1,6 @@
 //! Graph-memory retrieval, show, and debug-inspection orchestration.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use moa_core::traits::Identity;
 use moa_core::types::memory::{InformationBarrierClearances, SourceAclContext};
@@ -43,7 +42,6 @@ pub(super) async fn search_inner(
     provenance: MemoryRequestProvenance,
     deps: MemoryServiceDeps<'_>,
 ) -> Result<MemorySearchResponse, HandlerError> {
-    let started = Instant::now();
     let clearances = session_clearances(&provenance.session)?;
     let policy =
         MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
@@ -58,8 +56,7 @@ pub(super) async fn search_inner(
         policy_source_tiers(&policy),
     )
     .await?;
-    let result_count = hits.len() as u64;
-    record_memory_operation("search", "success", result_count, started.elapsed());
+    record_memory_operation("search", "success");
 
     Ok(MemorySearchResponse {
         query: request.query,
@@ -73,7 +70,6 @@ pub(super) async fn show_inner(
     provenance: MemoryRequestProvenance,
     deps: MemoryServiceDeps<'_>,
 ) -> Result<MemoryShowResponse, HandlerError> {
-    let started = Instant::now();
     let clearances = session_clearances(&provenance.session)?;
     let policy = resolved_policy(deps.pool, &provenance.session).await?;
     let scope = policy.traversal_scope();
@@ -140,7 +136,7 @@ pub(super) async fn show_inner(
             })
             .collect(),
     };
-    record_memory_operation("show", "success", 1, started.elapsed());
+    record_memory_operation("show", "success");
     Ok(response)
 }
 
@@ -156,7 +152,6 @@ pub(super) async fn retrieve_debug_inner(
     provenance: MemoryRequestProvenance,
     deps: MemoryServiceDeps<'_>,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
-    let started = Instant::now();
     let clearances = session_clearances(&provenance.session)?;
     let policy =
         MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
@@ -174,8 +169,7 @@ pub(super) async fn retrieve_debug_inner(
     .await?;
 
     let diagnostics = serde_json::json!({ "policy_source": "pinned_session" });
-    let result_count = hits.len() as u64;
-    record_memory_operation("retrieve_debug", "success", result_count, started.elapsed());
+    record_memory_operation("retrieve_debug", "success");
 
     Ok(MemoryRetrieveDebugResponse {
         query: request.query,

@@ -39,8 +39,8 @@ use crate::retrieval::source_rank::{
 };
 use crate::retrieval::types::{
     GraphCandidateCounts, GraphRetrievalDiagnostics, LegSources, LexicalBackend, LineageContext,
-    RerankScore, Result, RetrievalError, RetrievalHit, RetrievalLineageHit, RetrievalOutput,
-    RetrievalProvenance, RetrievalRequest, SourceTier,
+    RerankScore, Result, RetrievalError, RetrievalHit, RetrievalLeg, RetrievalLineageHit,
+    RetrievalOutput, RetrievalProvenance, RetrievalRequest, SourceTier,
 };
 
 /// Fusion method label recorded on retrieval spans and lineage.
@@ -256,7 +256,7 @@ impl HybridRetriever {
         let vector_future = timed_future(
             run_leg(
                 req.disable_leg_timeouts,
-                "vector",
+                RetrievalLeg::Vector,
                 VECTOR_BUDGET,
                 self.vector_leg(&req, &backend_state),
             )
@@ -265,7 +265,7 @@ impl HybridRetriever {
         let lexical_future = timed_future(
             run_leg(
                 req.disable_leg_timeouts,
-                "lexical",
+                RetrievalLeg::Lexical,
                 LEXICAL_BUDGET,
                 self.lexical_leg(&req, &backend_state),
             )
@@ -277,10 +277,10 @@ impl HybridRetriever {
         provenance.timings.lexical_ms = lexical_ms;
         // Reduce each leg to its usable hits: a fatal error aborts, a transient
         // error or timeout degrades to empty while the peer leg's hits are kept.
-        let vector_leg = reduce_leg("vector", vector_outcome)?;
+        let vector_leg = reduce_leg(RetrievalLeg::Vector, vector_outcome)?;
         let vector_timed_out = vector_leg.timed_out;
         let mut vector_hits = vector_leg.value;
-        let mut lexical_hits = reduce_leg("lexical", lexical_outcome)?.value;
+        let mut lexical_hits = reduce_leg(RetrievalLeg::Lexical, lexical_outcome)?.value;
         vector_span.record("candidates", vector_hits.len());
         vector_span.record("timed_out", vector_timed_out);
         vector_span.record("elapsed_ms", vector_ms);
@@ -322,17 +322,6 @@ impl HybridRetriever {
             )
         };
         diagnostics.seed_counts = graph_seed_plan.seed_counts;
-        // Graph contribution telemetry. A graph leg that seeds nothing produces
-        // nothing, and until Task 5.5 measured it that condition was invisible in
-        // production: the rich per-request diagnostics existed only in the eval
-        // harness, so a permanently-inert graph leg looked identical to a working
-        // one. `seeded` vs `unseeded` is the cheapest signal that distinguishes them.
-        metrics::counter!(
-            "moa_retrieval_graph_expansion_total",
-            "policy" => graph_policy.as_str(),
-            "outcome" => if graph_seed_plan.strengths.is_empty() { "unseeded" } else { "seeded" }
-        )
-        .increment(1);
         let graph_output = if graph_seed_plan.strengths.is_empty() {
             Default::default()
         } else {
@@ -346,7 +335,7 @@ impl HybridRetriever {
             let graph_started = Instant::now();
             let graph_outcome = run_leg(
                 req.disable_leg_timeouts,
-                "graph",
+                RetrievalLeg::Graph,
                 GRAPH_BUDGET,
                 graph_expansion_leg_with_diagnostics(
                     self.graph.as_ref(),
@@ -362,7 +351,7 @@ impl HybridRetriever {
             .instrument(graph_span.clone())
             .await;
             let graph_ms = duration_ms_u64(graph_started.elapsed());
-            let mut output = reduce_leg("graph", graph_outcome)?.value;
+            let mut output = reduce_leg(RetrievalLeg::Graph, graph_outcome)?.value;
             output.diagnostics.graph_latency_ms = graph_ms;
             graph_span.record("raw_paths", output.diagnostics.raw_path_count);
             graph_span.record("candidates", output.candidates.len());
@@ -370,14 +359,6 @@ impl HybridRetriever {
             output
         };
         diagnostics.graph_latency_ms = graph_output.diagnostics.graph_latency_ms;
-        // Candidates the graph leg actually contributed, which is the quantity the
-        // policy decision turns on — not paths walked, which can be large while
-        // contributing nothing.
-        metrics::histogram!(
-            "moa_retrieval_graph_candidates",
-            "policy" => graph_policy.as_str()
-        )
-        .record(graph_output.candidates.len() as f64);
         provenance.timings.graph_ms = (graph_output
             .diagnostics
             .graph_latency_ms
@@ -413,12 +394,12 @@ impl HybridRetriever {
             // slow backend cannot turn one bounded timeout into an uncapped tail.
             let retry_outcome = run_leg(
                 req.disable_leg_timeouts,
-                "vector",
+                RetrievalLeg::Vector,
                 VECTOR_BUDGET,
                 self.vector_leg(&req, &backend_state),
             )
             .await;
-            vector_hits = reduce_leg("vector", retry_outcome)?.value;
+            vector_hits = reduce_leg(RetrievalLeg::Vector, retry_outcome)?.value;
             let refuse_started = Instant::now();
             fused = rrf_fuse(
                 &graph_hits,
@@ -716,7 +697,7 @@ impl HybridRetriever {
             // to the fused pre-rerank order, mirroring the empty-output fallback.
             // No scores are attributed because the reranker did not produce any.
             Err(error) => {
-                record_leg_degraded("rerank", "error");
+                record_leg_degraded(RetrievalLeg::Rerank, "error");
                 tracing::warn!(
                     error = %error,
                     "reranker failed; falling back to fused pre-rerank order"
@@ -1002,16 +983,16 @@ struct LegDegradation<T> {
 /// A completed leg passes through. A timeout or transient error degrades to an
 /// empty result (recording a metric and warning) so the peer leg's hits are
 /// kept. A fatal error aborts the whole retrieval.
-fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<LegDegradation<T>> {
+fn reduce_leg<T: Default>(leg: RetrievalLeg, outcome: LegOutcome<T>) -> Result<LegDegradation<T>> {
     match outcome {
         LegOutcome::Completed(value) => Ok(LegDegradation {
             value,
             timed_out: false,
         }),
         LegOutcome::Timeout => {
-            record_leg_degraded(name, "timeout");
+            record_leg_degraded(leg, "timeout");
             tracing::warn!(
-                leg = name,
+                leg = leg.as_str(),
                 "hybrid retrieval leg exceeded budget; degrading to empty and keeping peer legs"
             );
             Ok(LegDegradation {
@@ -1020,9 +1001,9 @@ fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<
             })
         }
         LegOutcome::Transient(error) => {
-            record_leg_degraded(name, "transient");
+            record_leg_degraded(leg, "transient");
             tracing::warn!(
-                leg = name,
+                leg = leg.as_str(),
                 error = %error,
                 "hybrid retrieval leg failed transiently; degrading to empty and keeping peer legs"
             );
@@ -1035,9 +1016,13 @@ fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<
     }
 }
 
-fn record_leg_degraded(leg: &'static str, reason: &'static str) {
-    metrics::counter!("moa_retrieval_leg_degraded_total", "leg" => leg, "reason" => reason)
-        .increment(1);
+fn record_leg_degraded(leg: RetrievalLeg, reason: &'static str) {
+    metrics::counter!(
+        "moa_retrieval_leg_degraded_total",
+        "leg" => leg.as_str(),
+        "reason" => reason
+    )
+    .increment(1);
 }
 
 fn classify_leg_result<T>(error: RetrievalError) -> LegOutcome<T> {
@@ -1133,7 +1118,7 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
 
 async fn run_leg<T, F>(
     disable_timeout: bool,
-    name: &'static str,
+    leg: RetrievalLeg,
     budget: std::time::Duration,
     future: F,
 ) -> LegOutcome<T>
@@ -1147,7 +1132,7 @@ where
             Err(error) => classify_leg_result(error),
         };
     }
-    match timed_leg(name, budget, future).await {
+    match timed_leg(leg.as_str(), budget, future).await {
         Ok(Ok(value)) => LegOutcome::Completed(value),
         Ok(Err(error)) => classify_leg_result(error),
         Err(_elapsed) => LegOutcome::Timeout,

@@ -7,7 +7,6 @@ use moa_core::{
     error::Result, traits::ContextProcessor, types::context::MessageRole,
     types::context::ProcessorOutput, types::context::WorkingContext,
 };
-use moa_observability::record_query_rewrite_decision;
 use tracing::Instrument;
 
 use moa_core::{types::context::estimate_text_tokens, types::context::sum_message_tokens};
@@ -314,11 +313,19 @@ fn finalize_stage_report(
         tokens_after,
         tokens_added = output.tokens_added,
         tokens_removed = output.tokens_removed,
+        items_included = output.items_included.len(),
+        items_excluded = output.items_excluded.len(),
+        excluded_items = output.excluded_items.len(),
+        duration_ms = output.duration.as_millis(),
+        "pipeline stage completed"
+    );
+    tracing::debug!(
+        stage = stage.stage(),
+        name = stage.name(),
         items_included = ?output.items_included,
         items_excluded = ?output.items_excluded,
         excluded_items = ?output.excluded_items,
-        duration_ms = output.duration.as_millis(),
-        "pipeline stage completed"
+        "pipeline stage item details"
     );
 
     reports.push(PipelineStageReport {
@@ -345,7 +352,6 @@ fn record_query_rewrite_stage_metadata(span: &tracing::Span, output: &ProcessorO
     );
     span.record("moa.query_rewrite.reason", tracing::field::display(reason));
     span.record("moa.query_rewrite.llm_called", llm_called);
-    record_query_rewrite_decision(decision, reason, llm_called);
 }
 
 fn metadata_str<'a>(output: &'a ProcessorOutput, key: &str) -> Option<&'a str> {

@@ -35,9 +35,8 @@ use moa_core::{
     types::snapshot::ContextSnapshot,
 };
 use moa_observability::{
-    SessionEventAppendPhase, record_session_created, record_session_event_append,
-    record_session_event_append_phase_duration, record_session_event_load, record_sessions_active,
-    record_turn_completed,
+    SessionEventAppendPhase, record_session_event_append,
+    record_session_event_append_phase_duration, record_sessions_active, record_turn_completed,
 };
 use moa_security::ActionPolicyRuleStore;
 use sqlx::{Acquire, PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};

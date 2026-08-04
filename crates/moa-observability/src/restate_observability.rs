@@ -153,6 +153,13 @@ fn session_turn_span_inner(
         moa.turn.compaction_tier3 = tracing::field::Empty,
         moa.turn.compaction_tokens_reclaimed = tracing::field::Empty,
         moa.turn.compaction_messages_elided = tracing::field::Empty,
+        moa.turn.tool_calls = tracing::field::Empty,
+        moa.turn.input_tokens = tracing::field::Empty,
+        moa.turn.output_tokens = tracing::field::Empty,
+        moa.turn.result = tracing::field::Empty,
+        moa.turn.stop_reason = tracing::field::Empty,
+        moa.turn.vo_calls_total = tracing::field::Empty,
+        moa.session.cache_hit_rate = tracing::field::Empty,
     );
     // Keep the raw prompt out of trace metadata by default; only forward it (via the bounded
     // `moa.trace.name` attribute) and attach the prompt hash when the operator opts in.
@@ -234,12 +241,8 @@ pub fn event_persist_span(events_written: usize) -> tracing::Span {
     }
 }
 
-/// Emits the shared per-turn replay summary event and mirrors the values onto the turn span.
-pub fn emit_turn_replay_summary(
-    turn_root_span: &tracing::Span,
-    turn_number: i64,
-    snapshot: &TurnReplaySnapshot,
-) {
+/// Records the shared per-turn replay summary on the turn span.
+pub fn emit_turn_replay_summary(turn_root_span: &tracing::Span, snapshot: &TurnReplaySnapshot) {
     turn_root_span.record(
         "moa.turn.get_events_calls",
         snapshot.get_events_calls as i64,
@@ -254,20 +257,9 @@ pub fn emit_turn_replay_summary(
         "moa.turn.pipeline_compile_ms",
         snapshot.pipeline_compile_ms() as i64,
     );
-
-    tracing::info!(
-        parent: turn_root_span,
-        turn_number,
-        get_events_calls = snapshot.get_events_calls,
-        events_replayed = snapshot.events_replayed,
-        events_bytes = snapshot.events_bytes,
-        get_events_total_ms = snapshot.get_events_total_ms(),
-        pipeline_compile_ms = snapshot.pipeline_compile_ms(),
-        "turn event replay summary"
-    );
 }
 
-/// Emits the shared per-turn coordination summary event and mirrors the values onto the turn span.
+/// Records the shared per-turn coordination summary on the turn span.
 ///
 /// Counts the durable virtual-object round-trips (Session/Worker `.call()`s, fire-and-forget
 /// `.send()`s, and durable event appends) made during one turn so fan-in and delegation
@@ -283,24 +275,11 @@ pub fn emit_turn_coordination_summary(
     turn_root_span.record("moa.turn.vo_worker_calls", snapshot.worker_vo_calls as i64);
     turn_root_span.record("moa.turn.vo_sends", snapshot.vo_sends as i64);
     turn_root_span.record("moa.turn.durable_appends", snapshot.durable_appends as i64);
-
-    tracing::info!(
-        parent: turn_root_span,
-        vo_session_calls = snapshot.session_vo_calls,
-        vo_worker_calls = snapshot.worker_vo_calls,
-        vo_sends = snapshot.vo_sends,
-        durable_appends = snapshot.durable_appends,
-        total_vo_calls = snapshot.total_vo_calls(),
-        "turn coordination summary"
-    );
+    turn_root_span.record("moa.turn.vo_calls_total", snapshot.total_vo_calls() as i64);
 }
 
-/// Emits the shared per-turn latency summary event and mirrors the values onto the turn span.
-pub fn emit_turn_latency_summary(
-    turn_root_span: &tracing::Span,
-    turn_number: i64,
-    snapshot: &TurnLatencySnapshot,
-) {
+/// Records the shared per-turn latency summary on the turn span and histograms.
+pub fn emit_turn_latency_summary(turn_root_span: &tracing::Span, snapshot: &TurnLatencySnapshot) {
     record_turn_step_duration(
         TurnLatencyStep::SnapshotLoad,
         snapshot.snapshot_load_duration,
@@ -362,25 +341,6 @@ pub fn emit_turn_latency_summary(
     if let Some(ttft_ms) = snapshot.llm_ttft_ms() {
         turn_root_span.record("moa.turn.llm_ttft_ms", ttft_ms as i64);
     }
-
-    tracing::info!(
-        parent: turn_root_span,
-        turn_number,
-        snapshot_load_ms = snapshot.snapshot_load_ms(),
-        snapshot_hit = snapshot.snapshot_hit,
-        snapshot_write_ms = snapshot.snapshot_write_ms(),
-        pipeline_compile_ms = snapshot.pipeline_compile_ms(),
-        llm_call_ms = snapshot.llm_call_ms(),
-        tool_dispatch_ms = snapshot.tool_dispatch_ms(),
-        event_persist_ms = snapshot.event_persist_ms(),
-        compaction_tier1 = snapshot.compaction_tier1,
-        compaction_tier2 = snapshot.compaction_tier2,
-        compaction_tier3 = snapshot.compaction_tier3,
-        compaction_tokens_reclaimed = snapshot.compaction_tokens_reclaimed,
-        compaction_messages_elided = snapshot.compaction_messages_elided,
-        llm_ttft_ms = snapshot.llm_ttft_ms().unwrap_or_default(),
-        "turn latency breakdown"
-    );
 }
 
 fn synthetic_session_span_context(session_id: SessionId) -> SpanContext {
@@ -509,6 +469,55 @@ mod tests {
         assert_eq!(
             attr_string(span, "moa.trace.name").as_deref(),
             Some("Fix the OAuth bug")
+        );
+    }
+
+    #[test]
+    fn session_turn_span_exports_brain_and_coordination_summary_fields() {
+        // Pins: streamed-turn and coordination summaries remain queryable on the root span after
+        // their duplicate INFO events are removed. Undeclared tracing fields would silently drop
+        // these records.
+        let meta = test_meta();
+        let spans = capture_spans(|| {
+            let span = session_turn_span_inner(&meta, None, 3, None, false);
+            span.record("moa.turn.tool_calls", 4_i64);
+            span.record("moa.turn.input_tokens", 120_i64);
+            span.record("moa.turn.output_tokens", 30_i64);
+            span.record("moa.turn.result", "completed");
+            span.record("moa.turn.stop_reason", "EndTurn");
+            span.record("moa.turn.vo_calls_total", 6_i64);
+            span.record("moa.session.cache_hit_rate", 0.75_f64);
+            span.in_scope(|| {});
+        });
+
+        let span = find_span(&spans, "MOA turn 3");
+        assert_eq!(
+            attr_string(span, "moa.turn.tool_calls").as_deref(),
+            Some("4")
+        );
+        assert_eq!(
+            attr_string(span, "moa.turn.input_tokens").as_deref(),
+            Some("120")
+        );
+        assert_eq!(
+            attr_string(span, "moa.turn.output_tokens").as_deref(),
+            Some("30")
+        );
+        assert_eq!(
+            attr_string(span, "moa.turn.result").as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            attr_string(span, "moa.turn.stop_reason").as_deref(),
+            Some("EndTurn")
+        );
+        assert_eq!(
+            attr_string(span, "moa.turn.vo_calls_total").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            attr_string(span, "moa.session.cache_hit_rate").as_deref(),
+            Some("0.75")
         );
     }
 

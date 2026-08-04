@@ -66,21 +66,12 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp_db(
         "cancel before confirmation".to_string(),
     )
     .await?;
-    let CancellationOutcome::Cancelled {
-        commit: preconfirm,
-        metrics,
-    } = repository
+    let CancellationOutcome::Cancelled(preconfirm) = repository
         .cancel_run(scope, awaiting.run_uid, preconfirm_request)
         .await?
     else {
         panic!("pre-confirm cancellation must commit");
     };
-    assert_eq!(
-        metrics.run.prior_status,
-        ExecutionRunStatus::AwaitingConfirmation
-    );
-    assert_eq!(metrics.run.status, ExecutionRunStatus::Cancelled);
-    assert!(metrics.tasks.is_empty());
     assert_eq!(preconfirm.run.status, ExecutionRunStatus::Cancelled);
     assert!(preconfirm.run.queued_at.is_none());
     assert!(preconfirm.run.confirmed_at.is_none());
@@ -147,18 +138,12 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp_db(
         "cancel after queue".to_string(),
     )
     .await?;
-    let CancellationOutcome::Cancelled {
-        commit: postqueue,
-        metrics,
-    } = repository
+    let CancellationOutcome::Cancelled(postqueue) = repository
         .cancel_run(scope, queued.run_uid, postqueue_request)
         .await?
     else {
         panic!("post-queue cancellation must commit");
     };
-    assert_eq!(metrics.run.prior_status, ExecutionRunStatus::Queued);
-    assert_eq!(metrics.run.status, ExecutionRunStatus::Cancelled);
-    assert!(metrics.tasks.is_empty());
     assert_eq!(postqueue.run.queued_at, Some(queued_at));
     Ok(())
 }
@@ -219,9 +204,8 @@ async fn cancellation_counts_only_completed_task_requirement_evidence_db() -> Te
     .await?;
     assert_eq!(request.terminal_evidence.satisfied_requirement_count, 1);
     assert_eq!(request.terminal_evidence.requirement_count, 2);
-    let CancellationOutcome::Cancelled {
-        commit: cancelled, ..
-    } = repository.cancel_run(scope, run.run_uid, request).await?
+    let CancellationOutcome::Cancelled(cancelled) =
+        repository.cancel_run(scope, run.run_uid, request).await?
     else {
         panic!("cancellation must commit");
     };
@@ -304,10 +288,8 @@ async fn run_cancellation_replaces_every_active_outcome_with_typed_evidence_and_
 
     let reason = "operator cancelled run".to_string();
     let request = cancellation_request(&repository, scope, run.run_uid, reason.clone()).await?;
-    let CancellationOutcome::Cancelled {
-        commit: cancelled,
-        metrics,
-    } = repository.cancel_run(scope, run.run_uid, request).await?
+    let CancellationOutcome::Cancelled(cancelled) =
+        repository.cancel_run(scope, run.run_uid, request).await?
     else {
         panic!("first cancellation must commit its durable handoff");
     };
@@ -319,46 +301,6 @@ async fn run_cancellation_replaces_every_active_outcome_with_typed_evidence_and_
     ];
     expected_task_ids.sort();
     assert_eq!(cancelled.task_ids_to_release, expected_task_ids);
-    assert_eq!(metrics.run.prior_status, ExecutionRunStatus::WaitingReplan);
-    assert_eq!(metrics.run.status, ExecutionRunStatus::Cancelled);
-    assert_eq!(metrics.tasks.len(), 4);
-    let metric_transitions = metrics
-        .tasks
-        .iter()
-        .map(|transition| {
-            (
-                transition.kind.clone(),
-                transition.prior_status,
-                transition.status,
-                transition.started_at,
-                transition.completed_at,
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        metric_transitions
-            .iter()
-            .map(|(_, prior, status, _, _)| (*prior, *status))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                ExecutionTaskStatus::WaitingInput,
-                ExecutionTaskStatus::Cancelled,
-            ),
-            (ExecutionTaskStatus::Pending, ExecutionTaskStatus::Cancelled,),
-            (
-                ExecutionTaskStatus::WaitingReplan,
-                ExecutionTaskStatus::Cancelled,
-            ),
-            (ExecutionTaskStatus::Running, ExecutionTaskStatus::Cancelled,),
-        ]
-    );
-    assert!(
-        metric_transitions
-            .iter()
-            .all(|(_, _, _, _, completed_at)| completed_at.is_some()),
-        "every committed terminal transition must carry its persisted completion timestamp"
-    );
     let cancelled_wake_epoch = cancelled.run.wake_epoch;
     let first_page = repository
         .list_tasks(scope, run.run_uid, ExecutionTaskPageRequest::default())
@@ -496,10 +438,7 @@ async fn cancellation_race_releases_reservations_and_preserves_completed_results
         ReservationOutcome::Reserved(_)
             | ReservationOutcome::Rejected(ReservationRejection::InvalidTaskStatus)
     ));
-    assert!(matches!(
-        cancel.await??,
-        CancellationOutcome::Cancelled { .. }
-    ));
+    assert!(matches!(cancel.await??, CancellationOutcome::Cancelled(_)));
 
     let run = repository
         .load_run(scope, run.run_uid)
@@ -596,7 +535,7 @@ async fn cancellation_racing_outcome_write_has_one_consistent_winner_db() -> Tes
     let outcome_write = outcome_write.await??;
     assert!(matches!(
         cancellation.await??,
-        CancellationOutcome::Cancelled { .. }
+        CancellationOutcome::Cancelled(_)
     ));
     let cancelled_run = repository
         .load_run(scope, run.run_uid)

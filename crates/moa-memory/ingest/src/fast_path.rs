@@ -244,23 +244,17 @@ pub enum FastError {
 
 /// Remembers one fact through the graph write protocol.
 pub async fn fast_remember(req: FastRememberRequest, ctx: &FastPathCtx) -> Result<Uuid, FastError> {
-    let started = Instant::now();
-    let result = fast_remember_inner(req, ctx).await;
-    record_remember_metrics(started.elapsed(), &result);
-    result
+    fast_remember_inner(req, ctx).await
 }
 
 /// Soft-invalidates graph memory rows matched by a forget pattern.
 pub async fn fast_forget(pattern: ForgetPattern, ctx: &FastPathCtx) -> Result<u64, FastError> {
-    let started = Instant::now();
     let uids = active_uids_for_pattern(&pattern, ctx).await?;
     let mut invalidated = 0_u64;
     for uid in uids {
         ctx.graph.invalidate_node(uid, "user_forget").await?;
         invalidated += 1;
     }
-    metrics::histogram!("moa_fast_forget_latency_seconds").record(started.elapsed().as_secs_f64());
-    metrics::counter!("moa_fast_forget_total").increment(1);
     Ok(invalidated)
 }
 
@@ -426,7 +420,6 @@ pub async fn record_incident_with_ctx(
         actor_kind: req.actor_kind.clone(),
     };
     let uid = ctx.graph.create_node(intent).await?;
-    metrics::counter!("moa_incident_recorded_total").increment(1);
     Ok(Some(uid))
 }
 
@@ -789,12 +782,6 @@ fn parse_supersedes_marker(text: &str) -> Option<Uuid> {
         previous_was_supersedes = false;
     }
     None
-}
-
-fn record_remember_metrics(elapsed: Duration, result: &Result<Uuid, FastError>) {
-    metrics::histogram!("moa_fast_remember_latency_seconds").record(elapsed.as_secs_f64());
-    let outcome = if result.is_ok() { "ok" } else { "error" };
-    metrics::counter!("moa_fast_remember_total", "outcome" => outcome).increment(1);
 }
 
 /// Maximum number of facts one `memory_remember` invocation may store.

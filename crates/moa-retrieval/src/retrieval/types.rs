@@ -474,6 +474,35 @@ impl RetrievalLineageHit {
     }
 }
 
+/// Stable metric-label vocabulary for retrieval execution legs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetrievalLeg {
+    /// Query embedding generation.
+    Embedding,
+    /// Dense-vector nearest-neighbor retrieval.
+    Vector,
+    /// Lexical retrieval.
+    Lexical,
+    /// Graph expansion retrieval.
+    Graph,
+    /// Provider-backed reranking.
+    Rerank,
+}
+
+impl RetrievalLeg {
+    /// Returns the stable label used by retrieval metrics.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedding => "embedding",
+            Self::Vector => "vector",
+            Self::Lexical => "lexical",
+            Self::Graph => "graph",
+            Self::Rerank => "rerank",
+        }
+    }
+}
+
 /// Retrieval legs that contributed to one fused candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LegSources {

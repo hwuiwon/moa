@@ -32,7 +32,7 @@ spec:
                 name: moa-runtime-config
           env:
             - name: RUST_LOG
-              value: info
+              value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off
             - name: MOA_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -102,7 +102,7 @@ spec:
                 name: moa-runtime-config
           env:
             - name: RUST_LOG
-              value: info
+              value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off
             # Stable for this process lifetime and unique across replicas. The
             # shared telemetry resource maps it to service.instance.id.
             - name: MOA_SERVICE_INSTANCE_ID

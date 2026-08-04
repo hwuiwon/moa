@@ -404,7 +404,6 @@ operator knob for it.
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_OBSERVABILITY_ENABLED` | `observability.enabled` | false | Whether OTLP export is enabled |
 | `MOA_OBSERVABILITY_ENVIRONMENT` | `observability.environment` | _none_ | Deployment environment resource attribute |
 | `MOA_OBSERVABILITY_LINEAGE_BATCH_MAX_AGE_SECS` | `observability.lineage.batch_max_age_secs` | 2 | Maximum age for a partial ingress batch, and the drain poll cadence |
 | `MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE` | `observability.lineage.batch_size` | 512 | Maximum ingress events committed to the acceptance queue per batch; valid range `1..=4096` |
@@ -414,12 +413,12 @@ operator knob for it.
 | `MOA_OBSERVABILITY_LINEAGE_MAX_PENDING_AGE_SECS` | `observability.lineage.max_pending_age_secs` | 300 | Oldest accepted-but-unstored row age tolerated before readiness fails |
 | `MOA_OBSERVABILITY_LINEAGE_CHANNEL_CAPACITY` | `observability.lineage.channel_capacity` | 8192 | Bounded hot-path channel capacity |
 | `MOA_OBSERVABILITY_LINEAGE_SAMPLE_PGVECTOR_EXPLAIN` | `observability.lineage.sample_pgvector_explain` | 0.01 | Fraction of pgvector queries that run full EXPLAIN ANALYZE |
-| `MOA_OBSERVABILITY_OTLP_ENDPOINT` | `observability.otlp_endpoint` | _none_ | OTLP **collector base URL**. Traces and metrics are derived from it as `/v1/traces` and `/v1/metrics`; a value already naming a signal path is refused at startup |
-| `MOA_OBSERVABILITY_OTLP_HEADERS` | `observability.otlp_headers` | {} | Additional OTLP headers for trace and metric exporter auth and routing |
+| `MOA_OBSERVABILITY_OTLP_ENDPOINT` | `observability.otlp_endpoint` | _none_ | OTLP **collector base URL** and export switch. Its presence enables traces, metrics, and structured logs. HTTP derives `/v1/traces`, `/v1/metrics`, and `/v1/logs`; gRPC uses the base URL unchanged. A value already naming a signal path is refused at startup |
+| `MOA_OBSERVABILITY_OTLP_HEADERS` | `observability.otlp_headers` | {} | Additional OTLP headers shared by the trace, metric, and log exporters for auth and routing |
 | `MOA_OBSERVABILITY_OTLP_PROTOCOL` | `observability.otlp_protocol` | grpc | OTLP transport protocol |
 | `MOA_OBSERVABILITY_RELEASE` | `observability.release` | _none_ | Application release or version resource attribute |
 | `MOA_OBSERVABILITY_SAMPLE_RATE` | `observability.sample_rate` | 0.01 | Trace sampling ratio from 0.0 to 1.0 |
-| `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical OpenTelemetry service name for traces and metrics |
+| `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical OpenTelemetry service name shared by traces, metrics, and logs |
 
 Every lineage channel, batch, lease, age, and drain value must be greater than
 zero. Ingress and claim batch sizes are additionally capped at 4096 to bound
@@ -680,11 +679,16 @@ endpoint that exists.
 The removed `MOA_METRICS_ENABLED` and `MOA_METRICS_LISTEN` keys are rejected
 rather than ignored; a config still carrying them fails to load.
 
-`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) is read by the OpenTelemetry SDK,
-not by MOA's overlay, and controls how often the OTLP exporter pushes. The SDK
-default is 60s, which is correct for production and far longer than any test's
-patience — the orchestrator fixture sets it to 2s so a metric assertion does not
-time out against a working exporter.
+`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) optionally overrides MOA's 120
+second periodic metric-reader default. It must be a positive integer; malformed,
+zero, and negative values fail startup rather than silently selecting another
+interval. The orchestrator test fixture sets it to 2 seconds so metric
+assertions do not wait for a production-oriented interval.
+
+The removed `MOA_OBSERVABILITY_ENABLED` key is rejected rather than ignored.
+Endpoint presence is the single OTLP switch, so a configuration cannot claim
+that export is enabled while omitting its destination, or disable one signal
+while the other two continue using the same endpoint.
 
 ### Observability script variables
 

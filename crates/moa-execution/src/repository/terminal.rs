@@ -478,7 +478,6 @@ impl ExecutionRepository {
             .map(|task| task.task_id)
             .collect::<Vec<_>>();
         task_ids_to_release.sort();
-        let prior_run_status = run.status;
         let row = sqlx::query(CANCEL_RUN_SQL)
             .bind(run_uid)
             .bind(&reason)
@@ -538,20 +537,11 @@ impl ExecutionRepository {
             .map_err(sqlx_error)?;
         let run = run_from_row(&row)?;
         conn.commit().await.map_err(storage_error)?;
-        let metrics = ExecutionMutationMetricEvidence {
-            run: run_transition_evidence(prior_run_status, &run),
-            tasks: tasks
-                .iter()
-                .zip(&cancellation.tasks)
-                .map(|(prior, task)| task_transition_evidence(prior.status, task))
-                .collect(),
-        };
-        Ok(CancellationOutcome::Cancelled {
-            commit: Box::new(CancellationCommit {
+        Ok(CancellationOutcome::Cancelled(Box::new(
+            CancellationCommit {
                 run,
                 task_ids_to_release,
-            }),
-            metrics: Box::new(metrics),
-        })
+            },
+        )))
     }
 }

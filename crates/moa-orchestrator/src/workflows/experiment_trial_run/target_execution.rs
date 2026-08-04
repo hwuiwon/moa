@@ -1766,7 +1766,6 @@ async fn persist_compile_audit(
         .name("experiment_trial_write_compile_audit")
         .await?
         .into_inner();
-    moa_brain::execution_planning::request::record_applied_planning_audit(&outcome);
     if matches!(outcome, CompileAuditWriteOutcome::Conflict { .. }) {
         return Err(TerminalError::new_with_code(
             409,

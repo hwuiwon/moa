@@ -295,7 +295,6 @@ fn from_iter_applies_flat_single_underscore_env() {
             "MOA_RESTATE_LLM_GATEWAY_URL",
             "http://llm-gateway.example:10020",
         ),
-        ("MOA_OBSERVABILITY_ENABLED", "true"),
         (
             "MOA_OBSERVABILITY_OTLP_ENDPOINT",
             "http://otel.example:4317",
@@ -437,7 +436,6 @@ fn from_iter_applies_flat_single_underscore_env() {
         config.orchestrator.llm_gateway_url.as_deref(),
         Some("http://llm-gateway.example:10020")
     );
-    assert!(config.observability.enabled);
     assert_eq!(
         config.observability.otlp_endpoint.as_deref(),
         Some("http://otel.example:4317")

@@ -72,7 +72,7 @@ impl SessionImpl {
             )
             .await?;
             if rejected > 0 {
-                persist_message_admissions(&ctx, &admissions, 0);
+                persist_message_admissions(&ctx, &admissions);
                 tracing::info!(
                     key = %ctx.key(),
                     rejected,

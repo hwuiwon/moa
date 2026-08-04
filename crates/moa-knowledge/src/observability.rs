@@ -359,48 +359,6 @@ fn emit_counter_metrics(labels: StepLabels<'_>, status: &str, counters: &Value) 
         )
         .increment(1);
     }
-    for (key, action) in [
-        ("chunks_total", "total"),
-        ("chunks_new", "created"),
-        ("chunks_deleted", "deleted"),
-        ("chunks_embedded", "embedded"),
-    ] {
-        let count = safe_counter(counters, key);
-        if count > 0 {
-            metrics::counter!(
-                "moa_knowledge_chunks_total",
-                "action" => action
-            )
-            .increment(count);
-        }
-    }
-    for (key, metric_status) in [
-        ("embeddings_created", "created"),
-        ("embeddings_reused", "reused"),
-    ] {
-        let count = safe_counter(counters, key);
-        if count > 0 {
-            metrics::counter!(
-                "moa_knowledge_embeddings_total",
-                "status" => metric_status
-            )
-            .increment(count);
-        }
-    }
-    for (key, kind) in [
-        ("graph_nodes_upserted", "node"),
-        ("graph_edges_upserted", "edge"),
-    ] {
-        let count = safe_counter(counters, key);
-        if count > 0 {
-            metrics::counter!(
-                "moa_knowledge_graph_writes_total",
-                "kind" => kind,
-                "status" => status.to_string()
-            )
-            .increment(count);
-        }
-    }
 }
 
 fn safe_counter(counters: &Value, key: &str) -> u64 {

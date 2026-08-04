@@ -24,6 +24,7 @@ use moa_memory_vector::{QueryEmbedding, VectorStoreFactory};
 use sqlx::PgPool;
 
 use crate::planning::{PlannedQuery, PlanningCtx, QueryPlanner, Strategy};
+use crate::retrieval::types::RetrievalLeg;
 use crate::retrieval::{
     CachedHybridRetriever, EvidenceWindowPolicy, HybridRetriever, LineageContext,
     MemoryAdmissionPolicy, PlannedRetriever, RetrievalHit, RetrievalOutput, RetrievalProvenance,
@@ -509,7 +510,6 @@ impl MemoryRetrievalEngine {
 
     async fn query_embedding(&self, query: &str) -> Option<QueryEmbedding> {
         let embedder = self.embedder.as_deref()?;
-        let started = Instant::now();
         let embedding = match embedder.embed(&[query.to_string()]).await {
             Ok(mut embeddings) => embeddings.pop().unwrap_or_default(),
             Err(error) => {
@@ -519,15 +519,13 @@ impl MemoryRetrievalEngine {
                 );
                 metrics::counter!(
                     "moa_retrieval_leg_degraded_total",
-                    "leg" => "embedding",
+                    "leg" => RetrievalLeg::Embedding.as_str(),
                     "reason" => "error",
                 )
                 .increment(1);
                 return None;
             }
         };
-        metrics::histogram!("moa_retrieval_embedder_seconds")
-            .record(started.elapsed().as_secs_f64());
         match QueryEmbedding::new(embedding, embedder.model_id()) {
             Ok(embedding) => Some(embedding),
             Err(error) => {

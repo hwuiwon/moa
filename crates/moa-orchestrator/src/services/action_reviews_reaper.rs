@@ -101,7 +101,6 @@ impl ActionReviewReaper {
     }
 
     /// Run one timeout sweep, returning how many reviews failed closed.
-    #[tracing::instrument(skip(self))]
     pub async fn sweep(&self) -> Result<usize, ActionReviewReaperError> {
         let resolution_trace_context = current_trace_context();
         let timed_out = action_review_store::timeout_expired_reviews(

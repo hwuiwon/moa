@@ -195,7 +195,9 @@ fn short_content_hash(value: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn truncate_tool_span_text(mut value: String) -> String {
+/// Caps text attached to telemetry while preserving UTF-8 character boundaries.
+#[must_use]
+pub fn truncate_tool_span_text(mut value: String) -> String {
     const LIMIT: usize = 8 * 1024;
     if value.len() <= LIMIT {
         return value;
@@ -212,7 +214,10 @@ fn truncate_tool_span_text(mut value: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_trace_flag, short_content_hash, tool_body_field, tool_output_body_field};
+    use super::{
+        parse_trace_flag, short_content_hash, tool_body_field, tool_output_body_field,
+        truncate_tool_span_text,
+    };
 
     #[test]
     fn trace_flag_only_enables_on_explicit_truthy_values() {
@@ -249,6 +254,18 @@ mod tests {
         // output so input telemetry cannot bypass the output tracing gate.
         assert_eq!(tool_body_field("secret", false), None);
         assert_eq!(tool_body_field("secret", true), Some("secret".to_string()));
+    }
+
+    #[test]
+    fn telemetry_text_truncation_preserves_unicode_boundaries() {
+        // Pins: bounded error and tool-body telemetry remains valid UTF-8 when
+        // the byte cap falls inside a multi-byte character.
+        let value = format!("{}🦀", "x".repeat(8 * 1024 - 1));
+
+        let truncated = truncate_tool_span_text(value);
+
+        assert_eq!(truncated, format!("{}…", "x".repeat(8 * 1024 - 1)));
+        assert_eq!(truncated.len(), 8 * 1024 - 1 + '…'.len_utf8());
     }
 
     #[test]

@@ -30,13 +30,14 @@ impl OtlpProtocol {
 
 /// Observability configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ObservabilityConfig {
-    /// Whether OTLP export is enabled.
-    pub enabled: bool,
-    /// Logical service name for traces.
+    /// Logical service name shared by traces, metrics, and logs.
     pub service_name: String,
-    /// Optional OTLP endpoint override.
+    /// Optional OTLP collector base endpoint.
+    ///
+    /// Its presence enables OTLP traces, metrics, and logs. When absent, MOA
+    /// installs no OTLP providers.
     pub otlp_endpoint: Option<String>,
     /// OTLP transport protocol.
     pub otlp_protocol: OtlpProtocol,
@@ -58,7 +59,6 @@ pub struct ObservabilityConfig {
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             service_name: "moa".to_string(),
             otlp_endpoint: None,
             otlp_protocol: OtlpProtocol::Grpc,
@@ -165,6 +165,8 @@ pub enum OtlpSignal {
     Traces,
     /// Runtime metrics.
     Metrics,
+    /// Structured logs.
+    Logs,
 }
 
 impl OtlpSignal {
@@ -173,13 +175,14 @@ impl OtlpSignal {
         match self {
             Self::Traces => "/v1/traces",
             Self::Metrics => "/v1/metrics",
+            Self::Logs => "/v1/logs",
         }
     }
 }
 
 /// Resolves the exporter endpoint for one signal over one transport.
 ///
-/// This is the ONLY way an OTLP endpoint string is produced, and both signals go
+/// This is the ONLY way an OTLP endpoint string is produced, and all signals go
 /// through it, because the two transports need opposite things from the same
 /// configured value and getting that wrong is silent in both directions:
 ///
@@ -191,9 +194,9 @@ impl OtlpSignal {
 ///   * On **gRPC**, tonic appends the service method itself. Appending a signal
 ///     path here would produce `/v1/metrics/opentelemetry.proto...` and fail.
 ///
-/// `MOA_OTLP_ENDPOINT` names the collector, not one of its signal paths, so a
+/// `MOA_OBSERVABILITY_OTLP_ENDPOINT` names the collector, not one of its signal paths, so a
 /// value that already ends in a signal path is refused: it names one signal's
-/// endpoint and leaves nothing to derive the other's from.
+/// endpoint and leaves nothing to derive the others from.
 pub fn otlp_signal_endpoint(
     base: &str,
     protocol: OtlpProtocol,
@@ -222,7 +225,8 @@ fn validated_otlp_base(base: &str) -> Result<&str> {
     {
         return Err(MoaError::ConfigError(format!(
             "observability.otlp_endpoint `{base}` names the `{path}` signal endpoint; it must be \
-             the collector base URL so traces and metrics are derived from the same collector \
+             the collector base URL so traces, metrics, and logs are derived from the same \
+             collector \
              (drop the `{path}` suffix)"
         )));
     }
@@ -288,6 +292,20 @@ mod tests {
     }
 
     #[test]
+    fn removed_observability_enabled_key_is_rejected() {
+        // Pins: endpoint presence is the sole OTLP switch. A stale serialized
+        // enable flag must fail instead of being ignored and suggesting that it
+        // can override the endpoint.
+        let error =
+            serde_json::from_value::<ObservabilityConfig>(serde_json::json!({ "enabled": false }))
+                .expect_err("the removed observability enabled key must be rejected");
+        assert!(
+            error.to_string().contains("unknown field `enabled`"),
+            "the refusal must identify the removed key, got: {error}"
+        );
+    }
+
+    #[test]
     fn old_metrics_keys_fail_to_load_instead_of_being_ignored() {
         // Pins: a config still carrying the removed keys fails loudly. Serde's
         // default behaviour is to ignore unknown fields, which would leave an
@@ -313,9 +331,9 @@ mod tests {
         // exists. On HTTP the SDK uses a programmatic endpoint verbatim, so the
         // path must be here or every payload 404s at the collector root. On gRPC
         // tonic appends the service method, so the same path would corrupt the
-        // URI. Both directions are silent failures, and both signals resolve
+        // URI. Both directions are silent failures, and all signals resolve
         // through this one function so they cannot drift apart.
-        for signal in [OtlpSignal::Traces, OtlpSignal::Metrics] {
+        for signal in [OtlpSignal::Traces, OtlpSignal::Metrics, OtlpSignal::Logs] {
             let http = otlp_signal_endpoint("http://alloy:4318", OtlpProtocol::Http, signal)
                 .expect("base URL should be accepted");
             assert!(
@@ -333,17 +351,22 @@ mod tests {
     }
 
     #[test]
-    fn both_signals_resolve_against_the_same_collector() {
-        // Pins: one configured value cannot send traces and metrics to different
+    fn all_signals_resolve_against_the_same_collector() {
+        // Pins: one configured value cannot send logs, metrics, and traces to different
         // collectors, whatever the transport.
         for protocol in [OtlpProtocol::Http, OtlpProtocol::Grpc] {
             let traces = otlp_signal_endpoint("http://alloy:4318", protocol, OtlpSignal::Traces)
                 .expect("base URL should be accepted");
             let metrics = otlp_signal_endpoint("http://alloy:4318", protocol, OtlpSignal::Metrics)
                 .expect("base URL should be accepted");
+            let logs = otlp_signal_endpoint("http://alloy:4318", protocol, OtlpSignal::Logs)
+                .expect("base URL should be accepted");
             assert!(
-                traces.starts_with("http://alloy:4318") && metrics.starts_with("http://alloy:4318"),
-                "both signals must target the configured collector, got {traces} and {metrics}"
+                traces.starts_with("http://alloy:4318")
+                    && metrics.starts_with("http://alloy:4318")
+                    && logs.starts_with("http://alloy:4318"),
+                "all signals must target the configured collector, got {traces}, {metrics}, and \
+                 {logs}"
             );
         }
     }

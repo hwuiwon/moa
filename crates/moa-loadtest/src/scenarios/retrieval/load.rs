@@ -84,7 +84,7 @@ impl LoadReport {
         };
         self.cache_hit_p95_ms =
             prom_histogram_p95_ms(after, "moa_retrieval_cache_hit_seconds", &[]);
-        self.embedder_p95_ms = prom_histogram_p95_ms(after, "moa_retrieval_embedder_seconds", &[]);
+        self.embedder_p95_ms = prom_histogram_p95_ms(after, "perf_gate_embedder_seconds", &[]);
         self.vector_p95_ms =
             prom_histogram_p95_ms(after, "moa_retrieval_leg_seconds", &[("leg", "vector")]);
         self.lexical_p95_ms =
@@ -174,7 +174,6 @@ pub(super) async fn drive_load(stack: Stack, cfg: &PerfGateConfig) -> Result<Loa
             let t0 = Instant::now();
             let result = retriever.retrieve(&query).await;
             let elapsed = t0.elapsed();
-            metrics::histogram!("perf_gate_retrieval_seconds").record(elapsed.as_secs_f64());
             drop(permit);
             QueryOutcome {
                 ok: result.is_ok(),

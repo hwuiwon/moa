@@ -107,11 +107,6 @@ impl TurnExecution for TurnExecutionImpl {
         let request = request.into_inner();
 
         driver_progress::set_phase(&ctx, TurnPhase::Compiling);
-        tracing::info!(
-            session_id = %request.session_id,
-            turn_id = %request.turn_id,
-            "TurnExecution workflow started"
-        );
 
         let session_id = parse_session_id(&request.session_id)?;
         let turn_id = parse_turn_id(&request.turn_id)?;

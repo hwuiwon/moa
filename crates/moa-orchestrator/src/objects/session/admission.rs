@@ -213,8 +213,6 @@ impl TurnAdmission {
         .increment(1);
         metrics::gauge!("moa_turn_admission_live", "scope" => "fleet")
             .set(decision.fleet_live as f64);
-        metrics::histogram!("moa_turn_admission_tenant_utilization_ratio")
-            .record(decision.tenant_live as f64 / self.tenant_limit as f64);
     }
 }
 

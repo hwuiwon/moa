@@ -1,8 +1,7 @@
 //! Durable keyed workflow that advances one persisted dynamic execution run.
 
 use async_trait::async_trait;
-use moa_artifacts::execution_plan::{ExecutionOperation, ExecutionReducer};
-use moa_brain::execution_planning::request::record_applied_planning_audit;
+use moa_artifacts::execution_plan::ExecutionOperation;
 use moa_brain::execution_planning::{
     AmendmentPlanningEvidence, ExecutionAmendmentPlanningRequest,
     ExecutionAmendmentPlanningResultKind, plan_amendment,
@@ -44,10 +43,7 @@ use moa_execution::{
         ExecutionTaskWorkflowRequest, ExecutionTerminalDelivery, execution_progress_from_run,
     },
 };
-use moa_observability::{
-    ExecutionMetricReducerKind, record_execution_map_fanout_items, record_execution_reducer_depth,
-    restate_observability::annotate_restate_handler_span,
-};
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -56,9 +52,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::objects::session::SessionClient;
 use crate::services::{execution::ExecutionClient, llm_gateway::LLMGatewayClient};
-use crate::workflows::execution_node_actions::{
-    record_applied_run_transition, record_applied_task_transition,
-};
 use crate::workflows::execution_task::ExecutionTaskClient;
 
 const K_PROCESSED_WAKE_EPOCH: &str = "execution_processed_wake_epoch";
@@ -793,7 +786,6 @@ async fn persist_amendment_audit(
                 .write_planner_call_audit(scope, &envelope)
                 .await
                 .map_err(execution_error)?;
-            record_applied_planning_audit(&result);
             if matches!(result, PlannerCallAuditWriteOutcome::Conflict { .. }) {
                 return Err(TerminalError::new_with_code(
                     409,
@@ -807,7 +799,6 @@ async fn persist_amendment_audit(
                 .write_compile_audit(scope, &envelope)
                 .await
                 .map_err(execution_error)?;
-            record_applied_planning_audit(&result);
             if matches!(result, CompileAuditWriteOutcome::Conflict { .. }) {
                 return Err(TerminalError::new_with_code(
                     409,
@@ -923,10 +914,9 @@ async fn drive_once(
             .map_err(execution_error)?
         {
             MaterializationOutcome::Applied(evidence) => {
-                let marker = evidence.marker.as_ref().ok_or_else(|| {
+                evidence.marker.as_ref().ok_or_else(|| {
                     TerminalError::new("empty map application omitted its durable marker")
                 })?;
-                record_materialization_marker(&snapshot.run, marker)?;
                 applied_empty_map = true;
             }
             MaterializationOutcome::Replayed { tasks } => {
@@ -976,18 +966,6 @@ async fn drive_once(
                     .map_err(execution_error)?
                 {
                     MaterializationOutcome::Applied(evidence) => {
-                        if let Some(marker) = evidence.marker.as_ref() {
-                            record_materialization_marker(&snapshot.run, marker)?;
-                        }
-                        for task in &evidence.tasks {
-                            if evidence
-                                .inserted_task_ids
-                                .binary_search(&task.task_id)
-                                .is_ok()
-                            {
-                                record_applied_task_transition(None, task);
-                            }
-                        }
                         records.extend(evidence.tasks);
                     }
                     MaterializationOutcome::Replayed { tasks } => records.extend(tasks),
@@ -1025,9 +1003,6 @@ async fn drive_once(
                 )
                 .await
                 .map_err(execution_error)?;
-            if let TransitionOutcome::RunApplied(run) = &transition {
-                record_applied_run_transition(Some(snapshot.run.status), run);
-            }
             Ok(wait_transition_step(
                 waiting_status,
                 matches!(
@@ -1093,13 +1068,10 @@ async fn drive_once(
                 .await
                 .map_err(execution_error)?
             {
-                FinalizationOutcome::Finalized(run) => {
-                    record_applied_run_transition(Some(snapshot.run.status), &run);
-                    Ok(terminal_step(
-                        &snapshot.projection.tasks,
-                        "execution scheduler made no progress".to_string(),
-                    ))
-                }
+                FinalizationOutcome::Finalized(_) => Ok(terminal_step(
+                    &snapshot.projection.tasks,
+                    "execution scheduler made no progress".to_string(),
+                )),
                 FinalizationOutcome::Replayed(_) => Ok(terminal_step(
                     &snapshot.projection.tasks,
                     "execution scheduler made no progress".to_string(),
@@ -1194,13 +1166,10 @@ async fn finalize_replan_stop(
         .await
         .map_err(execution_error)?
     {
-        ReplanStopOutcome::Finalized(finalized) => {
-            record_applied_run_transition(Some(snapshot.run.status), &finalized.run);
-            Ok(RunDriveStep::Terminal {
-                task_ids,
-                reason: cancellation_reason,
-            })
-        }
+        ReplanStopOutcome::Finalized(_) => Ok(RunDriveStep::Terminal {
+            task_ids,
+            reason: cancellation_reason,
+        }),
         ReplanStopOutcome::Replayed(_) => Ok(RunDriveStep::Terminal {
             task_ids,
             reason: cancellation_reason,
@@ -1277,13 +1246,10 @@ async fn finalize_internal_failure(
         .await
         .map_err(execution_error)?
     {
-        FinalizationOutcome::Finalized(run) => {
-            record_applied_run_transition(Some(snapshot.run.status), &run);
-            Ok(terminal_step(
-                &snapshot.projection.tasks,
-                format!("internal execution failure: {message}"),
-            ))
-        }
+        FinalizationOutcome::Finalized(_) => Ok(terminal_step(
+            &snapshot.projection.tasks,
+            format!("internal execution failure: {message}"),
+        )),
         FinalizationOutcome::Replayed(_) => Ok(terminal_step(
             &snapshot.projection.tasks,
             format!("internal execution failure: {message}"),
@@ -1372,13 +1338,10 @@ async fn finalize(
         .await
         .map_err(execution_error)?
     {
-        FinalizationOutcome::Finalized(run) => {
-            record_applied_run_transition(Some(snapshot.run.status), &run);
-            Ok(RunDriveStep::Terminal {
-                task_ids,
-                reason: terminal_reason,
-            })
-        }
+        FinalizationOutcome::Finalized(_) => Ok(RunDriveStep::Terminal {
+            task_ids,
+            reason: terminal_reason,
+        }),
         FinalizationOutcome::Replayed(_) => Ok(RunDriveStep::Terminal {
             task_ids,
             reason: terminal_reason,
@@ -1445,44 +1408,6 @@ fn node_materialization_marker(
         | ExecutionOperation::WaitSignal { .. }
         | ExecutionOperation::Output { .. } => Ok(None),
     }
-}
-
-fn record_materialization_marker(
-    run: &ExecutionRunRecord,
-    marker: &ExecutionNodeMaterialization,
-) -> Result<(), HandlerError> {
-    match marker {
-        ExecutionNodeMaterialization::Map { fanout_items, .. } => {
-            record_execution_map_fanout_items(*fanout_items);
-        }
-        ExecutionNodeMaterialization::Reduce {
-            node_id,
-            reducer_depth,
-        } => {
-            let reducer = run
-                .active_plan
-                .definition
-                .nodes
-                .iter()
-                .find(|node| node.id == *node_id)
-                .and_then(|node| match &node.operation {
-                    ExecutionOperation::Reduce { reducer, .. } => Some(reducer),
-                    ExecutionOperation::Capability { .. }
-                    | ExecutionOperation::Agent { .. }
-                    | ExecutionOperation::Map { .. }
-                    | ExecutionOperation::Review { .. }
-                    | ExecutionOperation::WaitSignal { .. }
-                    | ExecutionOperation::Output { .. } => None,
-                })
-                .ok_or_else(|| TerminalError::new("reducer marker lost its plan node"))?;
-            let kind = match reducer {
-                ExecutionReducer::Capability { .. } => ExecutionMetricReducerKind::Capability,
-                ExecutionReducer::Agent { .. } => ExecutionMetricReducerKind::Agent,
-            };
-            record_execution_reducer_depth(kind, *reducer_depth);
-        }
-    }
-    Ok(())
 }
 
 fn reducer_depth(mut item_count: u64, batch_size: u32) -> u64 {

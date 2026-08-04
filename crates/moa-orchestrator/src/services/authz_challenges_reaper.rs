@@ -7,7 +7,7 @@ use moa_authz::{AwakeableResolveError, AwakeableResolver};
 use moa_core::traits::ApprovalDecision;
 use moa_observability::{
     record_builtin_approval_decision, record_builtin_approval_oldest_pending_age,
-    record_builtin_approval_pending_depth, record_builtin_approval_wait,
+    record_builtin_approval_pending_depth,
 };
 use sqlx::PgPool;
 use thiserror::Error;
@@ -114,12 +114,8 @@ impl AuthzChallengeReaper {
     pub async fn sweep(&self, resolver: &dyn AwakeableResolver) -> Result<usize, ReaperError> {
         let sweep =
             authz_challenge_store::unresolved_terminal_builtin_challenges(&self.pool).await?;
-        for timing in &sweep.timed_out {
+        for _ in &sweep.timed_out {
             record_builtin_approval_decision("timeout");
-            let wait = (timing.decided_at - timing.created_at)
-                .to_std()
-                .unwrap_or_default();
-            record_builtin_approval_wait(wait);
         }
         let unresolved = sweep.unresolved;
 

@@ -1,7 +1,5 @@
 //! Frozen planner inputs and schema-guided provider request construction.
 
-use std::time::Duration;
-
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::{GeneratedAmendmentCandidate, GeneratedExecutionCandidate};
 use moa_config::ExecutionConfig;
@@ -13,11 +11,9 @@ use moa_core::types::{
 };
 use moa_execution::{
     compiler::CanonicalExecutionPlan,
-    repository::{CompileAuditWriteOutcome, PlannerCallAuditWriteOutcome},
     state::{ExecutionProjection, ExecutionTaskId},
     wire::ExecutionPlanningContextSnapshot,
 };
-use moa_observability::{record_execution_compile_duration, record_execution_planner_call};
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -202,39 +198,6 @@ pub fn amendment_completion_request(
     )
 }
 
-/// One normalized planner/compile repository result that can emit a first-apply metric.
-pub trait AppliedPlanningAuditMetric {
-    /// Emits the metric only when this result carries first-applied durable evidence.
-    fn record_if_applied(&self);
-}
-
-impl AppliedPlanningAuditMetric for PlannerCallAuditWriteOutcome {
-    fn record_if_applied(&self) {
-        let Self::Applied(evidence) = self else {
-            return;
-        };
-        record_execution_planner_call(evidence.call, evidence.outcome);
-    }
-}
-
-impl AppliedPlanningAuditMetric for CompileAuditWriteOutcome {
-    fn record_if_applied(&self) {
-        let Self::Applied(evidence) = self else {
-            return;
-        };
-        record_execution_compile_duration(
-            evidence.source,
-            evidence.outcome,
-            Duration::from_micros(evidence.duration_micros),
-        );
-    }
-}
-
-/// Emits a planner or compiler metric only for first-applied normalized audit evidence.
-pub fn record_applied_planning_audit(result: &impl AppliedPlanningAuditMetric) {
-    result.record_if_applied();
-}
-
 /// Builds one no-tools planner request from a cacheable, schema-guided system
 /// prompt and a per-turn user payload.
 ///
@@ -270,71 +233,7 @@ fn planner_request<T: schemars::JsonSchema>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    };
-
-    use metrics::{
-        Counter, Gauge, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder, SharedString,
-        Unit,
-    };
-    use moa_core::types::execution_planning::{
-        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
-        ExecutionPlannerOutcome,
-    };
-    use moa_execution::repository::{CompileAuditEvidence, PlannerCallAuditEvidence};
-    use uuid::Uuid;
-
     use super::*;
-
-    struct SampleCounter(Arc<AtomicU64>);
-
-    impl HistogramFn for SampleCounter {
-        fn record(&self, _value: f64) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    struct PlanningRecorder {
-        planner_calls: Arc<AtomicU64>,
-        compiler_calls: Arc<AtomicU64>,
-    }
-
-    impl Recorder for PlanningRecorder {
-        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {
-        }
-
-        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
-
-        fn describe_histogram(
-            &self,
-            _key: KeyName,
-            _unit: Option<Unit>,
-            _description: SharedString,
-        ) {
-        }
-
-        fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
-            if key.name() == "moa_execution_planner_calls_total" {
-                Counter::from_arc(Arc::clone(&self.planner_calls))
-            } else {
-                Counter::noop()
-            }
-        }
-
-        fn register_gauge(&self, _key: &Key, _metadata: &Metadata<'_>) -> Gauge {
-            Gauge::noop()
-        }
-
-        fn register_histogram(&self, key: &Key, _metadata: &Metadata<'_>) -> Histogram {
-            if key.name() == "moa_execution_compile_duration_seconds" {
-                Histogram::from_arc(Arc::new(SampleCounter(Arc::clone(&self.compiler_calls))))
-            } else {
-                Histogram::noop()
-            }
-        }
-    }
 
     #[test]
     fn execution_planner_prompt_v3_pins_compiler_invariants() {
@@ -391,40 +290,5 @@ mod tests {
         assert_request::<GeneratedAmendmentCandidate>(
             "amendment planner instructions remain cacheable",
         );
-    }
-
-    #[test]
-    fn durable_planning_metrics_suppress_exact_replay() {
-        // Pins: mutation-checking either durable gate to emit on Replayed would make the
-        // corresponding count two instead of one.
-        let planner = PlannerCallAuditEvidence {
-            audit_uid: Uuid::now_v7(),
-            call: ExecutionPlannerCallKind::InitialPlan,
-            outcome: ExecutionPlannerOutcome::ProviderError,
-            duration_micros: 7,
-            candidate_hash: None,
-        };
-        let compile = CompileAuditEvidence {
-            audit_uid: Uuid::now_v7(),
-            source: ExecutionCompileSource::GeneratedPlan,
-            outcome: ExecutionCompileOutcome::Rejected,
-            duration_micros: 11,
-            candidate_hash: "a".repeat(64),
-            final_plan_hash: None,
-        };
-        let planner_calls = Arc::new(AtomicU64::new(0));
-        let compiler_calls = Arc::new(AtomicU64::new(0));
-        let recorder = PlanningRecorder {
-            planner_calls: Arc::clone(&planner_calls),
-            compiler_calls: Arc::clone(&compiler_calls),
-        };
-        metrics::with_local_recorder(&recorder, || {
-            record_applied_planning_audit(&PlannerCallAuditWriteOutcome::Applied(planner.clone()));
-            record_applied_planning_audit(&PlannerCallAuditWriteOutcome::Replayed(planner));
-            record_applied_planning_audit(&CompileAuditWriteOutcome::Applied(compile.clone()));
-            record_applied_planning_audit(&CompileAuditWriteOutcome::Replayed(compile));
-        });
-        assert_eq!(planner_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(compiler_calls.load(Ordering::Relaxed), 1);
     }
 }

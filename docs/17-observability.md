@@ -1,6 +1,6 @@
 # 17 - Observability
 
-_Turn latency, execution metrics and traces, export lag, and fast interpretation._
+_Turn latency, execution traces, export lag, and fast interpretation._
 
 ## Turn Latency
 
@@ -35,11 +35,14 @@ attributes. MOA-specific cost and cache-rate details stay under `moa.*`.
 
 ### Telemetry Resource Identity
 
-Traces and metrics share one OpenTelemetry resource. A non-empty
+Traces, metrics, and structured logs share one OpenTelemetry resource. A non-empty
 `MOA_SERVICE_INSTANCE_ID` becomes `service.instance.id`; Kubernetes injects the
 pod UID for both edge and orchestrator so collector discovery and backend
-series remain per-pod across rollout. `observability.otlp_headers` applies to
-both OTLP traces and metrics over either supported transport.
+series remain per-pod across rollout. Setting the collector base URL is the
+single OTLP switch; it enables all three signals. `observability.otlp_headers`
+applies to every OTLP exporter over either supported transport. Structured JSON
+stdout remains available for container operations while the OTLP log bridge
+provides the correlated backend copy.
 
 Healthy trace shape:
 
@@ -93,107 +96,12 @@ in-process helper plumbing, not as the hosted observation source of truth.
 
 ## Execution Runs
 
-Execution metrics describe durable logical work, not one process's active
-workers. A plan has no application fan-out ceiling below its approved run
-budget. Restate scoped concurrency, provider concurrency/rate pacing, and
-governed tool or hand capacity queue physical work without changing logical
-coverage.
-
-### Metrics
-
-All execution metric labels come from closed enums. IDs, plan hashes, artifact
-or capability references, prompts, user text, error/gap prose, and entity names
-are trace attributes or analytics fields, never Prometheus labels.
-
-| Metric | Type | Labels / use |
-|---|---|---|
-| `moa_execution_routes_total` | counter | `decision`, `strategy`, `source`, `classifier_outcome`; public-route volume, internal strategy, trusted-source use, and classifier fallback |
-| `moa_execution_planner_calls_total` | counter | `call`, `outcome`; planner repairs and rejection pressure |
-| `moa_execution_compile_duration_seconds` | histogram (`DURATION_SECONDS`) | `source`, `outcome`; compiler latency |
-| `moa_execution_run_state_transitions_total` | counter | `state`; durable run transitions |
-| `moa_execution_task_state_transitions_total` | counter | `state`, `kind`; durable task transitions |
-| `moa_execution_run_queue_to_start_seconds` | histogram (`DURATION_SECONDS`) | no labels; backpressure before first work |
-| `moa_execution_task_duration_seconds` | histogram (`DURATION_SECONDS`) | `kind`, `outcome`; terminal task duration |
-| `moa_execution_task_retries_total` | counter | `kind`, `failure_class`; accepted new generations only |
-| `moa_execution_map_fanout_items` | histogram (`CARDINALITY`) | no labels; first committed map materialization |
-| `moa_execution_run_cost_microusd` | histogram (`COST_MICROUSD`) | `usage=reserved|actual` |
-| `moa_execution_run_tokens` | histogram (`TOKENS`) | `usage=reserved|actual` |
-| `moa_execution_run_tasks` | histogram (`CARDINALITY`) | `usage=reserved|actual` |
-| `moa_execution_run_tool_calls` | histogram (`CARDINALITY`) | `usage=reserved|actual` |
-| `moa_execution_run_retrieved_bytes` | histogram (`BYTES`) | `usage=reserved|actual` |
-| `moa_execution_run_coverage_ratio` | histogram (`RATIO`) | terminal `status` |
-| `moa_execution_reducer_depth` | histogram (`CARDINALITY`) | `kind=capability|agent` |
-| `moa_execution_runs_terminal_total` | counter | terminal `status`, typed `reason` |
-
-Bucket boundaries are shared by registration and render tests; Prometheus adds
-`+Inf`:
-
-```text
-DURATION_SECONDS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600]
-CARDINALITY = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2500, 5000, 10000]
-COST_MICROUSD = [0, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000]
-TOKENS = [0, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
-BYTES = [0, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456, 1073741824]
-RATIO = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
-```
-
-The bounded label values are:
-
-Classifier rationale is ephemeral turn-local explanation. Never persist or
-attach its free-form text to counters, histograms, traces, logs, or analytics.
-
-- route: `decision=respond|execute|needs_input`,
-  `strategy=none|inline|durable`,
-  `source=classifier|blank_objective|selected_execution_template|durable_upgrade`, and
-  `classifier_outcome=not_called|accepted|provider_error|stream_error|oversized|schema_rejected|invalid_decision|low_confidence|context_forced_inline`;
-- planner:
-  `call=initial_plan|initial_repair|amendment|amendment_repair` and
-  `outcome=accepted|needs_input|unsupported|schema_rejected|immutable_goal_changed|compiler_rejected|oversized|provider_error`;
-- compiler:
-  `source=generated_plan|skill_template|experiment_template|amendment|skill_regression`
-  and `outcome=accepted|needs_input|unsupported|rejected`;
-- run state:
-  `awaiting_confirmation|queued|running|waiting_input|waiting_review|waiting_replan|completed|partial|blocked|unsupported|failed|cancelled`;
-- task state:
-  `pending|reserved|running|waiting_input|waiting_replan|completed|skipped|failed|cancelled`;
-- task kind:
-  `capability|agent|review|wait_signal|output|completion_verifier`;
-- terminal task outcome: `completed|skipped|failed|cancelled`;
-- failure class:
-  `retryable|dependency_failed|invalid_input|invalid_output|authorization_denied|budget_exceeded|deadline_exceeded|cancelled|unsupported|terminal`;
-- coverage and terminal status:
-  `completed|partial|blocked|unsupported|failed|cancelled`;
-- terminal reason:
-  `completed|goal_incomplete|budget_exceeded|deadline_exceeded|cancelled|no_progress|duplicate_plan|duplicate_amendment|repeated_failure|budget_exhausted|task_failure|unsupported_plan|blocked|internal_failure`.
-
-The normalized route matrix is Respond/none, NeedsInput/none,
-Execute/Inline, or Execute/Durable. Only the last pair may be recorded at the
-durable-upgrade stage, and every non-accepted classifier outcome records
-Execute/Inline. Emission points are durable and one-shot. Route emits after Session acceptance;
-planner emits once per completed provider call, including provider errors;
-compiler duration wraps each real compiler invocation. State counters emit only
-after a committed transition. Queue-to-start observes the sole first
-queued-to-running transition as `started_at - queued_at`, clamped at zero;
-pre-confirmation cancellation has no observation. Task duration observes
-terminalization from `started_at`, or from `created_at` when the task never
-started. Map fan-out and reducer depth emit only for first committed
-materialization. All five reserved/actual histograms, coverage, and terminal
-count emit only on the sole nonterminal-to-terminal run update.
-
-Mutation metrics emit only from committed `Applied` evidence. A semantically
-identical retry returns `Replayed` and emits nothing, including
-commit-before-handler-result recovery. Conflicts, stale generations, read paths,
-and repeated transport sends likewise do not increment mutation metrics.
-
-Operationally:
-
-- high queue-to-start with normal task duration means backpressure, not slow
-  task execution;
-- rising retry counts identify generation churn by typed failure class;
-- map fan-out and reducer depth show the compiled execution shape;
-- terminal `reserved` observations must be zero for all five budget dimensions;
-  a non-zero value is a reservation-leak invariant violation;
-- coverage is `satisfied requirements / total requirements`, with `0/0 = 1.0`.
+Durable execution is observed through `moa.execution_run` and
+`moa.execution_task`, Restate invocation state, compact session events, and
+bounded trace attributes. A plan has no application fan-out ceiling below its
+approved run budget. Restate scoped concurrency, provider concurrency/rate
+pacing, and governed tool or hand capacity queue physical work without changing
+logical coverage.
 
 ### Replay-Safe Trace Correlation
 

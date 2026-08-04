@@ -126,12 +126,6 @@ impl GlobalConcurrency {
         loop {
             match self.try_acquire_once().await {
                 Ok(Some(guard)) => {
-                    metrics::counter!(
-                        "moa_provider_concurrency_global_acquired_total",
-                        "provider" => self.provider.clone(),
-                        "kind" => self.kind,
-                    )
-                    .increment(1);
                     return Some(PermitLease::Global(guard));
                 }
                 Ok(None) => {}
@@ -186,12 +180,6 @@ impl GlobalConcurrency {
         if !decision.acquired {
             return Ok(None);
         }
-        metrics::gauge!(
-            "moa_provider_concurrency_lease_count",
-            "provider" => self.provider.clone(),
-            "kind" => self.kind,
-        )
-        .set(decision.live as f64);
         Ok(Some(GlobalLeaseGuard {
             store: Arc::clone(&self.store),
             key: self.key.clone(),

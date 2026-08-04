@@ -3,7 +3,8 @@
 //! The collector serves the two signal paths a real OTLP/HTTP receiver serves,
 //! `/v1/traces` and `/v1/metrics`, and [`OtlpCapture::endpoint`] hands out the
 //! collector BASE URL rather than either of them. That mirrors production
-//! exactly: `MOA_OTLP_ENDPOINT` names a collector, both signals derive their own
+//! exactly: `MOA_OBSERVABILITY_OTLP_ENDPOINT` names a collector, and each captured
+//! signal derives its own
 //! path from it, and a value that already names one signal is refused at config
 //! load. A fixture that handed out `.../v1/traces` would be configuring the
 //! child with a value production rejects, and could never observe a metric at
@@ -999,7 +1000,7 @@ mod tests {
             capture.unexpected_requests().await
         );
 
-        // Clearing must reset both signals, or a fixture reusing the collector
+        // Clearing must reset both captured signals, or a fixture reusing the collector
         // across phases reads a previous phase's metric as its own.
         capture.clear().await;
         assert!(capture.metrics_named("moa_turns_total").await.is_empty());

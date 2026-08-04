@@ -49,18 +49,20 @@ Local compose uses RustFS with an explicit local HTTP endpoint.
 
 ## Lineage And Audit Metrics
 
-Lineage queue pressure now separates accepted, backpressured, failed, and
-explicitly lossy events:
+The Postgres-backed lineage sink exposes queue and writer health separately:
 
-- `moa_lineage_accepted_total{durability="journal"}` counts events after the
-  durable journal append succeeds.
-- `moa_lineage_backpressure_total{mode="durable"}` means the event is already
-  journaled but the writer notification channel was full.
-- `moa_lineage_dropped_total{mode="lossy_telemetry"}` is only for explicitly
-  lossy telemetry/score paths; it must not be used as an audit-loss signal.
-- `moa_lineage_failed_total{mode="durable"}` means durable acceptance failed
-  and should page if compliance lineage is enabled.
+- `moa_lineage_accepted_total{durability="postgres"}` counts events after their
+  append to `analytics.lineage_journal` commits.
+- `moa_lineage_dropped_total{mode="best_effort",event_class}` counts events
+  rejected because the process-local best-effort ingress channel was full. It
+  is not an audit-loss signal for durable writes.
+- `moa_lineage_failed_total{mode,reason}` counts failed acceptance paths. The
+  bounded values are `mode="best_effort",reason="channel_closed|accept_failed"`
+  and `mode="durable",reason="accept_timeout"`.
+- `moa_lineage_written_total` counts journal rows written to the lineage store.
+- `moa_lineage_journal_depth` and
+  `moa_lineage_journal_oldest_age_seconds` report the committed queue backlog.
 
-Dashboards and alerts should treat `moa_lineage_backpressure_total` as a writer
-capacity signal and `moa_lineage_failed_total` as the compliance/audit failure
-signal.
+Dashboards should use journal depth and oldest age for writer-capacity pressure.
+Alerts should use `moa_lineage_failed_total` as the compliance/audit acceptance
+failure signal when compliance lineage is enabled.

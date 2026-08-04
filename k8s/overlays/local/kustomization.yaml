@@ -6,6 +6,7 @@ resources:
   - valkey.yaml
   - rustfs.yaml
   - local-config.yaml
+  - lgtm.yaml
 
 generatorOptions:
   disableNameSuffixHash: true
@@ -33,6 +34,16 @@ secretGenerator:
     namespace: moa-system
     files:
       - primary=kms-root-keys/primary
+
+configMapGenerator:
+  # Keep local Postgres datasource configuration beside the local-only LGTM
+  # deployment. The pinned image supplies its collector configuration.
+  # Dashboards stay single-sourced in the canonical directory and are imported
+  # through the sync helper after Grafana starts.
+  - name: moa-local-lgtm-config
+    namespace: moa-system
+    files:
+      - postgres-datasource.yaml
 
 images:
   - name: ghcr.io/hwuiwon/moa-orchestrator

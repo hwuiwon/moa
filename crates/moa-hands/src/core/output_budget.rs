@@ -6,7 +6,6 @@ use moa_core::{
     truncation::truncate_head_tail, types::session::SessionMeta, types::tools::ToolContent,
     types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::ToolOutputArtifact,
 };
-use moa_observability::record_tool_output_truncated_metric;
 use serde_json::json;
 
 use super::ToolRouter;
@@ -58,7 +57,6 @@ impl ToolRouter {
             )
             .await
         {
-            record_tool_output_truncated_metric(&tool_definition.name);
             return artifactized_output.with_truncated(true);
         }
 
@@ -102,10 +100,6 @@ impl ToolRouter {
         } else {
             existing_original_output_tokens
         };
-
-        if router_truncated {
-            record_tool_output_truncated_metric(&tool_definition.name);
-        }
 
         final_output
     }

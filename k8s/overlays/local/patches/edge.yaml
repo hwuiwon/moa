@@ -33,8 +33,13 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_OBSERVABILITY_ENABLED
-    value: "false"
+    name: MOA_OBSERVABILITY_OTLP_ENDPOINT
+    value: http://moa-lgtm.moa-system.svc.cluster.local:4317
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_OBSERVABILITY_SAMPLE_RATE
+    value: "1.0"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:

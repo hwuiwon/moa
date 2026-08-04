@@ -706,7 +706,6 @@ pub(super) async fn start_inner(
         )
         .await
         .map_err(execution_error)?;
-    record_applied_run_transition(None, &run);
     Ok(ExecutionStartResponse {
         active_plan_hash: run.active_plan_hash,
         estimate: run.active_plan.estimate,
@@ -799,12 +798,8 @@ pub(super) async fn confirm_inner(
         )
         .await
         .map_err(execution_error)?;
-    let prior_status = run.status;
     Ok(match outcome {
-        ConfirmationOutcome::Confirmed(run) => {
-            record_applied_run_transition(Some(prior_status), &run);
-            applied_mutation(&run)
-        }
+        ConfirmationOutcome::Confirmed(run) => applied_mutation(&run),
         ConfirmationOutcome::AlreadyConfirmed(run) => replayed_mutation(&run),
         ConfirmationOutcome::NotFound => not_found_mutation(),
         ConfirmationOutcome::Conflict(reason) => conflict_mutation(match reason {
@@ -1012,8 +1007,7 @@ pub(super) async fn cancel_inner(
             .await
             .map_err(execution_error)?
         {
-            CancellationOutcome::Cancelled { commit, metrics } => {
-                record_applied_execution_mutation(&metrics);
+            CancellationOutcome::Cancelled(commit) => {
                 applied_mutation(&commit.run).with_task_ids_to_release(commit.task_ids_to_release)
             }
             CancellationOutcome::Replayed(commit) => {
@@ -1368,8 +1362,7 @@ pub(super) async fn apply_amendment_inner(
         .await
         .map_err(execution_error)?;
     Ok(match write {
-        AmendmentWrite::Applied { commit, metrics } => {
-            record_applied_execution_mutation(&metrics);
+        AmendmentWrite::Applied(commit) => {
             applied_mutation(&commit.run).with_task_ids_to_release(commit.task_ids_to_release)
         }
         AmendmentWrite::Replayed(commit) => {
@@ -1450,7 +1443,6 @@ pub(super) async fn finalize_service_replan_stop(
         .map_err(execution_error)?;
     Ok(match finalized {
         ReplanStopOutcome::Finalized(finalized) => {
-            record_applied_run_transition(Some(snapshot.run.status), &finalized.run);
             applied_mutation(&finalized.run).with_task_ids_to_release(finalized.task_ids_to_release)
         }
         ReplanStopOutcome::Replayed(finalized) => replayed_mutation(&finalized.run)

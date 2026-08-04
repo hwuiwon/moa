@@ -34,4 +34,11 @@
     shutdown-timeout = "2m"
     default-num-partitions = 16
     default-replication = 1
+    # Restate 1.7 supports OTLP trace export through tracing-endpoint. It does
+    # not expose a supported probabilistic sampler knob, so local Phase 0 keeps
+    # the filter explicit and measures the resulting volume.
+    tracing-endpoint = "http://moa-lgtm.moa-system.svc.cluster.local:4317"
     tracing-filter = "info"
+    # Preserve the base feature flag: replacing spec.config without this entry
+    # would silently disable vqueues in the local cluster.
+    experimental_enable_vqueues = true

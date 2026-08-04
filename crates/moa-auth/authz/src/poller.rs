@@ -407,7 +407,6 @@ impl OutboxPoller {
                 error = %error,
                 "outbox row failed; backing off"
             );
-            metrics::counter!("moa_authz_outbox_retries_total").increment(1);
         } else {
             tracing::debug!(
                 id = %row.id,

@@ -225,8 +225,6 @@ impl CachedHybridRetriever {
                 metrics::histogram!("moa_retrieval_cache_hit_seconds")
                     .record(started.elapsed().as_secs_f64());
                 metrics::counter!("moa_retrieval_cache_total", "outcome" => "hit").increment(1);
-                metrics::gauge!("moa_retrieval_cache_entries")
-                    .set(tenant_cache.entry_count() as f64);
                 return Ok(RetrievalOutput {
                     hits: entry.hits,
                     diagnostics: Default::default(),
@@ -250,7 +248,6 @@ impl CachedHybridRetriever {
                 },
             )
             .await;
-        metrics::gauge!("moa_retrieval_cache_entries").set(tenant_cache.entry_count() as f64);
         Ok(output)
     }
 

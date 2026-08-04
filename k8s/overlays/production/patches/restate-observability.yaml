@@ -8,5 +8,10 @@
     shutdown-timeout = "10m"
     default-num-partitions = 128
     default-replication = 2
-    tracing-endpoint = "http://alloy.observability.svc.cluster.local:4317"
-    tracing-filter = "info"
+    tracing-endpoint = "http://alloy.observability.svc.cluster.local:4319"
+    tracing-filter = "warn,restate_ingress_http=info,restate_invoker_impl=info"
+    log-filter = "warn,restate=info"
+    # v1.7 limitation: vqueues can only be enabled on a fresh cluster (no
+    # in-flight invocations); a cluster with in-flight invocations will
+    # refuse to boot with this flag set.
+    experimental_enable_vqueues = true

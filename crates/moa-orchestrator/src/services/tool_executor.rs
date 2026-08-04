@@ -19,7 +19,6 @@ use moa_hands::{
     PendingConnectorToolOutput, ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution,
     ToolRouter,
 };
-use moa_observability::record_tool_idempotency_scan;
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
     screen_tool_input_for_canary,
@@ -1088,7 +1087,6 @@ async fn prior_non_idempotent_result_exists(
         .name("tool_executor_tool_result_exists")
         .await?
         .into_inner();
-    record_tool_idempotency_scan("ToolResult", 0);
     Ok(exists)
 }
 
@@ -1117,7 +1115,6 @@ async fn prior_tool_call_event_exists(
         .name("tool_executor_tool_call_exists")
         .await?
         .into_inner();
-    record_tool_idempotency_scan("ToolCall", 0);
     Ok(exists)
 }
 
