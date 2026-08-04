@@ -603,16 +603,24 @@ pub struct EmbeddingModelPrice {
     pub price_per_mtok: f64,
 }
 
-/// One rerank-model pricing entry, billed per "search" (one query over up to
-/// 100 documents, per Cohere's billing definition) rather than per token.
+/// Billing unit and price for one rerank model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RerankBilling {
+    /// Price in USD per 1,000 searches.
+    PerThousandSearches(f64),
+    /// Price in USD per 1,000,000 input tokens.
+    PerMillionTokens(f64),
+}
+
+/// One rerank-model pricing entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RerankModelPrice {
     /// Provider that serves the model (`"cohere"` / `"zeroentropy"`).
     pub provider: &'static str,
     /// Canonical rerank model id passed to the provider API.
     pub id: &'static str,
-    /// Price in USD per 1,000 search units.
-    pub price_per_thousand_searches: f64,
+    /// Provider-specific billing unit and price.
+    pub billing: RerankBilling,
 }
 
 /// Embedding-model pricing, verified against provider pricing pages on
@@ -664,29 +672,25 @@ pub const RERANK_CATALOG: &[RerankModelPrice] = &[
     RerankModelPrice {
         provider: "cohere",
         id: "rerank-v3.5",
-        price_per_thousand_searches: 2.00,
+        billing: RerankBilling::PerThousandSearches(2.00),
     },
     RerankModelPrice {
         provider: "cohere",
         id: "rerank-v4.0",
-        price_per_thousand_searches: 2.00,
+        billing: RerankBilling::PerThousandSearches(2.00),
     },
     RerankModelPrice {
         provider: "cohere",
         id: "rerank-v4.0-fast",
-        price_per_thousand_searches: 2.00,
+        billing: RerankBilling::PerThousandSearches(2.00),
     },
     RerankModelPrice {
         provider: "zeroentropy",
-        // TODO(pricing): unverified in this unit. ZeroEntropy bills zerank-2 at
-        // $0.025 per 1,000,000 tokens (confirmed at zeroentropy.dev/pricing),
-        // not per search, and publishes no official token-to-search
-        // conversion, so it cannot be priced in this per-1K-searches table
-        // without fabricating a ratio. Cost wiring skips this model (price is
-        // 0.0) until ZeroEntropy either bills per search or MOA adds a
-        // token-billed rerank pricing path.
+        // Billing unit and rate sources:
+        // https://docs.zeroentropy.dev/api-reference/models/rerank
+        // https://zeroentropy.dev/pricing/
         id: "zerank-2",
-        price_per_thousand_searches: 0.0,
+        billing: RerankBilling::PerMillionTokens(0.025),
     },
 ];
 
@@ -699,16 +703,13 @@ pub fn embedding_price_per_mtok(model_id: &str) -> Option<f64> {
         .map(|entry| entry.price_per_mtok)
 }
 
-/// Returns the USD price per 1,000 rerank search units for a rerank model id,
-/// or `None` if the id isn't catalogued. A catalogued-but-unverified model
-/// (see the `TODO(pricing)` entries in [`RERANK_CATALOG`]) returns
-/// `Some(0.0)`; callers that skip zero-cost billing already treat that
-/// correctly as "do not charge."
-pub fn rerank_price_per_thousand_searches(model_id: &str) -> Option<f64> {
+/// Returns the billing unit and USD price for a rerank model id, or `None` if
+/// the id isn't catalogued.
+pub fn rerank_billing(model_id: &str) -> Option<RerankBilling> {
     RERANK_CATALOG
         .iter()
         .find(|entry| entry.id == model_id)
-        .map(|entry| entry.price_per_thousand_searches)
+        .map(|entry| entry.billing)
 }
 
 #[cfg(test)]
@@ -877,17 +878,18 @@ mod tests {
         assert_eq!(embedding_price_per_mtok("not-a-real-embedding-model"), None);
 
         assert_eq!(
-            rerank_price_per_thousand_searches("rerank-v4.0-fast"),
-            Some(2.00)
+            rerank_billing("rerank-v4.0-fast"),
+            Some(RerankBilling::PerThousandSearches(2.00))
         );
         assert_eq!(
-            rerank_price_per_thousand_searches("rerank-v3.5"),
-            Some(2.00)
+            rerank_billing("rerank-v3.5"),
+            Some(RerankBilling::PerThousandSearches(2.00))
         );
         assert_eq!(
-            rerank_price_per_thousand_searches("not-a-real-rerank-model"),
-            None
+            rerank_billing("zerank-2"),
+            Some(RerankBilling::PerMillionTokens(0.025))
         );
+        assert_eq!(rerank_billing("not-a-real-rerank-model"), None);
     }
 
     #[test]

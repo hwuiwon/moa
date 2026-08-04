@@ -1163,13 +1163,6 @@ async fn request_input_from_parent(
     // Emit the NeedsInput signal to the owning coordinator (arms a guarded resume if the
     // coordinator is idle). DETACHED so the child never blocks on the coordinator's queue.
     //
-    // TODO(User-audience wiring): for `input_audience = User` the coordinator must surface
-    // the question to the human and forward the human's reply as `ProvideInput`. The
-    // awakeable + `ProvideInput` mechanism below is already complete, so User routing is a
-    // thin addition (coordinator prompt guidance + edge user-reply forwarding) that depends
-    // on the edge work in Task 10; today the question/audience are visible to the
-    // coordinator via the recorded `NeedsInput` signal and it can answer via
-    // `provide_worker_input`.
     let signal = build_needs_input_signal(
         worker_id,
         parent_session,

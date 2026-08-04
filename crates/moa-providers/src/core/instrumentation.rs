@@ -377,14 +377,23 @@ pub(crate) fn rerank_span(provider: &'static str, model: &str, document_count: u
     span
 }
 
-/// Records the per-call cost on a rerank span, when the model's price is known
-/// and non-zero. Rerank calls are billed per search unit, not per token, so
-/// cost is a flat per-call charge rather than a token-scaled one.
-pub(crate) fn finish_rerank_span(span: &Span, model: &str) {
-    if let Some(price) =
-        super::models::rerank_price_per_thousand_searches(model).filter(|price| *price > 0.0)
-    {
-        span.set_attribute("moa.rerank.cost_usd", price / 1_000.0);
+/// Records authoritative usage and cost on a successful rerank span when the
+/// model and required billing inputs are known.
+pub(crate) fn finish_rerank_span(span: &Span, model: &str, input_tokens: Option<usize>) {
+    match super::models::rerank_billing(model) {
+        Some(super::models::RerankBilling::PerThousandSearches(price)) if price > 0.0 => {
+            span.set_attribute("moa.rerank.cost_usd", price / 1_000.0);
+        }
+        Some(super::models::RerankBilling::PerMillionTokens(price)) => {
+            if let Some(tokens) = input_tokens {
+                span.set_attribute("gen_ai.usage.input_tokens", tokens as i64);
+                if price > 0.0 {
+                    let cost = (tokens as f64 * price) / 1_000_000.0;
+                    span.set_attribute("moa.rerank.cost_usd", cost);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -642,7 +651,7 @@ mod tests {
         // (rerank-v4.0-fast is $2.00/1K searches -> $0.002/call).
         let spans = capture_spans(|| {
             let span = rerank_span("cohere", "rerank-v4.0-fast", 12);
-            finish_rerank_span(&span, "rerank-v4.0-fast");
+            finish_rerank_span(&span, "rerank-v4.0-fast", None);
         });
 
         let span = find_span(&spans, "rerank rerank-v4.0-fast");
@@ -660,16 +669,31 @@ mod tests {
     }
 
     #[test]
-    fn rerank_span_omits_cost_for_unverified_zeroentropy_pricing() {
-        // Pins: zerank-2 is catalogued at price 0.0 (ZeroEntropy bills per
-        // token, not per search — see the RERANK_CATALOG TODO), so no cost is
-        // fabricated for it.
+    fn rerank_span_records_authoritative_token_usage_and_exact_cost() {
+        // Pins: zerank-2 uses the provider's authoritative token count and its
+        // $0.025/1M-token catalog price; document count is never a proxy.
         let spans = capture_spans(|| {
             let span = rerank_span("zeroentropy", "zerank-2", 5);
-            finish_rerank_span(&span, "zerank-2");
+            finish_rerank_span(&span, "zerank-2", Some(400));
         });
 
         let span = find_span(&spans, "rerank zerank-2");
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), Some(400));
+        let cost = attr_f64(span, "moa.rerank.cost_usd").expect("cost should be set");
+        assert!((cost - 0.00001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rerank_span_omits_token_cost_without_authoritative_usage() {
+        // Pins: token-billed rerank models fail closed when the provider does
+        // not supply usage; document count is never used as an estimate.
+        let spans = capture_spans(|| {
+            let span = rerank_span("zeroentropy", "zerank-2", 5);
+            finish_rerank_span(&span, "zerank-2", None);
+        });
+
+        let span = find_span(&spans, "rerank zerank-2");
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), None);
         assert_eq!(attr_f64(span, "moa.rerank.cost_usd"), None);
     }
 

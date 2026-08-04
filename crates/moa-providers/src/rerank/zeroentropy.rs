@@ -164,7 +164,8 @@ impl Reranker for ZeroEntropyReranker {
                 return Err(error);
             }
         };
-        finish_rerank_span(&span, model);
+        let total_tokens = body.total_tokens;
+        finish_rerank_span(&span, model, Some(total_tokens));
         Ok(body
             .results
             .into_iter()
@@ -191,10 +192,54 @@ struct ZeroEntropyRerankRequest<'a> {
 #[derive(Deserialize)]
 struct ZeroEntropyRerankResponse {
     results: Vec<ZeroEntropyRerankResponseHit>,
+    total_tokens: usize,
 }
 
 #[derive(Deserialize)]
 struct ZeroEntropyRerankResponseHit {
     index: usize,
     relevance_score: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::core::span_capture_test_support::{
+        attr_f64, attr_i64, capture_spans_async, find_span,
+    };
+
+    use super::{Reranker, ZEROENTROPY_DEFAULT_RERANK_MODEL, ZeroEntropyReranker};
+
+    #[tokio::test]
+    async fn rerank_records_provider_token_usage_and_exact_cost() {
+        // Pins: the real adapter records ZeroEntropy's response-reported usage
+        // and prices zerank-2 at $0.025/1M tokens without estimating usage.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{ "index": 0, "relevance_score": 0.9 }],
+                "total_tokens": 400
+            })))
+            .mount(&server)
+            .await;
+        let reranker = ZeroEntropyReranker::new("test-key")
+            .expect("ZeroEntropy reranker should build")
+            .with_endpoint(server.uri());
+        let documents = vec!["one".to_string(), "two".to_string()];
+
+        let spans = capture_spans_async(async {
+            reranker
+                .rerank(ZEROENTROPY_DEFAULT_RERANK_MODEL, "query", &documents, 1)
+                .await
+                .expect("wiremock rerank request should succeed");
+        })
+        .await;
+
+        let span = find_span(&spans, "rerank zerank-2");
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), Some(400));
+        let cost = attr_f64(span, "moa.rerank.cost_usd").expect("cost should be recorded");
+        assert!((cost - 0.00001).abs() < 1e-12);
+    }
 }

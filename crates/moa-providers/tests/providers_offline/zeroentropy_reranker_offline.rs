@@ -116,3 +116,33 @@ async fn zeroentropy_reranker_offline_http_error_surfaces_status() {
         "expected HTTP 401, got {error:?}"
     );
 }
+
+#[tokio::test]
+async fn zeroentropy_reranker_offline_missing_total_tokens_rejects_success_response() {
+    // Pins: total_tokens is required authoritative billing usage; a nominally
+    // successful response without it fails decoding instead of guessing cost.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "index": 0, "relevance_score": 0.9 }]
+        })))
+        .mount(&server)
+        .await;
+    let reranker = ZeroEntropyReranker::new("test-key")
+        .expect("ZeroEntropy reranker should build")
+        .with_endpoint(format!("{}/v1/models/rerank", server.uri()));
+    let documents = vec!["hello".to_string()];
+
+    let error = reranker
+        .rerank(ZEROENTROPY_DEFAULT_RERANK_MODEL, "query", &documents, 1)
+        .await
+        .expect_err("response without total_tokens should fail");
+
+    let MoaError::ProviderError(message) = error else {
+        panic!("expected response-decode ProviderError, got {error:?}");
+    };
+    assert!(
+        message.starts_with("error decoding response body for url"),
+        "expected response-decode diagnostic for missing total_tokens, got {message:?}"
+    );
+}

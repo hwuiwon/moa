@@ -130,7 +130,7 @@ impl Reranker for CohereReranker {
                 return Err(error);
             }
         };
-        finish_rerank_span(&span, model);
+        finish_rerank_span(&span, model, None);
         Ok(body
             .results
             .into_iter()
