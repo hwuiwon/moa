@@ -22,6 +22,8 @@ use super::{
 };
 use crate::{
     brain_bridge::TurnRequestPreparer,
+    services::llm_gateway::{LLMCompletionOwner, cancel_completion_owner},
+    turn::util::meaningful_cancel_reason,
     turn_driver::progress as driver_progress,
     workflows::{
         turn_events::{TurnEventAppender, append_turn_failed},
@@ -191,7 +193,7 @@ impl TurnExecution for TurnExecutionImpl {
             super::turn_outcome_kind_label(&outcome.kind),
             moa_core::types::provider::ModelTier::Main,
         );
-        notify_session_of_outcome(&ctx, &request.session_id, &request.identity, &outcome);
+        notify_session_of_outcome(&ctx, &request.session_id, &request.identity, &outcome).await?;
         if let Some(assessment) = post_outcome_assessment {
             run_post_outcome_assessment(self, &ctx, assessment).await;
         }
@@ -206,7 +208,11 @@ impl TurnExecution for TurnExecutionImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("TurnExecution", "request_cancel");
-        driver_progress::request_cancel(&ctx, reason.into_inner()).await
+        let Some(reason) = meaningful_cancel_reason(Some(reason.into_inner())) else {
+            return Ok(());
+        };
+        cancel_completion_owner(&ctx, LLMCompletionOwner::root_turn(ctx.key())).await?;
+        driver_progress::request_cancel(&ctx, reason).await
     }
 
     #[tracing::instrument(skip(self, ctx))]

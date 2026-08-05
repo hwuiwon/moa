@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: moa-session-status-migrator
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-session-status-migrator
+    app.kubernetes.io/part-of: moa
+    app.kubernetes.io/component: migration
+spec:
+  selector:
+    app.kubernetes.io/name: moa-session-status-migrator
+  ports:
+    - name: restate
+      port: 9080
+      targetPort: restate
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Production rendering replaces this placeholder with a deterministic suffix
+  # derived from the immutable orchestrator image digest.
+  name: moa-session-status-migrator-image-revision
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-session-status-migrator
+    app.kubernetes.io/part-of: moa
+    app.kubernetes.io/component: migration
+  annotations:
+    moa.hwuiwon.com/image-revision: "image-revision"
+spec:
+  activeDeadlineSeconds: 1200
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moa-session-status-migrator
+        app.kubernetes.io/part-of: moa
+        app.kubernetes.io/component: migration
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: database-migrations
+          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          args:
+            - migrate
+          envFrom:
+            - configMapRef:
+                name: moa-runtime-config
+          env:
+            - name: MOA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+            - name: MOA_DATABASE_ADMIN_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: admin-url
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: status-migrator
+          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              server_pid=""
+              trap '[ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true' EXIT
+              /usr/local/bin/moa-orchestrator --port 9080 serve-status-migration &
+              server_pid=$!
+              /usr/local/bin/moa-orchestrator wait-status-cutover \
+                --database-url "$MOA_CUTOVER_DATABASE_URL"
+              kill "$server_pid"
+              wait "$server_pid" || true
+          env:
+            - name: MOA_CUTOVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+          ports:
+            - name: restate
+              containerPort: 9080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: moa-session-status-migrator-ingress
+  namespace: moa-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: moa-session-status-migrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-restate
+          podSelector:
+            matchLabels:
+              moa.hwuiwon.com/restate-cluster: moa-restate
+      ports:
+        - protocol: TCP
+          port: 9080

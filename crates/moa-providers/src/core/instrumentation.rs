@@ -406,6 +406,8 @@ pub(crate) fn provider_error_class(error: &MoaError) -> &'static str {
         MoaError::HttpStatus { .. } => "http_4xx",
         MoaError::SerializationError(_) => "serialization_error",
         MoaError::ProviderQuirk(_) => "provider_quirk",
+        MoaError::ProviderTransport(_) => "transport_error",
+        MoaError::ProviderTimeout(_) => "timeout",
         _ => "provider_error",
     }
 }
@@ -587,6 +589,14 @@ mod tests {
         assert_eq!(
             provider_error_class(&MoaError::ProviderError("boom".to_string())),
             "provider_error"
+        );
+        assert_eq!(
+            provider_error_class(&MoaError::ProviderTransport("reset".to_string())),
+            "transport_error"
+        );
+        assert_eq!(
+            provider_error_class(&MoaError::ProviderTimeout("deadline".to_string())),
+            "timeout"
         );
     }
 

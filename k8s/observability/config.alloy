@@ -211,15 +211,18 @@ prometheus.scrape "restate" {
 	forward_to      = [prometheus.relabel.restate.receiver]
 }
 
-// Only retain the Restate series used by the provisioned dashboard and live
-// smoke checks. Filtering after scrape preserves target health (`up`) while
-// avoiding ingestion of Restate's complete internal metric surface.
+// Only retain the Restate 1.7.2 series used by the provisioned dashboard,
+// alerts, and live smoke checks. Filtering after scrape preserves target
+// health (`up`) while avoiding ingestion of Restate's complete internal metric
+// surface. Keep this list synchronized with RESTATE_1_7_2_METRICS in
+// validate-observability.sh; those names are pinned to the v1.7.2 metric
+// definitions, not copied from an unversioned dashboard.
 prometheus.relabel "restate" {
 	forward_to = [prometheus.remote_write.mimir.receiver]
 
 	rule {
 		source_labels = ["__name__"]
-		regex         = "up|restate_ingress_requests_total|restate_invoker_invocation_tasks_total|restate_ingress_request_duration_seconds|restate_rocksdb_estimate_live_data_size_bytes"
+		regex         = "up|restate_ingress_request_duration_seconds|restate_ingress_requests_total|restate_invoker_invocation_tasks_total|restate_num_partitions|restate_partition_applied_lsn_lag|restate_partition_is_effective_leader|restate_partition_snapshot_age_seconds|restate_partition_store_snapshots_upload_failed_total|restate_partition_store_snapshots_upload_total|restate_partition_time_since_last_status_update|restate_usage_state_storage_bytes"
 		action        = "keep"
 	}
 }
@@ -237,6 +240,18 @@ discovery.relabel "pod_logs" {
 			"__meta_kubernetes_pod_container_name",
 		]
 		regex  = "moa-edge;edge|moa-orchestrator;orchestrator"
+		action = "drop"
+	}
+
+	// Restate has a different JSON envelope (`fields.message`) and is handled
+	// by its own bounded pipeline below. Dropping it here prevents duplicate
+	// ingestion and avoids replacing its full JSON body with an empty MOA field.
+	rule {
+		source_labels = [
+			"__meta_kubernetes_namespace",
+			"__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster",
+		]
+		regex  = "moa-restate;moa-restate"
 		action = "drop"
 	}
 }
@@ -305,6 +320,73 @@ loki.relabel "moa" {
 	rule {
 		action = "labelkeep"
 		regex  = "^(service|namespace|level|cluster|env)$"
+	}
+}
+
+// Restate 1.7.2 writes newline-delimited JSON with the human message nested at
+// `fields.message`. Preserve the complete server-owned JSON body for incident
+// queries and promote only bounded labels; invocation IDs stay query-time JSON
+// fields rather than high-cardinality Loki labels.
+discovery.relabel "restate_logs" {
+	targets = discovery.kubernetes.pods.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		regex         = "moa-restate"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster"]
+		regex         = "moa-restate"
+		action        = "keep"
+	}
+}
+
+loki.source.kubernetes "restate" {
+	targets    = discovery.relabel.restate_logs.output
+	forward_to = [loki.process.restate.receiver]
+}
+
+loki.process "restate" {
+	forward_to = [loki.relabel.restate.receiver]
+
+	stage.json {
+		expressions = {
+			level  = "level",
+			target = "target",
+		}
+	}
+
+	stage.structured_metadata {
+		values = {
+			target = "",
+		}
+	}
+
+	stage.labels {
+		values = {
+			level = "",
+		}
+	}
+}
+
+loki.relabel "restate" {
+	forward_to = [loki.write.loki.receiver]
+
+	rule {
+		replacement  = "restate"
+		target_label = "service"
+	}
+
+	rule {
+		replacement  = "moa-restate"
+		target_label = "namespace"
+	}
+
+	rule {
+		action = "labelkeep"
+		regex  = "^(service|namespace|level)$"
 	}
 }
 

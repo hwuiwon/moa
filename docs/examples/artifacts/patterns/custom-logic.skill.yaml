@@ -35,7 +35,8 @@ definition:
             kind:
               kind: output_schema
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema:
           type: object
           properties:
@@ -69,6 +70,7 @@ definition:
                 - name: knowledge.search
                   version: v1
               max_turns: 2
+            compensation: null
             retry:
               max_attempts: 2
               initial_backoff_ms: 100
@@ -90,6 +92,7 @@ definition:
               skill_refs: []
               capability_refs: []
               max_turns: 1
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -107,6 +110,7 @@ definition:
                   $ref: $.nodes.escalate.output
                 standard_response:
                   $ref: $.nodes.standard_response.output
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0

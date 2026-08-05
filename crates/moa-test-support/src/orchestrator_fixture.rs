@@ -22,7 +22,8 @@ use moa_core::{
     events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
     types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
     types::channel::Channel, types::contact::SessionActorRef, types::events_stream::EventRange,
-    types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::events_stream::EventRecord, types::identifiers::ConnectorConnectionId,
+    types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::identifiers::UserId, types::session::SessionMeta, types::session::SessionStatus,
 };
@@ -77,9 +78,9 @@ use openfga::{
 };
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};
 use process::{
-    FixtureBinarySnapshot, OrchestratorRestartConfig, OrchestratorSpawnConfig,
-    locate_orchestrator_binary, pick_free_port, read_child_logs, repo_root, spawn_orchestrator,
-    terminate_child, wait_for_orchestrator_health,
+    FixtureBinarySnapshot, OrchestratorRestartConfig, OrchestratorSpawnConfig, hard_kill_child,
+    locate_orchestrator_binary, read_child_logs, repo_root, reserve_orchestrator_ports,
+    spawn_orchestrator, terminate_child, wait_for_orchestrator_health,
 };
 use redis::{start_redis_container, wait_for_redis};
 use restate::{
@@ -208,7 +209,7 @@ impl OrchestratorTestFixture {
     fn external(raw_ingress_url: String) -> Result<Self> {
         let repo_root = repo_root();
         let ingress_url = trim_url(&raw_ingress_url)?;
-        let admin_url = std::env::var("MOA_RESTATE_ADMIN_URL")
+        let admin_url = std::env::var("RESTATE_ADMIN_URL")
             .ok()
             .map(|url| trim_url(&url))
             .transpose()?
@@ -348,13 +349,9 @@ impl OrchestratorTestFixture {
             (None, None)
         };
 
-        let journal_path = match (&capability_options, &script_dir) {
-            (Some(_), Some(script_dir)) => Some(script_dir.path().join("scripted-requests.jsonl")),
-            (None, _) => None,
-            (Some(_), None) => {
-                bail!("fixture capability journal requires a scripted-provider directory")
-            }
-        };
+        let journal_path = script_dir
+            .as_ref()
+            .map(|script_dir| script_dir.path().join("scripted-requests.jsonl"));
         if let Some(path) = &journal_path {
             std::fs::write(path, []).with_context(|| {
                 format!(
@@ -393,29 +390,30 @@ impl OrchestratorTestFixture {
         .context("start fixture OTLP collector")?;
 
         let orchestrator_binary_snapshot = locate_orchestrator_binary(&repo_root).await?;
-        let orchestrator_port = pick_free_port()?;
-        let health_port = pick_free_port()?;
-        let scim_port = pick_free_port()?;
-        let restart_config =
-            journal_path
-                .as_ref()
-                .zip(script_path.as_ref())
-                .map(|(journal_path, script_path)| OrchestratorRestartConfig {
-                    binary: orchestrator_binary_snapshot.path().to_path_buf(),
-                    port: orchestrator_port,
-                    health_port,
-                    scim_port,
-                    postgres_url: postgres_url.clone(),
-                    admin_url: admin_url.clone(),
-                    ingress_url: ingress_url.clone(),
-                    redis_url: redis_url.clone(),
-                    script_path: script_path.clone(),
-                    journal_path: journal_path.clone(),
-                    fga_config: fga_config.clone(),
-                    extra_env: extra_env.clone(),
-                    otlp_endpoint: otlp_capture.endpoint().to_string(),
-                    observability_service_name: otlp_capture.resource_name().to_string(),
-                });
+        let port_reservation = reserve_orchestrator_ports()?;
+        let ports = port_reservation.ports();
+        let orchestrator_port = ports.restate;
+        let health_port = ports.health;
+        let scim_port = ports.scim;
+        let credential_port = ports.credential;
+        let restart_config = Some(OrchestratorRestartConfig {
+            binary: orchestrator_binary_snapshot.path().to_path_buf(),
+            port: orchestrator_port,
+            health_port,
+            scim_port,
+            credential_port,
+            postgres_url: postgres_url.clone(),
+            admin_url: admin_url.clone(),
+            ingress_url: ingress_url.clone(),
+            redis_url: redis_url.clone(),
+            script_path: script_path.clone(),
+            journal_path: journal_path.clone(),
+            fga_config: fga_config.clone(),
+            extra_env: extra_env.clone(),
+            otlp_endpoint: otlp_capture.endpoint().to_string(),
+            observability_service_name: otlp_capture.resource_name().to_string(),
+        });
+        port_reservation.release();
         let mut orchestrator_guard = match &restart_config {
             Some(config) => config.spawn()?,
             None => spawn_orchestrator(OrchestratorSpawnConfig {
@@ -423,8 +421,8 @@ impl OrchestratorTestFixture {
                 port: orchestrator_port,
                 health_port,
                 scim_port,
+                credential_port,
                 postgres_url: &postgres_url,
-                admin_url: &admin_url,
                 ingress_url: &ingress_url,
                 redis_url: &redis_url,
                 script_path: script_path.as_deref(),
@@ -484,7 +482,16 @@ impl OrchestratorTestFixture {
 
     /// Restarts only the dedicated orchestrator child while retaining all dependency services.
     pub async fn restart_orchestrator(&self) -> Result<()> {
-        self.restart_orchestrator_with_extra_env(Vec::new()).await
+        self.replace_orchestrator(Vec::new(), false).await
+    }
+
+    /// Abruptly `SIGKILL`s and reaps only the orchestrator child, then starts a replacement.
+    ///
+    /// Restate, Postgres, Valkey, OpenFGA, provider JSONL, and fixture MCP state
+    /// remain alive, so callers observe recovery from durable state rather than
+    /// a fresh-stack simulation.
+    pub async fn hard_crash_and_restart_orchestrator(&self) -> Result<()> {
+        self.replace_orchestrator(Vec::new(), true).await
     }
 
     /// Restarts the dedicated orchestrator once with additional child-process environment.
@@ -496,15 +503,16 @@ impl OrchestratorTestFixture {
         &self,
         extra_env: Vec<(String, String)>,
     ) -> Result<()> {
-        self.restart_orchestrator_with_extra_env(extra_env).await
+        self.replace_orchestrator(extra_env, false).await
     }
 
-    async fn restart_orchestrator_with_extra_env(
+    async fn replace_orchestrator(
         &self,
         extra_env: Vec<(String, String)>,
+        hard_crash: bool,
     ) -> Result<()> {
         let config = self.restart_config.as_ref().context(
-            "orchestrator fixture is external or was not created with with_execution_fixture",
+            "orchestrator fixture is external and cannot restart a process it does not own",
         )?;
         validate_execution_fixture_env(&extra_env)?;
         let mut child_env = config.extra_env.clone();
@@ -520,7 +528,11 @@ impl OrchestratorTestFixture {
         }
         let mut orchestrator = self.orchestrator.lock().await;
         if let Some(child) = orchestrator.take() {
-            terminate_child(child);
+            if hard_crash {
+                hard_kill_child(child)?;
+            } else {
+                terminate_child(child);
+            }
         }
 
         wait_for_postgres(&config.postgres_url)
@@ -541,12 +553,12 @@ impl OrchestratorTestFixture {
             port: config.port,
             health_port: config.health_port,
             scim_port: config.scim_port,
+            credential_port: config.credential_port,
             postgres_url: &config.postgres_url,
-            admin_url: &config.admin_url,
             ingress_url: &config.ingress_url,
             redis_url: &config.redis_url,
-            script_path: Some(&config.script_path),
-            journal_path: Some(&config.journal_path),
+            script_path: config.script_path.as_deref(),
+            journal_path: config.journal_path.as_deref(),
             fga_config: &config.fga_config,
             extra_env: &child_env,
             otlp_endpoint: &config.otlp_endpoint,
@@ -579,9 +591,35 @@ impl OrchestratorTestFixture {
         let path = self
             .restart_config
             .as_ref()
-            .map(|config| config.journal_path.as_path())
-            .context("scripted request inspection requires with_execution_fixture")?;
+            .and_then(|config| config.journal_path.as_deref())
+            .context("scripted request inspection requires a scripted-provider fixture")?;
         parse_scripted_requests(path)
+    }
+
+    /// Waits until the append-only scripted-provider JSONL contains `count` requests.
+    ///
+    /// The file content is the gate: the short poll interval only observes the
+    /// child process crossing that exact boundary and is never itself used as
+    /// evidence that a request occurred.
+    pub async fn wait_for_scripted_requests(
+        &self,
+        count: usize,
+        timeout: Duration,
+    ) -> Result<Vec<serde_json::Value>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let requests = self.scripted_requests()?;
+            if requests.len() >= count {
+                return Ok(requests);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!(
+                    "scripted provider journal recorded {} of {count} requests within {timeout:?}",
+                    requests.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     /// Explicitly truncates the dedicated scripted-provider request journal.
@@ -589,8 +627,8 @@ impl OrchestratorTestFixture {
         let path = self
             .restart_config
             .as_ref()
-            .map(|config| config.journal_path.as_path())
-            .context("scripted request reset requires with_execution_fixture")?;
+            .and_then(|config| config.journal_path.as_deref())
+            .context("scripted request reset requires a scripted-provider fixture")?;
         OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -670,6 +708,26 @@ impl OrchestratorTestFixture {
         )
         .await
         .context("grant fixture tenant admin")
+    }
+
+    /// Grants the fixture client's default identity direct use of one connector connection.
+    pub async fn grant_default_connector_connection_use(
+        &self,
+        connection_id: ConnectorConnectionId,
+    ) -> Result<()> {
+        let identity = self
+            .client
+            .identity
+            .as_ref()
+            .context("fixture test client must carry identity headers")?;
+        self.apply_raw_tuple(
+            TupleOp::Write,
+            &identity_subject(identity),
+            "use",
+            &format!("connector_connection:{connection_id}"),
+        )
+        .await
+        .context("grant fixture connector connection use")
     }
 
     async fn apply_raw_tuple(
@@ -878,6 +936,18 @@ impl IsolatedTest<'_> {
         model: ModelId,
         call_origin: moa_core::types::action_policy::CallOrigin,
     ) -> Result<SessionId> {
+        self.create_session_with_agent_context(suffix, model, call_origin, fixture_agent_context())
+            .await
+    }
+
+    /// Creates, persists, and initializes a real session with an explicit agent context.
+    pub async fn create_session_with_agent_context(
+        &self,
+        suffix: &str,
+        model: ModelId,
+        call_origin: moa_core::types::action_policy::CallOrigin,
+        agent_context: AgentContext,
+    ) -> Result<SessionId> {
         let session_id = SessionId::new();
         let now = Utc::now();
         let identity = self
@@ -904,7 +974,7 @@ impl IsolatedTest<'_> {
             contact: None,
             created_by: Some(SessionActorRef::Identity { id: identity.id }),
             contact_promoted_from_id: None,
-            agent_context: Some(fixture_agent_context()),
+            agent_context: Some(agent_context),
             call_origin,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
@@ -980,12 +1050,13 @@ mod tests {
             port: 1,
             health_port: 2,
             scim_port: 3,
+            credential_port: 4,
             postgres_url: String::new(),
             admin_url: String::new(),
             ingress_url: String::new(),
             redis_url: String::new(),
-            script_path: PathBuf::from("unused-script"),
-            journal_path: journal_path.clone(),
+            script_path: Some(PathBuf::from("unused-script")),
+            journal_path: Some(journal_path.clone()),
             fga_config: FgaConfig {
                 url: String::new(),
                 preshared_key: String::new(),
@@ -1038,8 +1109,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonexecution_fixture_exposes_no_capability_and_rejects_restart() {
-        // Pins: existing fixture constructors remain opt-in-free and cannot silently restart.
+    async fn external_fixture_exposes_no_owned_process_or_scripted_surfaces() {
+        // Pins: external mode cannot claim restart or provider-journal ownership.
         let fixture = nonrestartable_fixture();
 
         assert!(fixture.fixture_capability().is_none());
@@ -1058,7 +1129,7 @@ mod tests {
         let error = fixture
             .restart_orchestrator()
             .await
-            .expect_err("non-execution fixture restart must be rejected");
-        assert!(error.to_string().contains("with_execution_fixture"));
+            .expect_err("external fixture restart must be rejected");
+        assert!(error.to_string().contains("external"));
     }
 }

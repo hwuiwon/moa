@@ -5,6 +5,7 @@ resources:
   - postgres.yaml
   - valkey.yaml
   - rustfs.yaml
+  - restate-snapshots-network-policy.yaml
   - local-config.yaml
   - lgtm.yaml
 
@@ -12,6 +13,14 @@ generatorOptions:
   disableNameSuffixHash: true
 
 secretGenerator:
+  # Restate reads the local S3-compatible credentials through env overrides.
+  # Keep this Secret in Restate's namespace; Secrets cannot be mounted across
+  # namespaces and these fixed values are local-development material only.
+  - name: moa-restate-snapshots
+    namespace: moa-restate
+    literals:
+      - access-key-id=moaadmin
+      - secret-access-key=moa-local-dev-secret
   - name: moa-postgres
     namespace: moa-system
     literals:
@@ -44,6 +53,7 @@ configMapGenerator:
     namespace: moa-system
     files:
       - postgres-datasource.yaml
+      - otelcol-local-restate.yaml
 
 images:
   - name: ghcr.io/hwuiwon/moa-orchestrator

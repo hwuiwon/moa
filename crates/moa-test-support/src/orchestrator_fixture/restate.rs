@@ -10,7 +10,12 @@ pub(super) async fn start_restate_container() -> Result<(ContainerAsync<GenericI
             .with_exposed_port(9070.tcp())
             .with_wait_for(WaitFor::seconds(1))
             .with_env_var("DO_NOT_TRACK", "1")
-            .with_env_var("RESTATE_EXPERIMENTAL_ENABLE_VQUEUES", "true")
+            // Recovery tests hard-kill the SDK endpoint while a durable step is
+            // blocked. Keep Restate's fixture-level stall detection below the
+            // service-test deadline; handlers with explicit longer policies
+            // (for example LLM/tool work) still override these server defaults.
+            .with_env_var("RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT", "1s")
+            .with_env_var("RESTATE_WORKER__INVOKER__ABORT_TIMEOUT", "1s")
             .with_host("host.docker.internal", Host::HostGateway)
             .with_cmd(["--node-name=restate-test"])
             .start()

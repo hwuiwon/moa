@@ -26,7 +26,7 @@ pub(super) async fn load_session_meta(
                 .get_session(session_id)
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(crate::workflows::errors::moa_error_to_handler_error)
         })
         .name("turn_execution_load_session_meta")
         .await?
@@ -50,7 +50,7 @@ pub(super) async fn load_available_skill_names(
                     .list_skill_names(tenant_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)
             }
         })
         .name("turn_execution_load_available_skill_names")
@@ -74,7 +74,7 @@ async fn load_events_in_range(
                     .get_events(session_id, range)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)
             }
         })
         .name(operation_name)
@@ -250,7 +250,7 @@ pub(super) async fn load_session_events_fallback(
                     .get_events(session_id, range)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)
             }
         })
         .name("turn_execution_load_session_events_fallback")

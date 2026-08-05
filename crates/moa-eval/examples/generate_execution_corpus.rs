@@ -472,7 +472,8 @@ fn contract_case(index: usize) -> ExecutionContractCase {
             ],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -507,6 +508,7 @@ fn contract_case(index: usize) -> ExecutionContractCase {
                             },
                         },
                     },
+                    compensation: None,
                     retry: RetryPolicy {
                         max_attempts: 2,
                         initial_backoff_ms: 10,
@@ -524,6 +526,7 @@ fn contract_case(index: usize) -> ExecutionContractCase {
                     operation: ExecutionOperation::Output {
                         value: json!({"report": format!("report-{suffix}")}),
                     },
+                    compensation: None,
                     retry: RetryPolicy {
                         max_attempts: 1,
                         initial_backoff_ms: 0,

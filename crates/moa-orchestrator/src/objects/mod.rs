@@ -3,6 +3,7 @@
 pub mod cron_job;
 pub mod ingestion;
 pub mod session;
+pub mod session_status_migrator;
 pub mod tenant;
 pub mod worker;
 

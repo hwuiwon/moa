@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, register_deployment,
-    reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
+    reserve_orchestrator_ports, restate_ingress_url, restate_test_admin_url,
 };
 
 fn spawn_orchestrator(
@@ -73,7 +73,7 @@ async fn tenant_consolidation_round_trip_through_restate() -> Result<()> {
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 
     let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
 
         client
             .post(object_url(ingress, tenant_id, "init"))

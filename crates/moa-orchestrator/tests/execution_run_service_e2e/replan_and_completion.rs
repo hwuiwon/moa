@@ -163,7 +163,7 @@ async fn duplicate_amendment_stops_replan_service_e2e() -> Result<()> {
     let agent_b = agent_node("agent_b", "DUPLICATE_AMENDMENT_AGENT_B");
     let first = replacement_amendment(1, "agent_a", agent_b, "first semantic replacement");
     let repeated = PlanAmendment {
-        schema_version: 1,
+        schema_version: 2,
         base_plan_revision: 2,
         reason: "same operations at a later revision".to_string(),
         evidence: json!({"planner_observation": "changed prose cannot evade loop identity"}),
@@ -326,7 +326,7 @@ async fn remove_only_amendment_is_no_progress_service_e2e() -> Result<()> {
     // Pins: a remove-only patch cannot claim progress on an unresolved requirement.
     let agent_a = agent_node("agent_a", "REMOVE_ONLY_AGENT_A");
     let remove_only = PlanAmendment {
-        schema_version: 1,
+        schema_version: 2,
         base_plan_revision: 1,
         reason: "remove-only amendment has no unresolved work".to_string(),
         evidence: json!({"kind": "remove_only"}),
@@ -1398,11 +1398,23 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
             },
         )
         .await?;
-    assert!(matches!(
-        cancelled,
-        ExecutionMutationResponse::Applied { ref run }
-            if run.status == ExecutionRunStatus::Cancelled
-    ));
+    let ExecutionMutationResponse::Applied { run: fenced } = cancelled else {
+        bail!("cancellation did not install a terminal fence: {cancelled:?}");
+    };
+    assert_eq!(fenced.status, ExecutionRunStatus::WaitingReplan);
+    let fenced_record = repository
+        .load_run(scope, started.run.run_uid)
+        .await?
+        .context("cancelled execution disappeared after terminal fencing")?;
+    let pending = fenced_record
+        .pending_terminal
+        .as_ref()
+        .context("applied cancellation omitted its pending terminal intent")?;
+    assert_eq!(pending.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(
+        pending.terminal_evidence.cause,
+        ExecutionTerminalCause::Cancellation
+    );
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
     assert_eq!(terminal.run.status, ExecutionRunStatus::Cancelled);
     assert_execution_eval_case(
@@ -1804,7 +1816,8 @@ fn useful_replan_contract(
             ],
         },
         ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -1821,6 +1834,7 @@ fn useful_replan_contract(
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -1842,6 +1856,7 @@ fn terminal_output_node(dependency: &str) -> ExecutionNode {
         operation: ExecutionOperation::Output {
             value: json!({"result": USEFUL_OUTPUT}),
         },
+        compensation: None,
         retry: no_retry(),
         budget: None,
     }
@@ -1865,6 +1880,7 @@ fn agent_node(id: &str, instructions: &str) -> ExecutionNode {
             capability_refs: Vec::new(),
             max_turns: 1,
         },
+        compensation: None,
         retry: no_retry(),
         budget: None,
     }
@@ -1879,7 +1895,7 @@ fn replacement_amendment(
     let old_terminal_id = terminal_output_node_id(old_node_id);
     let replacement_terminal = terminal_output_node(&replacement.id);
     PlanAmendment {
-        schema_version: 1,
+        schema_version: 2,
         base_plan_revision,
         reason: reason.to_string(),
         evidence: json!({"replacement": replacement.id}),
@@ -2054,7 +2070,8 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
         output_schema,
     } = spec;
     ExecutionPlanDefinition {
-        schema_version: 1,
+        schema_version: 2,
+        cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
         input_schema: empty_input_schema(),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2072,6 +2089,7 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
                     item_output_schema: json!({"type": "object"}),
                     task: MapTask::Capability { reference },
                 },
+                compensation: None,
                 retry: no_retry(),
                 budget: None,
             },
@@ -2083,6 +2101,7 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
                 input: json!({}),
                 output_schema,
                 operation: ExecutionOperation::Output { value: output },
+                compensation: None,
                 retry: no_retry(),
                 budget: None,
             },
@@ -2121,7 +2140,8 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
             ],
         },
         ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -2148,6 +2168,7 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2161,6 +2182,7 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
                     operation: ExecutionOperation::Output {
                         value: json!({"summary": "useful but incomplete"}),
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2221,7 +2243,8 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
             ],
         },
         ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: report_schema.clone(),
             nodes: vec![
@@ -2238,6 +2261,7 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2254,6 +2278,7 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2275,6 +2300,7 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2290,6 +2316,7 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
                             "summary": "sources disagree; conflict remains unresolved"
                         }),
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2320,7 +2347,8 @@ fn injected_content_contract(
             )],
         },
         ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -2337,6 +2365,7 @@ fn injected_content_contract(
                         capability_refs: vec![safe_reference],
                         max_turns: 2,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2350,6 +2379,7 @@ fn injected_content_contract(
                     operation: ExecutionOperation::Output {
                         value: json!({"result": "safe"}),
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2464,6 +2494,7 @@ fn map_tool(name: &str, item_key_pointer: &str) -> FixtureCapabilityTool {
             "properties": {(field): {"type": "string"}}
         }),
         item_key_pointer: Some(item_key_pointer.to_string()),
+        idempotent: true,
         outcomes: vec![FixtureCapabilityOutcome::SuccessWithInput {
             output: json!({"processed": true}),
         }],
@@ -2481,6 +2512,7 @@ fn plain_tool(name: &str, outcome: FixtureCapabilityOutcome) -> FixtureCapabilit
             "properties": {"case": {"type": "string"}}
         }),
         item_key_pointer: None,
+        idempotent: true,
         outcomes: vec![outcome],
     }
 }

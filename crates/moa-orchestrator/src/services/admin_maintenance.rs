@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_config::MoaConfig;
 use moa_core::traits::{Identity, IdentityType};
@@ -24,7 +23,7 @@ use moa_wire::admin::{
 use restate_sdk::prelude::*;
 
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity};
 
 /// Restate service for user-facing administrative maintenance operations.
 #[restate_sdk::service]
@@ -353,7 +352,7 @@ fn validate_promotion_action(actual: &str, expected: &str) -> Result<(), Handler
 
 async fn authorize_tenant_admin_for_tenant(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
     authz
@@ -368,19 +367,19 @@ async fn authorize_tenant_admin_for_tenant(
 /// identities with the canonical deployment workspace admin relation.
 pub async fn authorize_platform_maintenance(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
 ) -> Result<(), HandlerError> {
     let identity = platform_maintenance_identity(ctx)?;
     let fga = authz.require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
+    crate::handlers::authz_shim::journal_context_authz(
+        ctx,
+        fga,
+        identity,
         ObjectType::Workspace,
         WORKSPACE_ID,
         Relation::Admin,
     )
     .await
-    .map_err(translate_authz_error)
 }
 
 /// Loads and validates the caller shape required before workspace admin authz.

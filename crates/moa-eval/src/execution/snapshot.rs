@@ -147,6 +147,8 @@ pub enum ExecutionTaskResultClass {
     NeedsReplan,
     /// Task was cancelled.
     Cancelled,
+    /// Upstream effect outcome is ambiguous and requires manual reconciliation.
+    UnknownOutcome,
     /// Task failed with the retained typed failure class.
     Failed {
         /// Stable execution failure class.
@@ -486,6 +488,7 @@ fn result_class(
         ExecutionTaskResult::NeedsInput { .. } => ExecutionTaskResultClass::NeedsInput,
         ExecutionTaskResult::NeedsReplan { .. } => ExecutionTaskResultClass::NeedsReplan,
         ExecutionTaskResult::Cancelled { .. } => ExecutionTaskResultClass::Cancelled,
+        ExecutionTaskResult::UnknownOutcome { .. } => ExecutionTaskResultClass::UnknownOutcome,
         ExecutionTaskResult::Failed { class, .. } => ExecutionTaskResultClass::Failed {
             class: class.clone(),
         },

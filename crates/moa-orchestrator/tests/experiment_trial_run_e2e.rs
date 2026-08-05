@@ -70,8 +70,8 @@ use uuid::Uuid;
 use crate::support::{
     restate_runtime::{
         OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_tenant_admin,
-        register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
-        test_user_identity, with_identity,
+        register_deployment, reserve_orchestrator_ports, restate_ingress_url,
+        restate_test_admin_url, test_user_identity, with_identity,
     },
     session_store_service::get_events_request,
 };
@@ -453,7 +453,7 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
         let pool = PgPool::connect(&test_database_url())
             .await
             .context("connect to test Postgres")?;
@@ -647,7 +647,7 @@ async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -
 
     let result = async {
         wait_for_orchestrator_live(&client, ports.health).await?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
         let pool = PgPool::connect(&test_database_url())
             .await
             .context("connect to test Postgres")?;
@@ -815,8 +815,8 @@ async fn session_turn_waiter_resolves_recorded_outcome_through_restate_service()
 
     let result = async {
         wait_for_orchestrator_live(&client, ports.health).await?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        register_deployment(&restate_admin_url(), probe_endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), probe_endpoint_url.as_str()).await?;
         let session_id = SessionId::new();
         let meta = SessionMeta {
             id: session_id,
@@ -1700,7 +1700,8 @@ definition:
             kind:
               kind: output_schema
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema:
           type: object
           additionalProperties: false
@@ -1717,6 +1718,7 @@ definition:
               kind: output
               value:
                 result: task-9-trial-complete
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -1967,7 +1969,7 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         .context("spawn moa-orchestrator binary for the billed experiment score smoke")?;
 
     let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
         let pool = PgPool::connect(&test_database_url())
             .await
             .context("connect to test Postgres")?;

@@ -348,6 +348,27 @@ mod tests {
     }
 
     #[test]
+    fn stream_timeout_env_rejects_total_above_restate_policy() {
+        // Pins: a flat production env override cannot admit a provider call
+        // whose deadline outlives the Restate LLMGateway inactivity policy.
+        let overlay = EnvOverlay::from_iter(env_pairs([(
+            "MOA_PROVIDERS_STREAM_TIMEOUTS_TOTAL_MS",
+            "300001",
+        )]))
+        .expect("stream timeout overlay should deserialize");
+        let mut config = MoaConfig::default();
+
+        let error = overlay
+            .apply_to(&mut config)
+            .expect_err("300001ms must fail startup validation");
+
+        assert!(
+            error.to_string().contains("must not exceed 300000"),
+            "startup rejection must name the Restate-aligned ceiling: {error}"
+        );
+    }
+
+    #[test]
     fn deployment_policy_capabilities_and_llm_dlp_are_typed_overlays() {
         // Pins: env-only Kubernetes composition can enable LLM DLP and declare
         // both endpoint capabilities and the deployment-wide routing policy.

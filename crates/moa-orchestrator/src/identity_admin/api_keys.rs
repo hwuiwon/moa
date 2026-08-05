@@ -12,6 +12,7 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_ocsf::ActorInput;
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -166,6 +167,75 @@ pub(crate) async fn revoke_key(
 ) -> Result<(), HandlerError> {
     let row = load_manageable_active_key(&pool, fga.as_ref(), &identity, key_id).await?;
     revoke_key_row(pool, identity, row, reason).await
+}
+
+/// Authorization work required before mutating one journaled API-key row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ApiKeyMutationAuthorization {
+    /// The authenticated principal directly owns or presents this key.
+    Direct,
+    /// The caller must be an admin of the key's tenant.
+    TenantAdmin { tenant_id: Uuid },
+    /// The caller may operate the owning agent or administer its tenant.
+    AgentOperatorOrTenantAdmin { agent_id: Uuid, tenant_id: Uuid },
+}
+
+/// Replay-stable API-key row and the separate authorization decision it requires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PreparedApiKeyMutation {
+    row: ApiKeyRow,
+    /// Authorization branch derived exclusively from the journaled database row.
+    pub authorization: ApiKeyMutationAuthorization,
+}
+
+/// Loads one active API key and derives its authorization branch without calling OpenFGA.
+pub(crate) async fn prepare_key_mutation(
+    pool: &PgPool,
+    identity: &Identity,
+    key_id: Uuid,
+) -> Result<PreparedApiKeyMutation, HandlerError> {
+    let row = if identity.api_key_id.is_some() {
+        load_active_key_by_id(pool, key_id).await?
+    } else {
+        load_active_key_for_tenant(pool, key_id, identity.tenant_id.0).await?
+    };
+    let directly_authorized = row.tenant_id == identity.tenant_id.0
+        && (identity.api_key_id == Some(key_id)
+            || (identity.api_key_id.is_none()
+                && (row.owner_user_id == Some(identity.id)
+                    || row.owner_agent_id == Some(identity.id))));
+    let authorization = if directly_authorized {
+        ApiKeyMutationAuthorization::Direct
+    } else if let Some(agent_id) = row.owner_agent_id {
+        ApiKeyMutationAuthorization::AgentOperatorOrTenantAdmin {
+            agent_id,
+            tenant_id: row.tenant_id,
+        }
+    } else {
+        ApiKeyMutationAuthorization::TenantAdmin {
+            tenant_id: row.tenant_id,
+        }
+    };
+    Ok(PreparedApiKeyMutation { row, authorization })
+}
+
+/// Rotates one already loaded and separately authorized API key.
+pub(crate) async fn rotate_prepared_key(
+    pool: PgPool,
+    identity: Identity,
+    prepared: PreparedApiKeyMutation,
+) -> Result<CreateApiKeyResponse, HandlerError> {
+    rotate_key_row(pool, identity, prepared.row).await
+}
+
+/// Revokes one already loaded and separately authorized API key.
+pub(crate) async fn revoke_prepared_key(
+    pool: PgPool,
+    identity: Identity,
+    prepared: PreparedApiKeyMutation,
+    reason: &str,
+) -> Result<(), HandlerError> {
+    revoke_key_row(pool, identity, prepared.row, reason).await
 }
 
 async fn rotate_key_row(
@@ -510,7 +580,7 @@ async fn enqueue_key_tenant_role_deletes(
     Ok(())
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 struct ApiKeyRow {
     id: Uuid,
     owner_user_id: Option<Uuid>,

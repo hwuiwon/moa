@@ -30,7 +30,7 @@ pub struct SessionLimitsConfig {
     pub turn_admission_tenant_limit: u32,
     /// TTL for one shared turn-admission lease, in milliseconds.
     pub turn_admission_lease_ttl_ms: u64,
-    /// Retry delay returned to callers rejected by turn admission, in milliseconds.
+    /// Durable wait between saturated shared turn-admission attempts, in milliseconds.
     pub turn_admission_retry_after_ms: u64,
     /// Maximum messages retained behind one already-active session turn.
     pub max_pending_messages: u32,
@@ -90,6 +90,10 @@ pub struct SessionLimitsConfig {
     /// returning a "no input received" result so the child can proceed or abort. Kept
     /// large because a human answer (audience = user) may take minutes.
     pub worker_input_timeout_ms: u64,
+    /// Maximum time a coordinator security-input round-trip blocks before the turn
+    /// stops with a safe timeout result. Kept large because the owning user may take
+    /// minutes to answer.
+    pub coordinator_input_timeout_ms: u64,
     /// Target cadence, in milliseconds, at which an active child refreshes its
     /// telemetry-plane heartbeat while running. Sizes the heartbeat the watchdog
     /// observes; consumers treat `0` as the built-in default cadence.
@@ -126,6 +130,7 @@ impl Default for SessionLimitsConfig {
             worker_resume_max_per_window: 6,
             worker_resume_window_ms: 600_000,
             worker_input_timeout_ms: 1_800_000,
+            coordinator_input_timeout_ms: 1_800_000,
             worker_heartbeat_interval_ms: 15_000,
             worker_heartbeat_stale_ms: 60_000,
         }
@@ -495,6 +500,9 @@ mod tests {
         // The needs_input round-trip ships with a large (but finite) default so a human
         // answer has time to arrive without blocking a child turn forever.
         assert_eq!(limits.worker_input_timeout_ms, 1_800_000);
+        // The coordinator's security-input suspend is bounded by the same human-scale
+        // default and cannot fence a session forever.
+        assert_eq!(limits.coordinator_input_timeout_ms, 1_800_000);
     }
 
     #[test]
@@ -504,6 +512,7 @@ mod tests {
             session_limits_worker_resume_max_per_window: Some(3),
             session_limits_worker_resume_window_ms: Some(120_000),
             session_limits_worker_input_timeout_ms: Some(90_000),
+            session_limits_coordinator_input_timeout_ms: Some(75_000),
             ..EnvOverlay::default()
         };
 
@@ -516,6 +525,7 @@ mod tests {
         assert_eq!(limits.worker_resume_max_per_window, 3);
         assert_eq!(limits.worker_resume_window_ms, 120_000);
         assert_eq!(limits.worker_input_timeout_ms, 90_000);
+        assert_eq!(limits.coordinator_input_timeout_ms, 75_000);
     }
 
     #[test]

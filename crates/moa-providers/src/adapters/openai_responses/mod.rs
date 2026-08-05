@@ -35,6 +35,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use crate::core::http::{is_retryable_reqwest_error, provider_transport_error};
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::retry::RetryPolicy;
 use crate::core::schema::compile_for_openai_strict;

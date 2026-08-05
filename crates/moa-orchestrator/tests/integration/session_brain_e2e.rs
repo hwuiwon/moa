@@ -15,8 +15,8 @@ use tokio::time::sleep;
 use crate::support::graph_ingest::wait_for_ingested_brain_responses;
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
-    restate_ingress_url, test_user_identity, with_identity,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_ingress_url,
+    restate_test_admin_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, start_turn_request,
@@ -102,7 +102,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
         .context("connect to test Postgres")?;
 
     let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
 
         let create_request = client.post(format!(
             "{}/restate/call/SessionStore/create_session",
@@ -141,18 +141,12 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("start_turn should succeed")?;
 
-        let status = wait_for_status(
-            &client,
-            ingress,
-            &identity,
-            session_id,
-            SessionStatus::Paused,
-        )
-        .await?;
+        let status =
+            wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Idle).await?;
         assert_eq!(
             status,
-            SessionStatus::Paused,
-            "completed turns park the Session VO in Paused in the current MOA status model"
+            SessionStatus::Idle,
+            "completed turns park the Session VO in Idle in the current MOA status model"
         );
 
         let events = wait_for_brain_response(&client, ingress, &identity, session_id).await?;

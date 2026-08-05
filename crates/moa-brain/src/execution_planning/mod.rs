@@ -356,6 +356,7 @@ async fn call_initial_provider(
     let response = match provider.complete(completion_request).await {
         Ok(stream) => match stream.collect().await {
             Ok(response) => response,
+            Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
             Err(error) => {
                 return Ok(provider_error_call(
                     request,
@@ -367,6 +368,7 @@ async fn call_initial_provider(
                 ));
             }
         },
+        Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
         Err(error) => {
             return Ok(provider_error_call(
                 request,
@@ -1000,6 +1002,7 @@ async fn call_amendment_provider(
     let response = match provider.complete(completion).await {
         Ok(stream) => match stream.collect().await {
             Ok(response) => response,
+            Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
             Err(error) => {
                 return Ok(amendment_provider_error(
                     request,
@@ -1011,6 +1014,7 @@ async fn call_amendment_provider(
                 ));
             }
         },
+        Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
         Err(error) => {
             return Ok(amendment_provider_error(
                 request,

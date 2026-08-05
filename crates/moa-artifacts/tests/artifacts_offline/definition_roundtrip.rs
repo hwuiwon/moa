@@ -526,13 +526,15 @@ definition:
         constraints: []
         completion_checks: []
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema: { type: object }
         output_schema: { type: object }
         nodes:
           - id: advise_customer
             requirement_ids: [req_customer_advice]
             depends_on: []
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
@@ -541,23 +543,28 @@ definition:
               skill_refs: [skill://customer-reassurance]
               capability_refs: []
               max_turns: 1
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
               max_backoff_ms: 0
+            budget: null
           - id: output
             requirement_ids: [req_customer_advice]
             depends_on: [advise_customer]
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
               kind: output
               value:
                 $ref: $.nodes.advise_customer.output
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
               max_backoff_ms: 0
+            budget: null
 reference_resolutions:
   - path: definition.spec.execution_plan.plan.nodes[0].operation.skill_refs[0]
     ref: skill://customer-reassurance
@@ -609,37 +616,47 @@ definition:
         constraints: []
         completion_checks: []
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema: { type: object }
         output_schema: { type: object }
         nodes:
           - id: duplicate
             requirement_ids: [req_one]
             depends_on: []
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
               kind: capability
               reference: { name: first.lookup, version: v1 }
+            compensation: null
             retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+            budget: null
           - id: duplicate
             requirement_ids: [req_one]
             depends_on: []
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
               kind: capability
               reference: { name: second.lookup, version: v1 }
+            compensation: null
             retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+            budget: null
           - id: output
             requirement_ids: [req_one]
             depends_on: [duplicate]
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
               kind: output
               value: { $ref: $.nodes.duplicate.output }
+            compensation: null
             retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+            budget: null
 "#;
     let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill execution plan");
     let report = validate_for_status(&document, ArtifactStatus::Draft);
@@ -674,22 +691,27 @@ definition:
         constraints: []
         completion_checks: []
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema: { type: object }
         output_schema: { type: object }
         nodes:
           - id: malformed_capability
             requirement_ids: [req_target]
             depends_on: []
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
               kind: capability
               reference: { name: "bad capability", version: v1 }
+            compensation: null
             retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+            budget: null
           - id: unbounded_agent
             requirement_ids: [req_target]
             depends_on: []
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
@@ -698,16 +720,21 @@ definition:
               skill_refs: []
               capability_refs: []
               max_turns: 0
+            compensation: null
             retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+            budget: null
           - id: output
             requirement_ids: [req_target]
             depends_on: [malformed_capability, unbounded_agent]
+            when: null
             input: {}
             output_schema: { type: object }
             operation:
               kind: output
               value: {}
+            compensation: null
             retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+            budget: null
 "#;
     let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill execution plan");
     let report = validate_for_status(&document, ArtifactStatus::Published);

@@ -141,7 +141,6 @@ fn manifest_mismatches(
     compare!(foreground_database_connections);
     compare!(background_database_connections);
     compare!(direct_turn_event_append);
-    compare!(restate_rule_profile);
     compare!(sessions);
     compare!(tenants);
     compare!(identities_per_tenant);
@@ -161,7 +160,6 @@ fn manifest_mismatches(
 }
 
 fn add_errors(total: &mut ErrorTaxonomy, part: &ErrorTaxonomy) {
-    total.turn_rejections += part.turn_rejections;
     total.turn_start_failures += part.turn_start_failures;
     total.turn_timeouts += part.turn_timeouts;
     total.turn_failures += part.turn_failures;
@@ -734,7 +732,6 @@ mod tests {
                 direct_turn_event_append: false,
                 compose_project: "worker-project".to_string(),
                 state_identity: "worker-state".to_string(),
-                restate_rule_profile: "scope:*:concurrency=1000".to_string(),
                 hardware_id: "worker-hardware".to_string(),
                 sessions: 4,
                 tenants: 2,

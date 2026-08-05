@@ -29,8 +29,8 @@ pub enum SessionStatus {
     Created,
     /// Session is currently executing.
     Running,
-    /// Session execution is paused.
-    Paused,
+    /// Session is inactive between turns and can accept new work.
+    Idle,
     /// Session finished successfully.
     Completed,
     /// Session was cancelled.
@@ -285,4 +285,27 @@ pub struct SessionFilter {
     pub channel: Option<Channel>,
     /// Maximum number of results.
     pub limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionStatus;
+
+    #[test]
+    fn session_status_idle_is_a_hard_serialization_cutover() {
+        // Pins: new readers emit and accept only `idle`; retaining `paused` as a
+        // serde alias would let the one-way persisted-state cutover silently drift.
+        assert_eq!(
+            serde_json::to_string(&SessionStatus::Idle)
+                .expect("idle session status should serialize"),
+            "\"idle\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SessionStatus>("\"idle\"")
+                .expect("idle session status should deserialize"),
+            SessionStatus::Idle
+        );
+        serde_json::from_str::<SessionStatus>("\"paused\"")
+            .expect_err("the retired paused label must not remain readable");
+    }
 }

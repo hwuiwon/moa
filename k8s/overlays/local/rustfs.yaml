@@ -87,7 +87,9 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rustfs-init
+  # Job pod templates are immutable. This identity belongs to the initializer
+  # revision which creates both the attachment and Restate snapshot buckets.
+  name: rustfs-init-snapshots-v1
   namespace: moa-system
   labels:
     app.kubernetes.io/name: rustfs-init
@@ -112,6 +114,7 @@ spec:
                 sleep 1
               done
               rc bucket create --ignore-existing --region "${MOA_SESSION_ATTACHMENT_REGION}" "rustfs/${MOA_SESSION_ATTACHMENT_BUCKET}"
+              rc bucket create --ignore-existing --region "${MOA_SESSION_ATTACHMENT_REGION}" "rustfs/moa-restate-snapshots"
           env:
             - name: MOA_SESSION_ATTACHMENT_BUCKET
               valueFrom:

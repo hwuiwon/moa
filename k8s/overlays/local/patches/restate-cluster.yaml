@@ -1,6 +1,13 @@
 - op: replace
   path: /spec/compute/replicas
   value: 1
+- op: add
+  path: /spec/compute/labels/moa.hwuiwon.com~1deployment-topology
+  value: local-single-node
+- op: remove
+  path: /spec/compute/affinity
+- op: remove
+  path: /spec/compute/topologySpreadConstraints
 - op: replace
   path: /spec/compute/resources
   value:
@@ -21,6 +28,58 @@
       value: 128 MiB
     - name: DO_NOT_TRACK
       value: "1"
+    - name: RESTATE_WORKER__SNAPSHOTS__AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: moa-restate-snapshots
+          key: access-key-id
+    - name: RESTATE_WORKER__SNAPSHOTS__AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: moa-restate-snapshots
+          key: secret-access-key
+- op: add
+  path: /spec/security/networkEgressRules
+  value:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rustfs
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-session-status-migrator
+      ports:
+        - protocol: TCP
+          port: 9080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-lgtm
+      ports:
+        - protocol: TCP
+          port: 4317
+- op: add
+  path: /spec/security/networkPeers/node/-
+  value:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: moa-system
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: moa-lgtm
 - op: add
   path: /spec/storage/storageClassName
   value: standard
@@ -39,6 +98,16 @@
     # the filter explicit and measures the resulting volume.
     tracing-endpoint = "http://moa-lgtm.moa-system.svc.cluster.local:4317"
     tracing-filter = "info"
-    # Preserve the base feature flag: replacing spec.config without this entry
-    # would silently disable vqueues in the local cluster.
-    experimental-enable-vqueues = true
+    log-filter = "warn,restate=info"
+    log-format = "json"
+    log-disable-ansi-codes = true
+    [worker]
+    durability-mode = "balanced"
+    [worker.snapshots]
+    destination = "s3://moa-restate-snapshots/moa-restate"
+    snapshot-interval-num-records = 1000
+    snapshot-interval = "10m"
+    num-retained = 2
+    aws-region = "local"
+    aws-endpoint-url = "http://rustfs.moa-system.svc.cluster.local:9000"
+    aws-allow-http = true

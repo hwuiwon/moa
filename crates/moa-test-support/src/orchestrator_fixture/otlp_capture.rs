@@ -1,7 +1,7 @@
-//! Per-fixture OTLP/HTTP protobuf collector for traces and runtime metrics.
+//! Per-fixture OTLP/HTTP protobuf collector for traces, metrics, and logs.
 //!
-//! The collector serves the two signal paths a real OTLP/HTTP receiver serves,
-//! `/v1/traces` and `/v1/metrics`, and [`OtlpCapture::endpoint`] hands out the
+//! The collector serves the three signal paths a real OTLP/HTTP receiver serves,
+//! `/v1/traces`, `/v1/metrics`, and `/v1/logs`, and [`OtlpCapture::endpoint`] hands out the
 //! collector BASE URL rather than either of them. That mirrors production
 //! exactly: `MOA_OBSERVABILITY_OTLP_ENDPOINT` names a collector, and each captured
 //! signal derives its own
@@ -26,6 +26,9 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use opentelemetry_proto::tonic::collector::logs::v1::{
+    ExportLogsServiceRequest, ExportLogsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
@@ -340,6 +343,7 @@ impl OtlpCapture {
         let app = Router::new()
             .route("/v1/traces", post(export_traces))
             .route("/v1/metrics", post(export_metrics))
+            .route("/v1/logs", post(export_logs))
             .fallback(record_unserved_request)
             .with_state(store.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -380,6 +384,12 @@ impl OtlpCapture {
     #[must_use]
     pub fn metrics_endpoint(&self) -> String {
         format!("{}/v1/metrics", self.endpoint)
+    }
+
+    /// Returns the exact URL this collector serves OTLP logs on.
+    #[must_use]
+    pub fn logs_endpoint(&self) -> String {
+        format!("{}/v1/logs", self.endpoint)
     }
 
     /// Returns the unique fixture service-resource name.
@@ -597,6 +607,23 @@ async fn export_metrics(State(store): State<Arc<CaptureStore>>, body: Bytes) -> 
     )
 }
 
+async fn export_logs(body: Bytes) -> Response {
+    if let Err(error) = ExportLogsServiceRequest::decode(body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("invalid OTLP log protobuf: {error}"),
+        )
+            .into_response();
+    }
+
+    protobuf_response(
+        ExportLogsServiceResponse {
+            partial_success: None,
+        }
+        .encode_to_vec(),
+    )
+}
+
 /// Records, rather than discards, an export posted to an unserved path.
 async fn record_unserved_request(
     State(store): State<Arc<CaptureStore>>,
@@ -606,7 +633,7 @@ async fn record_unserved_request(
     store.push_unexpected_request(description).await;
     (
         StatusCode::NOT_FOUND,
-        "fixture OTLP collector serves only /v1/traces and /v1/metrics",
+        "fixture OTLP collector serves only /v1/traces, /v1/metrics, and /v1/logs",
     )
         .into_response()
 }
@@ -1007,6 +1034,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn otlp_capture_accepts_logs_from_the_shared_base_endpoint() {
+        // Pins: the production collector base URL carries logs alongside traces
+        // and metrics, so the fixture must accept the derived /v1/logs endpoint.
+        let capture = OtlpCapture::start(RESOURCE_NAME.to_string())
+            .await
+            .expect("start OTLP capture");
+
+        post_logs(
+            &capture.logs_endpoint(),
+            ExportLogsServiceRequest {
+                resource_logs: Vec::new(),
+            },
+        )
+        .await;
+
+        assert!(
+            capture.unexpected_requests().await.is_empty(),
+            "valid OTLP logs must not be reported as an unserved request"
+        );
+    }
+
+    #[tokio::test]
     async fn otlp_capture_records_an_export_posted_to_an_unserved_path() {
         // Pins: a misdirected export is recorded and reported, not silently
         // dropped. An exporter that posts traces to the collector root produces
@@ -1184,6 +1233,12 @@ mod tests {
         let body = post_protobuf(endpoint, request.encode_to_vec()).await;
         let response =
             ExportMetricsServiceResponse::decode(body).expect("decode OTLP metric response");
+        assert_eq!(response.partial_success, None);
+    }
+
+    async fn post_logs(endpoint: &str, request: ExportLogsServiceRequest) {
+        let body = post_protobuf(endpoint, request.encode_to_vec()).await;
+        let response = ExportLogsServiceResponse::decode(body).expect("decode OTLP log response");
         assert_eq!(response.partial_success, None);
     }
 

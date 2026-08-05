@@ -692,11 +692,28 @@ pub struct RegisterCoordinatorInputRequest {
     pub input_request_id: String,
     /// Awakeable the blocked coordinator turn will park on.
     pub awakeable_id: String,
-    /// Workflow invocation waiting on that awakeable, so cancellation and
-    /// terminal outcomes can clear this exact target rather than the turn's.
+    /// Workflow invocation waiting on that awakeable, so cancellation and timeout
+    /// can clear this exact target rather than every request owned by the turn.
     pub waiting_workflow_id: String,
     /// Safe question surfaced to the user.
     pub question: String,
+}
+
+/// Request retracting one exact coordinator input registration.
+///
+/// Every ownership coordinate is required so a timed-out or cancelled invocation
+/// cannot remove a replacement registered by newer work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearCoordinatorInputRequest {
+    /// Coordinator turn that raised the request.
+    pub turn_id: String,
+    /// Session turn generation that admitted the owning turn.
+    pub generation: u64,
+    /// Exact request identifier.
+    pub input_request_id: String,
+    /// Workflow invocation that owns the registration.
+    pub waiting_workflow_id: String,
 }
 
 /// Read-only projection of the additive `TurnExecution` session state.

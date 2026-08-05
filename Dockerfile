@@ -12,6 +12,9 @@ RUN if [ -n "${MOA_ORCHESTRATOR_FEATURES}" ]; then \
     fi
 
 FROM debian:12-slim
+ARG MOA_BUILD_REVISION=development
+LABEL org.opencontainers.image.revision="${MOA_BUILD_REVISION}"
+ENV MOA_OBSERVABILITY_RELEASE="${MOA_BUILD_REVISION}"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates liblzma5 \
     && rm -rf /var/lib/apt/lists/* \

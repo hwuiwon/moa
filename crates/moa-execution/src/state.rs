@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use moa_artifacts::{
     execution_plan::{
-        CapabilityReference, ExecutionCitation, ExecutionFailureClass, ExecutionTaskOutcome,
-        ExecutionTaskResult, ExecutionUsage, InputAudience, RetryPolicy,
+        CapabilityReference, ExecutionCitation, ExecutionCompensation, ExecutionFailureClass,
+        ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, InputAudience, RetryPolicy,
     },
     reference::ArtifactRef,
 };
@@ -17,6 +17,7 @@ use crate::replan::ReplanStopReason;
 use crate::{Error, Result, capability::ExecutionEstimate};
 
 const TASK_NAMESPACE_NAME: &str = "https://moa.ai/execution-task";
+const COMPENSATION_NAMESPACE_NAME: &str = "https://moa.ai/execution-compensation";
 
 /// Stable UUIDv5 newtype for one logical execution task.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -48,6 +49,41 @@ impl ExecutionTaskId {
 }
 
 impl fmt::Display for ExecutionTaskId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Stable UUIDv5 newtype for the compensation paired with one forward task.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct CompensationId(Uuid);
+
+impl CompensationId {
+    /// Wraps a UUID loaded from durable compensation persistence.
+    #[must_use]
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Derives the stable compensation identity from the immutable forward-task identity.
+    #[must_use]
+    pub fn derive(forward_task_id: ExecutionTaskId) -> Self {
+        let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, COMPENSATION_NAMESPACE_NAME.as_bytes());
+        Self(Uuid::new_v5(
+            &namespace,
+            forward_task_id.as_uuid().as_bytes(),
+        ))
+    }
+
+    /// Returns the wrapped UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Display for CompensationId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
@@ -89,6 +125,8 @@ pub enum ExecutionRunStatus {
     WaitingReview,
     /// The run is waiting for a compiler-validated amendment.
     WaitingReplan,
+    /// Forward work is fenced while committed effects are undone in reverse order.
+    Compensating,
     /// Every required completion check passed.
     Completed,
     /// Useful work exists but the goal contract is not fully satisfied.
@@ -114,6 +152,7 @@ impl ExecutionRunStatus {
             Self::WaitingInput => "waiting_input",
             Self::WaitingReview => "waiting_review",
             Self::WaitingReplan => "waiting_replan",
+            Self::Compensating => "compensating",
             Self::Completed => "completed",
             Self::Partial => "partial",
             Self::Blocked => "blocked",
@@ -149,6 +188,7 @@ impl FromStr for ExecutionRunStatus {
             "waiting_input" => Ok(Self::WaitingInput),
             "waiting_review" => Ok(Self::WaitingReview),
             "waiting_replan" => Ok(Self::WaitingReplan),
+            "compensating" => Ok(Self::Compensating),
             "completed" => Ok(Self::Completed),
             "partial" => Ok(Self::Partial),
             "blocked" => Ok(Self::Blocked),
@@ -160,6 +200,193 @@ impl FromStr for ExecutionRunStatus {
             }),
         }
     }
+}
+
+/// Durable lifecycle state of one registered compensation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompensationStatus {
+    /// The compensator is waiting to be claimed.
+    Pending,
+    /// The current generation is executing.
+    Running,
+    /// The compensator completed successfully.
+    Completed,
+    /// The compensator failed terminally and requires manual repair.
+    Failed,
+    /// The effect may have been applied but cannot be proven and requires manual repair.
+    UnknownOutcome,
+}
+
+impl CompensationStatus {
+    /// Returns the stable database and wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::UnknownOutcome => "unknown_outcome",
+        }
+    }
+
+    /// Returns whether no automatic execution remains for this registration.
+    #[must_use]
+    pub const fn is_settled(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::UnknownOutcome)
+    }
+}
+
+impl FromStr for CompensationStatus {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "unknown_outcome" => Ok(Self::UnknownOutcome),
+            _ => Err(Error::InvalidRepositoryData {
+                message: format!("unknown execution compensation status `{value}`"),
+            }),
+        }
+    }
+}
+
+/// Original terminal result held while compensations execute.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingExecutionTerminal {
+    /// Terminal run status to install after every compensation completes.
+    pub status: ExecutionRunStatus,
+    /// Stable normalized terminal reason.
+    pub reason: ExecutionTerminalReason,
+    /// Complete typed terminal evidence, including requirement counts.
+    pub terminal_evidence: ExecutionTerminalEvidence,
+    /// Persisted completion-check evidence selected before compensation began.
+    pub completion_check_results: Vec<Value>,
+    /// Explicit terminal completion gaps selected before compensation began.
+    pub terminal_gaps: Vec<String>,
+    /// Structured terminal output selected before compensation began.
+    pub output: Option<Value>,
+    /// User-supplied cancellation reason, present only for cancelled intent.
+    pub cancellation_reason: Option<String>,
+}
+
+impl PendingExecutionTerminal {
+    /// Validates that this intent represents a real terminal state.
+    pub fn validate(&self) -> Result<()> {
+        if !self.status.is_terminal() {
+            return Err(Error::InvalidRepositoryInput {
+                message: "pending compensation terminal status must be terminal".to_string(),
+            });
+        }
+        if (self.status == ExecutionRunStatus::Cancelled) != self.cancellation_reason.is_some() {
+            return Err(Error::InvalidRepositoryInput {
+                message: "pending cancellation reason must be present exactly for cancelled intent"
+                    .to_string(),
+            });
+        }
+        if self
+            .cancellation_reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim().is_empty())
+        {
+            return Err(Error::InvalidRepositoryInput {
+                message: "pending cancellation reason must not be blank".to_string(),
+            });
+        }
+        if self.terminal_evidence.satisfied_requirement_count
+            > self.terminal_evidence.requirement_count
+        {
+            return Err(Error::InvalidRepositoryInput {
+                message: "pending terminal satisfied requirements exceed requirement count"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Typed outcome returned by one compensation attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionCompensationOutcome {
+    /// The compensator committed its exact undo effect.
+    Completed {
+        /// Structured compensator output.
+        output: Value,
+        /// Cumulative actual usage across compensation attempts.
+        usage: ExecutionUsage,
+    },
+    /// The attempt failed before a successful undo could be committed.
+    Failed {
+        /// Stable diagnostic message.
+        message: String,
+        /// Whether the persisted contract permits another automatic attempt.
+        retryable: bool,
+        /// Cumulative actual usage across compensation attempts.
+        usage: ExecutionUsage,
+    },
+    /// The compensator may have committed and must never be resent automatically.
+    UnknownOutcome {
+        /// Stable diagnostic message for manual reconciliation.
+        message: String,
+        /// Cumulative conservatively observed usage across compensation attempts.
+        usage: ExecutionUsage,
+    },
+}
+
+impl ExecutionCompensationOutcome {
+    /// Returns cumulative usage reported by this compensation generation.
+    #[must_use]
+    pub const fn usage(&self) -> &ExecutionUsage {
+        match self {
+            Self::Completed { usage, .. }
+            | Self::Failed { usage, .. }
+            | Self::UnknownOutcome { usage, .. } => usage,
+        }
+    }
+}
+
+/// Immutable registered compensation and its generation-fenced lifecycle projection.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompensationRegistrationProjection {
+    /// Stable registration identifier.
+    pub compensation_id: CompensationId,
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Forward task whose committed effect is undone.
+    pub forward_task_id: ExecutionTaskId,
+    /// Monotonic commit sequence used for strict reverse-order execution.
+    pub registered_sequence: u64,
+    /// Accepted forward-task generation that created the registration.
+    pub forward_generation: u64,
+    /// Immutable exact compensator contract.
+    pub compensator: ExecutionCompensation,
+    /// Fully resolved and schema-validated compensator input.
+    pub mapped_input: Value,
+    /// Current durable compensation status.
+    pub status: CompensationStatus,
+    /// One-based compensation attempt.
+    pub attempt: u64,
+    /// One-based compensation dispatch generation.
+    pub generation: u64,
+    /// Latest accepted typed outcome.
+    pub outcome: Option<ExecutionCompensationOutcome>,
+    /// Structured terminal error projection.
+    pub error: Option<Value>,
+    /// Creation timestamp.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Last mutation timestamp.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// First claim timestamp.
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Settlement timestamp.
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Closed normalized source cohort for an execution run.
@@ -233,6 +460,8 @@ pub enum ExecutionTerminalReason {
     Blocked,
     /// Execution infrastructure failed outside a typed task result.
     InternalFailure,
+    /// At least one exact undo failed or became ambiguous and requires manual repair.
+    CompensationFailed,
 }
 
 impl ExecutionTerminalReason {
@@ -254,6 +483,7 @@ impl ExecutionTerminalReason {
             Self::UnsupportedPlan => "unsupported_plan",
             Self::Blocked => "blocked",
             Self::InternalFailure => "internal_failure",
+            Self::CompensationFailed => "compensation_failed",
         }
     }
 }
@@ -277,6 +507,7 @@ impl FromStr for ExecutionTerminalReason {
             "unsupported_plan" => Ok(Self::UnsupportedPlan),
             "blocked" => Ok(Self::Blocked),
             "internal_failure" => Ok(Self::InternalFailure),
+            "compensation_failed" => Ok(Self::CompensationFailed),
             _ => Err(Error::InvalidRepositoryData {
                 message: format!("unknown execution terminal reason `{value}`"),
             }),
@@ -314,6 +545,19 @@ pub enum ExecutionTerminalCause {
     Cancellation,
     /// Execution infrastructure failed outside a typed task result.
     InternalFailure,
+    /// Exact undo failed or became ambiguous after the original terminal decision.
+    CompensationFailure {
+        /// Original terminal status held while compensation ran.
+        original_status: ExecutionRunStatus,
+        /// Original terminal reason held while compensation ran.
+        original_reason: ExecutionTerminalReason,
+        /// Original typed terminal cause.
+        original_cause: Box<ExecutionTerminalCause>,
+        /// Compensation whose failure requires manual repair.
+        compensation_id: CompensationId,
+        /// Exact failed or ambiguous compensation outcome.
+        outcome: ExecutionCompensationOutcome,
+    },
 }
 
 #[derive(Deserialize)]
@@ -334,6 +578,13 @@ enum StrictExecutionTerminalCause {
     },
     Cancellation {},
     InternalFailure {},
+    CompensationFailure {
+        original_status: ExecutionRunStatus,
+        original_reason: ExecutionTerminalReason,
+        original_cause: Box<ExecutionTerminalCause>,
+        compensation_id: CompensationId,
+        outcome: ExecutionCompensationOutcome,
+    },
 }
 
 impl<'de> Deserialize<'de> for ExecutionTerminalCause {
@@ -352,6 +603,19 @@ impl<'de> Deserialize<'de> for ExecutionTerminalCause {
                 StrictExecutionTerminalCause::ReplanStop { reason } => Self::ReplanStop { reason },
                 StrictExecutionTerminalCause::Cancellation {} => Self::Cancellation,
                 StrictExecutionTerminalCause::InternalFailure {} => Self::InternalFailure,
+                StrictExecutionTerminalCause::CompensationFailure {
+                    original_status,
+                    original_reason,
+                    original_cause,
+                    compensation_id,
+                    outcome,
+                } => Self::CompensationFailure {
+                    original_status,
+                    original_reason,
+                    original_cause,
+                    compensation_id,
+                    outcome,
+                },
             },
         )
     }
@@ -505,6 +769,8 @@ pub struct LogicalTask {
     pub input: Value,
     /// Executable task descriptor.
     pub kind: LogicalTaskKind,
+    /// Exact rollback contract for a direct capability node, if opted in.
+    pub compensation: Option<ExecutionCompensation>,
     /// Retry policy for this logical task.
     pub retry: RetryPolicy,
     /// Worst-case resource reservation held once across retries and resumes.
@@ -764,6 +1030,7 @@ pub fn task_status_from_outcome(
         ExecutionTaskResult::NeedsInput { .. } => ExecutionTaskStatus::WaitingInput,
         ExecutionTaskResult::NeedsReplan { .. } => ExecutionTaskStatus::WaitingReplan,
         ExecutionTaskResult::Cancelled { .. } => ExecutionTaskStatus::Cancelled,
+        ExecutionTaskResult::UnknownOutcome { .. } => ExecutionTaskStatus::Failed,
         ExecutionTaskResult::Failed {
             class: ExecutionFailureClass::Retryable,
             ..
@@ -792,11 +1059,15 @@ pub fn run_status_after_task_outcome(
     current: ExecutionRunStatus,
     outcome: &ExecutionTaskOutcome,
 ) -> ExecutionRunStatus {
+    if current == ExecutionRunStatus::Compensating {
+        return current;
+    }
     match &outcome.result {
         ExecutionTaskResult::NeedsInput { .. } => ExecutionRunStatus::WaitingInput,
         ExecutionTaskResult::NeedsReplan { .. } => ExecutionRunStatus::WaitingReplan,
         ExecutionTaskResult::Completed { .. }
         | ExecutionTaskResult::Cancelled { .. }
+        | ExecutionTaskResult::UnknownOutcome { .. }
         | ExecutionTaskResult::Failed { .. }
             if current == ExecutionRunStatus::WaitingReview =>
         {
@@ -804,6 +1075,7 @@ pub fn run_status_after_task_outcome(
         }
         ExecutionTaskResult::Completed { .. }
         | ExecutionTaskResult::Cancelled { .. }
+        | ExecutionTaskResult::UnknownOutcome { .. }
         | ExecutionTaskResult::Failed { .. } => current,
     }
 }
@@ -1007,8 +1279,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ExecutionLimitStop, ExecutionTerminalCause, exhaust_retry_outcome, failed_task_outcome,
-        retry_delay_ms,
+        CompensationId, CompensationStatus, ExecutionLimitStop, ExecutionRunStatus,
+        ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence,
+        ExecutionTerminalReason, PendingExecutionTerminal, exhaust_retry_outcome,
+        failed_task_outcome, retry_delay_ms,
     };
     use crate::replan::ReplanStopReason;
 
@@ -1079,6 +1353,56 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn compensation_state_uses_stable_ids_and_closed_labels() {
+        // Pins: compensation identity and persisted status labels are stable across replay.
+        let forward = ExecutionTaskId::from_uuid(
+            uuid::Uuid::parse_str("019c1111-2222-7333-8444-555555555555")
+                .expect("valid forward task UUID"),
+        );
+        assert_eq!(
+            CompensationId::derive(forward),
+            CompensationId::derive(forward)
+        );
+        assert_eq!(ExecutionRunStatus::Compensating.as_str(), "compensating");
+        assert_eq!(
+            "compensating"
+                .parse::<ExecutionRunStatus>()
+                .expect("known run status"),
+            ExecutionRunStatus::Compensating
+        );
+        assert_eq!(
+            CompensationStatus::UnknownOutcome.as_str(),
+            "unknown_outcome"
+        );
+        assert!("unknown".parse::<CompensationStatus>().is_err());
+    }
+
+    #[test]
+    fn pending_terminal_rejects_invalid_cancellation_and_requirement_evidence() {
+        // Pins: repository input validation mirrors the pending-terminal database guards.
+        let mut pending = PendingExecutionTerminal {
+            status: ExecutionRunStatus::Cancelled,
+            reason: ExecutionTerminalReason::Cancelled,
+            terminal_evidence: ExecutionTerminalEvidence {
+                cause: ExecutionTerminalCause::Cancellation,
+                satisfied_requirement_count: 0,
+                requirement_count: 1,
+            },
+            completion_check_results: Vec::new(),
+            terminal_gaps: Vec::new(),
+            output: None,
+            cancellation_reason: Some("user requested cancellation".to_string()),
+        };
+        assert!(pending.validate().is_ok());
+
+        pending.cancellation_reason = Some("  ".to_string());
+        assert!(pending.validate().is_err());
+        pending.cancellation_reason = Some("user requested cancellation".to_string());
+        pending.terminal_evidence.satisfied_requirement_count = 2;
+        assert!(pending.validate().is_err());
     }
 
     #[test]

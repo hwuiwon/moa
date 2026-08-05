@@ -16,7 +16,7 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 
-use crate::queries::from_db;
+use crate::queries::{from_db, map_sqlx_error};
 
 /// Loads one session summary row by session id.
 pub async fn get_session_summary(
@@ -540,8 +540,4 @@ fn qualified_relation(schema_name: Option<&str>, relation_name: &str) -> String 
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
-    MoaError::StorageError(error.to_string())
 }

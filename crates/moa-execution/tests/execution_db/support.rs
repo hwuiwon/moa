@@ -1,12 +1,10 @@
 //! Shared fixtures and contract helpers for execution PostgreSQL tests.
 
-pub(crate) use std::sync::Arc;
-
 pub(crate) use chrono::{Duration, Utc};
 pub(crate) use moa_artifacts::execution_plan::{
-    ExecutionBudgetLimit, ExecutionCitation, ExecutionFailureClass, ExecutionGoalContract,
-    ExecutionNode, ExecutionOperation, ExecutionRequirement, ExecutionTaskOutcome,
-    ExecutionTaskResult, ExecutionUsage, PlanAmendment, RetryPolicy,
+    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCitation,
+    ExecutionFailureClass, ExecutionGoalContract, ExecutionTaskOutcome, ExecutionTaskResult,
+    ExecutionUsage, PlanAmendment, RetryPolicy,
 };
 pub(crate) use moa_core::canonical_json::canonical_json_bytes;
 pub(crate) use moa_core::events::ExecutionTaskResultsRef;
@@ -28,24 +26,26 @@ pub(crate) use moa_execution::{
     },
     compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
     completion::{
-        CompletionEvaluation, CompletionStatus, cancellation_terminal_evidence,
-        execution_terminal_reason, terminal_evidence_from_evaluation,
+        CompletionEvaluation, CompletionStatus, execution_terminal_reason,
+        terminal_evidence_from_evaluation,
     },
     replan::{ReplanStopReason, failure_fingerprint},
     repository::{
-        ActionReviewResolutionWrite, AmendmentReplayOutcome, AmendmentWrite, CancellationOutcome,
-        CancellationRequest, CompileAuditWriteOutcome, ConfirmationConflict, ConfirmationOutcome,
+        ActionReviewResolutionWrite, AmendmentReplayOutcome, AmendmentWrite,
+        CompileAuditWriteOutcome, ConfirmationConflict, ConfirmationOutcome,
         ExecutionNodeMaterialization, ExecutionRepository, ExecutionRunPageRequest, ExecutionScope,
-        ExecutionTaskPageRequest, ExecutionTaskRecord, FinalizationOutcome, MaterializationOutcome,
-        NewExecutionPlanningContext, NewExecutionRun, PlannerCallAuditWriteOutcome,
-        PlanningContextWriteOutcome, ReplanStopRequest, ReservationOutcome, ReservationRejection,
-        RouteAuditWriteOutcome, RunFinalizationRequest, TaskOutcomeRejection, TaskOutcomeWrite,
-        TransitionOutcome, ValidatedAmendment, WakeAckOutcome,
+        ExecutionTaskPageRequest, ExecutionTaskRecord, FencedTerminalFinalizationOutcome,
+        FinalizationOutcome, MaterializationOutcome, NewExecutionPlanningContext, NewExecutionRun,
+        PlannerCallAuditWriteOutcome, PlanningContextWriteOutcome, ReplanStopReceipt,
+        ReservationOutcome, ReservationRejection, RouteAuditWriteOutcome, RunFinalizationRequest,
+        TaskOutcomeRejection, TaskOutcomeWrite, TerminalFenceOutcome, TransitionOutcome,
+        ValidatedAmendment, WakeAckOutcome,
     },
     state::{
         ExecutionLimitStop, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskId,
         ExecutionTaskStatus, ExecutionTerminalCause, ExecutionTerminalReason,
-        FailureFingerprintInput, LogicalTask, LogicalTaskKind, TerminalProjection,
+        FailureFingerprintInput, LogicalTask, LogicalTaskKind, PendingExecutionTerminal,
+        TerminalProjection,
     },
     wire::{
         ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
@@ -53,7 +53,7 @@ pub(crate) use moa_execution::{
     },
 };
 pub(crate) use serde_json::json;
-pub(crate) use tokio::{sync::Barrier, task::JoinSet};
+pub(crate) use tokio::task::JoinSet;
 pub(crate) use uuid::Uuid;
 
 /// Shared fallible result for concurrent database contract tests.
@@ -144,6 +144,7 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
             "waiting_input"
                 | "waiting_review"
                 | "waiting_replan"
+                | "compensating"
                 | "completed"
                 | "partial"
                 | "blocked"
@@ -153,7 +154,17 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
         ),
         "waiting_input" | "waiting_review" | "waiting_replan" => matches!(
             target,
-            "running" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled"
+            "running"
+                | "compensating"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
+        ),
+        "compensating" => matches!(
+            target,
+            "completed" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled"
         ),
         "completed" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled" => false,
         other => panic!("unknown run status in contract table: {other}"),
@@ -168,6 +179,7 @@ pub(crate) fn run_setup_path(status: &str) -> &'static [&'static str] {
         "waiting_input" => &["running", "waiting_input"],
         "waiting_review" => &["running", "waiting_review"],
         "waiting_replan" => &["running", "waiting_replan"],
+        "compensating" => &["running", "compensating"],
         "completed" => &["running", "completed"],
         "partial" => &["running", "partial"],
         "blocked" => &["blocked"],
@@ -203,15 +215,23 @@ pub(crate) async fn set_run_status_path(
             "cancelled" => Some("cancelled"),
             _ => None,
         };
+        let pending_terminal_status = (*status == "compensating").then_some("failed");
+        let pending_terminal_reason =
+            (*status == "compensating").then_some("transition matrix compensation fixture");
+        let pending_terminal_cause =
+            (*status == "compensating").then(|| json!({"kind": "internal_failure"}));
         assert_eq!(
             sqlx::query(
-                "UPDATE moa.execution_run SET status = $2, terminal_cause = $3, terminal_satisfied_requirement_count = $4, terminal_requirement_count = $4, terminal_reason = $5 WHERE run_uid = $1",
+                "UPDATE moa.execution_run SET status = $2, terminal_cause = $3, terminal_satisfied_requirement_count = $4, terminal_requirement_count = $4, terminal_reason = $5, pending_terminal_status = $6, pending_terminal_reason = $7, pending_terminal_cause = $8 WHERE run_uid = $1",
             )
                 .bind(run_uid)
                 .bind(status)
                 .bind(terminal_cause)
                 .bind(terminal_count)
                 .bind(terminal_reason)
+                .bind(pending_terminal_status)
+                .bind(pending_terminal_reason)
+                .bind(pending_terminal_cause)
                 .execute(pool)
                 .await?
                 .rows_affected(),
@@ -285,29 +305,6 @@ pub(crate) fn assert_db_error_contains(
         error.to_string().contains(expected),
         "expected database error containing `{expected}`, got `{error}`"
     );
-}
-
-/// Builds cancellation evidence from the run's current durable snapshot.
-pub(crate) async fn cancellation_request(
-    repository: &ExecutionRepository,
-    scope: ExecutionScope,
-    run_uid: Uuid,
-    reason: String,
-) -> Result<CancellationRequest, moa_execution::Error> {
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, run_uid)
-        .await?
-        .ok_or_else(|| moa_execution::Error::InvalidRepositoryInput {
-            message: "test cancellation run is missing".to_string(),
-        })?;
-    Ok(CancellationRequest {
-        reason,
-        terminal_evidence: cancellation_terminal_evidence(
-            &snapshot.run.goal,
-            &snapshot.run.active_plan,
-            &snapshot.projection,
-        )?,
-    })
 }
 
 /// Counts route-audit rows after assuming the application role and installing
@@ -441,7 +438,8 @@ pub(crate) fn new_run(
 pub(crate) fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: moa_artifacts::execution_plan::ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: Vec::new(),
@@ -514,31 +512,13 @@ pub(crate) fn logical_task(
         kind: LogicalTaskKind::Output {
             value: json!({ "company": item_key }),
         },
+        compensation: None,
         retry: RetryPolicy {
             max_attempts: 3,
             initial_backoff_ms: 1,
             max_backoff_ms: 10,
         },
         reservation,
-    }
-}
-
-/// Builds an output-node fixture tied to one requirement.
-pub(crate) fn output_node(id: &str, requirement_id: &str) -> ExecutionNode {
-    ExecutionNode {
-        id: id.to_string(),
-        requirement_ids: vec![requirement_id.to_string()],
-        depends_on: Vec::new(),
-        when: None,
-        input: json!({}),
-        output_schema: json!({"type":"object"}),
-        operation: ExecutionOperation::Output { value: json!({}) },
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 1,
-            max_backoff_ms: 1,
-        },
-        budget: None,
     }
 }
 

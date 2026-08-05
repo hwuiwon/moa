@@ -476,8 +476,6 @@ pub struct EnvOverlay {
     pub compaction_preserve_errors: Option<bool>,
     /// `MOA_RESTATE_INGRESS_URL`.
     pub restate_ingress_url: Option<String>,
-    /// `MOA_RESTATE_ADMIN_URL`.
-    pub restate_admin_url: Option<String>,
     /// `MOA_RESTATE_LLM_GATEWAY_URL`.
     pub restate_llm_gateway_url: Option<String>,
     /// `MOA_ORCHESTRATOR_ENDPOINT`.
@@ -580,6 +578,8 @@ pub struct EnvOverlay {
     pub session_limits_worker_resume_window_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_INPUT_TIMEOUT_MS`.
     pub session_limits_worker_input_timeout_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_COORDINATOR_INPUT_TIMEOUT_MS`.
+    pub session_limits_coordinator_input_timeout_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_INTERVAL_MS`.
     pub session_limits_worker_heartbeat_interval_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS`.
@@ -1068,7 +1068,6 @@ const ALLOWLIST_EXACT: &[&str] = &[
     "MOA_AUTH0_CLIENT_ID",
     "MOA_AUTHZ_DECISION_CACHE_TTL_MS", // MOA_AUTHZ_ collides with overlay
     "MOA_AUTHZ_OPENFGA_STORE_NAME",
-    "MOA_DEREGISTER_ON_SHUTDOWN",
     "MOA_DOCKER_SECCOMP_PROFILE",
     "MOA_LINEAGE_SINK",
     "MOA_MEMORY_AUTO_BOOTSTRAP", // MOA_MEMORY_ collides with overlay
@@ -1079,7 +1078,6 @@ const ALLOWLIST_EXACT: &[&str] = &[
     "MOA_ORCHESTRATOR_FEATURES",
     "MOA_PERSIST_TURN_METRICS",
     "MOA_PROVIDERS_OVERRIDE",
-    "MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS",
     "MOA_SCIM_BASE_URL",
     "MOA_SKIP_FGA",
     "MOA_TOXIPROXY_URL",

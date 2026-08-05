@@ -196,8 +196,8 @@ turns/s.
 A controlled local A/B test evaluated whether increasing the orchestrator
 foreground pool from 5 to 10 improves the admission-branch result. Each profile
 used independently fresh Postgres, Restate, and OpenFGA volumes, the required
-Restate `*` virtual-queue rule at concurrency 1000, one background database
-connection, and the same realistic scripted-provider workload. The shorter
+admission configuration active at that time (now retired), one background
+database connection, and the same realistic scripted-provider workload. The shorter
 5-to-100 turns/s ramp ran for five minutes, preserving approximately the same
 offered-rate slope through the previously observed knee.
 

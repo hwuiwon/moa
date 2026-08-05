@@ -252,6 +252,12 @@ impl ProviderStreamTimeoutConfig {
                     .to_string(),
             ));
         }
+        if self.total_ms > 300_000 {
+            return Err(MoaError::ConfigError(
+                "providers.stream_timeouts.total_ms must not exceed 300000 because the Restate LLMGateway inactivity timeout is 360000ms"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -578,6 +584,19 @@ mod tests {
         };
         assert!(
             matches!(invalid.validate(), Err(MoaError::ConfigError(message)) if message.contains("lease_ttl_ms"))
+        );
+
+        let exceeds_restate_inactivity_policy = ProviderStreamTimeoutConfig {
+            total_ms: 300_001,
+            ..ProviderStreamTimeoutConfig::default()
+        };
+        assert!(
+            matches!(
+                exceeds_restate_inactivity_policy.validate(),
+                Err(MoaError::ConfigError(message))
+                    if message.contains("must not exceed 300000")
+            ),
+            "a provider deadline that can outlive the Restate policy must fail startup validation"
         );
     }
 

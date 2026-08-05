@@ -1,12 +1,14 @@
 //! Pure execution-plan scheduling and logical-task materialization.
 
 mod aggregate;
+mod compensation;
 mod materialize;
 mod projection;
 mod reservation;
 mod terminal;
 
 use aggregate::*;
+pub use compensation::resolve_compensation_input;
 use materialize::*;
 use projection::*;
 use reservation::*;

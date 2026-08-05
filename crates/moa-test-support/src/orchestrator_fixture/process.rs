@@ -127,8 +127,8 @@ pub(super) struct OrchestratorSpawnConfig<'a> {
     pub(super) port: u16,
     pub(super) health_port: u16,
     pub(super) scim_port: u16,
+    pub(super) credential_port: u16,
     pub(super) postgres_url: &'a str,
-    pub(super) admin_url: &'a str,
     pub(super) ingress_url: &'a str,
     pub(super) redis_url: &'a str,
     pub(super) script_path: Option<&'a Path>,
@@ -144,12 +144,13 @@ pub(super) struct OrchestratorRestartConfig {
     pub(super) port: u16,
     pub(super) health_port: u16,
     pub(super) scim_port: u16,
+    pub(super) credential_port: u16,
     pub(super) postgres_url: String,
     pub(super) admin_url: String,
     pub(super) ingress_url: String,
     pub(super) redis_url: String,
-    pub(super) script_path: PathBuf,
-    pub(super) journal_path: PathBuf,
+    pub(super) script_path: Option<PathBuf>,
+    pub(super) journal_path: Option<PathBuf>,
     pub(super) fga_config: FgaConfig,
     pub(super) extra_env: Vec<(String, String)>,
     pub(super) otlp_endpoint: String,
@@ -163,12 +164,12 @@ impl OrchestratorRestartConfig {
             port: self.port,
             health_port: self.health_port,
             scim_port: self.scim_port,
+            credential_port: self.credential_port,
             postgres_url: &self.postgres_url,
-            admin_url: &self.admin_url,
             ingress_url: &self.ingress_url,
             redis_url: &self.redis_url,
-            script_path: Some(&self.script_path),
-            journal_path: Some(&self.journal_path),
+            script_path: self.script_path.as_deref(),
+            journal_path: self.journal_path.as_deref(),
             fga_config: &self.fga_config,
             extra_env: &self.extra_env,
             otlp_endpoint: &self.otlp_endpoint,
@@ -179,6 +180,90 @@ impl OrchestratorRestartConfig {
     pub(super) fn deployment_uri(&self) -> String {
         format!("http://host.docker.internal:{}", self.port)
     }
+}
+
+/// Four distinct TCP ports used by one orchestrator child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OrchestratorPorts {
+    pub(super) restate: u16,
+    pub(super) health: u16,
+    pub(super) scim: u16,
+    pub(super) credential: u16,
+}
+
+/// Live listeners that prevent the selected orchestrator ports from being recycled.
+pub(super) struct OrchestratorPortReservation {
+    ports: OrchestratorPorts,
+    _listeners: [std::net::TcpListener; 4],
+}
+
+impl OrchestratorPortReservation {
+    /// Returns the selected ports while retaining every listener reservation.
+    pub(super) fn ports(&self) -> OrchestratorPorts {
+        self.ports
+    }
+
+    /// Releases the listeners and returns the ports for immediate child-process use.
+    pub(super) fn release(self) -> OrchestratorPorts {
+        self.ports
+    }
+}
+
+/// Reserves the complete, distinct orchestrator port set on its actual wildcard bind scope.
+pub(super) fn reserve_orchestrator_ports() -> Result<OrchestratorPortReservation> {
+    let restate = std::net::TcpListener::bind("0.0.0.0:0")
+        .context("reserve orchestrator Restate handler port")?;
+    let health =
+        std::net::TcpListener::bind("0.0.0.0:0").context("reserve orchestrator health port")?;
+    let scim =
+        std::net::TcpListener::bind("0.0.0.0:0").context("reserve orchestrator SCIM port")?;
+    let credential =
+        std::net::TcpListener::bind("0.0.0.0:0").context("reserve orchestrator credential port")?;
+    let ports = OrchestratorPorts {
+        restate: restate
+            .local_addr()
+            .context("read reserved orchestrator Restate handler port")?
+            .port(),
+        health: health
+            .local_addr()
+            .context("read reserved orchestrator health port")?
+            .port(),
+        scim: scim
+            .local_addr()
+            .context("read reserved orchestrator SCIM port")?
+            .port(),
+        credential: credential
+            .local_addr()
+            .context("read reserved orchestrator credential port")?
+            .port(),
+    };
+    Ok(OrchestratorPortReservation {
+        ports,
+        _listeners: [restate, health, scim, credential],
+    })
+}
+
+/// Abruptly kills and reaps an orchestrator child.
+///
+/// On Unix, [`Child::kill`] sends `SIGKILL`. Waiting here is intentional: an
+/// unreaped process can leave the fixture's ports occupied and makes the next
+/// spawn observe timing rather than durable recovery.
+pub(super) fn hard_kill_child(mut child: Child) -> Result<()> {
+    child.kill().context("send SIGKILL to orchestrator child")?;
+    let status = child.wait().context("reap SIGKILLed orchestrator child")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        if status.signal() != Some(nix::libc::SIGKILL) {
+            bail!("hard-killed orchestrator child exited with {status}, not SIGKILL");
+        }
+    }
+    #[cfg(not(unix))]
+    if status.success() {
+        bail!("hard-killed orchestrator child unexpectedly exited successfully");
+    }
+    Ok(())
 }
 
 pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<ChildGuard> {
@@ -207,8 +292,9 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .arg(config.health_port.to_string())
         .arg("--scim-port")
         .arg(config.scim_port.to_string())
+        .arg("--credential-port")
+        .arg(config.credential_port.to_string())
         .env("MOA_DATABASE_URL", config.postgres_url)
-        .env("MOA_RESTATE_ADMIN_URL", config.admin_url)
         .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", config.redis_url)
@@ -328,11 +414,6 @@ pub(super) fn read_child_logs(child: &mut Child) -> String {
     output
 }
 
-pub(super) fn pick_free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
-}
-
 pub(super) fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -340,6 +421,38 @@ pub(super) fn repo_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orchestrator_ports_are_distinct_and_reserved_until_release() {
+        // Pins: one fixture cannot receive a recycled port for two of its three listeners, and
+        // no unrelated binder can claim those ports before the orchestrator spawn begins.
+        let reservation = reserve_orchestrator_ports().expect("reserve orchestrator ports");
+        let ports = reservation.ports();
+        let unique = std::collections::HashSet::from([
+            ports.restate,
+            ports.health,
+            ports.scim,
+            ports.credential,
+        ]);
+        assert_eq!(unique.len(), 4, "all orchestrator ports must be distinct");
+
+        for port in [ports.restate, ports.health, ports.scim, ports.credential] {
+            let error = std::net::TcpListener::bind(("0.0.0.0", port))
+                .expect_err("reserved fixture port must reject a competing bind");
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        }
+
+        let released = reservation.release();
+        for port in [
+            released.restate,
+            released.health,
+            released.scim,
+            released.credential,
+        ] {
+            std::net::TcpListener::bind(("0.0.0.0", port))
+                .expect("released fixture port should be available to the orchestrator");
+        }
+    }
 
     #[cfg(unix)]
     fn long_running_child() -> Child {
@@ -411,6 +524,17 @@ mod tests {
         );
         terminate_child(transferred);
         assert!(!process_exists(transferred_pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_kill_child_uses_non_graceful_exit_and_reaps_process() {
+        // Pins: recovery tests model process loss, not graceful shutdown, and
+        // the replacement cannot race a zombie that still owns fixture state.
+        let child = long_running_child();
+        let pid = child.id();
+        hard_kill_child(child).expect("SIGKILL and reap fixture child");
+        assert!(!process_exists(pid), "hard-killed child must be reaped");
     }
 
     #[cfg(unix)]

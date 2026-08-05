@@ -61,7 +61,7 @@ those instances explicitly rather than installing process globals.
 | Orchestration | `restate-sdk` |
 | Execution plans | `serde_json`, `serde_canonical_json`, `blake3`, UUIDv5, and `jsonschema` 0.47 with Draft 2020-12 validation and remote/file retrieval disabled in `moa-execution` |
 | Scheduling | Restate `CronJob` virtual object |
-| Runtime cache | Redis-backed coordination for the orchestrator; in-process memory exists only for isolated local/test code |
+| Runtime cache | Redis-backed coordination for the orchestrator; in-process memory exists only for isolated non-orchestrator tests |
 | Security | `secrecy`, `shell-words`; `moa-crypto` envelope encryption backed by Postgres KMS state and mounted generation keyrings |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
@@ -249,7 +249,7 @@ and deployment setup. Key groups:
 |---|---|
 | `MOA_MODELS_*` and `MOA_<PROVIDER>_API_KEY` | model routing and provider API keys |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
-| `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
+| `MOA_RUNTIME_CACHE_*` | required Redis-compatible Valkey backend and URL for orchestrator admission and transient coordination |
 | `MOA_KMS_*` | durable KMS provider, mounted generation-key directory, and required active generation |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding and reranker `provider:model` selectors, PII service, and Turbopuffer cloud vector backend credentials |
 | `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, and chunking limits |
@@ -258,7 +258,7 @@ and deployment setup. Key groups:
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
 | `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, and deadlines |
 | `MOA_CLOUD_*` | remote hand provider settings |
-| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
+| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Normal-runtime Restate ingress and optional health URL; bootstrap Admin access is an explicit command argument |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
 | `MOA_SESSION_ATTACHMENT_*` | session upload object storage backend, bucket, prefix, endpoint, and cloud credentials |
@@ -313,7 +313,6 @@ Cloud deployments need:
 
 ```bash
 MOA_DATABASE_URL=postgres://...
-MOA_RESTATE_ADMIN_URL=http://...
 MOA_RESTATE_INGRESS_URL=http://...
 MOA_OPENAI_API_KEY=... # or another configured provider key
 MOA_KMS_PROVIDER=postgres
@@ -329,7 +328,7 @@ data remains readable after process restarts and multi-container behavior
 matches production. Key rotation and the opt-in maintenance Jobs are documented
 in [KMS Root-Key Rotation](operations/kms-root-key-rotation.md).
 
-Configure Redis when runtime cache state should coordinate across replicas:
+Configure a Redis-compatible Valkey runtime cache for every orchestrator:
 
 ```bash
 MOA_RUNTIME_CACHE_BACKEND=redis
@@ -373,16 +372,19 @@ TWILIO_AUTH_TOKEN=...
 TWILIO_FROM_NUMBER=...
 ```
 
-The orchestrator exposes the Restate handler endpoint and a health/readiness endpoint. Readiness checks Postgres and can optionally require registered Restate services.
+The orchestrator exposes the Restate handler endpoint and a health/readiness
+endpoint. Process readiness checks Postgres, KMS, and the optional lineage
+writer only. RestateDeployment status is the registration gate; edge startup
+calls the side-effect-free public `Health/check` Restate handler.
 
 Provider registration is deployment-static. `ProviderRegistry` is built at
 startup from `MoaConfig` and directly injected provider API keys; changing provider
 availability requires a rollout unless a future shared provider store is added.
 
 Kubernetes routing is non-sticky. Correctness-sensitive state must be stored in
-Postgres, Restate, or Redis-backed `RuntimeCacheStore`. The memory runtime cache
-backend is per process and suitable only for local development or best-effort
-transient behavior.
+Postgres, Restate, or Redis-backed `RuntimeCacheStore`. The orchestrator rejects
+the process-local memory backend; it remains available only to isolated
+non-orchestrator tests.
 
 ### Durable Coordination Topology
 
@@ -403,12 +405,13 @@ and Postgres, never in process memory or Redis:
   sandbox keyed `(session_id, worker_id, provider)` in `moa.hand_leases`,
   released on worker self-cleanup. Sandboxes are refreshable: durable state
   lives in the event log and object store, and a crashed sandbox is reprovisioned
-  under a new lease generation. Readiness should still require the orchestrator's
-  Restate services to be registered before the replica takes traffic.
+  under a new lease generation. RestateDeployment readiness, rather than an
+  Admin API call from each replica, gates registered service traffic.
 
 Durable execution runs use a separate topology. `ExecutionRun` and
 `ExecutionTask` workflows recover from Postgres execution rows plus Restate
 journals; the `Session` VO stores only compact linkage and terminal-synthesis
 dedupe state. Ready map items have stable logical task identities and no
 application fan-out cap. Atomic run-budget reservations bound admission, while
-Restate concurrency rules and provider pacing supply physical backpressure.
+provider pacing and governed capability or hand capacity supply physical
+backpressure.

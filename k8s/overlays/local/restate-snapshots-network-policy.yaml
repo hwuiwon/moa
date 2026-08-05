@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rustfs-s3-ingress
+  namespace: moa-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - moa-edge
+                  - moa-orchestrator
+                  - rustfs-init
+      ports:
+        - protocol: TCP
+          port: 9000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-restate
+          podSelector:
+            matchLabels:
+              moa.hwuiwon.com/restate-cluster: moa-restate
+      ports:
+        - protocol: TCP
+          port: 9000

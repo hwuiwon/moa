@@ -10,8 +10,8 @@ use std::process::{Child, Command, Stdio};
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
-    restate_ingress_url, test_user_identity, with_identity,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_ingress_url,
+    restate_test_admin_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, storage_partition_id_from_meta, test_session_meta,
@@ -44,7 +44,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
     let mut orchestrator = spawn_orchestrator(ports)?;
     let endpoint_url = deployment_endpoint_url(ports.restate);
     let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
         let ingress = restate_ingress_url();

@@ -26,7 +26,6 @@ use crate::core::rate_guard::{self, RateGuard};
 use crate::core::retry::RetryPolicy;
 
 const DEFAULT_STREAM_BUFFER: usize = 128;
-const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const MODEL_GPT_5_4: &str = "gpt-5.4";
 #[cfg(test)]
@@ -92,7 +91,7 @@ impl OpenAIProvider {
             default_model,
             default_reasoning_effort: default_reasoning_effort.into(),
             default_capabilities,
-            retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
+            retry_policy: RetryPolicy::default().with_max_retries(crate::LLM_PROVIDER_MAX_RETRIES),
             web_search_enabled: true,
             pacer: RatePacer::new(PacerConfig::disabled()),
             // Direct construction uses the flat per-provider default; the config

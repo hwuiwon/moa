@@ -35,7 +35,7 @@ pub struct CoordinatorPendingInput {
     pub awakeable_id: String,
     /// Workflow invocation that is waiting on `awakeable_id`.
     ///
-    /// Recorded so cancellation and terminal outcomes can clear the *exact*
+    /// Recorded so cancellation and timeout can clear the *exact*
     /// target rather than every request that happens to share a turn id. Two
     /// invocations of one logical turn (an original and its retry) can both hold
     /// registrations; clearing by turn alone would drop the live one.

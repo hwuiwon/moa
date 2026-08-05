@@ -26,7 +26,7 @@ trap cleanup EXIT
 cd "${REPO_ROOT}"
 
 : "${MOA_DATABASE_URL:?set MOA_DATABASE_URL before running local-smoke.sh}"
-: "${MOA_RESTATE_ADMIN_URL:?set MOA_RESTATE_ADMIN_URL before running local-smoke.sh}"
+: "${RESTATE_ADMIN_URL:?set RESTATE_ADMIN_URL before running local-smoke.sh}"
 : "${MOA_RESTATE_INGRESS_URL:?set MOA_RESTATE_INGRESS_URL before running local-smoke.sh}"
 
 echo "Starting restate-server in background..."
@@ -42,7 +42,7 @@ sleep 3
 
 echo "Registering deployment..."
 curl --fail --silent --show-error \
-  -X POST "${MOA_RESTATE_ADMIN_URL}/deployments" \
+  -X POST "${RESTATE_ADMIN_URL}/deployments" \
   -H "content-type: application/json" \
   --data '{"uri":"http://localhost:10020"}'
 

@@ -31,8 +31,8 @@ use moa_session::PostgresSessionStore;
 use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
 use moa_wire::turn::{
     ApplySecurityAssessmentRequest, ApplySecurityAssessmentResponse, CancelResponse,
-    PendingMessage, RegisterCoordinatorInputRequest, RunTurnRequest, SessionProgress,
-    SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
+    ClearCoordinatorInputRequest, PendingMessage, RegisterCoordinatorInputRequest, RunTurnRequest,
+    SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
     TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
     TurnTrigger,
 };
@@ -296,6 +296,11 @@ pub trait Session {
     /// Registers one coordinator input request so a plain user reply can resolve it.
     async fn register_coordinator_input(
         request: Json<RegisterCoordinatorInputRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Retracts one exact coordinator input request after cancellation or timeout.
+    async fn clear_coordinator_input(
+        request: Json<ClearCoordinatorInputRequest>,
     ) -> Result<(), HandlerError>;
 
     /// Atomically applies one classified tool output to the coordinator's circuit.

@@ -44,7 +44,6 @@ fn test_run_manifest() -> LoadTestRunManifest {
         direct_turn_event_append: false,
         compose_project: "test-project".to_string(),
         state_identity: "test-project_moa-restate-data".to_string(),
-        restate_rule_profile: "scope:*:concurrency=1000".to_string(),
         hardware_id: "test-hardware".to_string(),
         sessions: 4,
         tenants: 2,
@@ -235,7 +234,6 @@ fn turn_error_rate_counts_failed_turns_over_scheduled_arrivals() {
     // Pins: the turn error rate denominator is scheduled arrivals, so missed
     // (never-dispatched) turns cannot hide a saturated system.
     let errors = ErrorTaxonomy {
-        turn_rejections: 1,
         turn_start_failures: 1,
         turn_timeouts: 2,
         turn_failures: 3,
@@ -248,5 +246,5 @@ fn turn_error_rate_counts_failed_turns_over_scheduled_arrivals() {
         tool_error_events: 100,
     };
 
-    assert_eq!(errors.failed_turns(), 16);
+    assert_eq!(errors.failed_turns(), 15);
 }

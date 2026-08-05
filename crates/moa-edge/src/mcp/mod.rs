@@ -190,8 +190,7 @@ impl Server {
             Err(error) => return result::execution_error(format!("invalid tool input: {error}")),
         };
         let service_path = format!("/Session/{session_id}/{handler}");
-        let ingress_path =
-            crate::ingress::call_path(&crate::ingress::IngressScope::Unscoped, &service_path);
+        let ingress_path = crate::ingress::call_path(&service_path);
         let response = match self
             .state
             .proxy

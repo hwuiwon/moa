@@ -471,7 +471,7 @@ const SENDERS: &[SenderManifestEntry] = &[
         "decide",
         TRACE_HELPER,
         "ToolExecutorClient",
-        "execute_execution_task",
+        "execute_execution",
         2
     ),
     sender!(
@@ -787,7 +787,7 @@ const SENDERS: &[SenderManifestEntry] = &[
         "execute_allowed_tool",
         TRACE_HELPER,
         "ToolExecutorClient",
-        "execute_execution_task"
+        "execute_execution"
     ),
     sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",

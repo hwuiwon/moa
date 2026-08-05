@@ -141,15 +141,10 @@ impl SessionTarget for EdgeTarget {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            let rejected = is_turn_admission_rejection(status, &body);
             return Err(TurnFailure {
-                kind: if rejected {
-                    TurnFailureKind::Rejected
-                } else {
-                    TurnFailureKind::StartFailed
-                },
+                kind: TurnFailureKind::StartFailed,
                 message: format!("edge message post returned {status}: {body}"),
-                replacement_safe: rejected,
+                replacement_safe: false,
             });
         }
 

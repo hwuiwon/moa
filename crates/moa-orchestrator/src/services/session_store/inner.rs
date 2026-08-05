@@ -37,7 +37,7 @@ pub(crate) async fn ensure_session_authz_visible(
     let delivered = OutboxPoller::new(pool.clone(), fga.clone(), PollerConfig::default())
         .flush_object(&object)
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(authz_error_to_handler_error)?;
     if delivered == 0 {
         return Err(TerminalError::new_with_code(
             503,
@@ -53,9 +53,9 @@ pub(crate) async fn ensure_session_authz_visible(
             &object,
         )
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(authz_error_to_handler_error)?;
     if !visible {
-        return Err(HandlerError::from(AuthzError::Ambiguous(
+        return Err(authz_error_to_handler_error(AuthzError::Ambiguous(
             "session authorization tuples are not visible".to_string(),
         )));
     }
@@ -89,7 +89,7 @@ async fn enqueue_session_authz_tuples(
         Some(tenant_id.0),
     )
     .await
-    .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")))?;
+    .map_err(authz_error_to_handler_error)?;
 
     enqueue_raw(
         &mut **transaction,
@@ -100,7 +100,7 @@ async fn enqueue_session_authz_tuples(
         Some(tenant_id.0),
     )
     .await
-    .map_err(|error| TerminalError::new(format!("authz outbox tenant tuple: {error}")))?;
+    .map_err(authz_error_to_handler_error)?;
 
     if let Some(contact_id) = contact_id {
         enqueue_raw(
@@ -112,7 +112,7 @@ async fn enqueue_session_authz_tuples(
             Some(tenant_id.0),
         )
         .await
-        .map_err(|error| TerminalError::new(format!("authz outbox contact tuple: {error}")))?;
+        .map_err(authz_error_to_handler_error)?;
     }
     Ok(())
 }
@@ -126,15 +126,12 @@ pub(crate) async fn create_session_for_identity(
 ) -> Result<SessionId, HandlerError> {
     let tenant_id = meta.tenant_id;
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let mut transaction = pool.begin().await.map_err(sqlx_error_to_handler_error)?;
 
     let outcome = store
         .create_session_in_tx(&mut transaction, meta)
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(moa_error_to_handler_error)?;
     let session_id = outcome.session_id;
 
     if outcome.inserted {
@@ -151,7 +148,7 @@ pub(crate) async fn create_session_for_identity(
     transaction
         .commit()
         .await
-        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        .map_err(sqlx_error_to_handler_error)?;
     // The active-session gauge is refreshed off the write path by the store's
     // background timer, so session creation does not run a COUNT(*) here.
 
@@ -185,15 +182,12 @@ pub(crate) async fn initialize_contact_session_atomic(
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
     let session_id = meta.id;
 
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let mut transaction = pool.begin().await.map_err(sqlx_error_to_handler_error)?;
 
     let outcome = store
         .create_session_in_tx(&mut transaction, meta)
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(moa_error_to_handler_error)?;
 
     if outcome.inserted {
         enqueue_session_authz_tuples(
@@ -232,7 +226,7 @@ pub(crate) async fn initialize_contact_session_atomic(
     transaction
         .commit()
         .await
-        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        .map_err(sqlx_error_to_handler_error)?;
 
     Ok(outcome.session_id)
 }
@@ -254,14 +248,11 @@ pub(crate) async fn initialize_internal_execution_session_atomic(
     let tenant_id = meta.tenant_id;
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
     let session_id = meta.id;
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let mut transaction = pool.begin().await.map_err(sqlx_error_to_handler_error)?;
     let outcome = store
         .create_session_in_tx(&mut transaction, meta)
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(moa_error_to_handler_error)?;
     if outcome.inserted {
         enqueue_session_authz_tuples(
             &mut transaction,
@@ -290,12 +281,12 @@ pub(crate) async fn initialize_internal_execution_session_atomic(
     transaction
         .commit()
         .await
-        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        .map_err(sqlx_error_to_handler_error)?;
 
     let persisted = store
         .get_session(session_id)
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(moa_error_to_handler_error)?;
     if persisted.tenant_id != expected.tenant_id
         || persisted.contact != expected.contact
         || persisted.created_by != expected.created_by
@@ -376,10 +367,7 @@ pub(crate) async fn change_contact_session_channel_atomic(
     changed_event: Event,
 ) -> Result<(), HandlerError> {
     let session_id = binding.session_id;
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let mut transaction = pool.begin().await.map_err(sqlx_error_to_handler_error)?;
 
     let inserted = store
         .replace_session_channel_binding_in_tx(
@@ -409,7 +397,7 @@ pub(crate) async fn change_contact_session_channel_atomic(
     transaction
         .commit()
         .await
-        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        .map_err(sqlx_error_to_handler_error)?;
 
     Ok(())
 }
@@ -470,7 +458,7 @@ pub(crate) async fn resolve_agent_context_for_session(
     let policy = AgentResolver::new(pool)
         .resolve_installation(&session_agent_scope(meta), installation_uid)
         .await
-        .map_err(HandlerError::from)?;
+        .map_err(moa_error_to_handler_error)?;
     Ok(policy.agent_context)
 }
 
@@ -499,21 +487,21 @@ pub(crate) async fn resolve_agent_context_for_evaluation(
             Some(overlay) => resolver
                 .resolve_installation_with_overlay(&scope, installation_uid, overlay)
                 .await
-                .map_err(HandlerError::from)?,
+                .map_err(moa_error_to_handler_error)?,
             None => resolver
                 .resolve_installation(&scope, installation_uid)
                 .await
-                .map_err(HandlerError::from)?,
+                .map_err(moa_error_to_handler_error)?,
         },
         (None, Some(revision_uid)) => match overlay {
             Some(overlay) => resolver
                 .resolve_exact_revision_with_overlay(&scope, revision_uid, overlay)
                 .await
-                .map_err(HandlerError::from)?,
+                .map_err(moa_error_to_handler_error)?,
             None => resolver
                 .resolve_release_candidate(&scope, revision_uid)
                 .await
-                .map_err(HandlerError::from)?,
+                .map_err(moa_error_to_handler_error)?,
         },
         _ => {
             return Err(TerminalError::new(
@@ -532,7 +520,7 @@ pub(crate) fn apply_agent_model_policy(
 ) -> Result<(), HandlerError> {
     let snapshot = agent_context
         .parsed_policy_snapshot()
-        .map_err(HandlerError::from)?;
+        .map_err(moa_error_to_handler_error)?;
     let model_policy = snapshot.model_policy;
     if meta.model.as_str().trim().is_empty()
         && let Some(default_model) = model_policy.default_model.as_deref()
@@ -586,19 +574,14 @@ impl SessionStoreImpl {
         self.store
             .create_session(meta)
             .await
-            .map_err(HandlerError::from)
+            .map_err(moa_error_to_handler_error)
     }
 }
 
 /// Maps a session-store [`MoaError`] to a Restate handler error, surfacing a
 /// missing session as a 404 and other failures as a generic terminal error.
 fn session_store_handler_error(error: moa_core::error::MoaError) -> HandlerError {
-    match error {
-        moa_core::error::MoaError::SessionNotFound(_) => {
-            TerminalError::new_with_code(404, "session not found").into()
-        }
-        error => TerminalError::new(format!("session store error: {error}")).into(),
-    }
+    moa_error_to_handler_error(error)
 }
 
 fn owner_tuple_subject(identity: &Identity) -> Result<(UserType, uuid::Uuid), HandlerError> {

@@ -32,6 +32,9 @@ use restate_sdk::prelude::*;
 use sqlx::PgPool;
 
 use crate::objects::session::SessionClient;
+use crate::workflows::errors::{
+    authz_error_to_handler_error, moa_error_to_handler_error, sqlx_error_to_handler_error,
+};
 use crate::workflows::session_retention::{SessionRetentionDispatch, SessionRetentionRequest};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 

@@ -83,6 +83,26 @@ fn execution_invariants_evaluate_every_typed_variant_with_stable_ids_offline() {
 }
 
 #[test]
+fn terminal_status_in_rejects_compensating_as_an_allowed_terminal_status_offline() {
+    // Pins: recovery evaluation cannot count an in-progress rollback as a settled run.
+    let snapshot = eval_snapshot(ExecutionRunStatus::Compensating, &[]);
+
+    let results = evaluate_invariants(
+        &snapshot,
+        &[ExecutionInvariantSpec::TerminalStatusIn {
+            statuses: vec![ExecutionRunStatus::Compensating],
+        }],
+    );
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].passed);
+    assert_eq!(
+        results[0].diagnostic,
+        "allowed terminal set contains a nonterminal status"
+    );
+}
+
+#[test]
 fn execution_false_completion_detects_impossible_and_strict_coverage_cases_offline() {
     // Pins: completed is never accepted when MustNotComplete or strict independent coverage is unsatisfied.
     let completed = eval_snapshot(

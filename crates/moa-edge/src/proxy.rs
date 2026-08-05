@@ -144,8 +144,8 @@ fn validate_upstream_path(path: &str) -> Result<(), anyhow::Error> {
     {
         bail!("upstream path must not contain dot segments");
     }
-    if !decoded_path.starts_with("/restate/") {
-        bail!("upstream path must target /restate/");
+    if !decoded_path.starts_with("/restate/call/") && !decoded_path.starts_with("/restate/send/") {
+        bail!("upstream path must target the Restate call or send ingress scheme");
     }
 
     Ok(())
@@ -289,7 +289,7 @@ mod tests {
         for path in [
             "/restate/call/SessionStore/append_event",
             "/restate/call/Session/11111111-1111-1111-1111-111111111111/progress",
-            "/restate/scope/tenant-22222222-2222-2222-2222-222222222222/call/Contacts/send_message",
+            "/restate/send/TenantPurge/22222222-2222-2222-2222-222222222222/run",
         ] {
             validate_upstream_path(path)
                 .unwrap_or_else(|error| panic!("{path} should be allowed: {error}"));

@@ -9,8 +9,9 @@
   forward-reference not-yet-provided user material to Act rather than clarify.
   Four Execute/Inline cases carry covering installed skills (`available_skills`)
   so borderline requests route to Act rather than clarify (session S016).
-- `contract-recorded.jsonl` contains 80 strict planner candidates paired
-  with independently stated goal-contract expectations.
+- `contract-recorded.jsonl` contains 80 strict schema-v2 planner candidates
+  with explicit cancellation policy and node compensation fields, paired with
+  independently stated goal-contract expectations.
 - `task-quality.jsonl` contains 20 paid-lane cases with exact public-route
   and optional strategy expectations.
 

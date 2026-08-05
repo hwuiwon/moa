@@ -161,36 +161,13 @@ fn oauth_access_token_bearer_routes_to_opaque_oauth_credential_not_api_key() {
 }
 
 #[test]
-fn only_send_message_takes_the_tenant_flow_control_scope() {
-    // Pins: posting a message starts a turn and is enrolled in per-tenant admission
-    // control, while contact-session reads and lifecycle calls (progress,
-    // authorize_session, init_session) stay unscoped so a status poll or session setup
-    // never consumes a tenant's concurrency slot.
-    let tenant = TenantId::from(
-        Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("tenant uuid parses"),
-    );
-
-    assert_eq!(
-        contacts_scope("send_message", tenant),
-        IngressScope::Tenant(tenant)
-    );
-    for read_handler in ["progress", "authorize_session", "init_session"] {
-        assert_eq!(
-            contacts_scope(read_handler, tenant),
-            IngressScope::Unscoped,
-            "{read_handler} must not consume tenant concurrency"
-        );
-    }
-}
-
-#[test]
-fn admission_429_terminal_body_produces_retry_after_seconds() {
-    // Pins: Restate terminal errors cannot add arbitrary HTTP headers, so
-    // edge translates the bounded retry delay carried by the admission
+fn pending_queue_429_terminal_body_produces_retry_after_seconds() {
+    // Pins: Restate terminal errors cannot add arbitrary HTTP headers, so the
+    // edge translates the bounded retry delay carried by a full Session queue
     // error into the public Retry-After response header.
     assert_eq!(
         retry_after_from_terminal_body(
-            "turn admission fleet budget is saturated; retry_after_ms=2500"
+            "session pending message queue is full; retry_after_ms=2500"
         ),
         Some("3".to_string())
     );

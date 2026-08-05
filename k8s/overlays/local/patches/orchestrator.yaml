@@ -13,11 +13,6 @@
     limits:
       cpu: "1"
       memory: 2Gi
-# Restate operator 2.8.1 registers only Ready pods. Use process liveness for
-# this local bootstrap; edge still gates traffic on registered-service readiness.
-- op: replace
-  path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
-  value: /_health/live
 - op: add
   path: /spec/template/spec/initContainers/0
   value:
@@ -113,11 +108,6 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE
-    value: "false"
-- op: add
-  path: /spec/template/spec/containers/0/env/-
-  value:
-    name: MOA_DEREGISTER_ON_SHUTDOWN
     value: "false"
 - op: add
   path: /spec/template/spec/containers/0/volumeMounts/-

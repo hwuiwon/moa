@@ -65,7 +65,6 @@ use tools::thinking_config_for_model;
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_STREAM_BUFFER: usize = 128;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 8_192;
-const DEFAULT_MAX_RETRIES: usize = 3;
 
 /// Builds a Gemini request body for inspection tests without sending it.
 pub fn debug_build_gemini_request_body(
@@ -130,7 +129,7 @@ impl GeminiProvider {
             default_model,
             default_reasoning_effort: default_reasoning_effort.into(),
             default_capabilities,
-            retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
+            retry_policy: RetryPolicy::default().with_max_retries(crate::LLM_PROVIDER_MAX_RETRIES),
             web_search_enabled: true,
             pacer: RatePacer::new(PacerConfig::disabled()),
             // Direct construction uses the flat per-provider default; the config

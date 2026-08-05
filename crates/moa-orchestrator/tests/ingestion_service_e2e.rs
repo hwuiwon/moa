@@ -1,6 +1,9 @@
 //! End-to-end slow-path ingestion coverage through a local Restate ingress.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use moa_config::MoaConfig;
@@ -21,14 +24,11 @@ struct LiveIngestionHarness {
     client: reqwest::Client,
     pool: PgPool,
     ingress: String,
-    _fixture: OrchestratorTestFixture,
+    fixture: OrchestratorTestFixture,
 }
 
 impl LiveIngestionHarness {
     async fn start(database_url: &str) -> Result<Self> {
-        let pool = PgPool::connect(database_url)
-            .await
-            .context("connect to test Postgres")?;
         let fixture = OrchestratorTestFixture::with_script_and_env(
             json!({
                 "default": {
@@ -40,13 +40,32 @@ impl LiveIngestionHarness {
         )
         .await
         .context("start shared orchestrator fixture for ingestion e2e")?;
+        Self::from_fixture(fixture).await
+    }
+
+    async fn start_owned() -> Result<Self> {
+        let fixture = OrchestratorTestFixture::with_script(json!({
+            "default": {
+                "content": "ok",
+                "stop_reason": "end_turn"
+            }
+        }))
+        .await
+        .context("start hermetic orchestrator fixture for ingestion recovery e2e")?;
+        Self::from_fixture(fixture).await
+    }
+
+    async fn from_fixture(fixture: OrchestratorTestFixture) -> Result<Self> {
+        let pool = PgPool::connect(&fixture.postgres_url)
+            .await
+            .context("connect to fixture Postgres")?;
         let ingress = fixture.ingress_url.clone();
 
         Ok(Self {
             client: reqwest::Client::new(),
             pool,
             ingress,
-            _fixture: fixture,
+            fixture,
         })
     }
 
@@ -74,10 +93,193 @@ impl LiveIngestionHarness {
     }
 }
 
+fn ingestion_gate_key(tenant_id: TenantId) -> i64 {
+    let bytes = tenant_id.0.as_bytes();
+    i64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+async fn install_ingestion_apply_gate(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    gate_key: i64,
+) -> Result<(String, String)> {
+    let suffix = tenant_id.0.simple().to_string();
+    let function_name = format!("test_ingestion_apply_gate_{}", &suffix[..16]);
+    let trigger_name = format!("test_ingestion_apply_trigger_{}", &suffix[..16]);
+    let ddl = format!(
+        r#"
+        CREATE FUNCTION {function_name}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.storage_partition_id = '{tenant_id}' THEN
+                PERFORM pg_advisory_xact_lock({gate_key});
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        CREATE TRIGGER {trigger_name}
+        BEFORE INSERT ON moa.node_index
+        FOR EACH ROW EXECUTE FUNCTION {function_name}();
+        "#
+    );
+    sqlx::raw_sql(&ddl)
+        .execute(pool)
+        .await
+        .context("install exact ingestion apply gate")?;
+    Ok((trigger_name, function_name))
+}
+
+async fn wait_for_ingestion_apply_gate(
+    pool: &PgPool,
+    gate_key: i64,
+    previous_waiter: Option<&(i32, String)>,
+    timeout: Duration,
+) -> Result<(i32, String)> {
+    let key_bits = gate_key as u64;
+    let class_id = (key_bits >> 32) as i64;
+    let object_id = (key_bits & u64::from(u32::MAX)) as i64;
+    let deadline = Instant::now() + timeout;
+    loop {
+        let waiters: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT pid, waitstart::text FROM pg_locks \
+             WHERE locktype = 'advisory' AND NOT granted \
+               AND classid::bigint = $1 AND objid::bigint = $2 \
+             ORDER BY pid, waitstart",
+        )
+        .bind(class_id)
+        .bind(object_id)
+        .fetch_all(pool)
+        .await
+        .context("inspect exact ingestion advisory waiter")?;
+        let observed = waiters.clone();
+        let current = waiters
+            .into_iter()
+            .filter(|waiter| Some(waiter) != previous_waiter)
+            .collect::<Vec<_>>();
+        if let [waiter] = current.as_slice() {
+            return Ok(waiter.clone());
+        }
+        ensure!(
+            current.len() <= 1,
+            "expected at most one new ingestion gate waiter; previous={previous_waiter:?}, observed={observed:?}"
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "ingestion apply did not reach its advisory gate within {timeout:?}; previous={previous_waiter:?}, observed={observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_ingestion_journal_action(
+    fixture: &OrchestratorTestFixture,
+    turn: &SessionTurn,
+    action_name: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let object_key = ingestion_object_key(turn);
+    let query = format!(
+        "SELECT journal.id, journal.index, journal.entry_type, journal.name, \
+                journal.version, journal.entry_json \
+         FROM sys_journal AS journal \
+         JOIN sys_invocation AS invocation ON journal.id = invocation.id \
+         WHERE invocation.target_service_name = 'IngestionVO' \
+           AND invocation.target_service_key = '{object_key}' \
+           AND invocation.target_handler_name = 'ingest_turn' \
+           AND invocation.status != 'completed' \
+           AND journal.name = '{action_name}'"
+    );
+    let client = reqwest::Client::new();
+    let url = format!("{}/query", fixture.admin_url.trim_end_matches('/'));
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let last_observation = match client
+            .post(&url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&json!({ "query": query }))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                match response.text().await {
+                    Ok(body) if status.is_success() && body.trim().is_empty() => {
+                        "successful query returned an empty body".to_string()
+                    }
+                    Ok(body) if status.is_success() => {
+                        match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(payload) => match payload
+                                .get("rows")
+                                .and_then(serde_json::Value::as_array)
+                            {
+                                Some(rows) => {
+                                    ensure!(
+                                        rows.len() <= 1,
+                                        "exact ingestion invocation has multiple `{action_name}` journal rows: {rows:?}"
+                                    );
+                                    let action_is_journaled = rows.first().is_some_and(|row| {
+                                        row.get("entry_type").and_then(serde_json::Value::as_str)
+                                            == Some("Command: Run")
+                                            && row.get("name").and_then(serde_json::Value::as_str)
+                                                == Some(action_name)
+                                            && row
+                                                .get("version")
+                                                .and_then(serde_json::Value::as_u64)
+                                                == Some(2)
+                                            && row
+                                                .get("entry_json")
+                                                .and_then(serde_json::Value::as_str)
+                                                .and_then(|entry| {
+                                                    serde_json::from_str::<serde_json::Value>(entry)
+                                                        .ok()
+                                                })
+                                                .and_then(|entry| {
+                                                    entry
+                                                        .pointer("/Command/Run/name")
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .map(str::to_string)
+                                                })
+                                                .as_deref()
+                                                == Some(action_name)
+                                    });
+                                    if action_is_journaled {
+                                        return Ok(());
+                                    }
+                                    format!("journal rows={rows:?}")
+                                }
+                                None => format!("response omitted rows: {payload}"),
+                            },
+                            Err(error) => {
+                                format!("decode JSON response: {error}; body={body:?}")
+                            }
+                        }
+                    }
+                    Ok(body) => format!("status {status}; body={body:?}"),
+                    Err(error) => format!("read response body: {error}"),
+                }
+            }
+            Err(error) => format!("send query: {error}"),
+        };
+
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Restate did not expose journaled `{action_name}` for IngestionVO/{object_key}/ingest_turn within {timeout:?}: {last_observation}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn ingestion_object_key(turn: &SessionTurn) -> String {
+    format!("{}:{}", turn.tenant_id, turn.session_id)
+}
+
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {
     format!(
-        "{ingress}/restate/call/IngestionVO/{}:{}/ingest_turn",
-        turn.tenant_id, turn.session_id
+        "{ingress}/restate/call/IngestionVO/{}/ingest_turn",
+        ingestion_object_key(turn)
     )
 }
 
@@ -533,6 +735,102 @@ async fn degraded_workspace_skips_sampled_low_pii_turn_without_side_effects() ->
 
     harness.shutdown().await;
     result
+}
+
+#[tokio::test]
+#[ignore = "requires local Restate, Postgres, Docker, and the orchestrator recovery fixture"]
+async fn recovery_matrix_degraded_decision_does_not_flip_after_restart() -> Result<()> {
+    // Pins: the Postgres degraded-state read is one durable decision. A restart
+    // after that action commits but before graph writes cannot re-read a flipped
+    // flag and change the command from ingest to skip.
+    let harness = LiveIngestionHarness::start_owned().await?;
+    let turn = low_pii_degraded_skip_turn();
+    let gate_key = ingestion_gate_key(turn.tenant_id);
+    let (trigger_name, function_name) =
+        install_ingestion_apply_gate(&harness.pool, turn.tenant_id, gate_key).await?;
+    set_slow_path_degraded(&harness.pool, turn.tenant_id, false).await?;
+
+    let mut gate_owner = harness.pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(gate_key)
+        .execute(&mut *gate_owner)
+        .await?;
+
+    let request_client = harness.client.clone();
+    let request_url = object_url(&harness.ingress, &turn);
+    let request_turn = turn.clone();
+    let request = tokio::spawn(async move {
+        request_client
+            .post(request_url)
+            .json(&request_turn)
+            .send()
+            .await
+            .context("send recovery ingestion request")?
+            .error_for_status()
+            .context("recovery ingestion request should succeed")?
+            .json::<IngestApplyReport>()
+            .await
+            .context("decode recovery ingestion report")
+    });
+
+    let first_waiter =
+        wait_for_ingestion_apply_gate(&harness.pool, gate_key, None, Duration::from_secs(30))
+            .await?;
+    // Protocol-v4 journals expose this durable step as a version-2 Run command;
+    // `completed` is intentionally unpopulated. The downstream apply waiter
+    // above proves the handler received the completion and advanced past it.
+    wait_for_ingestion_journal_action(
+        &harness.fixture,
+        &turn,
+        "should_skip_degraded",
+        Duration::from_secs(30),
+    )
+    .await?;
+    set_slow_path_degraded(&harness.pool, turn.tenant_id, true).await?;
+    harness
+        .fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("restart after journaled degraded decision")?;
+    // A PostgreSQL backend sleeping in an advisory-lock wait does not observe
+    // the dead SDK process promptly. Terminate that exact orphan so the test
+    // models the database observing the crash before replay starts a new apply.
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(first_waiter.0)
+        .fetch_one(&harness.pool)
+        .await?;
+    ensure!(terminated, "terminate orphaned ingestion apply backend");
+    let replay_waiter = wait_for_ingestion_apply_gate(
+        &harness.pool,
+        gate_key,
+        Some(&first_waiter),
+        Duration::from_secs(30),
+    )
+    .await?;
+    ensure!(
+        replay_waiter != first_waiter,
+        "replayed ingestion apply must use a distinct Postgres backend wait"
+    );
+
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+        .bind(gate_key)
+        .fetch_one(&mut *gate_owner)
+        .await?;
+    ensure!(unlocked, "fixture connection must own ingestion gate");
+    drop(gate_owner);
+
+    let report = request.await.context("join recovery ingestion request")??;
+    ensure!(report.inserted == 2, "unexpected replay report: {report:?}");
+    wait_for_fact_count(&harness.pool, &turn, 2).await?;
+
+    sqlx::raw_sql(&format!(
+        "DROP TRIGGER {trigger_name} ON moa.node_index; DROP FUNCTION {function_name}();"
+    ))
+    .execute(&harness.pool)
+    .await
+    .context("remove ingestion apply gate")?;
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test]

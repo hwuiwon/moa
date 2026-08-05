@@ -49,7 +49,13 @@ use crate::objects::session::SessionClient;
 use crate::objects::worker::{
     MAX_WORKER_TURNS_PER_WORKFLOW, WorkerClearInputRequest, WorkerClient,
 };
-use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
+use crate::services::{
+    llm_gateway::{
+        LLMCompletionAction, LLMCompletionOwner, LLMGatewayClient, attach_completion_owner,
+        cancel_completion_owner, completion_idempotency_key,
+    },
+    session_store::RestateSessionStoreClient,
+};
 use crate::tool_invocation::governed::completion_tool_catalog_pin;
 use crate::tool_invocation::governed::{
     GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
@@ -63,6 +69,7 @@ use crate::turn::util::{
 use crate::turn_driver::{
     model_loop as driver_model_loop, progress as driver_progress, segments as driver_segments,
 };
+use crate::workflows::child_invocation::{ChildInvocationOutcome, cancel_and_join_child_call};
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::{
     TurnEventAppender, append_session_event, append_session_event_with_dedupe_key,
@@ -92,6 +99,7 @@ struct WorkerIterationInput<'a> {
     active_canary: Option<String>,
     meta: SessionMeta,
     parent_session: SessionId,
+    model_turn: usize,
     turn_evidence: &'a mut TurnEvidence,
     tool_budget: &'a mut ToolBudgetState,
     disabled_capabilities: &'a mut BTreeMap<String, moa_core::types::security::ToolCapabilityId>,
@@ -225,7 +233,7 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
         emit_failed_child_signal_if_needed(&ctx, &request.worker_id, parent_session, &outcome)
             .await?;
 
-        notify_worker_of_outcome(&ctx, &request.worker_id, &outcome);
+        notify_worker_of_outcome(&ctx, &request.worker_id, &outcome).await?;
         Ok(Json::from(outcome))
     }
 
@@ -237,6 +245,7 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("WorkerTurnExecution", "request_cancel");
+        cancel_completion_owner(&ctx, LLMCompletionOwner::worker_turn(ctx.key())).await?;
         driver_progress::request_cancel(&ctx, reason.into_inner()).await
     }
 
@@ -300,12 +309,6 @@ async fn run_worker_inside_workflow(
     for turn_number in 1..=max_turns {
         driver_progress::set_iteration(ctx, turn_number);
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
-            moa_core::coordination_counters::record_vo_send();
-            crate::restate_identity::replay_safe_request(
-                ctx.object_client::<WorkerClient>(request.worker_id.clone())
-                    .cancel(reason.clone()),
-            )
-            .send();
             return Ok(TurnOutcome {
                 turn_id: request.turn_id.clone(),
                 kind: TurnOutcomeKind::Cancelled,
@@ -373,6 +376,7 @@ async fn run_worker_inside_workflow(
                     active_canary,
                     meta,
                     parent_session,
+                    model_turn: turn_number,
                     turn_evidence: &mut turn_evidence,
                     tool_budget: &mut tool_budget,
                     disabled_capabilities: &mut disabled_capabilities,
@@ -461,6 +465,8 @@ async fn run_worker_iteration(
     let selected_skills =
         attach_active_segment_metadata(ctx, input.parent_session, &mut input.completion_request)
             .await?;
+    let completion_owner = LLMCompletionOwner::worker_turn(ctx.key());
+    attach_completion_owner(&mut input.completion_request, &completion_owner);
     exclude_reserved_control_tool_schemas(&mut input.completion_request);
     let allowed_tools = allowed_tool_names(&input.completion_request);
 
@@ -479,24 +485,36 @@ async fn run_worker_iteration(
     let llm_started = Instant::now();
     let response = {
         let _guard = span.enter();
-        restate_sdk::select! {
-            reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
-                let reason = reason?;
-                moa_core::coordination_counters::record_vo_send();
-                crate::restate_identity::replay_safe_request(
-                    ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
-                        .cancel(reason.clone()),
-                )
-                .send();
+        let call = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<LLMGatewayClient>()
+                .complete(Json::from(input.completion_request))
+                .idempotency_key(completion_idempotency_key(
+                    ctx.invocation_id(),
+                    LLMCompletionAction::WorkerModel {
+                        turn: input.model_turn,
+                    },
+                )),
+        )
+        .call();
+        match cancel_and_join_child_call(
+            ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE),
+            call,
+        )
+        .await?
+        {
+            ChildInvocationOutcome::Cancelled(reason) => {
                 return Ok(WorkerIterationOutcome::Cancelled(reason));
-            },
-            response = crate::restate_identity::replay_safe_request(
-                ctx.service_client::<LLMGatewayClient>()
-                    .complete(Json::from(input.completion_request)),
-            )
-                .call() => {
-                    response?.into_inner()
+            }
+            ChildInvocationOutcome::Completed(response) => {
+                let response = response.into_inner();
+                if response.stop_reason == StopReason::Cancelled {
+                    let reason = driver_progress::cancel_requested(ctx)
+                        .await?
+                        .unwrap_or_else(|| "worker turn cancelled".to_string());
+                    return Ok(WorkerIterationOutcome::Cancelled(reason));
                 }
+                response
+            }
         }
     };
     record_turn_llm_call_duration(llm_started.elapsed());
@@ -531,12 +549,6 @@ async fn run_worker_iteration(
 
     for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
-            moa_core::coordination_counters::record_vo_send();
-            crate::restate_identity::replay_safe_request(
-                ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
-                    .cancel(reason.clone()),
-            )
-            .send();
             return Ok(WorkerIterationOutcome::Cancelled(reason));
         }
         match input
@@ -573,7 +585,7 @@ async fn run_worker_iteration(
             tool_catalog_pin: &input.tool_catalog_pin,
             disabled_capabilities: &mut *input.disabled_capabilities,
         };
-        if handle_tool_call(
+        match handle_tool_call(
             workflow,
             ctx,
             tool_context,
@@ -583,9 +595,15 @@ async fn run_worker_iteration(
             &mut *input.turn_evidence,
         )
         .await?
-            == WorkerToolCallDisposition::SecurityHalt
         {
-            return Ok(WorkerIterationOutcome::SecurityHalt);
+            WorkerToolCallDisposition::SecurityHalt => {
+                return Ok(WorkerIterationOutcome::SecurityHalt);
+            }
+            WorkerToolCallDisposition::Cancelled(reason) => {
+                return Ok(WorkerIterationOutcome::Cancelled(reason));
+            }
+            WorkerToolCallDisposition::Continue | WorkerToolCallDisposition::SecurityNeedsInput => {
+            }
         }
     }
 
@@ -606,19 +624,20 @@ async fn run_worker_iteration(
 /// Refreshes the child's telemetry-plane heartbeat at the progress cadence.
 ///
 /// The timestamp is journaled via `durable_utc_now` so it stays replay-stable, then
-/// fire-and-forget delivered to the `Worker` VO. This is VO state only (no event
+/// durably delivered to the `Worker` VO. This is VO state only (no event
 /// per tick); the watchdog and `progress_summary` read it to detect a stuck child.
 async fn record_worker_heartbeat(
     ctx: &WorkflowContext<'_>,
     worker_id: &str,
 ) -> Result<(), HandlerError> {
     let now = durable_utc_now(ctx, "worker_heartbeat").await?;
-    moa_core::coordination_counters::record_vo_send();
+    moa_core::coordination_counters::record_worker_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<WorkerClient>(worker_id.to_string())
             .record_heartbeat(Json::from(now)),
     )
-    .send();
+    .call()
+    .await?;
     Ok(())
 }
 
@@ -690,7 +709,7 @@ async fn handle_tool_call(
     if let Some(report_tool) = ChildReportTool::from_invocation(&tool_call.invocation)
         .map_err(|error| TerminalError::new(error.to_string()))?
     {
-        handle_child_report_tool(
+        return handle_child_report_tool(
             workflow,
             ctx,
             ChildReportToolRequest {
@@ -704,8 +723,7 @@ async fn handle_tool_call(
             },
             turn_evidence,
         )
-        .await?;
-        return Ok(WorkerToolCallDisposition::Continue);
+        .await;
     }
 
     if let Some(disabled_capability) = disabled_capability_for_tool(
@@ -814,13 +832,20 @@ async fn handle_tool_call(
             )
             .await?;
         }
+        GovernedInvocationOutcome::UnknownOutcome { .. }
+        | GovernedInvocationOutcome::NotDispatched { .. } => {
+            return Err(TerminalError::new(
+                "worker-origin governed invocation returned an execution-only outcome",
+            )
+            .into());
+        }
     }
     if disposition == WorkerToolCallDisposition::SecurityNeedsInput {
         // Reuse the existing request_input round-trip rather than inventing a
         // second suspension mechanism: it already emits one `NeedsInput` signal,
         // registers the awakeable on the Worker VO before emitting so a reply can
         // never race ahead of it, and clears the mapping on timeout.
-        request_input_from_parent(
+        if let ChildInputWaitOutcome::Cancelled(reason) = request_input_from_parent(
             workflow,
             ctx,
             ChildInputRequestOwner {
@@ -834,7 +859,10 @@ async fn handle_tool_call(
                 audience: moa_core::types::worker::state::InputAudience::User,
             },
         )
-        .await?;
+        .await?
+        {
+            return Ok(WorkerToolCallDisposition::Cancelled(reason));
+        }
     }
     Ok(disposition)
 }
@@ -1009,7 +1037,7 @@ async fn handle_child_report_tool(
     ctx: &WorkflowContext<'_>,
     request: ChildReportToolRequest<'_>,
     turn_evidence: &mut TurnEvidence,
-) -> Result<(), HandlerError> {
+) -> Result<WorkerToolCallDisposition, HandlerError> {
     let ChildReportToolRequest {
         turn_id,
         generation,
@@ -1034,7 +1062,7 @@ async fn handle_child_report_tool(
             report_to_parent(ctx, worker_id, parent_session, &input).await?
         }
         ChildReportTool::RequestInput(input) => {
-            request_input_from_parent(
+            match request_input_from_parent(
                 workflow,
                 ctx,
                 ChildInputRequestOwner {
@@ -1046,6 +1074,12 @@ async fn handle_child_report_tool(
                 &input,
             )
             .await?
+            {
+                ChildInputWaitOutcome::Output { output, .. } => *output,
+                ChildInputWaitOutcome::Cancelled(reason) => {
+                    return Ok(WorkerToolCallDisposition::Cancelled(reason));
+                }
+            }
         }
     };
     let secured = secured_worker_output(&invocation, output);
@@ -1060,14 +1094,13 @@ async fn handle_child_report_tool(
     .await?;
     record_tool_result(ctx, turn_id, worker_id, tool_id, &invocation, &secured).await?;
     turn_evidence.record_tool_result(&invocation, &secured.safe_output);
-    Ok(())
+    Ok(WorkerToolCallDisposition::Continue)
 }
 
 /// Emits a model-driven `Finding`/`Blocked` control-plane signal to the coordinator.
 ///
 /// `signal_id`/`created_at` are journaled (`ctx.run`/`durable_utc_now`) for replay safety
-/// and the cross-VO `record_child_signal` is dispatched detached (`.send()`) so the child
-/// turn never blocks on the coordinator's single-writer queue. A `Finding` records without
+/// and the cross-VO `record_child_signal` is awaited before the child reports success. A `Finding` records without
 /// arming a resume (`ParentResumePolicy::Never`); a `Blocked` is resume-eligible
 /// (`IfIdle`) and can wake an idle coordinator.
 async fn report_to_parent(
@@ -1083,12 +1116,13 @@ async fn report_to_parent(
         .into_inner();
     let created_at = durable_utc_now(ctx, "child_report_signal_at").await?;
     let signal = build_child_report_signal(worker_id, parent_session, signal_id, created_at, input);
-    moa_core::coordination_counters::record_vo_send();
+    moa_core::coordination_counters::record_session_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<SessionClient>(parent_session.to_string())
             .record_child_signal(Json::from(signal)),
     )
-    .send();
+    .call()
+    .await?;
     tracing::info!(
         worker_id = %worker_id,
         parent_session = %parent_session,
@@ -1117,7 +1151,7 @@ async fn request_input_from_parent(
     ctx: &WorkflowContext<'_>,
     owner: ChildInputRequestOwner<'_>,
     input: &RequestInputInput,
-) -> Result<ToolOutput, HandlerError> {
+) -> Result<ChildInputWaitOutcome, HandlerError> {
     let ChildInputRequestOwner {
         worker_id,
         turn_id,
@@ -1163,8 +1197,7 @@ async fn request_input_from_parent(
     .await?;
 
     // Emit the NeedsInput signal to the owning coordinator (arms a guarded resume if the
-    // coordinator is idle). DETACHED so the child never blocks on the coordinator's queue.
-    //
+    // coordinator is idle) before waiting, so cancellation cannot leave an unrecorded target.
     let signal = build_needs_input_signal(
         worker_id,
         parent_session,
@@ -1174,41 +1207,66 @@ async fn request_input_from_parent(
         input.audience,
         &input.question,
     );
-    moa_core::coordination_counters::record_vo_send();
+    moa_core::coordination_counters::record_session_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<SessionClient>(parent_session.to_string())
             .record_child_signal(Json::from(signal)),
     )
-    .send();
+    .call()
+    .await?;
 
     let timeout_ms = workflow.session_limits.worker_input_timeout_ms;
     let output = restate_sdk::select! {
         answer = answer_future => {
-            ToolOutput::text(format!("Input received: {}", answer?), Duration::ZERO)
+            ChildInputWaitOutcome::Output {
+                output: Box::new(ToolOutput::text(
+                    format!("Input received: {}", answer?),
+                    Duration::ZERO,
+                )),
+                clear_registration: false,
+            }
+        },
+        reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
+            ChildInputWaitOutcome::Cancelled(reason?)
         },
         _ = ctx.sleep(Duration::from_millis(timeout_ms)) => {
-            // Clear the now-dead mapping so a late ProvideInput is an idempotent no-op.
-            // Keyed on this exact registration: a replacement installed by a retry of
-            // this turn must survive the original invocation giving up. The Worker VO
-            // retracts the coordinator-advertised reply target on the same path.
-            moa_core::coordination_counters::record_worker_vo_call();
-            crate::restate_identity::replay_safe_request(
-                ctx.object_client::<WorkerClient>(worker_id.to_string())
-                    .clear_input_request(Json::from(WorkerClearInputRequest {
-                        target: target.clone(),
-                        waiting_workflow_id: turn_id.to_string(),
-                    })),
-            )
-            .call()
-            .await?;
-            ToolOutput::text(
-                "No input was received in time. Proceed with your best judgment or report that you are blocked."
-                    .to_string(),
-                Duration::ZERO,
-            )
+            ChildInputWaitOutcome::Output {
+                output: Box::new(ToolOutput::text(
+                    "No input was received in time. Proceed with your best judgment or report that you are blocked."
+                        .to_string(),
+                    Duration::ZERO,
+                )),
+                clear_registration: true,
+            }
         }
     };
+    let clear_registration = match &output {
+        ChildInputWaitOutcome::Output {
+            clear_registration, ..
+        } => *clear_registration,
+        ChildInputWaitOutcome::Cancelled(_) => true,
+    };
+    if clear_registration {
+        moa_core::coordination_counters::record_worker_vo_call();
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<WorkerClient>(worker_id.to_string())
+                .clear_input_request(Json::from(WorkerClearInputRequest {
+                    target,
+                    waiting_workflow_id: turn_id.to_string(),
+                })),
+        )
+        .call()
+        .await?;
+    }
     Ok(output)
+}
+
+enum ChildInputWaitOutcome {
+    Output {
+        output: Box<ToolOutput>,
+        clear_registration: bool,
+    },
+    Cancelled(String),
 }
 
 /// Builds the `Finding`/`Blocked` control-plane signal for a model-driven child report.
@@ -1490,7 +1548,7 @@ async fn apply_worker_security_assessment(
 }
 
 /// Whether one dispatched worker tool call left the worker turn able to continue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkerToolCallDisposition {
     /// The worker turn may keep running.
     Continue,
@@ -1498,6 +1556,8 @@ enum WorkerToolCallDisposition {
     SecurityHalt,
     /// The circuit suspended this worker pending the user's answer.
     SecurityNeedsInput,
+    /// Cooperative cancellation stopped an attached child wait.
+    Cancelled(String),
 }
 
 /// Fixed message for a worker turn the security circuit halted.
@@ -1568,13 +1628,19 @@ async fn record_denied_tool(
     Ok(())
 }
 
-fn notify_worker_of_outcome(ctx: &WorkflowContext<'_>, worker_id: &str, outcome: &TurnOutcome) {
-    moa_core::coordination_counters::record_vo_send();
+async fn notify_worker_of_outcome(
+    ctx: &WorkflowContext<'_>,
+    worker_id: &str,
+    outcome: &TurnOutcome,
+) -> Result<(), HandlerError> {
+    moa_core::coordination_counters::record_worker_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<WorkerClient>(worker_id.to_string())
             .record_turn_outcome(Json::from(outcome.clone())),
     )
-    .send();
+    .call()
+    .await?;
+    Ok(())
 }
 
 /// Emits a `Failed` control-plane attention signal to the owning coordinator when a
@@ -1583,8 +1649,7 @@ fn notify_worker_of_outcome(ctx: &WorkflowContext<'_>, worker_id: &str, outcome:
 /// This is the only child-originated control-plane emit in this increment: it is
 /// low-frequency (once per failed turn) and routed to `parent_session`. The signal id
 /// and timestamp are journaled via `ctx.run()`/`durable_utc_now` for replay safety, and
-/// the cross-VO `record_child_signal` is dispatched detached (`.send()`) so the workflow
-/// never blocks on the coordinator's single-writer queue. A missing `parent_session`
+/// the cross-VO `record_child_signal` is joined before terminal owner delivery. A missing `parent_session`
 /// (failure before the first turn prepared) is non-fatal — the terminal-delivery
 /// idle-wake still covers waking an idle parent.
 // Model-driven Finding/Blocked/NeedsInput signals (incl. the needs_input awakeable
@@ -1613,13 +1678,13 @@ async fn emit_failed_child_signal_if_needed(
         created_at,
         &outcome.message,
     );
-    // DETACHED: never block the workflow on the coordinator VO's single-writer queue.
-    moa_core::coordination_counters::record_vo_send();
+    moa_core::coordination_counters::record_session_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<SessionClient>(parent_session.to_string())
             .record_child_signal(Json::from(signal)),
     )
-    .send();
+    .call()
+    .await?;
     tracing::info!(
         worker_id = %worker_id,
         parent_session = %parent_session,

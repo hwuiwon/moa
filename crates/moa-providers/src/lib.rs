@@ -58,3 +58,91 @@ pub use routing::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, PROVIDER_DESCRIPTORS,
     ProviderDescriptor, infer_provider_id, provider_descriptor, provider_descriptor_by_name,
 };
+
+/// Maximum retries owned by one configured LLM provider candidate.
+pub const LLM_PROVIDER_MAX_RETRIES: usize = 3;
+
+/// Maximum HTTP attempts made by one configured LLM provider candidate.
+pub const LLM_PROVIDER_ATTEMPTS_PER_CANDIDATE: usize = LLM_PROVIDER_MAX_RETRIES + 1;
+
+/// Returns the maximum provider HTTP attempts for one logical completion.
+///
+/// The enclosing Restate `ctx.run` is configured for one attempt. Consequently
+/// provider failover is the sole retry owner and the total upper bound is the
+/// number of configured candidates multiplied by four attempts per candidate.
+#[must_use]
+pub const fn llm_provider_attempt_upper_bound(candidate_count: usize) -> usize {
+    candidate_count.saturating_mul(LLM_PROVIDER_ATTEMPTS_PER_CANDIDATE)
+}
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use std::time::Duration;
+
+    use moa_core::error::{FailureProvenance, MoaError};
+
+    use super::*;
+
+    #[test]
+    fn failover_attempt_bound_is_candidates_times_four() {
+        // Pins: Restate cannot multiply the provider-owned retry and failover budget.
+        for candidates in 0..=8 {
+            assert_eq!(
+                llm_provider_attempt_upper_bound(candidates),
+                candidates * 4,
+                "candidate count {candidates} must have a fixed four-attempt budget"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_failure_families_keep_typed_retry_provenance() {
+        // Pins: the Restate boundary never needs to infer provider retryability
+        // from an error message.
+        let cases = [
+            (
+                MoaError::ProviderTransport("connection reset".into()),
+                FailureProvenance::Transient,
+            ),
+            (
+                MoaError::ProviderTimeout("first byte deadline".into()),
+                FailureProvenance::Transient,
+            ),
+            (
+                MoaError::ProviderQuirk("invalid response shape".into()),
+                FailureProvenance::Permanent,
+            ),
+            (
+                MoaError::RateLimited {
+                    retries: LLM_PROVIDER_MAX_RETRIES,
+                    message: "limited".into(),
+                },
+                FailureProvenance::Transient,
+            ),
+            (
+                MoaError::HttpStatus {
+                    status: 422,
+                    retry_after: None,
+                    message: "bad request".into(),
+                },
+                FailureProvenance::Permanent,
+            ),
+            (
+                MoaError::HttpStatus {
+                    status: 503,
+                    retry_after: Some(Duration::from_secs(1)),
+                    message: "unavailable".into(),
+                },
+                FailureProvenance::Transient,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                error.failure_provenance(),
+                expected,
+                "unexpected provenance for {error:?}"
+            );
+        }
+    }
+}

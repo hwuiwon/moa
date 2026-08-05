@@ -24,7 +24,7 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_config::MoaConfig;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::runtime::deps::RuntimeDeps;
@@ -43,12 +43,14 @@ use crate::{
     },
     services::{
         action_policy::{ActionPolicy, ActionPolicyImpl},
+        action_review_dispatcher::{ActionReviewDispatcher, ActionReviewDispatcherImpl},
         action_reviews::{ActionReviews, ActionReviewsImpl},
         artifact_release::{ArtifactRelease, ArtifactReleaseImpl},
         artifacts::{Artifacts, ArtifactsImpl},
         contacts::{Contacts, ContactsImpl},
         execution::{Execution, ExecutionImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
+        health::{Health, HealthImpl},
         learning_review::{LearningReview, LearningReviewImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl},
         memory::{Memory, MemoryImpl},
@@ -58,6 +60,7 @@ use crate::{
     },
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
+        execution_compensation::{ExecutionCompensation, ExecutionCompensationImpl},
         execution_run::{ExecutionRun, ExecutionRunImpl},
         execution_task::{ExecutionTask, ExecutionTaskImpl},
         session_retention::{SessionRetention, SessionRetentionImpl},
@@ -68,6 +71,7 @@ use crate::{
 };
 
 const CORE_HEAD_SERVICE_NAMES: &[&str] = &[
+    "Health",
     "SessionStore",
     "LLMGateway",
     "AgentDefinitions",
@@ -75,6 +79,7 @@ const CORE_HEAD_SERVICE_NAMES: &[&str] = &[
     "AdminMaintenance",
     "Artifacts",
     "ActionReviews",
+    "ActionReviewDispatcher",
     "ApiKeys",
     "Authz",
     "AuthzChallenges",
@@ -101,6 +106,7 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "Tenant",
     "ExecutionRun",
     "ExecutionTask",
+    "ExecutionCompensation",
     "KnowledgeSyncIngestion",
     "Consolidate",
     "SessionRetention",
@@ -109,6 +115,16 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
 ];
 
 const CORE_TAIL_SERVICE_NAMES: &[&str] = &["WorkerTurnExecution", "TurnExecution"];
+#[cfg(test)]
+const INGRESS_PRIVATE_SERVICE_NAMES: &[&str] = &[
+    "LLMGateway",
+    "ToolExecutor",
+    "TurnExecution",
+    "WorkerTurnExecution",
+    "ExecutionRun",
+    "ExecutionTask",
+    "ExecutionCompensation",
+];
 const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &[
     "ExperimentRun",
     "ExperimentTrialRun",
@@ -118,6 +134,44 @@ const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &[
     // dispatch target is missing.
     "ArtifactReleaseEvaluation",
 ];
+
+const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const HIGH_COST_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+const ABORT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
+const RETRY_INITIAL_INTERVAL: Duration = Duration::from_millis(50);
+const RETRY_MAX_INTERVAL: Duration = Duration::from_secs(60);
+const RETRY_MAX_ATTEMPTS: u64 = 70;
+
+fn service_options() -> ServiceOptions {
+    ServiceOptions::new()
+        .idempotency_retention(RETENTION)
+        .journal_retention(RETENTION)
+        .retry_policy_initial_interval(RETRY_INITIAL_INTERVAL)
+        .retry_policy_exponentiation_factor(2.0)
+        .retry_policy_max_interval(RETRY_MAX_INTERVAL)
+        .retry_policy_max_attempts(RETRY_MAX_ATTEMPTS)
+        .retry_policy_pause_on_max_attempts()
+}
+
+fn bootstrap_entry_service_options() -> ServiceOptions {
+    service_options()
+}
+
+fn workflow_options() -> ServiceOptions {
+    service_options().handler("run", HandlerOptions::new().workflow_retention(RETENTION))
+}
+
+fn high_cost_internal_service_options() -> ServiceOptions {
+    service_options()
+        .inactivity_timeout(HIGH_COST_INACTIVITY_TIMEOUT)
+        .abort_timeout(ABORT_CLEANUP_TIMEOUT)
+        .ingress_private(true)
+}
+
+fn high_cost_internal_workflow_options() -> ServiceOptions {
+    high_cost_internal_service_options()
+        .handler("run", HandlerOptions::new().workflow_retention(RETENTION))
+}
 
 /// Restate admin deployment-list response.
 #[derive(Debug, Deserialize)]
@@ -166,7 +220,8 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
     let connector_completion = runtime_deps.connector_completion.clone();
     let authz = AuthzEnforcer::new(fga_client.clone());
     let mut builder = Endpoint::builder()
-        .bind(
+        .bind_with_options(HealthImpl.serve(), bootstrap_entry_service_options())
+        .bind_with_options(
             SessionStoreImpl::new(
                 session_store.clone(),
                 pool.clone(),
@@ -175,24 +230,38 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(
+        .bind_with_options(
             LLMGatewayImpl::new(providers.clone())
                 .with_session_limits(session_limits.clone())
+                .with_runtime_cache(runtime_cache.clone())
                 .serve(),
+            high_cost_internal_service_options(),
         )
-        .bind(
+        .bind_with_options(
             AgentDefinitionsImpl::new(pool.clone(), connector_catalogs.clone(), authz.clone())
                 .serve(),
+            service_options(),
         )
-        .bind(AgentsImpl::new(pool.clone(), fga_client.clone()).serve())
-        .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone(), authz.clone()).serve())
-        .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone()), authz.clone()).serve())
-        .bind(
+        .bind_with_options(
+            AgentsImpl::new(pool.clone(), fga_client.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
+            AdminMaintenanceImpl::new(pool.clone(), config.clone(), authz.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
+            ArtifactsImpl::new(ArtifactRegistry::new(pool.clone()), authz.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
             ArtifactReleaseImpl::new(pool.clone(), connector_catalogs.clone(), authz.clone())
                 .serve(),
+            service_options(),
         )
-        .bind(
+        .bind_with_options(
             ActionReviewsImpl::new(
                 pool.clone(),
                 session_store.clone(),
@@ -200,11 +269,25 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(ApiKeysImpl::new(pool.clone(), fga_client.clone()).serve())
-        .bind(AuthzImpl::new(pool.clone(), authz.clone()).serve())
-        .bind(AuthzChallengesImpl::new(pool.clone()).serve())
-        .bind(
+        .bind_with_options(
+            ActionReviewDispatcherImpl::new(pool.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
+            ApiKeysImpl::new(pool.clone(), fga_client.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
+            AuthzImpl::new(pool.clone(), authz.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
+            AuthzChallengesImpl::new(pool.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
             ContactsImpl::new(
                 pool.clone(),
                 session_store.clone(),
@@ -214,12 +297,15 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         );
 
-    builder = builder
-        .bind(ConnectorConnectionsImpl::new(runtime_deps.connector_management.clone()).serve());
+    builder = builder.bind_with_options(
+        ConnectorConnectionsImpl::new(runtime_deps.connector_management.clone()).serve(),
+        service_options(),
+    );
 
-    builder = builder.bind(
+    builder = builder.bind_with_options(
         ExperimentsImpl::new(
             pool.clone(),
             providers.clone(),
@@ -227,21 +313,27 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
             authz.clone(),
         )
         .serve(),
+        service_options(),
     );
 
     builder = builder
-        .bind(IngestionVOImpl::new(runtime_deps.ingest_runtime.clone()).serve())
-        .bind(
+        .bind_with_options(
+            IngestionVOImpl::new(runtime_deps.ingest_runtime.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
             ToolExecutorImpl::new(
                 tool_router.clone(),
                 connector_catalogs.clone(),
                 connector_completion,
                 session_store.clone(),
                 session_store.clone(),
+                pool.clone(),
             )
             .serve(),
+            high_cost_internal_service_options(),
         )
-        .bind(
+        .bind_with_options(
             ActionPolicyImpl::new(
                 tool_router.clone(),
                 connector_catalogs.clone(),
@@ -249,8 +341,9 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(
+        .bind_with_options(
             ExecutionImpl::new(
                 pool.clone(),
                 connector_catalogs.clone(),
@@ -259,10 +352,17 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
-        .bind(SecurityEventsImpl::new(pool.clone()).serve())
-        .bind(
+        .bind_with_options(
+            GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
+            SecurityEventsImpl::new(pool.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
             KnowledgeImpl::new(
                 KnowledgeService::from_config(
                     pool.clone(),
@@ -275,8 +375,9 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(
+        .bind_with_options(
             LearningReviewImpl::new(
                 session_store.clone(),
                 pool.clone(),
@@ -286,8 +387,9 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(
+        .bind_with_options(
             MemoryImpl::from_retrieval_engine(
                 pool.clone(),
                 kms.clone(),
@@ -296,9 +398,13 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(NeonMaintImpl::new(config.clone()).serve())
-        .bind(
+        .bind_with_options(
+            NeonMaintImpl::new(config.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(
             PrivacyImpl::new(
                 pool.clone(),
                 background_pool,
@@ -307,10 +413,14 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(SkillsImpl::new(pool.clone(), authz.clone()).serve())
-        .bind(CronJobImpl.serve())
-        .bind(
+        .bind_with_options(
+            SkillsImpl::new(pool.clone(), authz.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(CronJobImpl.serve(), service_options())
+        .bind_with_options(
             SessionImpl::new(
                 session_store.clone(),
                 pool.clone(),
@@ -320,8 +430,9 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(
+        .bind_with_options(
             WorkerImpl::new(
                 session_store.clone(),
                 session_limits.clone(),
@@ -330,11 +441,18 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz.clone(),
             )
             .serve(),
+            service_options(),
         )
-        .bind(TenantsImpl::new(pool.clone(), fga_client.clone()).serve())
-        .bind(TenantImpl::new(pool.clone()).serve())
-        .bind(TenantPurgeImpl::new(pool.clone(), credential_vault.clone(), config.as_ref()).serve())
-        .bind(
+        .bind_with_options(
+            TenantsImpl::new(pool.clone(), fga_client.clone()).serve(),
+            service_options(),
+        )
+        .bind_with_options(TenantImpl::new(pool.clone()).serve(), service_options())
+        .bind_with_options(
+            TenantPurgeImpl::new(pool.clone(), credential_vault.clone(), config.as_ref()).serve(),
+            workflow_options(),
+        )
+        .bind_with_options(
             ExecutionRunImpl::new(
                 pool.clone(),
                 config.execution.clone(),
@@ -347,8 +465,9 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 ),
             )
             .serve(),
+            high_cost_internal_workflow_options(),
         )
-        .bind(
+        .bind_with_options(
             ExecutionTaskImpl::new(
                 pool.clone(),
                 session_store.clone(),
@@ -356,8 +475,19 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 channel_adapters.clone(),
             )
             .serve(),
+            high_cost_internal_workflow_options(),
         )
-        .bind(
+        .bind_with_options(
+            ExecutionCompensationImpl::new(
+                pool.clone(),
+                session_store.clone(),
+                session_limits.clone(),
+                channel_adapters.clone(),
+            )
+            .serve(),
+            high_cost_internal_workflow_options(),
+        )
+        .bind_with_options(
             KnowledgeSyncIngestionImpl::new(
                 pool.clone(),
                 kms.clone(),
@@ -366,12 +496,19 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 runtime_cache.clone(),
             )
             .serve(),
+            workflow_options(),
         )
-        .bind(SessionRetentionImpl::new(session_store.clone()).serve())
-        .bind(ConsolidateImpl::new(pool.clone(), kms, config.clone(), embedding_provider).serve());
+        .bind_with_options(
+            SessionRetentionImpl::new(session_store.clone()).serve(),
+            workflow_options(),
+        )
+        .bind_with_options(
+            ConsolidateImpl::new(pool.clone(), kms, config.clone(), embedding_provider).serve(),
+            workflow_options(),
+        );
 
     {
-        builder = builder.bind(
+        builder = builder.bind_with_options(
             SkillLearningImpl::new(
                 session_store.clone(),
                 config.clone(),
@@ -379,13 +516,20 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 runtime_cache,
             )
             .serve(),
+            workflow_options(),
         );
     }
 
     builder = builder
-        .bind(ArtifactReleaseEvaluationImpl::new(pool.clone()).serve())
-        .bind(ExperimentRunImpl::new(pool.clone()).serve())
-        .bind(
+        .bind_with_options(
+            ArtifactReleaseEvaluationImpl::new(pool.clone()).serve(),
+            workflow_options(),
+        )
+        .bind_with_options(
+            ExperimentRunImpl::new(pool.clone()).serve(),
+            workflow_options(),
+        )
+        .bind_with_options(
             ExperimentTrialRunImpl::new(
                 pool.clone(),
                 session_store.clone(),
@@ -395,6 +539,7 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 authz,
             )
             .serve(),
+            workflow_options(),
         );
 
     // One durable event-append dependency, built here and owned by both turn
@@ -404,8 +549,8 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
         config.session.direct_turn_event_append,
     );
 
-    builder
-        .bind(
+    let builder = builder
+        .bind_with_options(
             WorkerTurnExecutionImpl::new(
                 session_limits,
                 session_store.clone(),
@@ -413,8 +558,9 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 event_appender.clone(),
             )
             .serve(),
+            high_cost_internal_workflow_options(),
         )
-        .bind(
+        .bind_with_options(
             TurnExecutionImpl::new(
                 session_store,
                 config,
@@ -425,8 +571,10 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 runtime_deps.turn_request_preparer.clone(),
             )
             .serve(),
-        )
-        .build()
+            high_cost_internal_workflow_options(),
+        );
+
+    builder.build()
 }
 
 /// Configured tenant action-review timeout in seconds, clamped to `i64`.
@@ -472,10 +620,59 @@ fn services_registered_with_expected(
 mod tests {
     use std::collections::HashSet;
 
+    use axum::{body::Body, http::Request};
+    use restate_sdk::prelude::*;
+
     use super::{
-        RegisteredDeployment, RegisteredService, expected_service_names, services_registered,
-        services_registered_with_expected,
+        INGRESS_PRIVATE_SERVICE_NAMES, RegisteredDeployment, RegisteredService,
+        bootstrap_entry_service_options, expected_service_names,
+        high_cost_internal_service_options, high_cost_internal_workflow_options,
+        services_registered, services_registered_with_expected,
     };
+    use crate::services::health::{Health, HealthImpl};
+
+    #[restate_sdk::service]
+    #[name = "ServicePolicyProbe"]
+    trait ServicePolicyProbe {
+        async fn call() -> Result<(), HandlerError>;
+    }
+
+    struct ServicePolicyProbeImpl;
+
+    impl ServicePolicyProbe for ServicePolicyProbeImpl {
+        async fn call(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[restate_sdk::workflow]
+    #[name = "WorkflowPolicyProbe"]
+    trait WorkflowPolicyProbe {
+        async fn run() -> Result<(), HandlerError>;
+    }
+
+    struct WorkflowPolicyProbeImpl;
+
+    impl WorkflowPolicyProbe for WorkflowPolicyProbeImpl {
+        async fn run(&self, _ctx: WorkflowContext<'_>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    async fn v4_manifest(endpoint: Endpoint) -> serde_json::Value {
+        let response = endpoint.handle(
+            Request::builder()
+                .uri("/discover")
+                .header("accept", "application/vnd.restate.endpointmanifest.v4+json")
+                .body(Body::empty())
+                .expect("discovery request should build"),
+        );
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(Body::new(response.into_body()), usize::MAX)
+            .await
+            .expect("v4 discovery body should read");
+        serde_json::from_slice(&bytes).expect("v4 discovery body should decode")
+    }
 
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
         RegisteredDeployment {
@@ -497,6 +694,82 @@ mod tests {
         for name in expected_service_names() {
             assert!(names.insert(name), "duplicate Restate binding name {name}");
         }
+    }
+
+    #[tokio::test]
+    async fn v4_discovery_reports_exact_high_cost_internal_policy() {
+        // Pins: SDK discovery is the deploy-time contract consumed by Restate;
+        // timeout, retention, retry, and privacy values must remain exact.
+        let endpoint = Endpoint::builder()
+            .bind_with_options(
+                ServicePolicyProbeImpl.serve(),
+                high_cost_internal_service_options(),
+            )
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+        let service = &manifest["services"][0];
+
+        assert_eq!(service["inactivityTimeout"], 360_000);
+        assert_eq!(service["abortTimeout"], 60_000);
+        assert_eq!(service["idempotencyRetention"], 86_400_000);
+        assert_eq!(service["journalRetention"], 86_400_000);
+        assert_eq!(service["retryPolicyInitialInterval"], 50);
+        assert_eq!(service["retryPolicyExponentiationFactor"], 2.0);
+        assert_eq!(service["retryPolicyMaxInterval"], 60_000);
+        assert_eq!(service["retryPolicyMaxAttempts"], 70);
+        assert_eq!(service["retryPolicyOnMaxAttempts"], "PAUSE");
+        assert_eq!(service["ingressPrivate"], true);
+    }
+
+    #[tokio::test]
+    async fn product_health_remains_ingress_public() {
+        // Pins: edge startup enters only through the steady-state product
+        // endpoint; the migration-only endpoint deliberately has no Health.
+        let endpoint = Endpoint::builder()
+            .bind_with_options(HealthImpl.serve(), bootstrap_entry_service_options())
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+
+        let service = &manifest["services"][0];
+        assert_eq!(service["name"], "Health");
+        assert_ne!(service["ingressPrivate"], true);
+    }
+
+    #[tokio::test]
+    async fn every_workflow_run_declares_24_hour_completion_retention() {
+        // Pins: completed workflow responses remain addressable for one explicit
+        // day instead of inheriting a server-side default that can drift.
+        let endpoint = Endpoint::builder()
+            .bind_with_options(
+                WorkflowPolicyProbeImpl.serve(),
+                high_cost_internal_workflow_options(),
+            )
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+        let run = manifest["services"][0]["handlers"]
+            .as_array()
+            .expect("workflow handlers should be an array")
+            .iter()
+            .find(|handler| handler["name"] == "run")
+            .expect("workflow run handler should exist");
+
+        assert_eq!(run["workflowCompletionRetention"], 86_400_000);
+    }
+
+    #[test]
+    fn ingress_private_services_are_exactly_the_internal_high_cost_set() {
+        assert_eq!(
+            INGRESS_PRIVATE_SERVICE_NAMES,
+            [
+                "LLMGateway",
+                "ToolExecutor",
+                "TurnExecution",
+                "WorkerTurnExecution",
+                "ExecutionRun",
+                "ExecutionTask",
+                "ExecutionCompensation",
+            ]
+        );
     }
 
     #[test]
@@ -526,8 +799,10 @@ mod tests {
             1
         );
         assert!(
-            names.contains(&"ExecutionRun") && names.contains(&"ExecutionTask"),
-            "product readiness should include both durable execution workflows"
+            names.contains(&"ExecutionRun")
+                && names.contains(&"ExecutionTask")
+                && names.contains(&"ExecutionCompensation"),
+            "product readiness should include every durable execution workflow"
         );
         assert!(
             names.contains(&"Execution"),
@@ -567,6 +842,11 @@ mod tests {
             .copied()
             .filter(|name| *name != "ExperimentRun")
             .collect::<Vec<_>>();
+        let deployment_without_compensation = names
+            .iter()
+            .copied()
+            .filter(|name| *name != "ExecutionCompensation")
+            .collect::<Vec<_>>();
 
         assert!(
             !services_registered_with_expected(
@@ -581,6 +861,13 @@ mod tests {
                 &names
             ),
             "readiness must reject a deployment missing ExperimentRun"
+        );
+        assert!(
+            !services_registered_with_expected(
+                &[deployment_with_services(&deployment_without_compensation)],
+                &names
+            ),
+            "readiness must reject a deployment missing ExecutionCompensation"
         );
     }
 

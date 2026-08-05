@@ -63,7 +63,7 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ctx::RequestHeaders;
+use crate::workflows::errors::moa_error_to_status_handler_error;
 use crate::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestionClient, KnowledgeSyncIngestionRequest,
 };
@@ -1697,7 +1697,7 @@ pub enum KnowledgeServiceError {
 
 async fn authorize_tenant(
     authz: &crate::handlers::authz_shim::AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     tenant_id: TenantId,
 ) -> Result<Identity, HandlerError> {
     authz
@@ -1723,9 +1723,21 @@ async fn authorize_knowledge_caller(
 }
 
 fn knowledge_handler_error(error: KnowledgeServiceError) -> HandlerError {
-    match terminal_knowledge_error_code(&error) {
-        Some(code) => TerminalError::new_with_code(code, error.to_string()).into(),
-        None => HandlerError::from(error),
+    match error {
+        KnowledgeServiceError::Moa(error) => moa_error_to_status_handler_error(error),
+        KnowledgeServiceError::Connector(moa_connectors::Error::DatabaseScope(error)) => {
+            moa_error_to_status_handler_error(error)
+        }
+        KnowledgeServiceError::Connector(moa_connectors::Error::Authorization(error)) => {
+            crate::workflows::errors::authz_error_to_handler_error(error)
+        }
+        KnowledgeServiceError::Connector(moa_connectors::Error::Storage(error)) => {
+            crate::workflows::errors::sqlx_error_to_handler_error(error)
+        }
+        other => match terminal_knowledge_error_code(&other) {
+            Some(code) => TerminalError::new_with_code(code, other.to_string()).into(),
+            None => HandlerError::from(other),
+        },
     }
 }
 
@@ -1766,6 +1778,7 @@ fn connector_terminal_error_code(error: &moa_connectors::Error) -> Option<u16> {
         | Error::ManagedParentClaimConflict { .. }
         | Error::InvocationConflict { .. }
         | Error::InvocationStateConflict { .. }
+        | Error::ManualReconciliationRequired { .. }
         | Error::InvocationUnavailable { .. } => Some(409),
         Error::InvalidConnectionOrigin { .. }
         | Error::InvalidGeneration { .. }
@@ -1784,10 +1797,8 @@ fn connector_terminal_error_code(error: &moa_connectors::Error) -> Option<u16> {
         | Error::CredentialSlotMissing { .. }
         | Error::ActionPinMismatch { .. }
         | Error::SchemaValidation { .. } => Some(400),
+        Error::Cancelled { .. } | Error::Credential(_) | Error::Serialization(_) => Some(400),
         Error::Http { .. }
-        | Error::Cancelled { .. }
-        | Error::Credential(_)
-        | Error::Serialization(_)
         | Error::DatabaseScope(_)
         | Error::Authorization(_)
         | Error::AuthorizationUnavailable

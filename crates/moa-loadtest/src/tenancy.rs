@@ -1,8 +1,8 @@
 //! Multi-tenant identity pools for load generation.
 //!
-//! Real MOA traffic is spread across tenants with a heavy-tailed skew, and
-//! Restate applies per-tenant flow-control scopes, so a single-tenant load
-//! test measures the scope cap instead of system capacity. The pool creates
+//! Real MOA traffic is spread across tenants with a heavy-tailed skew. A
+//! single-tenant load test measures the Session-owned Valkey admission cap
+//! instead of fleet capacity. The pool creates
 //! `tenants x identities_per_tenant` caller identities up front, grants each
 //! identity its tenant-operator tuple exactly once, and samples tenants with
 //! Zipf weights (a few heavy tenants, a long tail).
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn zipf_sampling_prefers_low_rank_tenants() {
         // Pins: tenant rank 0 receives more traffic than the last rank under
-        // Zipf weighting, so per-tenant flow-control sees a hot tenant.
+        // Zipf weighting, so Session-owned Valkey admission sees a hot tenant.
         let pool = TenancyPool::generate(4, 1).expect("pool");
         let mut rng = StdRng::seed_from_u64(11);
 

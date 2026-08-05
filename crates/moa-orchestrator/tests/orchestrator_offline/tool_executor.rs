@@ -122,6 +122,7 @@ fn tool_definition(
         schema: json!({"type": "object"}),
         policy,
         idempotency_class,
+        rollback: None,
         max_output_tokens: 8_000,
     }
 }

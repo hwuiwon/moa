@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
     types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewRelease,
-    types::action_policy::ActionReviewStatus, types::action_policy::ExecutionTaskOrigin,
-    types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::ToolCallRequest,
+    types::action_policy::ActionReviewStatus, types::contact::SessionActorRef,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
@@ -15,8 +15,11 @@ use uuid::Uuid;
 
 use crate::services::action_reviews::{ActionReviewSummary, RequestActionReview};
 use moa_execution::{
-    state::ExecutionTaskId,
-    wire::{ExecutionActionReviewResolution, ExecutionActionReviewResolutionRequest},
+    state::{CompensationId, ExecutionTaskId},
+    wire::{
+        ExecutionActionReviewResolution, ExecutionActionReviewResolutionRequest,
+        ExecutionCompensationReviewResolutionRequest,
+    },
 };
 use moa_observability::propagation::ValidatedTraceContext;
 
@@ -50,7 +53,7 @@ pub(crate) struct ReviewDecisionRow {
     pub(crate) owner_registered_at: Option<DateTime<Utc>>,
     /// Stored tool request to execute after a clear decision.
     pub(crate) tool_request: ToolCallRequest,
-    /// Original execution-task context stored when the review was created.
+    /// Original execution-operation context stored when the review was created.
     pub(crate) execution_task_trace_context: Option<ValidatedTraceContext>,
     /// User that already decided the review, if any.
     pub(crate) decided_by: Option<String>,
@@ -87,13 +90,21 @@ pub(crate) struct ClaimedExecutionReviewResolution {
     /// Stable outbox and review identifier.
     pub(crate) review_uid: Uuid,
     /// Exact keyed task request.
-    pub(crate) request: ExecutionActionReviewResolutionRequest,
+    pub(crate) request: ClaimedExecutionReviewRequest,
     /// Persisted attempt generation used to fence acknowledgement updates.
     pub(crate) attempt_count: i32,
     /// Immutable resolution context reinjected on every callback retry.
     pub(crate) resolution_trace_context: Option<ValidatedTraceContext>,
-    /// Immutable execution-task context linked on every callback retry.
+    /// Immutable execution-operation context linked on every callback retry.
     pub(crate) task_trace_context: Option<ValidatedTraceContext>,
+}
+
+/// Exact workflow request targeted by one claimed execution-review outbox row.
+pub(crate) enum ClaimedExecutionReviewRequest {
+    /// Forward execution-task review resolution.
+    Task(ExecutionActionReviewResolutionRequest),
+    /// Compensation review resolution.
+    Compensation(ExecutionCompensationReviewResolutionRequest),
 }
 
 /// One timed-out review awaiting release from its conversational owner.
@@ -123,13 +134,10 @@ pub(crate) async fn insert_review(
     let tenant_id = request.envelope.tenant_id;
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let requested_by = session_actor_ref_to_storage(&request.envelope.requested_by);
-    let execution_task_trace_context = request
-        .envelope
-        .owner
-        .execution_origin()
-        .is_some()
-        .then_some(execution_task_trace_context)
-        .flatten();
+    let execution_task_trace_context = (request.envelope.owner.execution_origin().is_some()
+        || request.envelope.owner.compensation_origin().is_some())
+    .then_some(execution_task_trace_context)
+    .flatten();
     let insert = sqlx::query(
         r#"
         INSERT INTO tenant_action_reviews (
@@ -404,12 +412,12 @@ pub(crate) async fn claim_conversational_review(
     Ok(())
 }
 
-/// Atomically inserts the execution-task resolution owned by a terminal review.
+/// Atomically inserts the execution-operation resolution owned by a terminal review.
 pub(crate) async fn insert_execution_review_resolution(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: TenantId,
     review_id: Uuid,
-    origin: ExecutionTaskOrigin,
+    owner: &ActionReviewOwner,
     resolution: &ExecutionActionReviewResolution,
     resolution_trace_context: Option<&ValidatedTraceContext>,
     task_trace_context: Option<&ValidatedTraceContext>,
@@ -419,7 +427,7 @@ pub(crate) async fn insert_execution_review_resolution(
         tx,
         tenant_id,
         review_id,
-        origin,
+        owner,
         resolution,
         resolution_trace_context,
         task_trace_context,
@@ -428,7 +436,7 @@ pub(crate) async fn insert_execution_review_resolution(
     .map_err(db_error)?;
     if !inserted {
         return Err(TerminalError::new(
-            "execution-origin action review does not match a persisted execution task",
+            "execution-origin action review does not match its persisted operation",
         )
         .into());
     }
@@ -506,7 +514,9 @@ pub(crate) async fn timeout_expired_reviews(
     for row in &rows {
         let envelope: ActionEnvelope = serde_json::from_value(row.try_get("envelope")?)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-        if let Some(origin) = envelope.owner.execution_origin() {
+        if envelope.owner.execution_origin().is_some()
+            || envelope.owner.compensation_origin().is_some()
+        {
             let reason = "review expired without a decision".to_string();
             let task_trace_context = trace_context_from_columns(
                 row.try_get("execution_task_traceparent")?,
@@ -516,7 +526,7 @@ pub(crate) async fn timeout_expired_reviews(
                 &mut tx,
                 TenantId::from(row.try_get::<Uuid, _>("tenant_id")?),
                 row.try_get("id")?,
-                origin,
+                &envelope.owner,
                 &ExecutionActionReviewResolution::TimedOut { reason },
                 resolution_trace_context,
                 task_trace_context.as_ref(),
@@ -524,7 +534,7 @@ pub(crate) async fn timeout_expired_reviews(
             .await?;
             if !inserted {
                 return Err(sqlx::Error::Protocol(
-                    "timed-out execution review has no matching execution task".to_string(),
+                    "timed-out execution review has no matching execution operation".to_string(),
                 ));
             }
         }
@@ -639,8 +649,9 @@ pub(crate) async fn claim_execution_review_resolutions(
             updated_at = NOW()
         FROM candidates
         WHERE outbox.review_uid = candidates.review_uid
-        RETURNING outbox.review_uid, outbox.run_uid, outbox.task_id,
-                  outbox.generation, outbox.resolution, outbox.attempt_count,
+        RETURNING outbox.review_uid, outbox.owner_kind, outbox.run_uid,
+                  outbox.operation_id, outbox.generation, outbox.resolution,
+                  outbox.attempt_count,
                   outbox.traceparent, outbox.tracestate,
                   outbox.task_traceparent, outbox.task_tracestate
         "#,
@@ -652,22 +663,43 @@ pub(crate) async fn claim_execution_review_resolutions(
     let claimed = rows
         .iter()
         .map(|row| {
-            let task_id = ExecutionTaskId::from_uuid(row.try_get("task_id")?);
             let resolution = serde_json::from_value::<ExecutionActionReviewResolution>(
                 row.try_get::<Value, _>("resolution")?,
             )
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
             let review_uid = row.try_get("review_uid")?;
+            let run_uid = row.try_get("run_uid")?;
+            let operation_id = row.try_get("operation_id")?;
+            let generation = u64::try_from(row.try_get::<i64, _>("generation")?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            let request = match row.try_get::<String, _>("owner_kind")?.as_str() {
+                "task" => {
+                    ClaimedExecutionReviewRequest::Task(ExecutionActionReviewResolutionRequest {
+                        run_uid,
+                        task_id: ExecutionTaskId::from_uuid(operation_id),
+                        generation,
+                        review_uid,
+                        resolution,
+                    })
+                }
+                "compensation" => ClaimedExecutionReviewRequest::Compensation(
+                    ExecutionCompensationReviewResolutionRequest {
+                        run_uid,
+                        compensation_id: CompensationId::from_uuid(operation_id),
+                        generation,
+                        review_uid,
+                        resolution,
+                    },
+                ),
+                owner_kind => {
+                    return Err(sqlx::Error::Decode(
+                        format!("unknown execution review owner_kind: {owner_kind}").into(),
+                    ));
+                }
+            };
             Ok(ClaimedExecutionReviewResolution {
                 review_uid,
-                request: ExecutionActionReviewResolutionRequest {
-                    run_uid: row.try_get("run_uid")?,
-                    task_id,
-                    generation: u64::try_from(row.try_get::<i64, _>("generation")?)
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
-                    review_uid,
-                    resolution,
-                },
+                request,
                 attempt_count: row.try_get("attempt_count")?,
                 resolution_trace_context: trace_context_from_columns(
                     row.try_get("traceparent")?,
@@ -742,30 +774,37 @@ async fn insert_execution_review_resolution_sql(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: TenantId,
     review_id: Uuid,
-    origin: ExecutionTaskOrigin,
+    owner: &ActionReviewOwner,
     resolution: &ExecutionActionReviewResolution,
     resolution_trace_context: Option<&ValidatedTraceContext>,
     task_trace_context: Option<&ValidatedTraceContext>,
 ) -> Result<bool, sqlx::Error> {
     let resolution =
         serde_json::to_value(resolution).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
-    let result = sqlx::query(
-        r#"
+    let (owner_kind, run_uid, operation_id, generation, statement) = match owner {
+        ActionReviewOwner::ExecutionTask { origin, .. } => (
+            "task",
+            origin.run_uid,
+            origin.task_uid,
+            origin.generation,
+            r#"
         INSERT INTO moa.execution_action_review_outbox (
-            review_uid, tenant_id, contact_id, run_uid, task_id, generation, resolution,
-            traceparent, tracestate, task_traceparent, task_tracestate
+            review_uid, tenant_id, contact_id, owner_kind, run_uid, operation_id,
+            generation, resolution, traceparent, tracestate,
+            task_traceparent, task_tracestate
         )
-        SELECT $1, task.tenant_id, task.contact_id, task.run_uid, task.task_id, $5, $6,
-               $7, $8, $9, $10
+        SELECT $1, task.tenant_id, task.contact_id, $2, task.run_uid, task.task_id,
+               $6, $7, $8, $9, $10, $11
         FROM moa.execution_task AS task
-        WHERE task.run_uid = $2
-          AND task.task_id = $3
-          AND task.tenant_id = $4
+        WHERE task.run_uid = $3
+          AND task.task_id = $4
+          AND task.tenant_id = $5
         ON CONFLICT (review_uid) DO UPDATE
         SET next_attempt_at = NOW(),
             updated_at = NOW()
-        WHERE moa.execution_action_review_outbox.run_uid = EXCLUDED.run_uid
-          AND moa.execution_action_review_outbox.task_id = EXCLUDED.task_id
+        WHERE moa.execution_action_review_outbox.owner_kind = EXCLUDED.owner_kind
+          AND moa.execution_action_review_outbox.run_uid = EXCLUDED.run_uid
+          AND moa.execution_action_review_outbox.operation_id = EXCLUDED.operation_id
           AND moa.execution_action_review_outbox.generation = EXCLUDED.generation
           AND moa.execution_action_review_outbox.resolution = EXCLUDED.resolution
           AND moa.execution_action_review_outbox.traceparent
@@ -777,19 +816,63 @@ async fn insert_execution_review_resolution_sql(
           AND moa.execution_action_review_outbox.task_tracestate
                 IS NOT DISTINCT FROM EXCLUDED.task_tracestate
         "#,
-    )
-    .bind(review_id)
-    .bind(origin.run_uid)
-    .bind(origin.task_uid)
-    .bind(tenant_id.0)
-    .bind(i64::try_from(origin.generation).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
-    .bind(resolution)
-    .bind(resolution_trace_context.map(ValidatedTraceContext::traceparent))
-    .bind(resolution_trace_context.and_then(ValidatedTraceContext::tracestate))
-    .bind(task_trace_context.map(ValidatedTraceContext::traceparent))
-    .bind(task_trace_context.and_then(ValidatedTraceContext::tracestate))
-    .execute(&mut **tx)
-    .await?;
+        ),
+        ActionReviewOwner::ExecutionCompensation { origin, .. } => (
+            "compensation",
+            origin.run_uid,
+            origin.compensation_id,
+            origin.generation,
+            r#"
+        INSERT INTO moa.execution_action_review_outbox (
+            review_uid, tenant_id, contact_id, owner_kind, run_uid, operation_id,
+            generation, resolution, traceparent, tracestate,
+            task_traceparent, task_tracestate
+        )
+        SELECT $1, run.tenant_id, run.contact_id, $2, compensation.run_uid,
+               compensation.compensation_id, $6, $7, $8, $9, $10, $11
+        FROM moa.execution_compensation AS compensation
+        JOIN moa.execution_run AS run ON run.run_uid = compensation.run_uid
+        WHERE compensation.run_uid = $3
+          AND compensation.compensation_id = $4
+          AND run.tenant_id = $5
+        ON CONFLICT (review_uid) DO UPDATE
+        SET next_attempt_at = NOW(),
+            updated_at = NOW()
+        WHERE moa.execution_action_review_outbox.owner_kind = EXCLUDED.owner_kind
+          AND moa.execution_action_review_outbox.run_uid = EXCLUDED.run_uid
+          AND moa.execution_action_review_outbox.operation_id = EXCLUDED.operation_id
+          AND moa.execution_action_review_outbox.generation = EXCLUDED.generation
+          AND moa.execution_action_review_outbox.resolution = EXCLUDED.resolution
+          AND moa.execution_action_review_outbox.traceparent
+                IS NOT DISTINCT FROM EXCLUDED.traceparent
+          AND moa.execution_action_review_outbox.tracestate
+                IS NOT DISTINCT FROM EXCLUDED.tracestate
+          AND moa.execution_action_review_outbox.task_traceparent
+                IS NOT DISTINCT FROM EXCLUDED.task_traceparent
+          AND moa.execution_action_review_outbox.task_tracestate
+                IS NOT DISTINCT FROM EXCLUDED.task_tracestate
+        "#,
+        ),
+        ActionReviewOwner::Coordinator { .. } | ActionReviewOwner::Worker { .. } => {
+            return Err(sqlx::Error::Protocol(
+                "conversational review cannot enter the execution outbox".to_string(),
+            ));
+        }
+    };
+    let result = sqlx::query(statement)
+        .bind(review_id)
+        .bind(owner_kind)
+        .bind(run_uid)
+        .bind(operation_id)
+        .bind(tenant_id.0)
+        .bind(i64::try_from(generation).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
+        .bind(resolution)
+        .bind(resolution_trace_context.map(ValidatedTraceContext::traceparent))
+        .bind(resolution_trace_context.and_then(ValidatedTraceContext::tracestate))
+        .bind(task_trace_context.map(ValidatedTraceContext::traceparent))
+        .bind(task_trace_context.and_then(ValidatedTraceContext::tracestate))
+        .execute(&mut **tx)
+        .await?;
     Ok(result.rows_affected() == 1)
 }
 

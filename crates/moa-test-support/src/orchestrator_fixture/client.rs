@@ -107,7 +107,8 @@ impl TestApiClient {
         decode_response(response.send().await.context("send orchestrator request")?).await
     }
 
-    async fn post_call_with_idempotency<Req, Resp>(
+    /// Sends an authenticated JSON POST with an optional Restate idempotency key.
+    pub async fn post_call_with_idempotency<Req, Resp>(
         &self,
         path: &str,
         body: &Req,

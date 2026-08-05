@@ -6,12 +6,12 @@ codegraph:
 dev:
 ifeq ($(MOA_SKIP_FGA),1)
 	@echo ">> MOA_SKIP_FGA=1 set; bringing up stack WITHOUT OpenFGA"
-	docker compose up -d --build postgres restate moa-orchestrator restate-register moa-edge
+	docker compose up -d --build postgres restate moa-orchestrator restate-bootstrap moa-edge
 else
 	@echo ">> bringing up full stack with OpenFGA (default)"
 	docker compose up -d --build postgres restate openfga
 	@$(MAKE) fga-bootstrap
-	@set -a; . ./.env.fga; set +a; docker compose up -d --build moa-orchestrator restate-register moa-edge
+	@set -a; . ./.env.fga; set +a; docker compose up -d --build moa-orchestrator restate-bootstrap moa-edge
 endif
 
 # CARGO_TARGET_DIR=target/tools keeps this `cargo run -p` build out of the
@@ -129,7 +129,6 @@ loadtest-mock:
 	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
 	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init
-	@docker compose run --rm restate-rules-bootstrap >/dev/null
 	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with scripted providers..."
 	@set -a; . ./.env.fga; set +a; \
@@ -139,7 +138,7 @@ loadtest-mock:
 	  MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS=$${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-1} \
 	  MOA_DATABASE_CONNECT_TIMEOUT_SECONDS=$${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-3} \
 	  MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/perf-gate.json \
-	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
+	  docker compose up -d --build --force-recreate moa-orchestrator restate-bootstrap
 	@$(MAKE) dev-status
 	@mkdir -p target/perf-gate
 	@set -a; . ./.env.fga; set +a; \
@@ -157,13 +156,12 @@ loadtest-live:
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:10010
 
 # T2 direct-ingress capacity run: realistic scripted workload, ramp to the
-# knee, report plus Restate state snapshots written under target/perf-gate/.
+# knee, and write the report under target/perf-gate/.
 loadtest-capacity:
-	@echo "starting capacity dependencies with the production Restate rule..."
+	@echo "starting capacity dependencies with shared Valkey turn admission..."
 	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
 	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init
-	@docker compose run --rm restate-rules-bootstrap >/dev/null
 	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with realistic scripted providers..."
 	@set -a; . ./.env.fga; set +a; \
@@ -174,17 +172,12 @@ loadtest-capacity:
 	  MOA_DATABASE_CONNECT_TIMEOUT_SECONDS=$${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-3} \
 	  MOA_SESSION_DIRECT_TURN_EVENT_APPEND=$${MOA_SESSION_DIRECT_TURN_EVENT_APPEND:-false} \
 	  MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/realistic.json \
-	  docker compose up -d --build --force-recreate moa-orchestrator restate-register moa-edge
+	  docker compose up -d --build --force-recreate moa-orchestrator restate-bootstrap moa-edge
 	@$(MAKE) dev-status
 	@mkdir -p target/perf-gate
 	@set -a; . ./.env.fga; set +a; \
 	  report_path=$${MOA_LOADTEST_REPORT:-target/perf-gate/capacity-direct.json}; \
 	  report_tmp=$$report_path.tmp; \
-	  state_prefix=$${report_path%.json}; \
-	  rules_before=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_rules'); \
-	  limits_before=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_user_limits'); \
-	  jq -n --argjson rules "$$rules_before" --argjson limits "$$limits_before" \
-	    '{sys_rules: $$rules, sys_user_limits: $$limits}' > $$state_prefix-restate-before.json; \
 	  source_revision=$$(git rev-parse --verify HEAD 2>/dev/null || echo unknown); \
 	  source_state=clean; git diff --quiet --ignore-submodules HEAD -- || source_state=dirty; \
 	  compose_project=$${COMPOSE_PROJECT_NAME:-moa}; \
@@ -198,7 +191,6 @@ loadtest-capacity:
 	MOA_LOADTEST_BACKGROUND_DB_CONNECTIONS=$${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-1} \
 	MOA_LOADTEST_COMPOSE_PROJECT=$$compose_project \
 	MOA_LOADTEST_STATE_IDENTITY=$${compose_project}_moa-restate-data \
-	MOA_LOADTEST_RESTATE_RULE_PROFILE="$$(printf '%s' "$$rules_before" | jq -c .)" \
 	MOA_SESSION_DIRECT_TURN_EVENT_APPEND=$${MOA_SESSION_DIRECT_TURN_EVENT_APPEND:-false} \
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
 	  --mode mock --endpoint http://localhost:10010 \
@@ -208,12 +200,6 @@ loadtest-capacity:
 	  $${MOA_LOADTEST_EDGE_ARGS:-} \
 	  --metrics-endpoint http://localhost:10023/metrics \
 	  --output json > $$report_tmp || status=$$?; \
-	  rules_after=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_rules') || \
-	    { echo "warning: post-run Restate rules snapshot failed" >&2; rules_after='[]'; }; \
-	  limits_after=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_user_limits') || \
-	    { echo "warning: post-run Restate limits snapshot failed" >&2; limits_after='[]'; }; \
-	  jq -n --argjson rules "$$rules_after" --argjson limits "$$limits_after" \
-	    '{sys_rules: $$rules, sys_user_limits: $$limits}' > $$state_prefix-restate-after.json; \
 	  if jq -e . $$report_tmp >/dev/null 2>&1; then \
 	    mv $$report_tmp $$report_path; \
 	    if [ $$status -ne 0 ]; then \
@@ -226,7 +212,7 @@ loadtest-capacity:
 	  fi
 	@echo "capacity report: $${MOA_LOADTEST_REPORT:-target/perf-gate/capacity-direct.json}"
 
-# Production edge/auth/tenant-scope/SSE lane. It writes a distinct report so
+# Production edge/auth/SSE lane. It writes a distinct report so
 # direct-ingress machinery results cannot be mistaken for edge certification.
 loadtest-capacity-edge:
 	@MOA_LOADTEST_EDGE_ARGS="--edge-endpoint http://localhost:10000" \

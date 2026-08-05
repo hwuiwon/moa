@@ -33,6 +33,11 @@ registered with Restate. At startup it:
 5. Binds Restate services, virtual objects, and workflows.
 6. Starts the Restate endpoint and a separate health/readiness endpoint.
 
+Normal replicas never receive Restate Admin API authority. Kubernetes
+RestateDeployment Operator owns registration and version retention. A distinct
+revisioned bootstrap Job observes registration, dispatches one-way state
+migrations, and reconciles default CronJob virtual objects.
+
 There is no process-global orchestrator context or ingestion-runtime singleton.
 `RuntimeDeps` is the sole production composition root, and `build_endpoint`
 only binds the already-constructed graph.
@@ -50,7 +55,7 @@ Core production Restate bindings:
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
 | Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
-| Workflow | `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `SkillLearning`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
+| Workflow | `ExecutionRun`, `ExecutionTask`, `ExecutionCompensation`, `KnowledgeSyncIngestion`, `Consolidate`, `SkillLearning`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
 
 Internal application boundaries for action reviews, builtin async-authz
 challenges, learning review, experiments, privacy, provider routing, and memory
@@ -65,8 +70,8 @@ child refs, active segment, pending cancellation scope, awakeables, and child
 budgets.
 Product-visible history is written to Postgres. Kubernetes traffic is
 non-sticky, so correctness state shared across incoming requests must live in
-Postgres, Restate, or an explicitly configured Redis runtime cache; process
-memory is only a local cache.
+Postgres, Restate, or the orchestrator's required Redis-compatible Valkey
+runtime cache; process memory is only a local cache.
 
 `Artifacts` owns import, export, listing, validation, and publish for canonical
 skills, connectors, actions, and agents. `moa-execution` owns execution-plan
@@ -460,8 +465,8 @@ explicit and observable.
 for every ready logical task. It materializes stable rows keyed by
 `(run_uid, node_id, item_key)` and submits all ready tasks durably. There is no
 application active-worker count or execution fan-out constant. Run budgets
-bound logical task count; Restate concurrency rules and provider pacing queue
-physical work.
+bound logical task count; provider pacing and governed capability or hand
+capacity queue physical work.
 
 `ExecutionTask` atomically reserves its worst-case integer cost, token, task,
 tool-call, retrieved-byte, and deadline allowance before dispatch. A failed
@@ -475,14 +480,20 @@ The plan is an acyclic graph with exactly `Capability`, `Agent`, `Map`,
 or agent and cannot nest another map. Agent tasks can use declared
 instruction-only skills and capabilities with bounded turns and budgets. They
 cannot mutate the graph. Unexpected conditions return typed `NeedsInput` or
-`NeedsReplan`; every amendment is compiled, authorization-narrowing, budgeted,
+`NeedsReplan`; every hard-v2 amendment is compiled, authorization-narrowing, budgeted,
 persisted in `plan_history`, and applied only to pending or downstream work.
 Repeated hashes, recurring failure fingerprints, no progress, deadline, or
 resource exhaustion terminate with exact partial/blocked coverage instead of an
 infinite loop.
 
-Cancellation prevents new reservations and leaves completed task results
-queryable. A run cannot become `completed` until every immutable goal-contract
+Cancellation first fences new reservations and cancels and joins active tasks.
+The plan's explicit policy then either retains already committed effects or
+enters `Compensating` and invokes atomically registered compensators in reverse
+commit order. Compensation uses stable identities and generation fencing, so a
+restart does not repeat a completed undo. Ambiguous or exhausted undo settles
+with `manual_repair_required`; it never reports a clean rollback. Completed
+forward and compensation evidence remains queryable. A run cannot become
+`completed` until every immutable goal-contract
 requirement and completion check passes. Terminal state emits compact aggregate
 output, citations, failures, and gaps to the owning session. The session starts
 at most one deduplicated synthesis turn for the originating user sequence; it

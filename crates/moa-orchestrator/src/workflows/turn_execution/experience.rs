@@ -162,6 +162,8 @@ async fn dispatch_skill_learning_after_experience(
     session_id: SessionId,
     experience_id: uuid::Uuid,
 ) -> Result<(), HandlerError> {
+    // Detached by design: the workflow key is the immutable experience id, so a
+    // replay targets the same idempotent learning generation and cannot duplicate it.
     crate::restate_identity::replay_safe_request(
         ctx.workflow_client::<SkillLearningClient>(experience_id.to_string())
             .run(Json(RunSkillLearningRequest {
@@ -199,11 +201,11 @@ pub(super) async fn record_segment_assessment_learning(
                 valid_from: Utc::now(),
             },
         )
-        .map_err(HandlerError::from)?;
+        .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
         session_store
             .append_learning(&entry)
             .await
-            .map_err(HandlerError::from)
+            .map_err(crate::workflows::errors::moa_error_to_handler_error)
     })
     .name("record_segment_assessment_learning")
     .await?;

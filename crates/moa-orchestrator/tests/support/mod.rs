@@ -23,7 +23,7 @@ pub mod restate_runtime {
         grant_connector_connection_use, grant_session_participant, grant_tenant_admin,
         grant_tenant_operator,
     };
-    pub use super::restate_env::{RESTATE_E2E_LOCK, restate_admin_url, restate_ingress_url};
+    pub use super::restate_env::{RESTATE_E2E_LOCK, restate_ingress_url, restate_test_admin_url};
     pub use super::restate_identity::{test_user_identity, with_identity};
     pub use super::restate_ports::{
         OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,

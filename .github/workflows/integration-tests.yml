@@ -8,6 +8,83 @@ permissions:
   contents: read
 
 jobs:
+  restate-recovery-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MOA_FIXTURE_RUST_LOG: info
+      RUST_BACKTRACE: "1"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      # Every case owns its Postgres, Restate, OpenFGA, and Valkey containers.
+      # Keep external-service settings out of the process so a developer or
+      # runner environment cannot silently turn this into an ambient-stack test.
+      - name: Run deterministic Restate recovery matrix serially
+        run: >-
+          env
+          -u MOA_RESTATE_INGRESS_URL
+          -u RESTATE_ADMIN_URL
+          -u MOA_DATABASE_URL
+          -u MOA_DATABASE_ADMIN_URL
+          -u MOA_RUNTIME_CACHE_BACKEND
+          -u MOA_RUNTIME_CACHE_REDIS_URL
+          -u MOA_AUTHZ_OPENFGA_URL
+          -u MOA_AUTHZ_OPENFGA_PRESHARED_KEY
+          -u MOA_AUTHZ_OPENFGA_STORE_ID
+          -u MOA_AUTHZ_OPENFGA_MODEL_ID
+          -u MOA_FIXTURE_OPENFGA_URL
+          -u MOA_FIXTURE_OPENFGA_PRESHARED_KEY
+          cargo nextest run -p moa-orchestrator --locked
+          --features provider-overrides,integration
+          --profile restate-recovery-pr
+          --run-ignored ignored-only --no-tests fail
+
+      - name: Capture Docker fixture diagnostics
+        if: failure()
+        run: |
+          diagnostics="${RUNNER_TEMP}/restate-recovery-docker.log"
+          {
+            echo "== docker ps -a =="
+            docker ps -a --no-trunc
+            while IFS= read -r container_id; do
+              [ -n "${container_id}" ] || continue
+              echo
+              echo "== docker inspect ${container_id} =="
+              docker inspect --format \
+                'name={{.Name}} image={{.Config.Image}} status={{.State.Status}} exit={{.State.ExitCode}} error={{json .State.Error}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "${container_id}"
+              echo
+              echo "== docker logs ${container_id} =="
+              docker logs "${container_id}"
+            done < <(docker ps -aq)
+          } 2>&1 | tee "${diagnostics}" || true
+
+      - name: Upload Docker fixture diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: restate-recovery-docker-diagnostics
+          path: ${{ runner.temp }}/restate-recovery-docker.log
+          if-no-files-found: ignore
+
   restate-fixture-smoke:
     runs-on: ubuntu-latest
     # The dedicated scripted fixture builds moa-orchestrator-bin inside the
@@ -20,7 +97,7 @@ jobs:
       # which nothing publishes, so the smoke could only ever fail with
       # connection-refused.
       MOA_RESTATE_INGRESS_URL: http://localhost:10010
-      MOA_RESTATE_ADMIN_URL: http://localhost:10011
+      RESTATE_ADMIN_URL: http://localhost:10011
       MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:10040/moa
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -95,7 +172,7 @@ jobs:
         run: docker compose down -v
       - name: Run fixture smoke (dedicated scripted fixture)
         run: >-
-          env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL
+          env -u MOA_RESTATE_INGRESS_URL -u RESTATE_ADMIN_URL
           cargo test -p moa-test-support --features integration
           --test orchestrator_fixture_service_e2e
           fixture_round_trips_accepted_execution_run_through_restate

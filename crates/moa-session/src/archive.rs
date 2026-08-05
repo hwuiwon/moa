@@ -30,13 +30,13 @@ pub const SESSION_ARCHIVE_DIGEST_LEN: usize = 32;
 
 /// Returns whether a session's history is finished and therefore archivable.
 ///
-/// `Created`, `Running`, and `Paused` sessions can still append; archiving one
+/// `Created`, `Running`, and `Idle` sessions can still append; archiving one
 /// would capture a prefix and then delete rows the session is still writing to.
 #[must_use]
 pub fn is_terminal_status(status: &SessionStatus) -> bool {
     match status {
         SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed => true,
-        SessionStatus::Created | SessionStatus::Running | SessionStatus::Paused => false,
+        SessionStatus::Created | SessionStatus::Running | SessionStatus::Idle => false,
     }
 }
 
@@ -49,7 +49,7 @@ pub fn terminal_status_strings() -> Vec<String> {
     [
         SessionStatus::Created,
         SessionStatus::Running,
-        SessionStatus::Paused,
+        SessionStatus::Idle,
         SessionStatus::Completed,
         SessionStatus::Cancelled,
         SessionStatus::Failed,
@@ -426,7 +426,7 @@ mod tests {
         for status in [
             SessionStatus::Created,
             SessionStatus::Running,
-            SessionStatus::Paused,
+            SessionStatus::Idle,
         ] {
             assert!(
                 !terminal.contains(&status.as_str().to_string()),

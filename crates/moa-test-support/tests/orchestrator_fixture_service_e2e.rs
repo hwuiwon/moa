@@ -188,7 +188,8 @@ fn execution_candidate(objective: &str) -> String {
             }]
         },
         "plan": {
-            "schema_version": 1,
+            "schema_version": 2,
+            "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
             "nodes": [{
@@ -202,6 +203,7 @@ fn execution_candidate(objective: &str) -> String {
                     "kind": "output",
                     "value": { "status": "complete" }
                 },
+                "compensation": null,
                 "retry": {
                     "max_attempts": 1,
                     "initial_backoff_ms": 0,

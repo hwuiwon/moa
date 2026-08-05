@@ -717,7 +717,8 @@ execution_plan:
         kind:
           kind: output_schema
   plan:
-    schema_version: 1
+    schema_version: 2
+    cancel_policy: retain_effects
     input_schema:
       type: object
       additionalProperties: false
@@ -734,6 +735,7 @@ execution_plan:
           kind: output
           value:
             route: done
+        compensation: null
         retry:
           max_attempts: 1
           initial_backoff_ms: 0

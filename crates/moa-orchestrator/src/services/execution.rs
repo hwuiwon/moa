@@ -6,7 +6,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::execution_plan::{
-    CapabilityReference, ExecutionBudgetLimit, ExecutionPlanDefinition,
+    CapabilityReference, CompensationInputBinding, CompensationInputMapping,
+    CompensationValueSource, ExecutionBudgetLimit, ExecutionPlanDefinition,
 };
 use moa_artifacts::execution_plan::{
     ExecutionFailureClass, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
@@ -19,7 +20,9 @@ use moa_artifacts::skill::{SkillActionDefinition, SkillActionKind};
 use moa_authz_schema::Relation;
 use moa_config::ExecutionConfig;
 use moa_core::types::memory::RlsContext;
-use moa_core::types::tools::{ToolDefinition, ToolPolicySpec};
+use moa_core::types::tools::{
+    ToolDefinition, ToolPolicySpec, ToolRollbackDefinition, ToolRollbackValueSource,
+};
 use moa_core::{
     error::{MoaError, Result as MoaResult},
     events::Event,
@@ -35,9 +38,10 @@ use moa_core::{
 };
 use moa_execution::capability::{
     CapabilitiesListRequest, CapabilitiesListResponse, CapabilityCatalogDiagnostic,
-    CapabilityCatalogDiagnosticCode, CapabilityPolicyContext, CapabilitySource,
-    ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate,
-    ExecutionHash, amendment_hash, amendment_operations_fingerprint, capability_version, plan_hash,
+    CapabilityCatalogDiagnosticCode, CapabilityPolicyContext, CapabilityRollbackContract,
+    CapabilitySource, ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass,
+    ExecutionEstimate, ExecutionHash, amendment_hash, amendment_operations_fingerprint,
+    capability_version, plan_hash,
 };
 use moa_execution::{
     budget::{BudgetLedger, estimate_fits_limit},
@@ -53,17 +57,16 @@ use moa_execution::{
         failure_fingerprint, replan_stop_gaps, replan_stop_status,
     },
     repository::{
-        AmendmentReplayOutcome, AmendmentWrite, CancellationOutcome, CancellationRequest,
-        ConfirmationConflict, ConfirmationOutcome, ExecutionRepository, ExecutionRunPageRequest,
-        ExecutionRunRecord, ExecutionScope, ExecutionTaskPageRequest, ExecutionTaskRecord,
-        NewExecutionPlanningContext, NewExecutionRun, PlanningContextWriteOutcome,
-        ReplanStopOutcome, ReplanStopRequest, TaskOutcomeWrite, TransitionOutcome,
-        TransitionRejection, ValidatedAmendment,
+        AmendmentReplayOutcome, AmendmentWrite, ConfirmationConflict, ConfirmationOutcome,
+        ExecutionRepository, ExecutionRunPageRequest, ExecutionRunRecord, ExecutionScope,
+        ExecutionTaskPageRequest, ExecutionTaskRecord, NewExecutionPlanningContext,
+        NewExecutionRun, PlanningContextWriteOutcome, ReplanStopReceipt, TaskOutcomeWrite,
+        TerminalFenceOutcome, TransitionOutcome, TransitionRejection, ValidatedAmendment,
     },
     schema::validate_instance,
     state::{
         ExecutionRunStatus, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
-        FailureFingerprintInput,
+        ExecutionTerminalReason, FailureFingerprintInput, PendingExecutionTerminal,
     },
     wire::{
         ExecutionAmendmentRequest, ExecutionCancelRequest, ExecutionConfirmRequest,
@@ -95,6 +98,7 @@ use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::{ExecutionRunStartedDelivery, SessionClient};
 use crate::restate_identity::with_identity_headers;
+use crate::services::llm_gateway::{LLMCompletionOwner, cancel_completion_owner_from_service};
 use crate::workflows::errors::moa_error_to_status_handler_error;
 use crate::workflows::execution_run::ExecutionRunClient;
 use crate::workflows::execution_task::ExecutionTaskClient;

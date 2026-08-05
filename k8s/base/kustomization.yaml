@@ -5,6 +5,8 @@ resources:
   - 10-restate-cluster.yaml
   - 15-runtime-config.yaml
   - 20-orchestrator-deployment.yaml
+  - 21-session-status-migrator.yaml
+  - 22-restate-bootstrap-job.yaml
   - 25-orchestrator-service.yaml
   - 26-orchestrator-network-policy.yaml
   - 30-orchestrator-hpa.yaml
@@ -13,6 +15,8 @@ resources:
   - 55-edge-service.yaml
 images:
   - name: ghcr.io/hwuiwon/moa-orchestrator
-    newTag: latest
+    # Non-runnable sentinel. Production is rendered only through
+    # k8s/scripts/render-production.sh, which replaces this with a pushed digest.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   - name: ghcr.io/hwuiwon/moa-edge
-    newTag: latest
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

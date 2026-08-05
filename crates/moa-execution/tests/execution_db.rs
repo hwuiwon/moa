@@ -2,8 +2,8 @@
 
 #[path = "execution_db/budget_and_materialization_db.rs"]
 mod budget_and_materialization_db;
-#[path = "execution_db/cancellation_db.rs"]
-mod cancellation_db;
+#[path = "execution_db/compensation_db.rs"]
+mod compensation_db;
 #[path = "execution_db/outcomes_and_replan_db.rs"]
 mod outcomes_and_replan_db;
 #[path = "execution_db/planning_and_audit_db.rs"]

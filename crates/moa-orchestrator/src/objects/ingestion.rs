@@ -52,7 +52,20 @@ impl IngestionVO for IngestionVOImpl {
             return Ok(Json::from(IngestApplyReport::default()));
         }
 
-        if self.ingestor.should_skip_degraded(&turn).await? {
+        let degraded_ingestor = self.ingestor.clone();
+        let degraded_turn = turn.clone();
+        let should_skip_degraded = ctx
+            .run(|| async move {
+                degraded_ingestor
+                    .should_skip_degraded(&degraded_turn)
+                    .await
+                    .map(Json::from)
+            })
+            .name("should_skip_degraded")
+            .retry_policy(ingest_step_retry_policy())
+            .await?
+            .into_inner();
+        if should_skip_degraded {
             ctx.set(&done_key, Json::from(true));
             return Ok(Json::from(IngestApplyReport {
                 skipped: 1,

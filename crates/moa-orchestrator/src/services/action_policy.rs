@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
     error::MoaError, traits::Identity, types::action_policy::ActionEnvelope,
@@ -21,7 +20,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::connector_catalog::ScopedConnectorCatalogProvider;
-use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity};
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
@@ -185,7 +184,7 @@ impl ActionPolicy for ActionPolicyImpl {
         annotate_restate_handler_span("ActionPolicy", "upsert_rule");
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
-        require_tenant_admin(&self.authz, &identity, request.tenant_id).await?;
+        require_tenant_admin(&self.authz, &ctx, identity.clone(), request.tenant_id).await?;
         let created_by = UserId::new(identity.id.to_string());
         let rule_store = self.rule_store.clone();
 
@@ -323,19 +322,20 @@ async fn prepare_action_review_inner(
 
 async fn require_tenant_admin(
     authz: &AuthzEnforcer,
-    identity: &moa_core::traits::Identity,
+    ctx: &Context<'_>,
+    identity: moa_core::traits::Identity,
     tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
     let fga = authz.require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
+    crate::handlers::authz_shim::journal_context_authz(
+        ctx,
+        fga,
         identity,
         ObjectType::Tenant,
         tenant_id,
         Relation::Admin,
     )
     .await
-    .map_err(translate_authz_error)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

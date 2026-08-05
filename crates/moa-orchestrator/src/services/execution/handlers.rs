@@ -33,7 +33,7 @@ impl Execution for ExecutionImpl {
                 let parent = store
                     .get_session(session_id)
                     .await
-                    .map_err(HandlerError::from)?;
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
                 let record = store
                     .get_events(
                         session_id,
@@ -45,7 +45,7 @@ impl Execution for ExecutionImpl {
                         },
                     )
                     .await
-                    .map_err(HandlerError::from)?
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)?
                     .pop();
                 Ok::<_, HandlerError>(Json::from((parent, record)))
             })
@@ -123,7 +123,7 @@ impl Execution for ExecutionImpl {
                 let parent = store
                     .get_session(session_id)
                     .await
-                    .map_err(HandlerError::from)?;
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
                 let origin = store
                     .get_events(
                         session_id,
@@ -135,7 +135,7 @@ impl Execution for ExecutionImpl {
                         },
                     )
                     .await
-                    .map_err(HandlerError::from)?
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)?
                     .pop();
                 Ok::<_, HandlerError>(Json::from((parent, origin)))
             })
@@ -312,19 +312,17 @@ impl Execution for ExecutionImpl {
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
+            cancel_completion_owner_from_service(
+                &ctx,
+                LLMCompletionOwner::execution_run(run_request.run_uid.to_string()),
+            )
+            .await?;
             send_run_wake(
                 &ctx,
                 run_request.run_uid,
                 wake_epoch,
                 ExecutionRunWakeReason::Cancelled,
             );
-        }
-        for task_id in accepted.task_ids_to_release() {
-            crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionTaskClient>(task_id.to_string())
-                    .cancel(Json::from("execution run cancelled".to_string())),
-            )
-            .send();
         }
         Ok(Json::from(accepted.into_response()))
     }
@@ -988,33 +986,47 @@ pub(super) async fn cancel_inner(
         return Ok(not_found_mutation());
     };
     verify_run_request(&snapshot.run, &request.run)?;
+    if snapshot.run.status == ExecutionRunStatus::Cancelled {
+        return Ok(replayed_mutation(&snapshot.run));
+    }
+    if let Some(pending) = &snapshot.run.pending_terminal {
+        return Ok(if pending.status == ExecutionRunStatus::Cancelled {
+            replayed_mutation(&snapshot.run)
+        } else {
+            conflict_mutation(ExecutionConflictReason::AlreadyTerminal)
+        });
+    }
     let terminal_evidence = cancellation_terminal_evidence(
         &snapshot.run.goal,
         &snapshot.run.active_plan,
         &snapshot.projection,
     )
     .map_err(execution_error)?;
+    let pending_terminal = PendingExecutionTerminal {
+        status: ExecutionRunStatus::Cancelled,
+        reason: ExecutionTerminalReason::Cancelled,
+        terminal_evidence,
+        output: None,
+        completion_check_results: Vec::new(),
+        terminal_gaps: Vec::new(),
+        cancellation_reason: Some(request.reason),
+    };
     Ok(
         match repository
-            .cancel_run(
+            .fence_run_for_terminal(
                 scope,
                 snapshot.run.run_uid,
-                CancellationRequest {
-                    reason: request.reason,
-                    terminal_evidence,
-                },
+                snapshot.run.plan_revision,
+                snapshot.run.wake_epoch,
+                pending_terminal,
             )
             .await
             .map_err(execution_error)?
         {
-            CancellationOutcome::Cancelled(commit) => {
-                applied_mutation(&commit.run).with_task_ids_to_release(commit.task_ids_to_release)
-            }
-            CancellationOutcome::Replayed(commit) => {
-                replayed_mutation(&commit.run).with_task_ids_to_release(commit.task_ids_to_release)
-            }
-            CancellationOutcome::NotFound => not_found_mutation(),
-            CancellationOutcome::Conflict => {
+            TerminalFenceOutcome::Applied(commit) => applied_mutation(&commit.run),
+            TerminalFenceOutcome::Replayed(commit) => replayed_mutation(&commit.run),
+            TerminalFenceOutcome::NotFound => not_found_mutation(),
+            TerminalFenceOutcome::Conflict => {
                 conflict_mutation(ExecutionConflictReason::AlreadyTerminal)
             }
         },
@@ -1410,6 +1422,7 @@ pub(super) async fn finalize_service_replan_stop(
         None,
     )
     .map_err(execution_error)?;
+    let terminal_status = moa_execution::state::run_status_from_terminal_projection(&terminal);
     let terminal_evidence = terminal_evidence_from_evaluation(
         ExecutionTerminalCause::ReplanStop { reason },
         &evaluation,
@@ -1418,40 +1431,50 @@ pub(super) async fn finalize_service_replan_stop(
     let terminal_reason =
         execution_terminal_reason(&terminal_evidence.cause, &terminal, &evaluation)
             .map_err(execution_error)?;
-    let cancellation_reason = stop_gaps
-        .first()
-        .cloned()
-        .ok_or_else(|| invalid_execution_request("replan stop omitted typed gap evidence"))?;
-    let finalized = repository
-        .finalize_replan_stop(
-            scope,
-            ReplanStopRequest {
-                run_uid: snapshot.run.run_uid,
-                expected_revision: snapshot.run.plan_revision,
-                expected_wake_epoch: snapshot.run.wake_epoch,
-                task_id: waiting_task.task_id,
-                expected_generation: waiting_task.generation,
-                amendment_hash: Some(amendment_digest),
-                cancellation_reason,
-                terminal_projection: terminal,
-                completion_evaluation: evaluation,
-                terminal_evidence,
-                terminal_reason,
-            },
-        )
-        .await
-        .map_err(execution_error)?;
-    Ok(match finalized {
-        ReplanStopOutcome::Finalized(finalized) => {
-            applied_mutation(&finalized.run).with_task_ids_to_release(finalized.task_ids_to_release)
-        }
-        ReplanStopOutcome::Replayed(finalized) => replayed_mutation(&finalized.run)
-            .with_task_ids_to_release(finalized.task_ids_to_release),
-        ReplanStopOutcome::Conflict => {
-            conflict_mutation(ExecutionConflictReason::PlanRevisionMismatch)
-        }
-        ReplanStopOutcome::NotFound => not_found_mutation(),
-    })
+    let pending_terminal = PendingExecutionTerminal {
+        status: terminal_status,
+        reason: terminal_reason,
+        terminal_evidence,
+        output: snapshot.run.output.clone(),
+        completion_check_results: evaluation
+            .checks
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| {
+                invalid_execution_request(format!(
+                    "serialize replan-stop completion checks: {error}"
+                ))
+            })?,
+        terminal_gaps: evaluation.gaps,
+        cancellation_reason: None,
+    };
+    Ok(
+        match repository
+            .fence_replan_stop(
+                scope,
+                snapshot.run.run_uid,
+                snapshot.run.plan_revision,
+                snapshot.run.wake_epoch,
+                pending_terminal,
+                ReplanStopReceipt {
+                    task_id: waiting_task.task_id,
+                    task_generation: waiting_task.generation,
+                    base_plan_revision: snapshot.run.plan_revision,
+                    amendment_hash: amendment_digest,
+                },
+            )
+            .await
+            .map_err(execution_error)?
+        {
+            TerminalFenceOutcome::Applied(commit) => applied_mutation(&commit.run),
+            TerminalFenceOutcome::Replayed(commit) => replayed_mutation(&commit.run),
+            TerminalFenceOutcome::Conflict => {
+                conflict_mutation(ExecutionConflictReason::PlanRevisionMismatch)
+            }
+            TerminalFenceOutcome::NotFound => not_found_mutation(),
+        },
+    )
 }
 
 #[cfg(test)]

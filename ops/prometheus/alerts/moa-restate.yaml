@@ -1,0 +1,129 @@
+# Restate 1.7.2 server health alerts.
+#
+# Metric names are pinned to the v1.7.2 server source by
+# k8s/scripts/validate-observability.sh. Restate does not expose an ingress
+# failure status in v1.7.2: ingress request states are admitted, completed, and
+# rate-limited. Permanent invocation-task failures are therefore the closest
+# durable-processing failure signal and are kept distinct from ingress
+# throttling below.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: moa-restate
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: moa-restate-alerts
+    app.kubernetes.io/part-of: moa
+    moa.dev/rule-sync: mimir
+spec:
+  groups:
+    - name: moa-restate
+      interval: 30s
+      rules:
+        - alert: MOARestateScrapeTargetsMissing
+          expr: (count(up{job="restate"}) or on() vector(0)) < 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate scrape targets are missing
+            description: "Only {{ $value }} of the expected three Restate node targets are present. Pod discovery, node availability, or Alloy RBAC is incomplete."
+
+        - alert: MOARestateNodeScrapeDown
+          expr: up{job="restate"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate node metrics endpoint is down
+            description: "Alloy cannot scrape Restate target {{ $labels.instance }}. Check node health and network policy before assuming the other cluster metrics are complete."
+
+        - alert: MOARestateIngressRateLimited
+          expr: sum(rate(restate_ingress_requests_total{status="rate-limited"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Restate ingress is rate limiting requests
+            description: "Restate has rate-limited ingress at {{ $value }} requests/sec for five minutes. Check admission pressure and caller retry behavior."
+
+        - alert: MOARestateInvocationTaskFailures
+          expr: sum(rate(restate_invoker_invocation_tasks_total{status="failed", transient="false"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate invocation tasks are failing permanently
+            description: "Restate reports {{ $value }} permanent invocation-task failures/sec. Inspect the affected invocation journal and deployment response before retrying externally."
+
+        - alert: MOARestateIngressP99LatencyHigh
+          expr: max(restate_ingress_request_duration_seconds{quantile="0.99"}) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Restate ingress p99 latency is high
+            description: "The highest Restate ingress p99 is {{ $value }}s (threshold 5s) for ten minutes. Check partition lag, invoker pressure, and service deployment latency."
+
+        - alert: MOARestateStateStorageGrowingFast
+          expr: deriv(max(restate_usage_state_storage_bytes)[1h:5m]) > 1048576
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Restate state storage is growing rapidly
+            description: "Restate state storage is growing at {{ $value }} bytes/sec (threshold 1 MiB/sec). Check retention, completed journals, and unexpected state growth."
+
+        - alert: MOARestateSnapshotUploadFailures
+          expr: sum(rate(restate_partition_store_snapshots_upload_failed_total[15m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate partition snapshot uploads are failing
+            description: "Restate snapshot uploads are failing at {{ $value }} failures/sec. Check object-store reachability and credentials before log trimming is constrained."
+
+        - alert: MOARestateSnapshotAgeHigh
+          expr: max(restate_partition_snapshot_age_seconds) > 7200
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate partition snapshots are stale
+            description: "The oldest latest-partition snapshot is {{ $value }}s old (threshold 7200s). Recovery time and archive progress are outside the expected bound."
+
+        - alert: MOARestateSnapshotPartitionsMissing
+          expr: (count(count by (partition) (restate_partition_snapshot_age_seconds)) or on() vector(0)) < max(restate_num_partitions)
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate partition snapshot telemetry is incomplete
+            description: "Snapshot age is published for only {{ $value }} partitions, fewer than restate_num_partitions. Treat an absent partition series as failed snapshot publication, not as a healthy age."
+
+        - alert: MOARestatePartitionAppliedLSNLagHigh
+          expr: max(restate_partition_applied_lsn_lag) > 10000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Restate partition application is behind the log tail
+            description: "A Restate partition is {{ $value }} records behind the log tail (threshold 10000). Check processor health and storage pressure."
+
+        - alert: MOARestatePartitionStatusStale
+          expr: max(restate_partition_time_since_last_status_update) > 60
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate partition status updates are stale
+            description: "A Restate partition has not updated status for {{ $value }}s (threshold 60s). Check the partition processor and node health."
+
+        - alert: MOARestatePartitionLeaderMissing
+          expr: sum(restate_partition_is_effective_leader) < max(restate_num_partitions)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate has a partition without an effective leader
+            description: "Only {{ $value }} effective partition leaders are visible. Compare with restate_num_partitions and inspect cluster membership before changing placement."

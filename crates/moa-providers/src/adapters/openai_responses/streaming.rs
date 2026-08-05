@@ -308,15 +308,15 @@ async fn create_response(
     request: &CreateResponse,
 ) -> std::result::Result<Response, ResponsesStreamError> {
     let response = send_openai_request(client, api_base, api_key, request, false).await?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| ResponsesStreamError {
+    let bytes = response.bytes().await.map_err(|error| {
+        let retryable = is_retryable_reqwest_error(&error);
+        ResponsesStreamError {
             error: map_reqwest_error(error),
-            retryable: false,
+            retryable,
             emitted_content: false,
             rate_limited: false,
-        })?;
+        }
+    })?;
     serde_json::from_slice::<Response>(&bytes).map_err(|error| ResponsesStreamError {
         error: MoaError::SerializationError(format!(
             "failed to decode provider response: {error}; content: {}",
@@ -341,11 +341,14 @@ async fn send_openai_request(
         builder = builder.header(reqwest::header::ACCEPT, "text/event-stream");
     }
 
-    let response = builder.send().await.map_err(|error| ResponsesStreamError {
-        retryable: error.status().is_none(),
-        error: map_reqwest_error(error),
-        emitted_content: false,
-        rate_limited: false,
+    let response = builder.send().await.map_err(|error| {
+        let retryable = is_retryable_reqwest_error(&error);
+        ResponsesStreamError {
+            retryable,
+            error: map_reqwest_error(error),
+            emitted_content: false,
+            rate_limited: false,
+        }
     })?;
     let status = response.status();
     if status.is_success() {
@@ -363,8 +366,8 @@ async fn openai_status_error(response: reqwest::Response) -> ResponsesStreamErro
         .await
         .unwrap_or_else(|error| format!("failed to read error body: {error}"));
     let message = openai_error_message(&body);
-    let rate_limited = status == StatusCode::TOO_MANY_REQUESTS || is_rate_limit_message(&message);
-    let retryable = rate_limited || status.is_server_error() || is_server_error_message(&message);
+    let rate_limited = status == StatusCode::TOO_MANY_REQUESTS;
+    let retryable = rate_limited || status.is_server_error();
     let error = if rate_limited {
         MoaError::ProviderError(message)
     } else {
@@ -520,7 +523,7 @@ async fn consume_responses_stream_once(
                             .map(|call| call.name.clone())
                     })
                     .ok_or_else(|| ResponsesStreamError {
-                        error: MoaError::ProviderError(format!(
+                        error: MoaError::ProviderQuirk(format!(
                             "response function call {} did not include a tool name",
                             event.item_id
                         )),
@@ -574,12 +577,30 @@ async fn consume_responses_stream_once(
                 response = Some(event.response);
             }
             ResponseStreamEvent::ResponseError(event) => {
-                let rate_limited = is_rate_limit_message(&event.message);
+                let rate_limited = event.code.as_deref() == Some("rate_limit_exceeded");
+                let server_error = event
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| matches!(code, "server_error" | "internal_server_error"));
+                let error = if rate_limited {
+                    MoaError::RateLimited {
+                        retries: 0,
+                        message: event.message,
+                    }
+                } else if server_error {
+                    MoaError::HttpStatus {
+                        status: 500,
+                        retry_after: None,
+                        message: event.message,
+                    }
+                } else {
+                    MoaError::ProviderQuirk(event.message)
+                };
                 return Err(ResponsesStreamError {
-                    retryable: rate_limited,
+                    retryable: rate_limited || server_error,
                     emitted_content,
                     rate_limited,
-                    error: MoaError::ProviderError(event.message),
+                    error,
                 });
             }
             _ => {}
@@ -590,7 +611,7 @@ async fn consume_responses_stream_once(
         retryable: false,
         emitted_content,
         rate_limited: false,
-        error: MoaError::ProviderError(
+        error: MoaError::ProviderQuirk(
             "Responses stream ended before the provider returned a completed response".to_string(),
         ),
     })?;
@@ -737,10 +758,17 @@ fn map_openai_error(error: OpenAIError) -> MoaError {
                 };
             }
 
-            MoaError::ProviderError(format!(
-                "provider request failed: {}",
-                error_chain_message(&error)
-            ))
+            let message = error_chain_message(&error);
+            if error.is_timeout() {
+                MoaError::ProviderTimeout(message)
+            } else if error.is_connect()
+                || error.is_body()
+                || (error.is_request() && !error.is_builder())
+            {
+                MoaError::ProviderTransport(message)
+            } else {
+                MoaError::ProviderError(message)
+            }
         }
         OpenAIError::ApiError(error) if is_server_error_api_error(&error) => MoaError::HttpStatus {
             status: 500,
@@ -770,10 +798,7 @@ fn map_reqwest_error(error: reqwest::Error) -> MoaError {
         };
     }
 
-    MoaError::ProviderError(format!(
-        "provider request failed: {}",
-        error_chain_message(&error)
-    ))
+    provider_transport_error(error)
 }
 
 fn error_chain_message(error: &(dyn StdError + 'static)) -> String {
@@ -788,36 +813,30 @@ fn error_chain_message(error: &(dyn StdError + 'static)) -> String {
 }
 
 fn is_retryable_openai_error(error: &OpenAIError) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
     is_rate_limit_error(error)
         || match error {
-            OpenAIError::Reqwest(error) => error
-                .status()
-                .is_some_and(|status| status.is_server_error()),
+            OpenAIError::Reqwest(error) => {
+                error
+                    .status()
+                    .is_some_and(|status| status.is_server_error())
+                    || error.is_timeout()
+                    || error.is_connect()
+                    || error.is_body()
+                    || (error.is_request() && !error.is_builder())
+            }
             OpenAIError::ApiError(error) => is_server_error_api_error(error),
             _ => false,
         }
-        || message.contains("server_error")
-        || message.contains("upstream unavailable")
-        || message.contains("internal server error")
-        || message.contains("status 500")
-        || message.contains("http 500")
 }
 
 fn is_rate_limit_error(error: &OpenAIError) -> bool {
-    let generic_message = error.to_string().to_ascii_lowercase();
-
     match error {
         OpenAIError::Reqwest(error) => error.status() == Some(StatusCode::TOO_MANY_REQUESTS),
         OpenAIError::ApiError(error) => {
             error.code.as_deref() == Some("rate_limit_exceeded")
-                || error.message.to_ascii_lowercase().contains("rate limit")
+                || error.r#type.as_deref() == Some("rate_limit_error")
         }
-        _ => {
-            generic_message.contains("rate limit")
-                || generic_message.contains("rate_limit")
-                || generic_message.contains("too many requests")
-        }
+        _ => false,
     }
 }
 
@@ -825,38 +844,11 @@ fn is_server_error_api_error(error: &async_openai::error::ApiError) -> bool {
     error
         .r#type
         .as_deref()
-        .is_some_and(|kind| kind.contains("server") || kind.contains("temporar"))
+        .is_some_and(|kind| matches!(kind, "server_error" | "internal_server_error"))
         || error
             .code
             .as_deref()
-            .is_some_and(|code| code.contains("server") || code.contains("temporar"))
-        || error.message.to_ascii_lowercase().contains("server error")
-        || error.message.to_ascii_lowercase().contains("server_error")
-        || error
-            .message
-            .to_ascii_lowercase()
-            .contains("upstream unavailable")
-        || error
-            .message
-            .to_ascii_lowercase()
-            .contains("temporarily unavailable")
-}
-
-fn is_rate_limit_message(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("rate limit")
-        || message.contains("rate_limit")
-        || message.contains("too many requests")
-}
-
-fn is_server_error_message(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("server_error")
-        || message.contains("upstream unavailable")
-        || message.contains("internal server error")
-        || message.contains("status 500")
-        || message.contains("http 500")
-        || message.contains("temporarily unavailable")
+            .is_some_and(|code| matches!(code, "server_error" | "internal_server_error"))
 }
 
 /// Field names that can appear in `OpenAI` streaming payloads with a type

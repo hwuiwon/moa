@@ -1,5 +1,6 @@
 //! Shared fleet and tenant admission for coordinator turns.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -86,34 +87,39 @@ impl TurnAdmission {
         tenant_id: TenantId,
         action_name: &'static str,
     ) -> Result<(), HandlerError> {
-        let admission = self.clone();
-        let decision = ctx
-            .run(move || async move {
-                admission
-                    .acquire_shared(session_id, tenant_id)
-                    .await
-                    .map(Json::from)
-                    .map_err(moa_error_to_handler_error)
-            })
-            .name(action_name)
-            .await?
-            .into_inner();
-        self.record_decision(decision);
-        if let Some(scope) = decision.rejected_scope {
-            let scope = match scope {
-                RejectedScope::Fleet => "fleet",
-                RejectedScope::Tenant => "tenant",
-            };
-            return Err(TerminalError::new_with_code(
-                429,
-                format!(
-                    "turn admission {scope} budget is saturated; retry_after_ms={}",
-                    self.retry_after_ms
-                ),
-            )
-            .into());
-        }
-        Ok(())
+        wait_until_admitted(
+            Duration::from_millis(self.retry_after_ms),
+            || {
+                let admission = self.clone();
+                async move {
+                    Ok(ctx
+                        .run(move || async move {
+                            admission
+                                .acquire_shared(session_id, tenant_id)
+                                .await
+                                .map(Json::from)
+                                .map_err(moa_error_to_handler_error)
+                        })
+                        .name(action_name)
+                        .await?
+                        .into_inner())
+                }
+            },
+            |decision| {
+                self.record_decision(decision);
+                if let Some(scope) = decision.rejected_scope {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        tenant_id = %tenant_id,
+                        scope = ?scope,
+                        retry_after_ms = self.retry_after_ms,
+                        "waiting for shared turn-admission capacity"
+                    );
+                }
+            },
+            |delay| async move { ctx.sleep(delay).await.map_err(HandlerError::from) },
+        )
+        .await
     }
 
     /// Releases the session's fleet and tenant leases after durable terminal handling.
@@ -197,7 +203,7 @@ impl TurnAdmission {
 
     fn record_decision(&self, decision: AdmissionDecision) {
         let outcome = if decision.rejected_scope.is_some() {
-            "rejected"
+            "waiting"
         } else {
             "admitted"
         };
@@ -216,6 +222,29 @@ impl TurnAdmission {
     }
 }
 
+async fn wait_until_admitted<Attempt, AttemptFuture, Observe, Sleep, SleepFuture>(
+    retry_after: Duration,
+    mut attempt: Attempt,
+    mut observe: Observe,
+    mut sleep: Sleep,
+) -> Result<(), HandlerError>
+where
+    Attempt: FnMut() -> AttemptFuture,
+    AttemptFuture: Future<Output = Result<AdmissionDecision, HandlerError>>,
+    Observe: FnMut(AdmissionDecision),
+    Sleep: FnMut(Duration) -> SleepFuture,
+    SleepFuture: Future<Output = Result<(), HandlerError>>,
+{
+    loop {
+        let decision = attempt().await?;
+        observe(decision);
+        if decision.rejected_scope.is_none() {
+            return Ok(());
+        }
+        sleep(retry_after).await?;
+    }
+}
+
 fn tenant_lease_key(tenant_id: TenantId) -> String {
     format!("moa:turn-admission:{{turn-admission}}:tenant:{tenant_id}")
 }
@@ -227,9 +256,12 @@ mod tests {
 
     use moa_config::SessionLimitsConfig;
     use moa_core::types::identifiers::{SessionId, TenantId};
+    use moa_core::types::worker::state::WorkerChildRef;
     use moa_runtime_store::MemoryRuntimeCacheStore;
+    use tokio::sync::Notify;
 
-    use super::{RejectedScope, TurnAdmission};
+    use super::{RejectedScope, TurnAdmission, wait_until_admitted};
+    use crate::objects::session::{ChildProgressFetch, plan_child_progress_fan_in};
 
     fn policy(fleet: u32, tenant: u32, ttl_ms: u64) -> TurnAdmission {
         let limits = SessionLimitsConfig {
@@ -296,6 +328,94 @@ mod tests {
                 .acquire_shared(SessionId::new(), tenant_a)
                 .await
                 .unwrap()
+                .rejected_scope,
+            None
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tenant_waiter_does_not_block_other_tenants_or_progress_and_starts_after_release() {
+        // Pins: tenant A's second session remains pending at limit one while an
+        // unrelated tenant and a progress-style read proceed, then acquires the
+        // released slot without surfacing a terminal overload response.
+        let admission = Arc::new(policy(2, 1, 10_000));
+        let tenant_a = TenantId::new();
+        let tenant_b = TenantId::new();
+        let session_a1 = SessionId::new();
+        let session_a2 = SessionId::new();
+        let session_b = SessionId::new();
+        admission
+            .acquire_shared(session_a1, tenant_a)
+            .await
+            .expect("tenant A session 1 should acquire its lease");
+
+        let waiting = Arc::new(Notify::new());
+        let waiter_admission = Arc::clone(&admission);
+        let waiter_started = Arc::clone(&waiting);
+        let waiter = tokio::spawn(async move {
+            wait_until_admitted(
+                Duration::from_millis(100),
+                || {
+                    let waiter_admission = Arc::clone(&waiter_admission);
+                    async move {
+                        Ok(waiter_admission
+                            .acquire_shared(session_a2, tenant_a)
+                            .await
+                            .expect("tenant A session 2 lease attempt should succeed"))
+                    }
+                },
+                |decision| {
+                    if decision.rejected_scope.is_some() {
+                        waiter_started.notify_one();
+                    }
+                },
+                |delay| async move {
+                    tokio::time::sleep(delay).await;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("tenant A session 2 should wait and then acquire");
+        });
+        waiting.notified().await;
+        assert!(
+            !waiter.is_finished(),
+            "tenant A session 2 must still be waiting"
+        );
+
+        let tenant_b_decision = admission
+            .acquire_shared(session_b, tenant_b)
+            .await
+            .expect("tenant B should not share tenant A's cap");
+        assert_eq!(tenant_b_decision.rejected_scope, None);
+        let progress_plan = plan_child_progress_fan_in(
+            &[WorkerChildRef {
+                id: "active-worker".to_string(),
+                task_hash: "active-task".to_string(),
+                budget_tokens: 100,
+                terminal: None,
+            }],
+            1,
+        );
+        assert_eq!(
+            progress_plan,
+            vec![ChildProgressFetch::Fetch("active-worker".to_string())],
+            "the production progress fan-in must proceed without turn admission"
+        );
+
+        admission
+            .release_shared(session_a1, tenant_a)
+            .await
+            .expect("tenant A session 1 should release its lease");
+        tokio::time::advance(Duration::from_millis(100)).await;
+        waiter
+            .await
+            .expect("tenant A session 2 waiter should complete after release");
+        assert_eq!(
+            admission
+                .acquire_shared(session_a2, tenant_a)
+                .await
+                .expect("tenant A session 2 should own the released lease")
                 .rejected_scope,
             None
         );

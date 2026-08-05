@@ -19,7 +19,7 @@ mod workers;
 
 use turns::*;
 
-use authz::require_session_participant;
+use authz::{require_session_participant, require_shared_session_participant};
 
 impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -154,6 +154,18 @@ impl Session for SessionImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         self.handle_register_coordinator_input(ctx, request).await
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal cleanup by the workflow that owns this exact registration;
+    // the generation and workflow fences prevent it from retracting newer work.
+    async fn clear_coordinator_input(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<ClearCoordinatorInputRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        self.handle_clear_coordinator_input(ctx, request).await
     }
 
     #[tracing::instrument(skip(self, ctx, request))]

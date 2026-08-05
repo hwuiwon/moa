@@ -24,17 +24,14 @@ use moa_core::{
         execution_planning::{
             ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
             ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
-            ExecutionRouteKind, ExecutionRouteStage, ExecutionRouteSummary, ExecutionStrategy,
+            ExecutionRouteKind, ExecutionRouteStage, ExecutionStrategy,
         },
         identifiers::{SessionId, TenantId, UserId},
         session::SessionStatus,
     },
 };
 use moa_execution::{
-    capability::{
-        ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionEstimate,
-        ExecutionHash,
-    },
+    capability::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionEstimate},
     compiler::{CompileExecutionRequest, CompiledExecution, compile},
     completion::{
         CompletionEvaluation, CompletionStatus, execution_terminal_reason,
@@ -42,14 +39,15 @@ use moa_execution::{
     },
     replan::ReplanStopReason,
     repository::{
-        CancellationOutcome, CancellationRequest, ExecutionRepository, ExecutionRunRecord,
-        ExecutionScope, FinalizationOutcome, NewExecutionRun, ReplanStopOutcome, ReplanStopRequest,
-        ReservationOutcome, RunFinalizationRequest, TaskOutcomeWrite, TransitionOutcome,
+        ExecutionRepository, ExecutionRunRecord, ExecutionScope, FencedTerminalFinalizationOutcome,
+        FinalizationOutcome, NewExecutionRun, ReservationOutcome, RunFinalizationRequest,
+        TaskOutcomeWrite, TerminalFenceCommit, TerminalFenceOutcome, TransitionOutcome,
     },
     state::{
         ExecutionLimitStop, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskFailure,
-        ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence, LogicalTask,
-        LogicalTaskKind, TerminalProjection,
+        ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence,
+        ExecutionTerminalReason, LogicalTask, LogicalTaskKind, PendingExecutionTerminal,
+        TerminalProjection,
     },
     wire::{
         ExecutionCancelRequest, ExecutionMutationResponse, ExecutionRunRequest,
@@ -60,7 +58,7 @@ use moa_test_support::{
     FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
     OrchestratorTestFixture, TestApiClient,
 };
-use moa_wire::turn::{TurnOutcomeKind, TurnPhase, TurnProgress};
+use moa_wire::turn::{TurnOutcomeKind, TurnOutcomeKind::Accepted};
 use serde_json::{Value, json};
 
 use crate::execution_execution_support::assertions::{
@@ -211,6 +209,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
                         "properties": {"query": {"type": "string"}}
                     }),
                     item_key_pointer: None,
+                    idempotent: true,
                     outcomes: vec![FixtureCapabilityOutcome::Success {
                         output: json!({"company_count": 500}),
                     }],
@@ -226,6 +225,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
                         "properties": {"untrusted_override": {"type": "boolean"}}
                     }),
                     item_key_pointer: None,
+                    idempotent: true,
                     outcomes: vec![FixtureCapabilityOutcome::Success {
                         output: json!({"unexpected": true}),
                     }],
@@ -292,21 +292,19 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
         "replayed control request changed across orchestrator restart"
     );
 
-    let progress =
-        await_accepted_durable_turn_progress(&fixture.ingress_url, &started.turn_id).await?;
+    let outcome = await_turn_outcome(test.client(), &started).await?;
+    let Accepted {
+        execution_run_uid: outcome_run_uid,
+    } = outcome.kind
+    else {
+        bail!("Inline Durable-upgrade turn did not reach Accepted: {outcome:?}");
+    };
     let execution_run_uid =
         await_single_execution_run_started_uid(test.client(), started.session_id, &started.turn_id)
             .await?;
     assert_eq!(
-        progress.execution_route,
-        Some(ExecutionRouteSummary::Execute {
-            strategy: ExecutionStrategy::Durable,
-        })
-    );
-    assert_eq!(
-        serde_json::to_value(&progress)?.pointer("/execution_route"),
-        Some(&json!({"decision": "execute", "strategy": "durable"})),
-        "public terminal progress must expose only its rationale-free Durable route summary"
+        outcome_run_uid, execution_run_uid,
+        "public Session outcome and persisted run-start event disagree"
     );
     let status = await_execution_terminal(
         test.client(),
@@ -317,7 +315,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
     assert_eq!(status.run.source_kind, ExecutionSourceKind::GeneratedPlan);
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
-        SessionStatus::Paused
+        SessionStatus::Idle
     );
 
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
@@ -561,50 +559,6 @@ async fn await_scripted_control_request_attempts(
     }
 }
 
-async fn read_turn_progress(ingress_url: &str, turn_id: &str) -> Result<TurnProgress> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/restate/call/TurnExecution/{turn_id}/progress",
-            ingress_url.trim_end_matches('/')
-        ))
-        .send()
-        .await
-        .context("read terminal TurnExecution progress")?
-        .error_for_status()
-        .context("terminal TurnExecution progress should succeed")?
-        .json::<TurnProgress>()
-        .await
-        .context("decode terminal TurnExecution progress")
-}
-
-async fn await_accepted_durable_turn_progress(
-    ingress_url: &str,
-    turn_id: &str,
-) -> Result<TurnProgress> {
-    let deadline = tokio::time::Instant::now() + SERVICE_TIMEOUT;
-    loop {
-        let progress = read_turn_progress(ingress_url, turn_id).await?;
-        if progress.phase == TurnPhase::Accepted {
-            return Ok(progress);
-        }
-        if matches!(
-            progress.phase,
-            TurnPhase::Completed | TurnPhase::Cancelled | TurnPhase::Failed
-        ) {
-            bail!(
-                "Inline Durable-upgrade turn {turn_id} reached {:?} instead of Accepted: {progress:?}",
-                progress.phase
-            );
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "Inline Durable-upgrade turn {turn_id} did not reach Accepted within {SERVICE_TIMEOUT:?}; last progress: {progress:?}"
-            );
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
 async fn await_single_execution_run_started_uid(
     client: &TestApiClient,
     session_id: SessionId,
@@ -735,7 +689,7 @@ async fn rejected_initial_candidate_and_sole_repair_persist_strict_audits_servic
     assert_completed_terminal(&status, 1, 1);
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
-        SessionStatus::Paused
+        SessionStatus::Idle
     );
 
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
@@ -915,7 +869,7 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
     assert_completed_terminal(&status, 2, 2);
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
-        SessionStatus::Paused
+        SessionStatus::Idle
     );
 
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
@@ -1239,7 +1193,8 @@ async fn assert_repository_terminal_case(
             | ExecutionTerminalCause::SchedulerNoProgress
             | ExecutionTerminalCause::ReplanStop { .. }
             | ExecutionTerminalCause::Cancellation
-            | ExecutionTerminalCause::InternalFailure => None,
+            | ExecutionTerminalCause::InternalFailure
+            | ExecutionTerminalCause::CompensationFailure { .. } => None,
         },
         checks: Vec::new(),
         satisfied_requirement_ids: case.satisfied.clone(),
@@ -1248,6 +1203,89 @@ async fn assert_repository_terminal_case(
     };
     let evidence = terminal_evidence_from_evaluation(case.cause.clone(), &evaluation)?;
     let terminal_reason = execution_terminal_reason(&case.cause, &case.projection, &evaluation)?;
+    if case.status != ExecutionRunStatus::Completed {
+        let pending_terminal = PendingExecutionTerminal {
+            status: case.status,
+            reason: terminal_reason,
+            terminal_evidence: evidence.clone(),
+            output: case.output.clone(),
+            completion_check_results: evaluation
+                .checks
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            terminal_gaps: case.gaps.clone(),
+            cancellation_reason: None,
+        };
+        let first = repository
+            .fence_run_for_terminal(
+                scope,
+                run.run_uid,
+                run.plan_revision,
+                run.wake_epoch,
+                pending_terminal.clone(),
+            )
+            .await?;
+        let TerminalFenceOutcome::Applied(first_commit) = first else {
+            bail!(
+                "{} did not enter the compensation fence: {first:?}",
+                case.label
+            );
+        };
+        let replay = repository
+            .fence_run_for_terminal(
+                scope,
+                run.run_uid,
+                run.plan_revision,
+                run.wake_epoch,
+                pending_terminal.clone(),
+            )
+            .await?;
+        let TerminalFenceOutcome::Replayed(replayed_commit) = replay else {
+            bail!(
+                "{} did not replay its terminal fence: {replay:?}",
+                case.label
+            );
+        };
+        assert_eq!(replayed_commit, first_commit);
+        let mut conflict = pending_terminal.clone();
+        conflict.terminal_evidence.satisfied_requirement_count =
+            conflicting_satisfied_count(&evidence);
+        assert_eq!(
+            repository
+                .fence_run_for_terminal(
+                    scope,
+                    run.run_uid,
+                    run.plan_revision,
+                    run.wake_epoch,
+                    conflict,
+                )
+                .await?,
+            TerminalFenceOutcome::Conflict,
+            "{} accepted conflicting terminal-fence evidence",
+            case.label
+        );
+        assert_pending_terminal_projection(
+            repository,
+            scope,
+            run.run_uid,
+            run.status,
+            &pending_terminal,
+        )
+        .await?;
+        settle_fenced_terminal(repository, scope, &first_commit).await?;
+        return assert_status_projection(
+            client,
+            tenant_id,
+            session_id,
+            run.run_uid,
+            case.status,
+            case.output,
+            case.gaps,
+            evidence,
+        )
+        .await;
+    }
     let request = RunFinalizationRequest {
         run_uid: run.run_uid,
         expected_revision: run.plan_revision,
@@ -1419,62 +1457,86 @@ async fn assert_replan_terminal_case(
         &projection,
         &evaluation,
     )?;
-    let request = ReplanStopRequest {
-        run_uid: run.run_uid,
-        expected_revision: 1,
-        expected_wake_epoch: waiting_run.wake_epoch,
-        task_id: waiting_task.task_id,
-        expected_generation: 1,
-        amendment_hash: Some(ExecutionHash::from_bytes([origin as u8; 32])),
-        cancellation_reason: gap.clone(),
-        terminal_projection: projection,
-        completion_evaluation: evaluation,
+    let pending_terminal = PendingExecutionTerminal {
+        status: ExecutionRunStatus::Partial,
+        reason: terminal_reason,
         terminal_evidence: evidence.clone(),
-        terminal_reason,
+        output: Some(json!({"useful": true})),
+        completion_check_results: Vec::new(),
+        terminal_gaps: evaluation.gaps,
+        cancellation_reason: None,
     };
     let first = repository
-        .finalize_replan_stop(scope, request.clone())
+        .fence_run_for_terminal(
+            scope,
+            run.run_uid,
+            1,
+            waiting_run.wake_epoch,
+            pending_terminal.clone(),
+        )
         .await?;
-    let ReplanStopOutcome::Finalized(first_commit) = first else {
-        bail!("{label} did not finalize through the replan transaction: {first:?}");
+    let TerminalFenceOutcome::Applied(first_commit) = first else {
+        bail!("{label} did not enter the compensation fence: {first:?}");
     };
     let replay = repository
-        .finalize_replan_stop(scope, request.clone())
+        .fence_run_for_terminal(
+            scope,
+            run.run_uid,
+            1,
+            waiting_run.wake_epoch,
+            pending_terminal.clone(),
+        )
         .await?;
-    let ReplanStopOutcome::Replayed(replayed_commit) = replay else {
-        bail!("{label} did not replay through the replan transaction: {replay:?}");
+    let TerminalFenceOutcome::Replayed(replayed_commit) = replay else {
+        bail!("{label} did not replay through the compensation fence: {replay:?}");
     };
     assert_eq!(
         replayed_commit, first_commit,
         "{label} replay changed persisted bytes"
     );
 
-    let mut count_conflict = request.clone();
+    let mut count_conflict = pending_terminal.clone();
     count_conflict.terminal_evidence.satisfied_requirement_count = 0;
     assert_eq!(
         repository
-            .finalize_replan_stop(scope, count_conflict)
+            .fence_run_for_terminal(
+                scope,
+                run.run_uid,
+                1,
+                waiting_run.wake_epoch,
+                count_conflict,
+            )
             .await?,
-        ReplanStopOutcome::Conflict,
+        TerminalFenceOutcome::Conflict,
         "{label} accepted conflicting requirement counts"
     );
-    let mut cause_conflict = request;
+    let mut cause_conflict = pending_terminal.clone();
     cause_conflict.terminal_evidence.cause = ExecutionTerminalCause::ReplanStop {
         reason: alternate_replan_reason(reason),
     };
-    cause_conflict.terminal_reason = execution_terminal_reason(
-        &cause_conflict.terminal_evidence.cause,
-        &cause_conflict.terminal_projection,
-        &cause_conflict.completion_evaluation,
-    )?;
     assert_eq!(
         repository
-            .finalize_replan_stop(scope, cause_conflict)
+            .fence_run_for_terminal(
+                scope,
+                run.run_uid,
+                1,
+                waiting_run.wake_epoch,
+                cause_conflict,
+            )
             .await?,
-        ReplanStopOutcome::Conflict,
+        TerminalFenceOutcome::Conflict,
         "{label} accepted a conflicting replan cause"
     );
 
+    assert_pending_terminal_projection(
+        repository,
+        scope,
+        run.run_uid,
+        waiting_run.status,
+        &pending_terminal,
+    )
+    .await?;
+    settle_fenced_terminal(repository, scope, &first_commit).await?;
     assert_status_projection(
         client,
         tenant_id,
@@ -1532,8 +1594,8 @@ async fn assert_cancellation_terminal_case(
         satisfied_requirement_count: 0,
         requirement_count: 2,
     };
-    assert_eq!(first_run.status, ExecutionRunStatus::Cancelled);
-    assert_eq!(first_run.terminal_evidence, Some(evidence.clone()));
+    assert_eq!(first_run.status, ExecutionRunStatus::Running);
+    assert!(first_run.terminal_evidence.is_none());
 
     let replay: ExecutionMutationResponse = client.post_call("/Execution/cancel", &request).await?;
     assert_eq!(
@@ -1542,45 +1604,37 @@ async fn assert_cancellation_terminal_case(
             run: first_run.clone()
         }
     );
-    let mut conflicting_counts = evidence.clone();
-    conflicting_counts.satisfied_requirement_count = 1;
-    assert_eq!(
-        repository
-            .cancel_run(
-                scope,
-                run.run_uid,
-                CancellationRequest {
-                    reason: reason.clone(),
-                    terminal_evidence: conflicting_counts,
-                },
-            )
-            .await?,
-        CancellationOutcome::Conflict
-    );
-    let invalid_cause = repository
-        .cancel_run(
-            scope,
-            run.run_uid,
-            CancellationRequest {
-                reason: reason.clone(),
-                terminal_evidence: ExecutionTerminalEvidence {
-                    cause: ExecutionTerminalCause::InternalFailure,
-                    satisfied_requirement_count: 0,
-                    requirement_count: 2,
-                },
-            },
-        )
-        .await;
-    assert!(
-        invalid_cause.is_err(),
-        "cancellation accepted a non-cancellation cause"
-    );
-
+    let pending_terminal = PendingExecutionTerminal {
+        status: ExecutionRunStatus::Cancelled,
+        reason: ExecutionTerminalReason::Cancelled,
+        terminal_evidence: evidence.clone(),
+        output: None,
+        completion_check_results: Vec::new(),
+        terminal_gaps: Vec::new(),
+        cancellation_reason: Some(reason.clone()),
+    };
+    assert_pending_terminal_projection(
+        repository,
+        scope,
+        run.run_uid,
+        ExecutionRunStatus::Running,
+        &pending_terminal,
+    )
+    .await?;
     let persisted = repository
         .load_run(scope, run.run_uid)
         .await?
-        .context("cancelled run disappeared")?;
-    assert_eq!(persisted.cancellation_reason, Some(reason));
+        .context("cancellation-fenced run disappeared")?;
+    let finalized = settle_fenced_terminal(
+        repository,
+        scope,
+        &TerminalFenceCommit {
+            run: persisted,
+            tasks_to_settle: Vec::new(),
+        },
+    )
+    .await?;
+    assert_eq!(finalized.cancellation_reason, Some(reason));
     assert_status_projection(
         client,
         tenant_id,
@@ -1693,22 +1747,93 @@ async fn assert_status_projection(
     expected_gaps: Vec<String>,
     expected_evidence: ExecutionTerminalEvidence,
 ) -> Result<()> {
-    let status: ExecutionStatusResponse = client
-        .post_call(
-            "/Execution/status",
-            &ExecutionRunRequest {
-                tenant_id,
-                contact_id: None,
-                session_id,
-                run_uid,
-            },
-        )
-        .await?;
+    let status = await_execution_terminal(
+        client,
+        &ExecutionRunRequest {
+            tenant_id,
+            contact_id: None,
+            session_id,
+            run_uid,
+        },
+    )
+    .await?;
     assert_eq!(status.run.status, expected_status);
     assert_eq!(status.output, expected_output);
     assert_eq!(status.gaps, expected_gaps);
     assert_eq!(status.run.terminal_evidence, Some(expected_evidence));
     Ok(())
+}
+
+async fn assert_pending_terminal_projection(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run_uid: uuid::Uuid,
+    expected_status: ExecutionRunStatus,
+    expected_pending: &PendingExecutionTerminal,
+) -> Result<()> {
+    let run = repository.load_run(scope, run_uid).await?;
+    let run = run.context("fenced run disappeared before its pending projection was asserted")?;
+    assert_eq!(run.status, expected_status);
+    assert_eq!(run.pending_terminal.as_ref(), Some(expected_pending));
+    assert!(run.terminal_evidence.is_none());
+    Ok(())
+}
+
+async fn settle_fenced_terminal(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    fence: &TerminalFenceCommit,
+) -> Result<ExecutionRunRecord> {
+    for task in &fence.tasks_to_settle {
+        let outcome = ExecutionTaskOutcome {
+            schema_version: 1,
+            usage: task.actual.clone(),
+            result: ExecutionTaskResult::Cancelled {
+                reason: "terminal-matrix forward settlement".to_string(),
+            },
+        };
+        assert!(matches!(
+            repository
+                .record_task_outcome(
+                    scope,
+                    fence.run.run_uid,
+                    task.task_id,
+                    task.generation,
+                    outcome,
+                )
+                .await?,
+            TaskOutcomeWrite::Applied { .. } | TaskOutcomeWrite::Replayed { .. }
+        ));
+    }
+    let settled = repository
+        .load_run(scope, fence.run.run_uid)
+        .await?
+        .context("fenced run disappeared before terminal settlement")?;
+    let finalized = repository
+        .finalize_fenced_terminal(
+            scope,
+            settled.run_uid,
+            settled.plan_revision,
+            settled.wake_epoch,
+        )
+        .await?;
+    let FencedTerminalFinalizationOutcome::Finalized(finalized) = finalized else {
+        bail!("fenced terminal did not finalize after forward settlement: {finalized:?}");
+    };
+    let replay = repository
+        .finalize_fenced_terminal(
+            scope,
+            finalized.run_uid,
+            finalized.plan_revision,
+            finalized.wake_epoch,
+        )
+        .await?;
+    assert_eq!(
+        replay,
+        FencedTerminalFinalizationOutcome::Replayed(finalized.clone()),
+        "terminal-fence finalization did not replay exactly"
+    );
+    Ok(finalized)
 }
 
 fn terminal_blueprint() -> Result<RunBlueprint> {
@@ -1744,7 +1869,8 @@ fn terminal_blueprint() -> Result<RunBlueprint> {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_object_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![ExecutionNode {
@@ -1757,6 +1883,7 @@ fn terminal_blueprint() -> Result<RunBlueprint> {
                 operation: ExecutionOperation::Output {
                     value: json!({"result": "terminal-matrix"}),
                 },
+                compensation: None,
                 retry: no_retry(),
                 budget: None,
             }],
@@ -1797,6 +1924,7 @@ fn logical_output_task(
         generation: 1,
         input: json!({}),
         kind: LogicalTaskKind::Output { value },
+        compensation: None,
         retry: no_retry(),
         reservation: one_task_estimate(),
     })
@@ -1821,6 +1949,7 @@ fn logical_agent_task(
             capability_refs: Vec::new(),
             max_turns: 1,
         },
+        compensation: None,
         retry: no_retry(),
         reservation: one_task_estimate(),
     })
@@ -1947,7 +2076,8 @@ fn output_candidate(
     GeneratedExecutionCandidate {
         goal: single_requirement_goal(objective),
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
             nodes: vec![ExecutionNode {
@@ -1958,6 +2088,7 @@ fn output_candidate(
                 input: json!({}),
                 output_schema: schema,
                 operation: ExecutionOperation::Output { value: output },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts,
                     initial_backoff_ms: 0,
@@ -1975,7 +2106,8 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
     GeneratedExecutionCandidate {
         goal: replan_goal(objective),
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
             nodes: vec![
@@ -1992,6 +2124,7 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2008,6 +2141,7 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2021,6 +2155,7 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
                     operation: ExecutionOperation::Output {
                         value: json!({"$ref": "$.nodes.research.output"}),
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -2034,7 +2169,7 @@ fn useful_amendment_candidate(base_plan_revision: u64) -> GeneratedAmendmentCand
     let schema = answer_schema();
     GeneratedAmendmentCandidate {
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: 2,
             base_plan_revision,
             reason: "replace unsupported research with deterministic output".to_string(),
             evidence: json!({"shape": "unsupported"}),
@@ -2056,6 +2191,7 @@ fn useful_amendment_candidate(base_plan_revision: u64) -> GeneratedAmendmentCand
                             capability_refs: Vec::new(),
                             max_turns: 1,
                         },
+                        compensation: None,
                         retry: no_retry(),
                         budget: None,
                     },
@@ -2072,6 +2208,7 @@ fn useful_amendment_candidate(base_plan_revision: u64) -> GeneratedAmendmentCand
                         operation: ExecutionOperation::Output {
                             value: json!({"$ref": "$.nodes.replacement_research.output"}),
                         },
+                        compensation: None,
                         retry: no_retry(),
                         budget: None,
                     },

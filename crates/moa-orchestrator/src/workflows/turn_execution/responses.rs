@@ -121,6 +121,8 @@ pub(super) async fn ingest_deferred_session_turn(
         response_sequence_num,
         finalized_at,
     ) {
+        // Detached by design: the ingestion object key is derived from the immutable
+        // finalized turn, and IngestionVO deduplicates a replay of the same generation.
         crate::restate_identity::replay_safe_request(
             ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
                 .ingest_turn(Json(turn)),

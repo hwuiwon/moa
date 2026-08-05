@@ -64,7 +64,7 @@ impl StreamDeadline {
 }
 
 fn stream_timeout(phase: &str, timeout_ms: u64) -> MoaError {
-    MoaError::StreamError(format!(
+    MoaError::ProviderTimeout(format!(
         "provider stream {phase} timeout after {timeout_ms}ms"
     ))
 }
@@ -184,7 +184,7 @@ mod tests {
             .await
             .expect_err("a stream with no first event must time out");
         assert!(
-            matches!(first_byte_error, MoaError::StreamError(message) if message.contains("first-byte timeout after 10ms"))
+            matches!(first_byte_error, MoaError::ProviderTimeout(message) if message.contains("first-byte timeout after 10ms"))
         );
 
         let idle_stream = stream::iter([1usize]).chain(stream::pending());
@@ -202,7 +202,7 @@ mod tests {
             .await
             .expect_err("a stream that stalls after one event must time out");
         assert!(
-            matches!(idle_error, MoaError::StreamError(message) if message.contains("idle timeout after 20ms"))
+            matches!(idle_error, MoaError::ProviderTimeout(message) if message.contains("idle timeout after 20ms"))
         );
 
         let total_config = ProviderStreamTimeoutConfig {
@@ -235,7 +235,7 @@ mod tests {
             .await
             .expect_err("frequent events must not extend the total deadline");
         assert!(
-            matches!(total_error, MoaError::StreamError(message) if message.contains("total timeout after 12ms"))
+            matches!(total_error, MoaError::ProviderTimeout(message) if message.contains("total timeout after 12ms"))
         );
     }
 }

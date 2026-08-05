@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, ExecutionBudgetLimit, ExecutionFailureClass, ExecutionNode,
-    ExecutionOperation, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    ExecutionOperation, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment, PlanAmendmentOperation,
+    RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use moa_execution::{
@@ -219,7 +220,7 @@ fn replan_rejects_duplicate_hashes_remove_only_and_exhausted_budget() {
 
 fn request() -> ReplanEvaluationRequest {
     let amendment = PlanAmendment {
-        schema_version: 1,
+        schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
         base_plan_revision: 8,
         reason: "Try a replacement path".to_string(),
         evidence: json!({ "failure": "provider" }),
@@ -237,6 +238,7 @@ fn request() -> ReplanEvaluationRequest {
                         version: "v1".to_string(),
                     },
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,

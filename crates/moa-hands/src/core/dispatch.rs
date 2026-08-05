@@ -921,6 +921,11 @@ fn connector_runtime_error(error: moa_connectors::Error) -> MoaError {
             MoaError::PermissionDenied("connector use authorization unavailable".to_string())
         }
         moa_connectors::Error::Cancelled { .. } => MoaError::Cancelled,
+        moa_connectors::Error::ManualReconciliationRequired { invocation_id } => {
+            MoaError::ExternalEffectUnknownOutcome {
+                operation_id: invocation_id.to_string(),
+            }
+        }
         other => MoaError::ToolError(other.to_string()),
     }
 }
@@ -958,7 +963,7 @@ mod egress_dispatch_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::ToolCallScope;
+    use super::{ToolCallScope, connector_runtime_error};
 
     use moa_config::McpServerConfig;
     use moa_core::types::security::SensitivityClass;
@@ -984,6 +989,22 @@ mod egress_dispatch_tests {
 
     const SERVER_NAME: &str = "external-search";
     const MCP_TOOL_INVOCATION_ID: &str = "00000000-0000-0000-0000-000000000f01";
+
+    #[test]
+    fn connector_unknown_outcome_is_not_erased_to_generic_tool_error() {
+        // Pins: the execution-only caller must be able to distinguish a durable
+        // ambiguous effect from an ordinary tool failure without inspecting text.
+        let mapped = connector_runtime_error(moa_connectors::Error::ManualReconciliationRequired {
+            invocation_id: moa_connectors::domain::ConnectorInvocationId::from(Uuid::from_u128(
+                0xabc,
+            )),
+        });
+
+        assert!(
+            !matches!(mapped, moa_core::error::MoaError::ToolError(_)),
+            "manual-reconciliation provenance was erased at the hands boundary"
+        );
+    }
 
     /// Spawns a fake MCP server that answers the initialize handshake and records
     /// whether a `tools/call` request ever arrives. Returns the server URL and a
@@ -1094,6 +1115,7 @@ mod egress_dispatch_tests {
                 diff_strategy: ToolDiffStrategy::None,
             },
             idempotency_class: IdempotencyClass::NonIdempotent,
+            rollback: None,
             max_output_tokens: 4096,
         }
     }

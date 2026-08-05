@@ -119,6 +119,7 @@ pub(super) fn schedule_verifiers_or_complete(request: ScheduleRequest) -> Result
                 instructions: instructions.clone(),
                 max_turns: *max_turns,
             },
+            compensation: None,
             retry: RetryPolicy {
                 max_attempts: 1,
                 initial_backoff_ms: 0,
@@ -187,6 +188,16 @@ pub(super) fn verifier_summaries(
                         class: ExecutionFailureClass::Cancelled,
                         message: reason.clone(),
                         capability_ref: None,
+                    }),
+                    ExecutionTaskResult::UnknownOutcome { message } => Some(ExecutionTaskFailure {
+                        class: ExecutionFailureClass::Terminal,
+                        message: message.clone(),
+                        capability_ref: plan
+                            .definition
+                            .nodes
+                            .iter()
+                            .find(|node| node.id == task.node_id)
+                            .and_then(|node| operation_capability(&node.operation)),
                     }),
                     ExecutionTaskResult::Completed { .. }
                     | ExecutionTaskResult::NeedsInput { .. }
@@ -289,6 +300,17 @@ pub(super) fn terminal_failure(request: &ScheduleRequest, gaps: &[String]) -> Ex
                 .and_then(|outcome| match &outcome.result {
                     ExecutionTaskResult::Failed { class, message } => Some(ExecutionTaskFailure {
                         class: class.clone(),
+                        message: message.clone(),
+                        capability_ref: request
+                            .plan
+                            .definition
+                            .nodes
+                            .iter()
+                            .find(|node| node.id == task.node_id)
+                            .and_then(|node| operation_capability(&node.operation)),
+                    }),
+                    ExecutionTaskResult::UnknownOutcome { message } => Some(ExecutionTaskFailure {
+                        class: ExecutionFailureClass::Terminal,
                         message: message.clone(),
                         capability_ref: request
                             .plan

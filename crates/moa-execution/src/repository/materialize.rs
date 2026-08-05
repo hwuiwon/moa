@@ -139,7 +139,8 @@ impl ExecutionRepository {
         if !matches!(
             run.status,
             ExecutionRunStatus::Queued | ExecutionRunStatus::Running
-        ) {
+        ) || run.pending_terminal.is_some()
+        {
             conn.rollback().await.map_err(storage_error)?;
             return Err(Error::InvalidRepositoryInput {
                 message: "tasks may materialize only for queued or running runs".to_string(),
@@ -273,6 +274,7 @@ pub(super) struct TaskMaterializationRow<'a> {
     generation: i64,
     input: &'a Value,
     task_kind: &'a LogicalTaskKind,
+    compensation_contract: &'a Option<ExecutionCompensation>,
     retry_policy: &'a moa_artifacts::execution_plan::RetryPolicy,
     estimate_cost_microusd: i64,
     estimate_tokens: i64,
@@ -303,6 +305,7 @@ pub(super) fn prepare_task_materialization_batch(
             generation: to_i64(task.generation, "task generation")?,
             input: &task.input,
             task_kind: &task.kind,
+            compensation_contract: &task.compensation,
             retry_policy: &task.retry,
             estimate_cost_microusd: estimate.cost_microusd,
             estimate_tokens: estimate.tokens,
@@ -360,6 +363,7 @@ pub(super) fn ensure_materialization_replay_matches(
         || existing.plan_revision != requested.plan_revision
         || existing.input != requested.input
         || existing.kind != requested.kind
+        || existing.compensation_contract != requested.compensation
         || existing.retry != requested.retry
         || existing.estimate != requested.reservation
     {

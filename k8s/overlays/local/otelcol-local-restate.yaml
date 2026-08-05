@@ -1,0 +1,60 @@
+# Local-only extensions to grafana/otel-lgtm's pinned collector configuration.
+# The image's base pipelines continue to own MOA OTLP. These two independent
+# pipelines add only Restate's per-pod Prometheus endpoint and JSON stdout.
+receivers:
+  prometheus/restate:
+    config:
+      scrape_configs:
+        - job_name: restate
+          scrape_interval: 5s
+          metrics_path: /metrics
+          kubernetes_sd_configs:
+            - role: pod
+              namespaces:
+                names: [moa-restate]
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster]
+              regex: moa-restate
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_container_port_number]
+              regex: "5122"
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: instance
+            - target_label: job
+              replacement: restate
+
+  filelog/restate:
+    include:
+      - /var/log/pods/moa-restate_*/*/*.log
+    start_at: beginning
+    include_file_path: true
+    operators:
+      # Removes the CRI timestamp/stream envelope. Restate's body remains its
+      # original newline-delimited JSON so Loki's `| json` parser sees exactly
+      # the server-owned fields, including restate.invocation.id when present.
+      - type: container
+
+processors:
+  resource/restate:
+    attributes:
+      - key: service.name
+        value: restate
+        action: upsert
+      - key: deployment.environment
+        value: local
+        action: upsert
+      - key: k8s.namespace.name
+        value: moa-restate
+        action: upsert
+
+service:
+  pipelines:
+    metrics/restate:
+      receivers: [prometheus/restate]
+      processors: [batch]
+      exporters: [otlp_http/metrics]
+    logs/restate:
+      receivers: [filelog/restate]
+      processors: [resource/restate, batch]
+      exporters: [otlp_http/logs]

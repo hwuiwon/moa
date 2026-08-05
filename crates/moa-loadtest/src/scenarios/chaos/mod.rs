@@ -391,7 +391,7 @@ pub async fn run_experiment(
                 "-d",
                 "--force-recreate",
                 "moa-orchestrator",
-                "restate-register",
+                "restate-bootstrap",
             ],
         )
         .await?;

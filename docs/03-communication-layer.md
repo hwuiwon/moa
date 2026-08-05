@@ -252,15 +252,14 @@ the path once in `crate::ingress` so route translation never encodes the wire
 contract. The edge issues only request-response calls, never the fire-and-forget
 `/restate/send/...` form.
 
-Turn-starting invocations are tagged for per-tenant flow control. Posting a
-message (`POST /v1/sessions/{session_id}/messages` →
-`Contacts/send_message`) starts a turn, so the edge forwards it on the scoped
-form `POST /restate/scope/{tenant_id}/call/...`, using the 36-character tenant
-UUID directly as Restate's bounded scope key. Every cheap read, status
-poll (`Session/progress`, `Contacts/progress`), authorization check, and
-session-lifecycle call stays unscoped, so a status poll can never wait behind a
-tenant's turn concurrency. `docs/12-restate-architecture.md` describes the
-cluster rule book and per-scope counters that back this admission control.
+All edge request-response traffic uses the ordinary `/restate/call/...` form.
+Posting a message (`POST /v1/sessions/{session_id}/messages` →
+`Contacts/send_message`) reaches the Session-owned `TurnAdmission` policy,
+which durably waits on shared Valkey fleet and tenant leases before starting a
+turn. `Session/progress` remains a shared Restate handler and does not acquire a
+turn lease, so status polling stays responsive while an exclusive turn-start
+handler waits. `docs/12-restate-architecture.md` describes the authoritative
+lease, heartbeat, and terminal-release semantics.
 
 ## Messaging Adapters
 
@@ -282,9 +281,10 @@ email addresses, or phone numbers.
 Notification connectors are transport clients, not durable schedulers. Caller-owned alert or notification workflows that must survive process restarts should invoke them from Restate handlers or workflows. Twilio and Postmark handle safe API-level rate limits locally by retrying HTTP 429 responses with `Retry-After`; Slack uses the Slack SDK rate-control path and maps exhausted rate limits to MOA's typed `RateLimited` error. Terminal or provider-level failures such as Twilio A2P 10DLC `30034`, Postmark inactive-recipient `ErrorCode` values, and Slack `ok:false` API errors are classified and observed so the durable caller can decide whether a new send is allowed.
 
 Slack channel pacing and multi-chunk outbound message references use
-`RuntimeCacheStore` when configured. With Redis selected, replicas coordinate
-per-channel send slots and edit/delete references. With the memory backend,
-those values are per-pod best effort; durable conversation routing still comes
-from Postgres session/channel bindings and session events.
+`RuntimeCacheStore`. The production orchestrator injects its required
+Redis-compatible Valkey store, so replicas coordinate per-channel send slots and
+edit/delete references. The memory implementation is limited to isolated
+non-orchestrator tests; durable conversation routing still comes from Postgres
+session/channel bindings and session events.
 
 Current implementation caveats are documented in `implementation-caveats.md`.

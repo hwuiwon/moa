@@ -93,9 +93,16 @@ impl WorkerImpl {
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         let matches_active = state.clear_active_turn(&outcome.turn_id);
         if matches_active {
-            if matches!(outcome.kind, TurnOutcomeKind::Failed) {
-                state.status = Some(WorkerState::Failed);
-                state.last_turn_summary = Some(outcome.message.clone());
+            match outcome.kind {
+                TurnOutcomeKind::Failed => {
+                    state.status = Some(WorkerState::Failed);
+                    state.last_turn_summary = Some(outcome.message.clone());
+                }
+                TurnOutcomeKind::Cancelled => {
+                    state.status = Some(WorkerState::Cancelled);
+                    state.last_turn_summary = Some(outcome.message.clone());
+                }
+                TurnOutcomeKind::Completed | TurnOutcomeKind::Accepted { .. } => {}
             }
             state.last_outcome = Some(outcome.clone());
         }

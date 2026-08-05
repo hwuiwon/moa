@@ -20,6 +20,10 @@ pub(super) fn task_failure_fingerprint_input(
             moa_artifacts::execution_plan::ExecutionFailureClass::Terminal,
             reason.clone(),
         ),
+        ExecutionTaskResult::UnknownOutcome { message } => (
+            moa_artifacts::execution_plan::ExecutionFailureClass::Terminal,
+            message.clone(),
+        ),
         ExecutionTaskResult::Completed { .. }
         | ExecutionTaskResult::NeedsInput { .. }
         | ExecutionTaskResult::Cancelled { .. } => return None,
@@ -104,6 +108,15 @@ pub(super) fn outcome_projection_fields(
         ExecutionTaskResult::Failed { class, message } => Ok((
             None,
             Some(json!({ "class": class, "message": message })),
+            Vec::new(),
+        )),
+        ExecutionTaskResult::UnknownOutcome { message } => Ok((
+            None,
+            Some(json!({
+                "class": "unknown_outcome",
+                "message": message,
+                "manual_reconciliation_required": true,
+            })),
             Vec::new(),
         )),
     }

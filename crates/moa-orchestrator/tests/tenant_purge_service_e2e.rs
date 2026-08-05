@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, register_deployment,
-    reserve_orchestrator_ports, restate_admin_url, restate_ingress_url, test_user_identity,
+    reserve_orchestrator_ports, restate_ingress_url, restate_test_admin_url, test_user_identity,
     with_identity,
 };
 
@@ -107,7 +107,7 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
     };
 
     let result = async {
-        register_deployment(&restate_admin_url(), &endpoint_url).await?;
+        register_deployment(&restate_test_admin_url(), &endpoint_url).await?;
         sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, 'purge e2e')")
             .bind(tenant_id.0)
             .bind(format!("purge-{tenant_id}"))

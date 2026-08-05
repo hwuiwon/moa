@@ -2,32 +2,41 @@
 
 use std::sync::Arc;
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::{
     action_policy::{
-        ActionClass, ActionEnvelope, ActionReviewOwner, ExecutionTaskOrigin, RiskLevel,
+        ActionClass, ActionEnvelope, ActionReviewOwner, ExecutionCompensationOrigin,
+        ExecutionTaskOrigin, RiskLevel,
     },
     contact::SessionActorRef,
     identifiers::{TenantId, ToolCallId},
+    tools::ToolCallRequest,
 };
-use moa_execution::wire::{ExecutionActionReviewAcknowledgement, ExecutionActionReviewResolution};
-use moa_observability::propagation::{TRACE_LINK_TRACEPARENT_HEADER, TRACE_LINK_TRACESTATE_HEADER};
-use moa_orchestrator::services::action_reviews_reaper::ActionReviewReaper;
+use moa_execution::wire::ExecutionActionReviewResolution;
+use moa_orchestrator::services::{
+    action_reviews::{
+        ExecutionActionReviewSettlement, SettleExecutionActionReviewRequest,
+        settle_execution_action_review,
+    },
+    action_reviews_reaper::ActionReviewReaper,
+};
 use moa_test_support::postgres::TestDb;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const RESOLUTION_TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-const RESOLUTION_TRACESTATE: &str = "vendor=resolution";
 const TASK_TRACEPARENT: &str = "00-70f5db931a2b4b63a5998b0ca94a6d20-7f3a20f9e6a03e01-01";
 const TASK_TRACESTATE: &str = "vendor=task";
+
+type ReviewSettlementRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<Uuid>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
 
 #[tokio::test]
 async fn expired_pending_review_is_failed_closed_db() {
@@ -120,6 +129,10 @@ async fn timeout_release_survives_crash_between_terminalization_and_delivery_db(
                         order.lock().await.push("owner_release");
                         StatusCode::OK
                     }),
+                )
+                .route(
+                    "/restate/call/ActionReviewDispatcher/dispatch",
+                    post(|| async { Json(serde_json::json!({ "claimed": 0 })) }),
                 )
                 .with_state(server_state),
         )
@@ -242,9 +255,10 @@ async fn expired_review_claimed_by_durable_execution_is_not_timed_out_db() {
 }
 
 #[tokio::test]
-async fn timed_out_execution_review_inserts_and_dispatches_resolution_db() {
+async fn timed_out_execution_review_inserts_resolution_and_wakes_restate_dispatcher_db() {
     // Pins: timeout persistence and its execution-task resolution outbox insert
-    // commit atomically, and one bounded dispatch marks the exact claimed row delivered.
+    // commit atomically, while the process reaper only wakes the Restate-owned
+    // dispatcher and never calls the private ExecutionTask workflow directly.
     let test_db = test_pool().await;
     let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::new_v4());
@@ -256,13 +270,24 @@ async fn timed_out_execution_review_inserts_and_dispatches_resolution_db() {
     let address = listener
         .local_addr()
         .expect("listener address should resolve");
+    type DispatcherCalls = Arc<Mutex<Vec<serde_json::Value>>>;
+    let calls = DispatcherCalls::default();
+    let server_calls = calls.clone();
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            Router::new().route(
-                "/restate/call/ExecutionTask/{task_id}/resolve_action_review",
-                post(|| async { Json(ExecutionActionReviewAcknowledgement::Applied) }),
-            ),
+            Router::new()
+                .route(
+                    "/restate/call/ActionReviewDispatcher/dispatch",
+                    post(
+                        |State(calls): State<DispatcherCalls>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            calls.lock().await.push(body);
+                            Json(serde_json::json!({ "claimed": 1 }))
+                        },
+                    ),
+                )
+                .with_state(server_calls),
         )
         .await
     });
@@ -292,12 +317,17 @@ async fn timed_out_execution_review_inserts_and_dispatches_resolution_db() {
         }
     );
     assert_eq!(
-        attempt_count, 1,
-        "one bounded dispatch attempt is persisted"
+        attempt_count, 0,
+        "only the Restate dispatcher may claim rows"
     );
     assert!(
-        delivered_at.is_some(),
-        "Applied acknowledgement marks delivery"
+        delivered_at.is_none(),
+        "the process reaper must not acknowledge private workflow delivery"
+    );
+    assert_eq!(
+        calls.lock().await.as_slice(),
+        &[serde_json::json!({})],
+        "one dispatcher wake must replace direct ExecutionTask ingress"
     );
     server.abort();
     delete_execution_run(&pool, origin.run_uid).await;
@@ -355,308 +385,280 @@ async fn timed_out_execution_review_copies_original_task_context_atomically_db()
 }
 
 #[tokio::test]
-async fn stale_outbox_claim_acknowledgement_cannot_mark_newer_attempt_delivered_db() {
-    // Pins: a delayed acknowledgement is fenced by the claimed attempt count
-    // and cannot mark a row delivered after crash recovery creates a newer claim.
+async fn timed_out_compensation_review_creates_one_exact_delivery_db() {
+    // Pins: an expired compensation review terminalizes once and its outbox row
+    // preserves the exact compensation id instead of routing to the forward task.
     let test_db = test_pool().await;
     let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::new_v4());
-    let origin = insert_execution_task(&pool, tenant_id).await;
-    let review_id = insert_execution_review(&pool, tenant_id, origin, ReviewClock::Expired).await;
-    ActionReviewReaper::new(pool.clone())
-        .sweep()
-        .await
-        .expect("timeout should insert outbox row");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock Restate listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener address should resolve");
-    let handler_pool = pool.clone();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/restate/call/ExecutionTask/{task_id}/resolve_action_review",
-                post(move || {
-                    let pool = handler_pool.clone();
-                    async move {
-                        sqlx::query(
-                            "UPDATE moa.execution_action_review_outbox \
-                             SET attempt_count = attempt_count + 1 WHERE review_uid = $1",
-                        )
-                        .bind(review_id)
-                        .execute(&pool)
-                        .await
-                        .expect("test should advance the claim fence");
-                        Json(ExecutionActionReviewAcknowledgement::Applied)
-                    }
-                }),
-            ),
-        )
-        .await
-    });
-    let reaper =
-        ActionReviewReaper::with_restate_ingress(pool.clone(), format!("http://{address}"));
+    let task_origin = insert_execution_task(&pool, tenant_id).await;
+    let compensation_origin = insert_execution_compensation(&pool, task_origin).await;
+    let mut envelope = action_envelope(tenant_id, None);
+    envelope.owner = ActionReviewOwner::ExecutionCompensation {
+        session_id: envelope.owner.session_id(),
+        origin: compensation_origin,
+    };
+    let review_id = insert_review_with_envelope(
+        &pool,
+        "command_execution",
+        "high",
+        ReviewClock::Expired,
+        envelope,
+        Some((TASK_TRACEPARENT, TASK_TRACESTATE)),
+    )
+    .await;
 
+    let reaper = ActionReviewReaper::new(pool.clone());
+    assert_eq!(reaper.sweep().await.expect("timeout should commit"), 1);
     assert_eq!(
-        reaper
-            .dispatch_execution_review_resolutions()
-            .await
-            .expect("dispatch should complete"),
-        1
+        reaper.sweep().await.expect("timeout replay should be idle"),
+        0
     );
-    let delivered_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT delivered_at FROM moa.execution_action_review_outbox WHERE review_uid = $1",
+    let (owner_kind, operation_id, generation, count): (String, Uuid, i64, i64) = sqlx::query_as(
+        "SELECT owner_kind, operation_id, generation, COUNT(*) OVER() \
+             FROM moa.execution_action_review_outbox WHERE review_uid = $1",
     )
     .bind(review_id)
     .fetch_one(&pool)
     .await
-    .expect("outbox row should remain");
-    assert!(
-        delivered_at.is_none(),
-        "the stale attempt must not acknowledge the newer claim"
+    .expect("compensation outbox row should exist");
+    assert_eq!(owner_kind, "compensation");
+    assert_eq!(operation_id, compensation_origin.compensation_id);
+    assert_eq!(
+        generation,
+        i64::try_from(compensation_origin.generation)
+            .expect("fixture generation should fit PostgreSQL BIGINT")
     );
-    server.abort();
-    delete_execution_run(&pool, origin.run_uid).await;
+    assert_eq!(count, 1, "one review may create only one delivery row");
+    delete_execution_run(&pool, task_origin.run_uid).await;
 }
 
 #[tokio::test]
-async fn execution_review_outbox_retries_after_arbitrarily_many_failures_db() {
-    // Pins: persisted attempt_count controls claim fencing and backoff only;
-    // it never becomes a terminal retry cap before the task acknowledges
-    // Applied, Replayed, or AuditedStale.
+async fn owner_settlement_revokes_unclaimed_task_review_before_admin_claim_db() {
+    // Pins: when task termination wins the action-review race, the same locked
+    // transaction terminalizes the pending review before any admin clear can
+    // claim or dispatch its gated effect.
     let test_db = test_pool().await;
     let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::new_v4());
     let origin = insert_execution_task(&pool, tenant_id).await;
-    let review_id = insert_execution_review(&pool, tenant_id, origin, ReviewClock::Expired).await;
-    ActionReviewReaper::new(pool.clone())
-        .sweep()
-        .await
-        .expect("timeout should insert outbox row");
-    sqlx::query(
-        "UPDATE moa.execution_action_review_outbox \
-         SET attempt_count = 32, claimed_at = NULL, next_attempt_at = NOW() - INTERVAL '1 second' \
-         WHERE review_uid = $1",
+    let envelope = action_envelope(tenant_id, Some(origin));
+    let owner = envelope.owner.clone();
+    let review_id = insert_review_with_envelope(
+        &pool,
+        "command_execution",
+        "high",
+        ReviewClock::Fresh,
+        envelope,
+        Some((TASK_TRACEPARENT, TASK_TRACESTATE)),
     )
+    .await;
+
+    let settlement = settle_execution_action_review(
+        pool.clone(),
+        SettleExecutionActionReviewRequest {
+            tenant_id,
+            review_id,
+            owner,
+        },
+    )
+    .await
+    .expect("unclaimed task review should settle transactionally");
+    assert_eq!(settlement, ExecutionActionReviewSettlement::Revoked);
+
+    let attempted_tool_call_id = Uuid::new_v4();
+    let later_claim = sqlx::query(
+        r#"
+        UPDATE tenant_action_reviews
+        SET decided_by = 'admin-after-task-terminal',
+            decided_at = NOW(),
+            execution_tool_call_id = $3,
+            execution_requested_at = NOW()
+        WHERE storage_partition_id = $1
+          AND id = $2
+          AND status = 'pending'
+          AND execution_requested_at IS NULL
+        "#,
+    )
+    .bind(moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string())
     .bind(review_id)
+    .bind(attempted_tool_call_id)
     .execute(&pool)
     .await
-    .expect("fixture should represent many prior failed deliveries");
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock Restate listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener address should resolve");
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/restate/call/ExecutionTask/{task_id}/resolve_action_review",
-                post(|| async { Json(ExecutionActionReviewAcknowledgement::AuditedStale) }),
-            ),
-        )
-        .await
-    });
-    let reaper =
-        ActionReviewReaper::with_restate_ingress(pool.clone(), format!("http://{address}"));
-
+    .expect("later admin claim attempt should be rejected by durable row state");
     assert_eq!(
-        reaper
-            .dispatch_execution_review_resolutions()
-            .await
-            .expect("late retry dispatch should complete"),
-        1,
-        "attempt 33 must still be claimed and delivered"
+        later_claim.rows_affected(),
+        0,
+        "a revoked review must never become dispatchable"
     );
-    let (attempt_count, delivered_at): (i32, Option<chrono::DateTime<chrono::Utc>>) =
-        sqlx::query_as(
-            "SELECT attempt_count, delivered_at \
-             FROM moa.execution_action_review_outbox WHERE review_uid = $1",
-        )
-        .bind(review_id)
-        .fetch_one(&pool)
-        .await
-        .expect("outbox row should remain auditable");
-    assert_eq!(attempt_count, 33);
-    assert!(
-        delivered_at.is_some(),
-        "AuditedStale acknowledgement is a terminal delivery acknowledgement"
-    );
-    server.abort();
-    delete_execution_run(&pool, origin.run_uid).await;
-}
 
-#[tokio::test]
-async fn execution_review_retry_reinjects_resolution_parent_and_preserves_both_pairs_db() {
-    // Pins: a failed raw-Restate delivery retries with the first persisted resolution
-    // parent while the separately stored execution-task link target remains byte-exact.
-    let test_db = test_pool().await;
-    let pool = test_db.store().pool().clone();
-    let tenant_id = TenantId::from(Uuid::new_v4());
-    let origin = insert_execution_task(&pool, tenant_id).await;
-    let review_id = insert_execution_review(&pool, tenant_id, origin, ReviewClock::Fresh).await;
-    let resolution = serde_json::to_value(ExecutionActionReviewResolution::TimedOut {
-        reason: "review expired without a decision".to_string(),
-    })
-    .expect("resolution should serialize");
-    sqlx::query(
+    let (
+        status,
+        decided_by,
+        deny_reason,
+        decided_at,
+        execution_tool_call_id,
+        execution_requested_at,
+    ): ReviewSettlementRow = sqlx::query_as(
         r#"
-        INSERT INTO moa.execution_action_review_outbox (
-            review_uid, tenant_id, contact_id, run_uid, task_id, generation, resolution,
-            traceparent, tracestate, task_traceparent, task_tracestate
-        )
-        SELECT $1, tenant_id, contact_id, run_uid, task_id, 1, $4, $5, $6, $7, $8
-        FROM moa.execution_task
-        WHERE run_uid = $2 AND task_id = $3
+        SELECT status, decided_by, deny_reason, decided_at,
+               execution_tool_call_id, execution_requested_at
+        FROM tenant_action_reviews
+        WHERE id = $1
         "#,
     )
     .bind(review_id)
-    .bind(origin.run_uid)
-    .bind(origin.task_uid)
-    .bind(resolution)
-    .bind(RESOLUTION_TRACEPARENT)
-    .bind(RESOLUTION_TRACESTATE)
-    .bind(TASK_TRACEPARENT)
-    .bind(TASK_TRACESTATE)
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
-    .expect("outbox fixture should insert");
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock Restate listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener address should resolve");
-    type CapturedHeaders = Arc<
-        Mutex<
-            Vec<(
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            )>,
-        >,
-    >;
-    let captured = CapturedHeaders::default();
-    let server_state = captured.clone();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new()
-                .route(
-                    "/restate/call/ExecutionTask/{task_id}/resolve_action_review",
-                    post(
-                        |State(captured): State<CapturedHeaders>, headers: HeaderMap| async move {
-                            let traceparent = headers
-                                .get("traceparent")
-                                .and_then(|value| value.to_str().ok())
-                                .map(ToOwned::to_owned);
-                            let tracestate = headers
-                                .get("tracestate")
-                                .and_then(|value| value.to_str().ok())
-                                .map(ToOwned::to_owned);
-                            let task_traceparent = headers
-                                .get(TRACE_LINK_TRACEPARENT_HEADER)
-                                .and_then(|value| value.to_str().ok())
-                                .map(ToOwned::to_owned);
-                            let task_tracestate = headers
-                                .get(TRACE_LINK_TRACESTATE_HEADER)
-                                .and_then(|value| value.to_str().ok())
-                                .map(ToOwned::to_owned);
-                            let mut captured = captured.lock().await;
-                            captured.push((
-                                traceparent,
-                                tracestate,
-                                task_traceparent,
-                                task_tracestate,
-                            ));
-                            if captured.len() == 1 {
-                                (StatusCode::SERVICE_UNAVAILABLE, "retry").into_response()
-                            } else {
-                                Json(ExecutionActionReviewAcknowledgement::Applied).into_response()
-                            }
-                        },
-                    ),
-                )
-                .with_state(server_state),
-        )
-        .await
-    });
-    let reaper =
-        ActionReviewReaper::with_restate_ingress(pool.clone(), format!("http://{address}"));
-
+    .expect("revoked review should remain readable");
+    assert_eq!(status, "revoked");
     assert_eq!(
-        reaper
-            .dispatch_execution_review_resolutions()
-            .await
-            .expect("first dispatch should persist its failure"),
-        1
+        decided_by.as_deref(),
+        Some("system:execution-owner-terminal")
     );
-    sqlx::query(
-        "UPDATE moa.execution_action_review_outbox \
-         SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE review_uid = $1",
-    )
-    .bind(review_id)
-    .execute(&pool)
-    .await
-    .expect("retry fixture should make the row immediately claimable");
     assert_eq!(
-        reaper
-            .dispatch_execution_review_resolutions()
-            .await
-            .expect("second dispatch should acknowledge delivery"),
-        1
+        deny_reason.as_deref(),
+        Some("execution owner terminated before the reviewed effect was claimed")
     );
-
-    let captured = captured.lock().await.clone();
-    assert_eq!(
-        captured,
-        vec![
-            (
-                Some(RESOLUTION_TRACEPARENT.to_string()),
-                Some(RESOLUTION_TRACESTATE.to_string()),
-                Some(TASK_TRACEPARENT.to_string()),
-                Some(TASK_TRACESTATE.to_string()),
-            ),
-            (
-                Some(RESOLUTION_TRACEPARENT.to_string()),
-                Some(RESOLUTION_TRACESTATE.to_string()),
-                Some(TASK_TRACEPARENT.to_string()),
-                Some(TASK_TRACESTATE.to_string()),
-            ),
-        ],
-        "every retry must reinject the first resolution parent and task link"
-    );
-    let stored: (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT traceparent, tracestate, task_traceparent, task_tracestate \
-             FROM moa.execution_action_review_outbox WHERE review_uid = $1",
+    assert!(decided_at.is_some(), "revocation must record when it won");
+    assert_eq!(execution_tool_call_id, None);
+    assert_eq!(execution_requested_at, None);
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.execution_action_review_outbox WHERE review_uid = $1",
     )
     .bind(review_id)
     .fetch_one(&pool)
     .await
-    .expect("stored trace pairs should remain auditable");
+    .expect("outbox count should load");
     assert_eq!(
-        stored,
-        (
-            Some(RESOLUTION_TRACEPARENT.to_string()),
-            Some(RESOLUTION_TRACESTATE.to_string()),
-            Some(TASK_TRACEPARENT.to_string()),
-            Some(TASK_TRACESTATE.to_string()),
-        )
+        outbox_count, 0,
+        "revocation must not invent an execution resolution delivery"
     );
-    server.abort();
+
     delete_execution_run(&pool, origin.run_uid).await;
+}
+
+#[tokio::test]
+async fn admin_claim_requires_compensation_owner_to_join_definitive_resolution_db() {
+    // Pins: when an admin clear claims a compensation review first, owner
+    // termination cannot revoke it or erase its exact compensation fence; the
+    // compensation workflow must join the already-owned definitive resolution.
+    let test_db = test_pool().await;
+    let pool = test_db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::new_v4());
+    let task_origin = insert_execution_task(&pool, tenant_id).await;
+    let compensation_origin = insert_execution_compensation(&pool, task_origin).await;
+    let mut envelope = action_envelope(tenant_id, None);
+    let compensation_owner = ActionReviewOwner::ExecutionCompensation {
+        session_id: envelope.owner.session_id(),
+        origin: compensation_origin,
+    };
+    envelope.owner = compensation_owner.clone();
+    let review_id = insert_review_with_envelope(
+        &pool,
+        "command_execution",
+        "high",
+        ReviewClock::Fresh,
+        envelope,
+        Some((TASK_TRACEPARENT, TASK_TRACESTATE)),
+    )
+    .await;
+    let claimed_tool_call_id = Uuid::new_v4();
+    let claim = sqlx::query(
+        r#"
+        UPDATE tenant_action_reviews
+        SET decided_by = 'admin-won-clear-race',
+            decided_at = NOW(),
+            execution_tool_call_id = $3,
+            execution_requested_at = NOW()
+        WHERE storage_partition_id = $1
+          AND id = $2
+          AND status = 'pending'
+          AND execution_requested_at IS NULL
+        "#,
+    )
+    .bind(moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string())
+    .bind(review_id)
+    .bind(claimed_tool_call_id)
+    .execute(&pool)
+    .await
+    .expect("admin clear should claim the pending compensation review");
+    assert_eq!(claim.rows_affected(), 1);
+
+    let wrong_owner = ActionReviewOwner::ExecutionCompensation {
+        session_id: compensation_owner.session_id(),
+        origin: ExecutionCompensationOrigin {
+            compensation_id: Uuid::new_v4(),
+            ..compensation_origin
+        },
+    };
+    settle_execution_action_review(
+        pool.clone(),
+        SettleExecutionActionReviewRequest {
+            tenant_id,
+            review_id,
+            owner: wrong_owner,
+        },
+    )
+    .await
+    .expect_err("a different compensation id must not settle the claimed review");
+
+    let settlement = settle_execution_action_review(
+        pool.clone(),
+        SettleExecutionActionReviewRequest {
+            tenant_id,
+            review_id,
+            owner: compensation_owner.clone(),
+        },
+    )
+    .await
+    .expect("the exact compensation owner should inspect the claimed review");
+    assert_eq!(
+        settlement,
+        ExecutionActionReviewSettlement::JoinRequired,
+        "a claimed effect must reach its definitive resolution before compensation terminates"
+    );
+
+    let (status, stored_envelope, decided_by, execution_tool_call_id, execution_requested_at): (
+        String,
+        serde_json::Value,
+        Option<String>,
+        Option<Uuid>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        r#"
+        SELECT status, envelope, decided_by, execution_tool_call_id, execution_requested_at
+        FROM tenant_action_reviews
+        WHERE id = $1
+        "#,
+    )
+    .bind(review_id)
+    .fetch_one(&pool)
+    .await
+    .expect("claimed compensation review should remain readable");
+    let stored_envelope: ActionEnvelope =
+        serde_json::from_value(stored_envelope).expect("stored envelope should decode");
+    assert_eq!(status, "pending", "join-required work must not be revoked");
+    assert_eq!(stored_envelope.owner, compensation_owner);
+    assert_eq!(decided_by.as_deref(), Some("admin-won-clear-race"));
+    assert_eq!(execution_tool_call_id, Some(claimed_tool_call_id));
+    assert!(
+        execution_requested_at.is_some(),
+        "the winning admin claim must remain durably owned"
+    );
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.execution_action_review_outbox WHERE review_uid = $1",
+    )
+    .bind(review_id)
+    .fetch_one(&pool)
+    .await
+    .expect("outbox count should load");
+    assert_eq!(
+        outbox_count, 0,
+        "the outbox must wait for the claimed tool's definitive resolution"
+    );
+
+    delete_execution_run(&pool, task_origin.run_uid).await;
 }
 
 /// Whether the inserted review is already past its expiry.
@@ -716,6 +718,25 @@ async fn insert_review_with_envelope(
 ) -> Uuid {
     let review_id = Uuid::new_v4();
     envelope.review_id = review_id;
+    let tool_request = ToolCallRequest {
+        tool_call_id: envelope.tool_call_id,
+        caller_identity: Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::new_v4(),
+            tenant_id: envelope.tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        },
+        provider_tool_use_id: None,
+        tool_name: "bash".to_string(),
+        expected_tool_contract_revision: "fixture-v1".to_string(),
+        input: serde_json::json!({"cmd": "printf ok"}),
+        active_canary: None,
+        session_id: envelope.owner.session_id(),
+        trusted_sandbox_manifest: None,
+        worker_id: None,
+        resource_budget: Default::default(),
+    };
     let expires_at_sql = match clock {
         ReviewClock::Expired => "NOW() - INTERVAL '1 minute'",
         ReviewClock::Fresh => "NOW() + INTERVAL '1 day'",
@@ -728,7 +749,7 @@ async fn insert_review_with_envelope(
              preview, tool_request, requested_by, status, created_at, expires_at,
              execution_task_traceparent, execution_task_tracestate, owner_registered_at)
         VALUES ($1, $2, $3, $4, 'bash', $5, $6, 'test action', 'printf ok', $7,
-                '{{"fields":[],"file_diffs":[]}}'::JSONB, '{{}}'::JSONB,
+                '{{"fields":[],"file_diffs":[]}}'::JSONB, $10,
                 'anonymous', 'pending', NOW() - INTERVAL '2 minutes', {expires_at_sql},
                 $8, $9, NOW())
         "#
@@ -745,6 +766,7 @@ async fn insert_review_with_envelope(
     .bind(serde_json::to_value(envelope).expect("envelope should serialize"))
     .bind(execution_task_trace_context.map(|context| context.0))
     .bind(execution_task_trace_context.map(|context| context.1))
+    .bind(serde_json::to_value(tool_request).expect("tool request should serialize"))
     .execute(pool)
     .await
     .expect("pending review should insert");
@@ -852,6 +874,40 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
     ExecutionTaskOrigin {
         run_uid,
         task_uid,
+        generation: 1,
+    }
+}
+
+async fn insert_execution_compensation(
+    pool: &PgPool,
+    task_origin: ExecutionTaskOrigin,
+) -> ExecutionCompensationOrigin {
+    let compensation_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO moa.execution_compensation (
+            compensation_id, run_uid, forward_task_id, tenant_id,
+            registered_sequence, forward_generation, compensator, mapped_input
+        )
+        SELECT $1, task.run_uid, task.task_id, task.tenant_id,
+               1, $4, '{}'::JSONB, '{}'::JSONB
+        FROM moa.execution_task AS task
+        WHERE task.run_uid = $2 AND task.task_id = $3
+        "#,
+    )
+    .bind(compensation_id)
+    .bind(task_origin.run_uid)
+    .bind(task_origin.task_uid)
+    .bind(
+        i64::try_from(task_origin.generation)
+            .expect("fixture generation should fit PostgreSQL BIGINT"),
+    )
+    .execute(pool)
+    .await
+    .expect("execution compensation should insert");
+    ExecutionCompensationOrigin {
+        run_uid: task_origin.run_uid,
+        compensation_id,
         generation: 1,
     }
 }

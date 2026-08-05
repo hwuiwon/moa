@@ -13,10 +13,12 @@ use moa_config::SessionLimitsConfig;
 use moa_core::{
     traits::{ChannelAdapter, SessionStore as _},
     types::{
-        action_policy::{ActionRuleScope, CapabilityProvenance},
+        action_policy::{
+            ActionReviewOwner, ActionRuleScope, CapabilityProvenance, ExecutionTaskOrigin,
+        },
         channel::Channel,
         completion::{
-            CompletionContent, CompletionRequest, DEFER_BRAIN_RESPONSE_METADATA_KEY,
+            CompletionContent, CompletionRequest, DEFER_BRAIN_RESPONSE_METADATA_KEY, StopReason,
             ToolCallContent,
         },
         context::ContextMessage,
@@ -41,7 +43,7 @@ use moa_execution::{
         ExecutionActionReviewAcknowledgement, ExecutionActionReviewResolution,
         ExecutionActionReviewResolutionRequest, ExecutionInputRequest,
         ExecutionReviewDecisionRequest, ExecutionRunWakeReason, ExecutionRunWakeRequest,
-        ExecutionSignalRequest, ExecutionTaskWorkflowRequest,
+        ExecutionSignalRequest, ExecutionTaskWorkflowRequest, ExecutionToolDispatchRejection,
     },
 };
 use moa_observability::propagation::link_remote_context_from_link_headers;
@@ -54,14 +56,22 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::ctx::RequestHeaders;
 
+use crate::workflows::child_invocation::{ChildInvocationOutcome, cancel_and_join_child_call};
 use crate::{
     services::{
-        llm_gateway::LLMGatewayClient,
+        action_reviews::{
+            ActionReviewsClient, ExecutionActionReviewSettlement,
+            SettleExecutionActionReviewRequest,
+        },
+        llm_gateway::{
+            LLMCompletionAction, LLMCompletionOwner, LLMGatewayClient, attach_completion_owner,
+            completion_idempotency_key,
+        },
         tool_executor::{ReleaseExecutionTaskHandsRequest, ToolExecutorClient},
     },
     tool_invocation::governed::{
         GovernedInvocationDisposition, GovernedInvocationOrigin, GovernedInvocationOutcome,
-        GovernedInvocationRequest, invoke_governed_tool,
+        GovernedInvocationRequest, GovernedInvocationResult, invoke_governed_tool,
     },
     workflows::execution_run::ExecutionRunClient,
 };
@@ -181,17 +191,55 @@ impl ExecutionTask for ExecutionTaskImpl {
                 );
             }
             if prepared.task.status.is_terminal() || prepared.run.status.is_terminal() {
-                cleanup_task_hands(&ctx, &prepared.run, &prepared.task);
+                cleanup_task_hands(&ctx, &prepared.run, &prepared.task).await?;
+                return Ok(());
+            }
+            if prepared.run.pending_terminal.is_some() {
+                persist_cancelled_task_and_finish(
+                    &ctx,
+                    self.repository.clone(),
+                    scope,
+                    prepared,
+                    "execution run fenced forward work before compensation".to_string(),
+                    operation_index,
+                )
+                .await?;
                 return Ok(());
             }
 
             match &prepared.task.kind {
                 LogicalTaskKind::Review { .. } => {
-                    await_review_or_cancel(&ctx, &prepared.task).await?;
+                    if let ParkedTaskWake::Cancelled(reason) =
+                        await_review_or_cancel(&ctx, &prepared.task).await?
+                    {
+                        persist_cancelled_task_and_finish(
+                            &ctx,
+                            self.repository.clone(),
+                            scope,
+                            prepared,
+                            reason,
+                            operation_index,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     continue;
                 }
                 LogicalTaskKind::WaitSignal { signal_name } => {
-                    await_signal_or_cancel(&ctx, &prepared.task, signal_name).await?;
+                    if let ParkedTaskWake::Cancelled(reason) =
+                        await_signal_or_cancel(&ctx, &prepared.task, signal_name).await?
+                    {
+                        persist_cancelled_task_and_finish(
+                            &ctx,
+                            self.repository.clone(),
+                            scope,
+                            prepared,
+                            reason,
+                            operation_index,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     continue;
                 }
                 _ => {}
@@ -261,24 +309,46 @@ impl ExecutionTask for ExecutionTaskImpl {
                         ExecutionRunWakeReason::TaskOutcome,
                     );
                     if retried.task.status.is_terminal() || retried.run.status.is_terminal() {
-                        cleanup_task_hands(&ctx, &retried.run, &retried.task);
+                        cleanup_task_hands(&ctx, &retried.run, &retried.task).await?;
                         return Ok(());
                     }
                     let delay = retry_delay_ms(retried.task.attempt, &retried.task.retry);
                     ctx.sleep(std::time::Duration::from_millis(delay)).await?;
                 }
                 ExecutionTaskResult::NeedsInput { .. } => {
-                    await_input_or_cancel(&ctx, &persisted.task).await?;
+                    if let ParkedTaskWake::Cancelled(reason) =
+                        await_input_or_cancel(&ctx, &persisted.task).await?
+                    {
+                        persist_cancelled_task_and_finish(
+                            &ctx,
+                            self.repository.clone(),
+                            scope,
+                            persisted,
+                            reason,
+                            operation_index,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                 }
                 ExecutionTaskResult::NeedsReplan { .. } => {
-                    let _: String = ctx.promise(K_CANCEL_PROMISE).await?;
-                    cleanup_task_hands(&ctx, &persisted.run, &persisted.task);
+                    let reason: String = ctx.promise(K_CANCEL_PROMISE).await?;
+                    persist_cancelled_task_and_finish(
+                        &ctx,
+                        self.repository.clone(),
+                        scope,
+                        persisted,
+                        reason,
+                        operation_index,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 ExecutionTaskResult::Completed { .. }
                 | ExecutionTaskResult::Cancelled { .. }
+                | ExecutionTaskResult::UnknownOutcome { .. }
                 | ExecutionTaskResult::Failed { .. } => {
-                    cleanup_task_hands(&ctx, &persisted.run, &persisted.task);
+                    cleanup_task_hands(&ctx, &persisted.run, &persisted.task).await?;
                     return Ok(());
                 }
             }
@@ -458,6 +528,13 @@ async fn prepare_task(
         )
         .into());
     }
+    if run.pending_terminal.is_some() && !task.status.is_terminal() {
+        return Ok(PreparedTask {
+            run,
+            task,
+            wake_run: false,
+        });
+    }
     if task.status.is_terminal() || run.status.is_terminal() {
         let wake_run = task.status.is_terminal() && !run.status.is_terminal();
         return Ok(PreparedTask {
@@ -612,6 +689,12 @@ async fn execute_capability(
     )
     .map_err(execution_error)?;
     let session = load_session(workflow, ctx, run.session_id, task).await?;
+    if let Some(outcome) = cancellation_outcome_before_next_agent_tool(
+        ctx.peek_promise::<String>(K_CANCEL_PROMISE).await?,
+        &task.actual,
+    ) {
+        return Ok(outcome);
+    }
     let invocation = invoke_capability_tool(
         workflow,
         ctx,
@@ -637,7 +720,12 @@ async fn execute_capability(
             .retrieved_bytes
             .saturating_add(serialized_len(&output.safe_output.structured));
     }
-    let outcome = capability_invocation_outcome(capability.idempotency_class, invocation, usage)?;
+    let outcome = capability_invocation_outcome(
+        capability.idempotency_class,
+        capability.action_class,
+        invocation,
+        usage,
+    )?;
     let output_usage = outcome.usage.clone();
     let ExecutionTaskResult::Completed { output: value, .. } = &outcome.result else {
         return Ok(outcome);
@@ -647,8 +735,8 @@ async fn execute_capability(
         value,
         "execution_task.capability_output",
     ) {
-        return Ok(failed_task_outcome(
-            ExecutionFailureClass::InvalidOutput,
+        return Ok(invalid_capability_output_outcome(
+            capability.action_class,
             error.to_string(),
             output_usage,
         ));
@@ -893,18 +981,34 @@ async fn execute_agent(
             DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
             Value::Bool(true),
         );
-        let response = restate_sdk::select! {
-            reason = ctx.promise::<String>(K_CANCEL_PROMISE) => {
-                return Ok(cancelled_task_outcome(reason?, usage));
-            },
-            response = crate::restate_identity::replay_safe_request(
-                ctx.service_client::<LLMGatewayClient>()
-                    .complete(Json::from(request)),
-            )
-                .call() => {
-                    response?.into_inner()
-                }
+        let completion_owner = LLMCompletionOwner::execution_run(run.run_uid.to_string());
+        attach_completion_owner(&mut request, &completion_owner);
+        let call = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<LLMGatewayClient>()
+                .complete(Json::from(request))
+                .idempotency_key(completion_idempotency_key(
+                    ctx.invocation_id(),
+                    LLMCompletionAction::ExecutionTaskModel { turn },
+                )),
+        )
+        .call();
+        let response = match cancel_and_join_child_call(
+            ctx.promise::<String>(K_CANCEL_PROMISE),
+            call,
+        )
+        .await?
+        {
+            ChildInvocationOutcome::Cancelled(reason) => {
+                return Ok(cancelled_task_outcome(reason, usage));
+            }
+            ChildInvocationOutcome::Completed(response) => response.into_inner(),
         };
+        if response.stop_reason == StopReason::Cancelled {
+            return Ok(cancelled_task_outcome(
+                "execution run fenced its provider completion".to_string(),
+                usage,
+            ));
+        }
         usage.tokens = usage
             .tokens
             .saturating_add(response.usage.total_input_tokens() as u64)
@@ -930,6 +1034,15 @@ async fn execute_agent(
             response.thought_signature,
         ));
         for (call_index, tool_call) in tool_calls.into_iter().enumerate() {
+            let cancellation_reason = ctx.peek_promise::<String>(K_CANCEL_PROMISE).await?;
+            if let Some(outcome) =
+                cancellation_outcome_before_next_agent_tool(cancellation_reason, &usage)
+            {
+                // A prior governed effect is always joined and accounted before
+                // reaching this boundary. Once cancellation is durable, no later
+                // tool from the same model response may cross the admission fence.
+                return Ok(outcome);
+            }
             let binding = capability_bindings
                 .iter()
                 .find(|binding| binding.tool_name == tool_call.invocation.name)
@@ -1072,6 +1185,13 @@ async fn execute_agent(
     ))
 }
 
+fn cancellation_outcome_before_next_agent_tool(
+    cancellation_reason: Option<String>,
+    usage: &ExecutionUsage,
+) -> Option<ExecutionTaskOutcome> {
+    cancellation_reason.map(|reason| cancelled_task_outcome(reason, usage.clone()))
+}
+
 fn task_agent_tool_schema(binding: &AgentCapabilityBinding<'_>) -> Value {
     json!({
         "name": binding.tool_name,
@@ -1165,16 +1285,47 @@ async fn invoke_capability_tool(
         workflow.channel_adapters.as_ref(),
     )
     .await?;
-    let GovernedInvocationOutcome::Completed(result) = outcome else {
-        return Err(TerminalError::new("execution agents cannot invoke delegation tools").into());
+    let result = match classify_governed_capability_outcome(outcome)? {
+        GovernedCapabilityOutcome::Completed(result) => result,
+        GovernedCapabilityOutcome::Terminal(result) => {
+            return Ok(CapabilityInvocationResult::Terminal(result));
+        }
     };
     if result.disposition == GovernedInvocationDisposition::ReviewPending {
         let promise_key = action_review_promise_key(tool_id.0, task.generation);
         let resolution = restate_sdk::select! {
             reason = ctx.promise::<String>(K_CANCEL_PROMISE) => {
-                return Ok(CapabilityInvocationResult::Terminal(
-                    ExecutionTaskResult::Cancelled { reason: reason? }
-                ));
+                let reason = reason?;
+                let settlement = crate::restate_identity::replay_safe_request(
+                    ctx.service_client::<ActionReviewsClient>()
+                        .settle_execution_owner_review(Json::from(
+                            SettleExecutionActionReviewRequest {
+                                tenant_id: run.tenant_id,
+                                review_id: tool_id.0,
+                                owner: ActionReviewOwner::ExecutionTask {
+                                    session_id: run.session_id,
+                                    origin: ExecutionTaskOrigin {
+                                        run_uid: run.run_uid,
+                                        task_uid: task.task_id.as_uuid(),
+                                        generation: task.generation,
+                                    },
+                                },
+                            },
+                        )),
+                )
+                .call()
+                .await?
+                .into_inner();
+                match action_review_cancellation_step(settlement, &reason) {
+                    ActionReviewCancellationStep::Cancelled(result) => {
+                        return Ok(CapabilityInvocationResult::Terminal(result));
+                    }
+                    ActionReviewCancellationStep::JoinResolution => {
+                        ctx.promise::<Json<ExecutionActionReviewResolution>>(&promise_key)
+                            .await?
+                            .into_inner()
+                    }
+                }
             },
             resolution = ctx.promise::<Json<ExecutionActionReviewResolution>>(
                 &promise_key
@@ -1185,6 +1336,54 @@ async fn invoke_capability_tool(
         return action_review_invocation_result(resolution);
     }
     Ok(CapabilityInvocationResult::Output(Box::new(result.output)))
+}
+
+enum ActionReviewCancellationStep {
+    Cancelled(ExecutionTaskResult),
+    JoinResolution,
+}
+
+fn action_review_cancellation_step(
+    settlement: ExecutionActionReviewSettlement,
+    reason: &str,
+) -> ActionReviewCancellationStep {
+    match settlement {
+        ExecutionActionReviewSettlement::Revoked => {
+            ActionReviewCancellationStep::Cancelled(ExecutionTaskResult::Cancelled {
+                reason: reason.to_string(),
+            })
+        }
+        ExecutionActionReviewSettlement::JoinRequired => {
+            ActionReviewCancellationStep::JoinResolution
+        }
+    }
+}
+
+enum GovernedCapabilityOutcome {
+    Completed(Box<GovernedInvocationResult>),
+    Terminal(ExecutionTaskResult),
+}
+
+fn classify_governed_capability_outcome(
+    outcome: GovernedInvocationOutcome,
+) -> Result<GovernedCapabilityOutcome, HandlerError> {
+    match outcome {
+        GovernedInvocationOutcome::Completed(result) => {
+            Ok(GovernedCapabilityOutcome::Completed(result))
+        }
+        GovernedInvocationOutcome::UnknownOutcome { message, .. } => Ok(
+            GovernedCapabilityOutcome::Terminal(ExecutionTaskResult::UnknownOutcome { message }),
+        ),
+        GovernedInvocationOutcome::NotDispatched { reason, .. } => Ok(
+            GovernedCapabilityOutcome::Terminal(ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Terminal,
+                message: execution_dispatch_rejection_message(reason),
+            }),
+        ),
+        GovernedInvocationOutcome::Delegation { .. } => {
+            Err(TerminalError::new("execution agents cannot invoke delegation tools").into())
+        }
+    }
 }
 
 async fn persist_task_outcome(
@@ -1218,6 +1417,36 @@ async fn persist_task_outcome(
         task,
         wake_run: false,
     })
+}
+
+async fn persist_cancelled_task_and_finish(
+    ctx: &WorkflowContext<'_>,
+    repository: ExecutionRepository,
+    scope: ExecutionScope,
+    prepared: PreparedTask,
+    reason: String,
+    operation_index: u64,
+) -> Result<(), HandlerError> {
+    let task = prepared.task.clone();
+    let outcome = cancelled_task_outcome(reason, task.actual.clone());
+    let persisted = ctx
+        .run(|| async move {
+            persist_task_outcome(repository, scope, task, outcome)
+                .await
+                .map(Json::from)
+        })
+        .name(format!(
+            "execution_task_cancelled_outcome_{operation_index}"
+        ))
+        .await?
+        .into_inner();
+    send_run_wake(
+        ctx,
+        persisted.run.run_uid,
+        persisted.run.wake_epoch,
+        ExecutionRunWakeReason::TaskOutcome,
+    );
+    cleanup_task_hands(ctx, &persisted.run, &persisted.task).await
 }
 
 async fn retry_task_generation(
@@ -1263,7 +1492,7 @@ async fn load_session(
                 .get_session(session_id)
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(crate::workflows::errors::moa_error_to_handler_error)
         })
         .name(format!(
             "execution_task_load_session_{}_{}",
@@ -1302,7 +1531,7 @@ async fn load_pinned_skills(
                     .load_skill_markdown(&scope, revision_uid)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)
             })
             .name(format!(
                 "execution_task_skill_{}_{}_{}",
@@ -1318,42 +1547,50 @@ async fn load_pinned_skills(
 async fn await_input_or_cancel(
     ctx: &WorkflowContext<'_>,
     task: &ExecutionTaskRecord,
-) -> Result<(), HandlerError> {
+) -> Result<ParkedTaskWake, HandlerError> {
     let promise_key = input_promise_key(task.task_id, task.generation);
-    restate_sdk::select! {
-        _ = ctx.promise::<String>(K_CANCEL_PROMISE) => {},
-        _ = ctx.promise::<Json<Value>>(&promise_key) => {},
-    }
-    Ok(())
+    Ok(restate_sdk::select! {
+        reason = ctx.promise::<String>(K_CANCEL_PROMISE) => {
+            ParkedTaskWake::Cancelled(reason?)
+        },
+        _ = ctx.promise::<Json<Value>>(&promise_key) => ParkedTaskWake::Resumed,
+    })
 }
 
 async fn await_review_or_cancel(
     ctx: &WorkflowContext<'_>,
     task: &ExecutionTaskRecord,
-) -> Result<(), HandlerError> {
+) -> Result<ParkedTaskWake, HandlerError> {
     let promise_key = review_promise_key(task.task_id, task.generation);
-    restate_sdk::select! {
-        _ = ctx.promise::<String>(K_CANCEL_PROMISE) => {},
+    Ok(restate_sdk::select! {
+        reason = ctx.promise::<String>(K_CANCEL_PROMISE) => {
+            ParkedTaskWake::Cancelled(reason?)
+        },
         _ = ctx.promise::<Json<moa_execution::wire::ExecutionReviewDecision>>(
             &promise_key
-        ) => {},
-    }
-    Ok(())
+        ) => ParkedTaskWake::Resumed,
+    })
 }
 
 async fn await_signal_or_cancel(
     ctx: &WorkflowContext<'_>,
     task: &ExecutionTaskRecord,
     signal_name: &str,
-) -> Result<(), HandlerError> {
+) -> Result<ParkedTaskWake, HandlerError> {
     let promise_key = signal_promise_key(task.task_id, task.generation, signal_name);
-    restate_sdk::select! {
-        _ = ctx.promise::<String>(K_CANCEL_PROMISE) => {},
+    Ok(restate_sdk::select! {
+        reason = ctx.promise::<String>(K_CANCEL_PROMISE) => {
+            ParkedTaskWake::Cancelled(reason?)
+        },
         _ = ctx.promise::<Json<Value>>(
             &promise_key
-        ) => {},
-    }
-    Ok(())
+        ) => ParkedTaskWake::Resumed,
+    })
+}
+
+enum ParkedTaskWake {
+    Resumed,
+    Cancelled(String),
 }
 
 fn find_capability<'a>(
@@ -1410,15 +1647,28 @@ fn action_review_invocation_result(
 ) -> Result<CapabilityInvocationResult, HandlerError> {
     match resolution {
         ExecutionActionReviewResolution::Completed { tool_output } => {
-            serde_json::from_value(tool_output)
-                .map(Box::new)
-                .map(CapabilityInvocationResult::Output)
-                .map_err(|error| {
-                    TerminalError::new(format!("invalid action-review tool output: {error}")).into()
-                })
+            match serde_json::from_value(tool_output) {
+                Ok(output) => Ok(CapabilityInvocationResult::Output(Box::new(output))),
+                Err(error) => Ok(CapabilityInvocationResult::Terminal(
+                    ExecutionTaskResult::UnknownOutcome {
+                        message: format!(
+                            "reviewed capability returned an invalid output after possible commit: {error}"
+                        ),
+                    },
+                )),
+            }
         }
         ExecutionActionReviewResolution::Failed { class, message } => Ok(
             CapabilityInvocationResult::Terminal(ExecutionTaskResult::Failed { class, message }),
+        ),
+        ExecutionActionReviewResolution::UnknownOutcome { message } => Ok(
+            CapabilityInvocationResult::Terminal(ExecutionTaskResult::UnknownOutcome { message }),
+        ),
+        ExecutionActionReviewResolution::NotDispatched { reason } => Ok(
+            CapabilityInvocationResult::Terminal(ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Terminal,
+                message: execution_dispatch_rejection_message(reason),
+            }),
         ),
         ExecutionActionReviewResolution::Denied { reason } => Ok(
             CapabilityInvocationResult::Terminal(ExecutionTaskResult::Failed {
@@ -1435,8 +1685,19 @@ fn action_review_invocation_result(
     }
 }
 
+fn execution_dispatch_rejection_message(reason: ExecutionToolDispatchRejection) -> String {
+    let reason = match reason {
+        ExecutionToolDispatchRejection::OriginNotFound => "origin_not_found",
+        ExecutionToolDispatchRejection::StaleGeneration => "stale_generation",
+        ExecutionToolDispatchRejection::OperationNotRunning => "operation_not_running",
+        ExecutionToolDispatchRejection::RunNotDispatchable => "run_not_dispatchable",
+    };
+    format!("execution effect was not dispatched: {reason}")
+}
+
 fn capability_invocation_outcome(
     idempotency_class: IdempotencyClass,
+    action_class: moa_core::types::action_policy::ActionClass,
     invocation: CapabilityInvocationResult,
     usage: ExecutionUsage,
 ) -> Result<ExecutionTaskOutcome, HandlerError> {
@@ -1447,16 +1708,30 @@ fn capability_invocation_outcome(
             result,
         }),
         CapabilityInvocationResult::Output(output) if output.is_error() => {
-            let class = if idempotency_class == IdempotencyClass::Idempotent {
-                ExecutionFailureClass::Retryable
+            if idempotency_class == IdempotencyClass::Idempotent {
+                Ok(failed_task_outcome(
+                    ExecutionFailureClass::Retryable,
+                    output.safe_output.to_text(),
+                    usage,
+                ))
+            } else if action_class != moa_core::types::action_policy::ActionClass::Read {
+                Ok(ExecutionTaskOutcome {
+                    schema_version: 1,
+                    usage,
+                    result: ExecutionTaskResult::UnknownOutcome {
+                        message: format!(
+                            "non-idempotent side-effecting capability returned an error after possible commit: {}",
+                            output.safe_output.to_text()
+                        ),
+                    },
+                })
             } else {
-                ExecutionFailureClass::Terminal
-            };
-            Ok(failed_task_outcome(
-                class,
-                output.safe_output.to_text(),
-                usage,
-            ))
+                Ok(failed_task_outcome(
+                    ExecutionFailureClass::Terminal,
+                    output.safe_output.to_text(),
+                    usage,
+                ))
+            }
         }
         CapabilityInvocationResult::Output(output) => {
             // A non-safe class already cleared `structured`, so a task whose
@@ -1468,6 +1743,26 @@ fn capability_invocation_outcome(
                 .clone()
                 .unwrap_or_else(|| Value::String(output.safe_output.to_text()));
             Ok(completed_task_outcome(value, usage))
+        }
+    }
+}
+
+fn invalid_capability_output_outcome(
+    action_class: moa_core::types::action_policy::ActionClass,
+    message: String,
+    usage: ExecutionUsage,
+) -> ExecutionTaskOutcome {
+    if action_class == moa_core::types::action_policy::ActionClass::Read {
+        failed_task_outcome(ExecutionFailureClass::InvalidOutput, message, usage)
+    } else {
+        ExecutionTaskOutcome {
+            schema_version: 1,
+            usage,
+            result: ExecutionTaskResult::UnknownOutcome {
+                message: format!(
+                    "side-effecting capability returned invalid output after possible commit: {message}"
+                ),
+            },
         }
     }
 }
@@ -1566,6 +1861,8 @@ fn send_run_wake(
     wake_epoch: u64,
     reason: ExecutionRunWakeReason,
 ) {
+    // Detached by design: wake_epoch is a persisted generation fence and the run
+    // workflow ignores duplicate or superseded notifications.
     crate::restate_identity::replay_safe_request(
         ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
             .wake(Json::from(ExecutionRunWakeRequest {
@@ -1577,11 +1874,11 @@ fn send_run_wake(
     .send();
 }
 
-fn cleanup_task_hands(
+async fn cleanup_task_hands(
     ctx: &WorkflowContext<'_>,
     run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
-) {
+) -> Result<(), HandlerError> {
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<ToolExecutorClient>()
             .release_execution_task_hands(Json::from(ReleaseExecutionTaskHandsRequest {
@@ -1590,7 +1887,9 @@ fn cleanup_task_hands(
                 task_id: task.task_id,
             })),
     )
-    .send();
+    .call()
+    .await?;
+    Ok(())
 }
 
 fn execution_error(error: moa_execution::Error) -> HandlerError {
@@ -1607,7 +1906,8 @@ mod tests {
     };
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-        identifiers::ConnectorConnectionId,
+        completion::ToolInvocation,
+        identifiers::{ConnectorConnectionId, ToolCallId},
         tools::IdempotencyClass,
     };
     use moa_execution::capability::{
@@ -1615,10 +1915,14 @@ mod tests {
         ExecutionEstimate,
     };
     use moa_execution::wire::ExecutionActionReviewResolution;
+    use moa_execution::wire::ExecutionToolDispatchRejection;
     use serde_json::json;
 
     use super::{
-        CapabilityInvocationResult, action_review_invocation_result, capability_invocation_outcome,
+        ActionReviewCancellationStep, CapabilityInvocationResult, ExecutionActionReviewSettlement,
+        GovernedCapabilityOutcome, GovernedInvocationOutcome, action_review_cancellation_step,
+        action_review_invocation_result, cancellation_outcome_before_next_agent_tool,
+        capability_invocation_outcome, classify_governed_capability_outcome,
         task_agent_tool_schema, validate_agent_capability_bindings,
     };
 
@@ -1648,6 +1952,7 @@ mod tests {
                 tasks: 1,
                 ..ExecutionEstimate::default()
             },
+            rollback: None,
         }
     }
 
@@ -1826,6 +2131,7 @@ mod tests {
             ));
             let outcome = capability_invocation_outcome(
                 IdempotencyClass::Idempotent,
+                ActionClass::Read,
                 invocation,
                 ExecutionUsage {
                     cost_microusd: 0,
@@ -1841,6 +2147,156 @@ mod tests {
                     if class == expected_class && message == expected_message
             ));
         }
+    }
+
+    #[test]
+    fn governed_execution_ambiguity_is_a_typed_unknown_task_outcome() {
+        // Pins: once ToolExecutor reports that a side effect may have committed,
+        // the execution workflow persists UnknownOutcome and cannot resend it as
+        // an ordinary failed invocation.
+        let classified =
+            classify_governed_capability_outcome(GovernedInvocationOutcome::UnknownOutcome {
+                tool_id: ToolCallId(uuid::Uuid::from_u128(81)),
+                invocation: ToolInvocation {
+                    id: Some("tool-81".to_string()),
+                    name: "fixture_effect".to_string(),
+                    input: json!({"value": 1}),
+                },
+                message: "external result is ambiguous".to_string(),
+            })
+            .expect("typed ambiguity is a valid terminal task result");
+        assert!(matches!(
+            classified,
+            GovernedCapabilityOutcome::Terminal(ExecutionTaskResult::UnknownOutcome { message })
+                if message == "external result is ambiguous"
+        ));
+    }
+
+    #[test]
+    fn governed_execution_admission_rejection_is_definitive_failure() {
+        // Pins: the row-locked owner admission proved no external effect began, so
+        // a fenced or stale origin is terminal Failed and never UnknownOutcome.
+        let classified =
+            classify_governed_capability_outcome(GovernedInvocationOutcome::NotDispatched {
+                tool_id: ToolCallId(uuid::Uuid::from_u128(82)),
+                invocation: ToolInvocation {
+                    id: Some("tool-82".to_string()),
+                    name: "fixture_effect".to_string(),
+                    input: json!({"value": 2}),
+                },
+                reason: ExecutionToolDispatchRejection::RunNotDispatchable,
+            })
+            .expect("definitive admission rejection is a valid task result");
+        assert!(matches!(
+            classified,
+            GovernedCapabilityOutcome::Terminal(ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Terminal,
+                message,
+            }) if message.ends_with("run_not_dispatchable")
+        ));
+    }
+
+    #[test]
+    fn reviewed_execution_ambiguity_and_malformed_output_are_unknown() {
+        // Pins: an approved external effect has crossed the commit boundary, so
+        // both an explicit ambiguous resolution and undecodable completed output
+        // require reconciliation instead of retry or generic workflow failure.
+        for resolution in [
+            ExecutionActionReviewResolution::UnknownOutcome {
+                message: "reviewed result is ambiguous".to_string(),
+            },
+            ExecutionActionReviewResolution::Completed {
+                tool_output: json!("not a secured tool output"),
+            },
+        ] {
+            let result = action_review_invocation_result(resolution)
+                .expect("review ambiguity remains a typed task result");
+            assert!(matches!(
+                result,
+                CapabilityInvocationResult::Terminal(ExecutionTaskResult::UnknownOutcome { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn cancellation_revokes_unclaimed_review_but_joins_claimed_effect() {
+        // Pins: cancellation before tenant clear terminalizes the review before any
+        // tool dispatch; once the decision transaction claimed the effect, the task
+        // must join its definitive resolution and cannot overwrite it as Cancelled.
+        assert!(matches!(
+            action_review_cancellation_step(
+                ExecutionActionReviewSettlement::Revoked,
+                "run cancelled",
+            ),
+            ActionReviewCancellationStep::Cancelled(ExecutionTaskResult::Cancelled { reason })
+                if reason == "run cancelled"
+        ));
+        assert!(matches!(
+            action_review_cancellation_step(
+                ExecutionActionReviewSettlement::JoinRequired,
+                "run cancelled",
+            ),
+            ActionReviewCancellationStep::JoinResolution
+        ));
+
+        let definitive =
+            action_review_invocation_result(ExecutionActionReviewResolution::UnknownOutcome {
+                message: "claimed effect is ambiguous".to_string(),
+            })
+            .expect("claimed review ambiguity must remain typed");
+        assert!(matches!(
+            definitive,
+            CapabilityInvocationResult::Terminal(ExecutionTaskResult::UnknownOutcome { message })
+                if message == "claimed effect is ambiguous"
+        ));
+
+        let no_effect =
+            action_review_invocation_result(ExecutionActionReviewResolution::NotDispatched {
+                reason: ExecutionToolDispatchRejection::RunNotDispatchable,
+            })
+            .expect("claimed no-effect admission rejection stays definitive");
+        assert!(matches!(
+            no_effect,
+            CapabilityInvocationResult::Terminal(ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Terminal,
+                message,
+            }) if message.ends_with("run_not_dispatchable")
+        ));
+
+        let unfenced =
+            action_review_invocation_result(ExecutionActionReviewResolution::NotDispatched {
+                reason: ExecutionToolDispatchRejection::StaleGeneration,
+            })
+            .expect("definitive no-effect admission rejection is typed");
+        assert!(matches!(
+            unfenced,
+            CapabilityInvocationResult::Terminal(ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Terminal,
+                message,
+            }) if message.ends_with("stale_generation")
+        ));
+    }
+
+    #[test]
+    fn cancellation_fence_stops_the_next_agent_tool() {
+        // Pins: after one joined governed effect, a cancellation observed at the
+        // per-tool admission boundary terminates the task before a second tool
+        // from the same model response can be dispatched.
+        let outcome = cancellation_outcome_before_next_agent_tool(
+            Some("run fenced forward work".to_string()),
+            &ExecutionUsage {
+                cost_microusd: 0,
+                tokens: 0,
+                tool_calls: 1,
+                retrieved_bytes: 0,
+            },
+        )
+        .expect("durable cancellation must stop the next tool");
+        assert!(matches!(
+            outcome.result,
+            ExecutionTaskResult::Cancelled { reason }
+                if reason == "run fenced forward work"
+        ));
     }
 
     #[test]

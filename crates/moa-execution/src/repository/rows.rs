@@ -65,6 +65,49 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         .map_err(row_error)?
         .map(|value| ExecutionTerminalReason::from_str(&value))
         .transpose()?;
+    let pending_terminal_status = row
+        .try_get::<Option<String>, _>("pending_terminal_status")
+        .map_err(row_error)?
+        .map(|value| ExecutionRunStatus::from_str(&value))
+        .transpose()?;
+    let pending_terminal_reason = row
+        .try_get::<Option<String>, _>("pending_terminal_reason")
+        .map_err(row_error)?
+        .map(|value| ExecutionTerminalReason::from_str(&value))
+        .transpose()?;
+    let pending_terminal_evidence: Option<Value> =
+        row.try_get("pending_terminal_cause").map_err(row_error)?;
+    let pending_terminal_output: Option<Value> =
+        row.try_get("pending_terminal_output").map_err(row_error)?;
+    let cancellation_reason: Option<String> =
+        row.try_get("cancellation_reason").map_err(row_error)?;
+    let pending_terminal = match (
+        pending_terminal_status,
+        pending_terminal_reason,
+        pending_terminal_evidence,
+    ) {
+        (None, None, None) if pending_terminal_output.is_none() => None,
+        (Some(status), Some(reason), Some(evidence)) => {
+            let payload: PendingTerminalEvidencePayload = serde_json::from_value(evidence)?;
+            let terminal = PendingExecutionTerminal {
+                status,
+                reason,
+                terminal_evidence: payload.terminal_evidence,
+                completion_check_results: payload.completion_check_results,
+                terminal_gaps: payload.terminal_gaps,
+                output: pending_terminal_output,
+                cancellation_reason: cancellation_reason.clone(),
+            };
+            terminal.validate()?;
+            Some(terminal)
+        }
+        _ => {
+            return Err(Error::InvalidRepositoryData {
+                message: "pending execution terminal columns are only partially populated"
+                    .to_string(),
+            });
+        }
+    };
     if status.is_terminal() != terminal_reason.is_some() {
         return Err(Error::InvalidRepositoryData {
             message: "execution terminal reason nullability disagrees with run status".to_string(),
@@ -140,8 +183,11 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         waiting_reasons: serde_json::from_value(waiting_reasons)?,
         wake_epoch: required_u64(row, "wake_epoch")?,
         processed_wake_epoch: required_u64(row, "processed_wake_epoch")?,
+        next_compensation_sequence: required_u64(row, "next_compensation_sequence")?,
+        pending_terminal,
+        manual_repair_required: row.try_get("manual_repair_required").map_err(row_error)?,
         idempotency_key: row.try_get("idempotency_key").map_err(row_error)?,
-        cancellation_reason: row.try_get("cancellation_reason").map_err(row_error)?,
+        cancellation_reason,
         created_at: row.try_get("created_at").map_err(row_error)?,
         queued_at: row.try_get("queued_at").map_err(row_error)?,
         updated_at: row.try_get("updated_at").map_err(row_error)?,
@@ -155,6 +201,8 @@ pub(super) fn task_from_row(row: &PgRow) -> Result<ExecutionTaskRecord> {
     let contact_id: Option<Uuid> = row.try_get("contact_id").map_err(row_error)?;
     let requirement_ids: Value = row.try_get("requirement_ids").map_err(row_error)?;
     let kind: Value = row.try_get("task_kind").map_err(row_error)?;
+    let compensation_contract: Option<Value> =
+        row.try_get("compensation_contract").map_err(row_error)?;
     let retry: Value = row.try_get("retry_policy").map_err(row_error)?;
     let resume_input_history: Value = row.try_get("resume_input_history").map_err(row_error)?;
     let current_outcome: Option<Value> = row.try_get("current_outcome").map_err(row_error)?;
@@ -179,6 +227,9 @@ pub(super) fn task_from_row(row: &PgRow) -> Result<ExecutionTaskRecord> {
         input: row.try_get("input").map_err(row_error)?,
         resume_input_history: serde_json::from_value(resume_input_history)?,
         kind: serde_json::from_value(kind)?,
+        compensation_contract: compensation_contract
+            .map(serde_json::from_value)
+            .transpose()?,
         retry: serde_json::from_value(retry)?,
         estimate: estimate_from_row(row, "estimate")?,
         reserved: estimate_from_row(row, "reserved")?,
@@ -198,6 +249,38 @@ pub(super) fn task_from_row(row: &PgRow) -> Result<ExecutionTaskRecord> {
         created_at: row.try_get("created_at").map_err(row_error)?,
         updated_at: row.try_get("updated_at").map_err(row_error)?,
         reserved_at: row.try_get("reserved_at").map_err(row_error)?,
+        started_at: row.try_get("started_at").map_err(row_error)?,
+        completed_at: row.try_get("completed_at").map_err(row_error)?,
+    })
+}
+
+pub(super) fn compensation_from_row(row: &PgRow) -> Result<CompensationRegistrationProjection> {
+    let compensator: Value = row.try_get("compensator").map_err(row_error)?;
+    let outcome: Option<Value> = row.try_get("outcome").map_err(row_error)?;
+    let outcome = outcome
+        .map(serde_json::from_value::<CompensationPersistedOutcome>)
+        .transpose()?;
+    Ok(CompensationRegistrationProjection {
+        compensation_id: CompensationId::from_uuid(
+            row.try_get("compensation_id").map_err(row_error)?,
+        ),
+        run_uid: row.try_get("run_uid").map_err(row_error)?,
+        forward_task_id: ExecutionTaskId::from_uuid(
+            row.try_get("forward_task_id").map_err(row_error)?,
+        ),
+        registered_sequence: required_u64(row, "registered_sequence")?,
+        forward_generation: required_u64(row, "forward_generation")?,
+        compensator: serde_json::from_value(compensator)?,
+        mapped_input: row.try_get("mapped_input").map_err(row_error)?,
+        status: CompensationStatus::from_str(
+            &row.try_get::<String, _>("status").map_err(row_error)?,
+        )?,
+        attempt: required_u64(row, "attempt")?,
+        generation: required_u64(row, "generation")?,
+        outcome: outcome.and_then(|persisted| persisted.result),
+        error: row.try_get("error").map_err(row_error)?,
+        created_at: row.try_get("created_at").map_err(row_error)?,
+        updated_at: row.try_get("updated_at").map_err(row_error)?,
         started_at: row.try_get("started_at").map_err(row_error)?,
         completed_at: row.try_get("completed_at").map_err(row_error)?,
     })

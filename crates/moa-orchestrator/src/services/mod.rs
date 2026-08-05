@@ -1,6 +1,7 @@
 //! Restate service modules hosted by the orchestrator binary.
 
 pub mod action_policy;
+pub mod action_review_dispatcher;
 pub mod action_reviews;
 pub mod action_reviews_reaper;
 pub mod admin_maintenance;
@@ -18,6 +19,7 @@ pub mod dual_control;
 pub mod execution;
 pub mod experiments;
 pub mod graph_memory_maint;
+pub mod health;
 pub mod knowledge;
 pub mod learning_review;
 pub mod llm_gateway;
@@ -30,5 +32,6 @@ pub mod security_events;
 pub mod session_store;
 pub mod skill_regression;
 pub mod skills;
+pub mod status_migration_dispatcher;
 pub mod tenants;
 pub mod tool_executor;

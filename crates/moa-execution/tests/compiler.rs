@@ -5,11 +5,14 @@ use std::{
 
 use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
-    CapabilityReference, CompletionCheck, CompletionCheckKind, CoverageRequirement,
-    ExecutionBudgetLimit, ExecutionCondition, ExecutionDeliverable, ExecutionGoalContract,
+    CapabilityReference, CompensationInputBinding, CompensationInputMapping,
+    CompensationValueSource, CompletionCheck, CompletionCheckKind, CoverageRequirement,
+    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionBudgetLimit, ExecutionCancelPolicy,
+    ExecutionCompensation, ExecutionCondition, ExecutionDeliverable, ExecutionGoalContract,
     ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer,
     ExecutionReference, ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult,
-    ExecutionUsage, MapTask, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    ExecutionUsage, MapTask, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment, PlanAmendmentOperation,
+    RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_config::ExecutionConfig;
@@ -20,9 +23,9 @@ use moa_core::types::{
 };
 use moa_execution::{
     capability::{
-        CapabilityPolicyContext, CapabilitySource, ExecutionAuthorizationEnvelope,
-        ExecutionCapability, ExecutionCapabilityCatalog, ExecutionClass, ExecutionEstimate,
-        catalog_hash, plan_hash,
+        CapabilityPolicyContext, CapabilityRollbackContract, CapabilitySource,
+        ExecutionAuthorizationEnvelope, ExecutionCapability, ExecutionCapabilityCatalog,
+        ExecutionClass, ExecutionEstimate, catalog_hash, plan_hash,
     },
     compiler::{
         CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationIssue,
@@ -68,6 +71,7 @@ proptest! {
                 operation: ExecutionOperation::Capability {
                     reference: reference.clone(),
                 },
+                compensation: None,
                 retry: retry(1),
                 budget: None,
             });
@@ -83,6 +87,7 @@ proptest! {
             operation: ExecutionOperation::Output {
                 value: json!({ "$ref": format!("$.nodes.{last_work}.output") }),
             },
+            compensation: None,
             retry: retry(1),
             budget: None,
         });
@@ -403,6 +408,315 @@ fn compile_rejects_every_reference_outside_catalog_or_authorization() {
             .issues
             .iter()
             .any(|issue| issue.code == "skill_not_authorized")
+    );
+}
+
+#[test]
+fn compile_accepts_exact_rollback_contract_and_reserves_undo_cost() {
+    // Pins: an opted-in rollback uses the forward retry bound for resources while reserving one
+    // additional logical compensation task.
+    let request = compensated_request();
+
+    let outcome = compile(request);
+
+    assert!(
+        outcome.report.issues.is_empty(),
+        "{:?}",
+        outcome.report.issues
+    );
+    assert_eq!(
+        outcome
+            .compiled
+            .expect("exact compensated plan should compile")
+            .plan
+            .estimate,
+        ExecutionEstimate {
+            cost_microusd: 28,
+            tokens: 44,
+            tool_calls: 12,
+            retrieved_bytes: 52,
+            tasks: 3,
+        }
+    );
+}
+
+#[test]
+fn compensate_committed_requires_direct_coverage_and_rejects_indirect_effects() {
+    // Pins: the cancellation policy cannot promise rollback for effects the first implementation
+    // cannot register and compensate deterministically.
+    let mut uncovered = valid_request();
+    uncovered.plan.cancel_policy = ExecutionCancelPolicy::CompensateCommitted;
+    uncovered.catalog.capabilities[0].action_class = ActionClass::ExternalWrite;
+    uncovered.catalog.capabilities[0].execution_class = ExecutionClass::External;
+    rehash_catalog(&mut uncovered);
+    let direct = compile(uncovered.clone());
+    assert_eq!(
+        direct
+            .report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "uncompensated_cancel_effect")
+            .count(),
+        1
+    );
+
+    uncovered.plan.cancel_policy = ExecutionCancelPolicy::RetainEffects;
+    let retained = compile(uncovered.clone());
+    assert!(
+        retained.compiled.is_some(),
+        "retain_effects should admit an uncompensated side effect: {:?}",
+        retained.report.issues
+    );
+
+    uncovered.plan.cancel_policy = ExecutionCancelPolicy::CompensateCommitted;
+    let reference = uncovered.catalog.capabilities[0].reference.clone();
+    uncovered.plan.nodes[0].operation = ExecutionOperation::Agent {
+        instructions: "perform the governed operation".to_string(),
+        skill_refs: vec![],
+        capability_refs: vec![reference],
+        max_turns: 1,
+    };
+    let indirect = compile(uncovered);
+    assert_eq!(
+        indirect
+            .report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "indirect_compensation_unsupported")
+            .count(),
+        1
+    );
+
+    let covered = compile(compensated_request());
+    assert!(
+        covered.compiled.is_some(),
+        "fully compensated direct effects should compile: {:?}",
+        covered.report.issues
+    );
+}
+
+#[test]
+fn compile_rejects_unpromised_read_non_idempotent_and_unauthorized_compensators() {
+    // Pins: durable rollback is admitted only for an exact side-effecting idempotent capability
+    // inside the original catalog and authorization envelope.
+    let mut mismatched = compensated_request();
+    mismatched.plan.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture")
+        .input_mapping
+        .bindings[0]
+        .source = CompensationValueSource::OriginalInput {
+        pointer: "/order_id".to_string(),
+    };
+    assert_issue_code(compile(mismatched), "compensation_contract_mismatch");
+
+    let mut unpromised = compensated_request();
+    unpromised.catalog.capabilities[0].rollback = None;
+    rehash_catalog(&mut unpromised);
+    assert_issue_code(compile(unpromised), "compensation_not_promised");
+
+    let mut forward_read = compensated_request();
+    forward_read.catalog.capabilities[0].action_class = ActionClass::Read;
+    rehash_catalog(&mut forward_read);
+    assert_issue_code(compile(forward_read), "compensation_on_read");
+
+    let mut read_compensator = compensated_request();
+    read_compensator.catalog.capabilities[1].action_class = ActionClass::Read;
+    rehash_catalog(&mut read_compensator);
+    assert_issue_code(compile(read_compensator), "read_compensator");
+
+    let mut non_idempotent = compensated_request();
+    non_idempotent.catalog.capabilities[1].idempotency_class = IdempotencyClass::NonIdempotent;
+    rehash_catalog(&mut non_idempotent);
+    assert_issue_code(compile(non_idempotent), "non_idempotent_compensator");
+
+    let mut unauthorized = compensated_request();
+    unauthorized.authorization.capability_refs.pop();
+    assert_issue_code(compile(unauthorized), "capability_not_authorized");
+}
+
+#[test]
+fn compile_rejects_compensation_mapping_outside_governed_schemas() {
+    // Pins: rollback mappings can read only committed forward fields and write declared undo input.
+    let mut bad_source = compensated_request();
+    bad_source.plan.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture")
+        .input_mapping
+        .bindings[0]
+        .source = CompensationValueSource::OriginalOutput {
+        pointer: "/missing".to_string(),
+    };
+    bad_source.catalog.capabilities[0].rollback = bad_source.plan.nodes[0]
+        .compensation
+        .clone()
+        .map(|compensation| CapabilityRollbackContract {
+            compensator: compensation.compensator,
+            input_mapping: compensation.input_mapping,
+        });
+    rehash_catalog(&mut bad_source);
+    assert_issue_code(compile(bad_source), "unguaranteed_compensation_source_path");
+
+    let mut bad_target = compensated_request();
+    bad_target.plan.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture")
+        .input_mapping
+        .bindings[0]
+        .target_pointer = "/missing".to_string();
+    bad_target.catalog.capabilities[0].rollback = bad_target.plan.nodes[0]
+        .compensation
+        .clone()
+        .map(|compensation| CapabilityRollbackContract {
+            compensator: compensation.compensator,
+            input_mapping: compensation.input_mapping,
+        });
+    rehash_catalog(&mut bad_target);
+    assert_issue_code(compile(bad_target), "unknown_compensation_target_path");
+
+    let mut optional_source = compensated_request();
+    optional_source.catalog.capabilities[0].output_schema["required"] = json!([]);
+    rehash_catalog(&mut optional_source);
+    assert_issue_code(
+        compile(optional_source),
+        "unguaranteed_compensation_source_path",
+    );
+
+    let mut incompatible = compensated_request();
+    incompatible.catalog.capabilities[1].input_schema["properties"]["order_id"]["type"] =
+        json!("number");
+    rehash_catalog(&mut incompatible);
+    assert_issue_code(compile(incompatible), "incompatible_compensation_mapping");
+
+    for (source_pointer, target_pointer, expected_code) in [
+        (
+            "/order~2id",
+            "/order_id",
+            "invalid_compensation_source_pointer",
+        ),
+        (
+            "/order_id",
+            "/order~2id",
+            "invalid_compensation_target_pointer",
+        ),
+    ] {
+        let mut malformed = compensated_request();
+        let compensation = malformed.plan.nodes[0]
+            .compensation
+            .as_mut()
+            .expect("compensation fixture");
+        compensation.input_mapping.bindings[0].source = CompensationValueSource::OriginalOutput {
+            pointer: source_pointer.to_string(),
+        };
+        compensation.input_mapping.bindings[0].target_pointer = target_pointer.to_string();
+        malformed.catalog.capabilities[0].rollback = Some(CapabilityRollbackContract {
+            compensator: compensation.compensator.clone(),
+            input_mapping: compensation.input_mapping.clone(),
+        });
+        rehash_catalog(&mut malformed);
+        assert_issue_code(compile(malformed), expected_code);
+    }
+}
+
+#[test]
+fn compile_rejects_decoded_parent_child_compensation_targets() {
+    // Pins: overlapping rollback writes are rejected before a forward effect can commit, including
+    // paths whose relationship is visible only after RFC 6901 decoding.
+    let mut request = compensated_request();
+    let forward_output = request.catalog.capabilities[0].output_schema.clone();
+    request.catalog.capabilities[1].input_schema = json!({
+        "type": "object",
+        "required": ["resource"],
+        "properties": { "resource": forward_output }
+    });
+    let compensation = request.plan.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture");
+    compensation.input_mapping.bindings = vec![
+        CompensationInputBinding {
+            target_pointer: "/resource".to_string(),
+            source: CompensationValueSource::OriginalOutput {
+                pointer: String::new(),
+            },
+        },
+        CompensationInputBinding {
+            target_pointer: "/resource/order_id".to_string(),
+            source: CompensationValueSource::OriginalOutput {
+                pointer: "/order_id".to_string(),
+            },
+        },
+    ];
+    request.catalog.capabilities[0].rollback = Some(CapabilityRollbackContract {
+        compensator: compensation.compensator.clone(),
+        input_mapping: compensation.input_mapping.clone(),
+    });
+    rehash_catalog(&mut request);
+
+    assert_issue_code(compile(request), "compensation_target_collision");
+}
+
+#[test]
+fn compile_requires_complete_nested_compensator_input_coverage() {
+    // Pins: a forward effect cannot commit unless its mapping constructs every required undo
+    // input; an exact binding at a required parent safely covers that whole subtree.
+    let mut incomplete = compensated_request();
+    incomplete.catalog.capabilities[1].input_schema = json!({
+        "type": "object",
+        "required": ["resource"],
+        "properties": {
+            "resource": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "note": { "type": "string" }
+                }
+            }
+        }
+    });
+    let compensation = incomplete.plan.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture");
+    compensation.input_mapping.bindings[0].target_pointer = "/resource/note".to_string();
+    incomplete.catalog.capabilities[0].rollback = Some(CapabilityRollbackContract {
+        compensator: compensation.compensator.clone(),
+        input_mapping: compensation.input_mapping.clone(),
+    });
+    rehash_catalog(&mut incomplete);
+    assert_issue_code(compile(incomplete), "unmapped_required_compensation_target");
+
+    let mut parent_bound = compensated_request();
+    let forward_output = parent_bound.catalog.capabilities[0].output_schema.clone();
+    parent_bound.catalog.capabilities[1].input_schema = json!({
+        "type": "object",
+        "required": ["resource"],
+        "properties": { "resource": forward_output }
+    });
+    let compensation = parent_bound.plan.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture");
+    compensation.input_mapping.bindings[0] = CompensationInputBinding {
+        target_pointer: "/resource".to_string(),
+        source: CompensationValueSource::OriginalOutput {
+            pointer: String::new(),
+        },
+    };
+    parent_bound.catalog.capabilities[0].rollback = Some(CapabilityRollbackContract {
+        compensator: compensation.compensator.clone(),
+        input_mapping: compensation.input_mapping.clone(),
+    });
+    rehash_catalog(&mut parent_bound);
+    let accepted = compile(parent_bound);
+    assert!(
+        accepted.compiled.is_some(),
+        "exact parent binding should cover its required subtree: {:?}",
+        accepted.report.issues
     );
 }
 
@@ -833,7 +1147,7 @@ fn amendment_rejects_unknown_reference_path_before_persistence() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 4,
             reason: "Replace the pending terminal projection".to_string(),
             evidence: json!({}),
@@ -886,6 +1200,7 @@ fn amendment_replaces_only_pending_work_with_a_distinct_identity() {
         operation: ExecutionOperation::Output {
             value: json!({ "$ref": "$.nodes.lookup.output" }),
         },
+        compensation: None,
         retry: retry(1),
         budget: None,
     };
@@ -893,7 +1208,7 @@ fn amendment_replaces_only_pending_work_with_a_distinct_identity() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 4,
             reason: "Replace pending terminal projection".to_string(),
             evidence: json!({ "reason": "new shape" }),
@@ -926,6 +1241,54 @@ fn amendment_replaces_only_pending_work_with_a_distinct_identity() {
 }
 
 #[test]
+fn amendment_cannot_remove_compensation_after_forward_work_starts() {
+    // Pins: once a forward effect can have committed, amendment cannot discard its undo contract.
+    let request = compensated_request();
+    let compiled = compile(request.clone())
+        .compiled
+        .expect("compile compensated amendment fixture");
+    let mut replacement = compiled.plan.definition.nodes[0].clone();
+    replacement.id = "replacement_create".to_string();
+    replacement.compensation = None;
+
+    let outcome = validate_amendment(ValidateAmendmentRequest {
+        goal: compiled.goal,
+        active_plan: compiled.plan,
+        amendment: PlanAmendment {
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
+            base_plan_revision: 3,
+            reason: "Attempt to discard rollback after dispatch".to_string(),
+            evidence: json!({}),
+            operations: vec![PlanAmendmentOperation::ReplacePendingNode {
+                node_id: "lookup".to_string(),
+                node: replacement,
+            }],
+        },
+        projection: ExecutionProjection {
+            plan_revision: 3,
+            node_statuses: BTreeMap::from([("lookup".to_string(), ExecutionNodeStatus::Running)]),
+            tasks: vec![task_projection("lookup", ExecutionTaskStatus::Running)],
+        },
+        catalog: request.catalog,
+        authorization: request.authorization,
+        remaining_budget: generous_budget(),
+        config: ExecutionConfig::default(),
+        now: now(),
+    });
+
+    assert!(outcome.plan.is_none());
+    assert_eq!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "compensation_locked")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn amendment_validation_retains_remaining_estimate_without_completed_work() {
     // Pins: replan budget policy consumes the compiler's one remaining-work estimate instead of
     // charging the completed capability node again through CanonicalExecutionPlan::estimate.
@@ -939,7 +1302,7 @@ fn amendment_validation_retains_remaining_estimate_without_completed_work() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 4,
             reason: "Replace only unfinished output work".to_string(),
             evidence: json!({}),
@@ -1082,7 +1445,7 @@ fn amendment_rejects_references_unused_by_the_active_plan() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 3,
             reason: "Try a newly authorized capability".to_string(),
             evidence: json!({}),
@@ -1202,7 +1565,7 @@ fn amendment_rejects_removed_or_increased_pending_node_budget() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 5,
             reason: "Replace pending work within its budget".to_string(),
             evidence: json!({}),
@@ -1356,7 +1719,7 @@ fn waiting_replan_amendment_removes_origin_and_replaces_every_pending_dependent(
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 7,
             reason: "Replace unsupported lookup".to_string(),
             evidence: json!({ "failure": "unsupported" }),
@@ -1411,6 +1774,7 @@ fn waiting_replan_amendment_removes_origin_and_replaces_every_pending_dependent(
     reused_origin.amendment.operations[1] = PlanAmendmentOperation::AddNode {
         node: ExecutionNode {
             id: "lookup".to_string(),
+            compensation: None,
             ..replacement
         },
     };
@@ -1461,7 +1825,7 @@ fn map_replacement_accepts_literal_subset_and_rejects_scope_broadening() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 2,
             reason: "Narrow failed map scope".to_string(),
             evidence: json!({}),
@@ -1543,7 +1907,8 @@ fn valid_request() -> CompileExecutionRequest {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({
                 "type": "object",
                 "required": ["order_id"],
@@ -1561,6 +1926,7 @@ fn valid_request() -> CompileExecutionRequest {
                     operation: ExecutionOperation::Capability {
                         reference: reference.clone(),
                     },
+                    compensation: None,
                     retry: retry(2),
                     budget: None,
                 },
@@ -1574,6 +1940,7 @@ fn valid_request() -> CompileExecutionRequest {
                     operation: ExecutionOperation::Output {
                         value: json!({ "$ref": "$.nodes.lookup.output" }),
                     },
+                    compensation: None,
                     retry: retry(1),
                     budget: None,
                 },
@@ -1593,6 +1960,83 @@ fn valid_request() -> CompileExecutionRequest {
         config: ExecutionConfig::default(),
         now: now(),
     }
+}
+
+fn compensated_request() -> CompileExecutionRequest {
+    let mut request = valid_request();
+    let mut forward = capability("orders.create");
+    forward.action_class = ActionClass::ExternalWrite;
+    forward.execution_class = ExecutionClass::External;
+    forward.input_schema = json!({
+        "type": "object",
+        "required": ["order_id"],
+        "properties": { "order_id": { "type": "string" } }
+    });
+    forward.output_schema = json!({
+        "type": "object",
+        "required": ["order_id"],
+        "properties": { "order_id": { "type": "string" } }
+    });
+
+    let mut compensator = capability("orders.rollback");
+    compensator.action_class = ActionClass::ExternalWrite;
+    compensator.execution_class = ExecutionClass::External;
+    compensator.input_schema = json!({
+        "type": "object",
+        "required": ["order_id"],
+        "properties": { "order_id": { "type": "string" } }
+    });
+    let compensation = ExecutionCompensation {
+        compensator: compensator.reference.clone(),
+        input_mapping: CompensationInputMapping {
+            bindings: vec![CompensationInputBinding {
+                target_pointer: "/order_id".to_string(),
+                source: CompensationValueSource::OriginalOutput {
+                    pointer: "/order_id".to_string(),
+                },
+            }],
+        },
+    };
+    forward.rollback = Some(CapabilityRollbackContract {
+        compensator: compensation.compensator.clone(),
+        input_mapping: compensation.input_mapping.clone(),
+    });
+
+    let catalog = ExecutionCapabilityCatalog::build(vec![forward.clone(), compensator])
+        .expect("build compensated capability catalog");
+    request.plan.cancel_policy = ExecutionCancelPolicy::CompensateCommitted;
+    request.plan.nodes[0].operation = ExecutionOperation::Capability {
+        reference: forward.reference,
+    };
+    request.plan.nodes[0].compensation = Some(compensation);
+    request.catalog = catalog;
+    request.authorization.capability_refs = request
+        .catalog
+        .capabilities
+        .iter()
+        .map(|capability| capability.reference.clone())
+        .collect();
+    request
+}
+
+fn rehash_catalog(request: &mut CompileExecutionRequest) {
+    request.catalog.catalog_hash = catalog_hash(
+        request.catalog.schema_version,
+        &request.catalog.capabilities,
+    )
+    .expect("rehash modified catalog fixture");
+}
+
+fn assert_issue_code(outcome: CompileExecutionOutcome, code: &str) {
+    assert!(
+        outcome.compiled.is_none(),
+        "compiler unexpectedly accepted {code}"
+    );
+    assert!(
+        outcome.report.issues.iter().any(|issue| issue.code == code),
+        "expected issue code {code}, got {:?}",
+        outcome.report.issues
+    );
 }
 
 fn unknown_reference_issue(path: &str) -> ExecutionValidationIssue {
@@ -1642,7 +2086,7 @@ fn amendment_validation_for_output(
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 9,
             reason: "Validate task-backed amendment immutability".to_string(),
             evidence: json!({}),
@@ -1688,6 +2132,7 @@ fn capability(name: &str) -> ExecutionCapability {
             retrieved_bytes: 13,
             tasks: 1,
         },
+        rollback: None,
     }
 }
 

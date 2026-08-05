@@ -411,8 +411,8 @@ impl OutboundHostResolver for UnusedResolver {
 #[tokio::test]
 async fn http_runtime_pins_transport_and_requires_post_security_completion_offline() {
     // Pins: untrusted fields cannot change the reviewed transport, the secret is
-    // injected only into a redacted fixed header, and raw output cannot mark the
-    // invocation succeeded before secured post-journal finalization.
+    // injected only into a redacted fixed header, and replay after a lost journal
+    // acknowledgement uses the exact same upstream idempotency key.
     let fixture_secret = "fixture-secret-never-visible";
     let fixture = FixtureConnectorApi::start(
         FixtureConnectorScript::new(vec![FixtureConnectorResponse::json(json!({
@@ -477,20 +477,30 @@ async fn http_runtime_pins_transport_and_requires_post_security_completion_offli
     assert_eq!(identities.len(), 1);
     assert_eq!(identities[0].slot_name.as_str(), "primary");
 
-    let replay_error = runtime
+    let replay_result = runtime
         .invoke(invocation.clone(), prepared.clone())
         .await
-        .expect_err("transmitting invocation must never be sent again");
-    assert!(matches!(
-        replay_error,
-        Error::InvocationUnavailable {
-            state: ConnectorInvocationState::Transmitting
-        }
-    ));
-    assert_eq!(fixture.controller().requests().len(), 1);
-    assert_eq!(vault.resolves.load(Ordering::SeqCst), 1);
+        .expect("idempotency-keyed transmitting invocation should resume safely");
+    let replay_requests = fixture
+        .controller()
+        .wait_for_requests(2, std::time::Duration::from_secs(1))
+        .await
+        .expect("fixture should capture the replayed keyed request");
+    assert_eq!(replay_requests.len(), 2);
+    let expected_key = vec![FixtureCapturedHeaderValue::Visible(
+        invocation.tool_call_id.to_string(),
+    )];
+    assert_eq!(
+        replay_requests[0].headers.get("idempotency-key"),
+        Some(&expected_key)
+    );
+    assert_eq!(
+        replay_requests[1].headers.get("idempotency-key"),
+        Some(&expected_key)
+    );
+    assert_eq!(vault.resolves.load(Ordering::SeqCst), 2);
 
-    let (output, ticket) = result.into_parts();
+    let (output, ticket) = replay_result.into_parts();
     assert_eq!(output, json!({"accepted": true}));
     ConnectorInvocationCompletionService::new(repository.clone())
         .finalize_succeeded(
@@ -510,6 +520,55 @@ async fn http_runtime_pins_transport_and_requires_post_security_completion_offli
         !serde_json::to_string(&repository.only_invocation())
             .expect("secret-free invocation row should serialize")
             .contains(fixture_secret)
+    );
+    drop(result);
+}
+
+#[tokio::test]
+async fn non_idempotent_journal_gap_becomes_manual_reconciliation_offline() {
+    // Pins: if a non-idempotent response was returned but its surrounding
+    // Restate run result was not journaled, replay closes the transmitting row
+    // as unknown and never sends the remote request again.
+    let fixture = FixtureConnectorApi::start(FixtureConnectorScript::new(vec![
+        FixtureConnectorResponse::json(json!({"data": {"accepted": true}})),
+    ]))
+    .await
+    .expect("connector fixture should start");
+    let (runtime, repository, _, invocation, prepared) =
+        runtime_fixture_without_upstream_idempotency(
+            fixture.origin(),
+            Arc::new(StaticVault::with_secret("journal-gap-secret")),
+            loopback_policy(),
+        );
+
+    let unjournaled = runtime
+        .invoke(invocation.clone(), prepared.clone())
+        .await
+        .expect("first non-idempotent request should reach the upstream");
+    assert_eq!(unjournaled.output(), &json!({"accepted": true}));
+    assert_eq!(fixture.controller().requests().len(), 1);
+    assert_eq!(
+        repository.only_invocation().state,
+        ConnectorInvocationState::Transmitting
+    );
+
+    let replay_error = runtime
+        .invoke(invocation, prepared)
+        .await
+        .expect_err("ambiguous non-idempotent replay must require reconciliation");
+    assert!(matches!(
+        replay_error,
+        Error::ManualReconciliationRequired { .. }
+    ));
+    assert_eq!(fixture.controller().requests().len(), 1);
+    let record = repository.only_invocation();
+    assert_eq!(record.state, ConnectorInvocationState::UnknownOutcome);
+    assert_eq!(
+        record.error_metadata,
+        Some(json!({
+            "code": "effect_journal_ambiguous",
+            "manual_reconciliation_required": true,
+        }))
     );
 }
 
@@ -733,11 +792,12 @@ async fn credential_failure_is_before_send_and_preheader_loss_is_unknown_offline
     ]))
     .await
     .expect("preheader-loss fixture should start");
-    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
-        fixture.origin(),
-        Arc::new(StaticVault::with_secret("unknown-outcome-secret")),
-        loopback_policy(),
-    );
+    let (runtime, repository, _, invocation, prepared) =
+        runtime_fixture_without_upstream_idempotency(
+            fixture.origin(),
+            Arc::new(StaticVault::with_secret("unknown-outcome-secret")),
+            loopback_policy(),
+        );
     let replay = invocation.clone();
     let error = runtime
         .invoke(invocation, prepared.clone())
@@ -761,11 +821,16 @@ async fn credential_failure_is_before_send_and_preheader_loss_is_unknown_offline
         .expect_err("unknown outcome must never retransmit automatically");
     assert!(matches!(
         replay_error,
-        Error::InvocationUnavailable {
-            state: ConnectorInvocationState::UnknownOutcome
-        }
+        Error::ManualReconciliationRequired { .. }
     ));
     assert_eq!(fixture.controller().requests().len(), 1);
+    assert_eq!(
+        repository.only_invocation().error_metadata,
+        Some(json!({
+            "code": "transport_outcome_unknown",
+            "manual_reconciliation_required": true,
+        }))
+    );
 }
 
 fn runtime_fixture(
@@ -779,10 +844,39 @@ fn runtime_fixture(
     ConnectorActionInvocation,
     PreparedConnectorAction,
 ) {
+    runtime_fixture_with_upstream_idempotency(origin, vault, policy, true)
+}
+
+fn runtime_fixture_without_upstream_idempotency(
+    origin: &str,
+    vault: Arc<StaticVault>,
+    policy: OutboundHttpPolicy,
+) -> (
+    HttpConnectorRuntime,
+    Arc<InMemoryRepository>,
+    Arc<StaticVault>,
+    ConnectorActionInvocation,
+    PreparedConnectorAction,
+) {
+    runtime_fixture_with_upstream_idempotency(origin, vault, policy, false)
+}
+
+fn runtime_fixture_with_upstream_idempotency(
+    origin: &str,
+    vault: Arc<StaticVault>,
+    policy: OutboundHttpPolicy,
+    upstream_idempotency: bool,
+) -> (
+    HttpConnectorRuntime,
+    Arc<InMemoryRepository>,
+    Arc<StaticVault>,
+    ConnectorActionInvocation,
+    PreparedConnectorAction,
+) {
     let tenant_id = TenantId::new();
     let connection_id = ConnectorConnectionId::new();
     let generation = ConnectionGeneration::new(2).expect("fixture generation should be valid");
-    let definition: ConnectorDefinition = serde_json::from_value(json!({
+    let mut definition_json = json!({
         "display_name": "HTTP fixture",
         "auth": [{
             "type": "api_key_header",
@@ -831,8 +925,20 @@ fn runtime_fixture(
                     }
                 }
         }]
-    }))
-    .expect("HTTP connector fixture should deserialize");
+    });
+    if !upstream_idempotency {
+        let contract = definition_json["actions"][0]["contract"]
+            .as_object_mut()
+            .expect("fixture connector contract should be an object");
+        contract.remove("upstream_idempotency_header");
+        contract
+            .get_mut("policy")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("fixture connector policy should be an object")
+            .insert("idempotency".to_string(), json!("non_idempotent"));
+    }
+    let definition: ConnectorDefinition =
+        serde_json::from_value(definition_json).expect("HTTP connector fixture should deserialize");
     let action = definition
         .actions
         .first()

@@ -3,18 +3,25 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use moa_connectors::executor::ConnectorInvocationCompletionService;
+use moa_connectors::executor::{
+    ConnectorInvocationCompletionService, ConnectorInvocationCompletionTicket,
+    SecuredConnectorOutputMetadata,
+};
 use moa_core::traits::{SessionEventLookupStore, SessionStore};
 use moa_core::{
     error::MoaError, error::ToolFailureClass, events::Event, events::EventType,
-    types::action_policy::ExecutionTaskOrigin, types::completion::ToolInvocation,
-    types::events_stream::ClaimCheck, types::events_stream::EventRecord, types::hands::SandboxFile,
-    types::identifiers::SessionId, types::identifiers::ToolCallId,
-    types::security::ToolCapabilityId, types::session::SessionMeta, types::tools::IdempotencyClass,
-    types::tools::SecuredToolOutput, types::tools::ToolCallRequest, types::tools::ToolDefinition,
-    types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
+    types::action_policy::ExecutionCompensationOrigin, types::action_policy::ExecutionTaskOrigin,
+    types::completion::ToolInvocation, types::events_stream::ClaimCheck,
+    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::SessionId,
+    types::identifiers::ToolCallId, types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::tools::IdempotencyClass, types::tools::SecuredToolOutput, types::tools::ToolCallRequest,
+    types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
     types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
+use moa_execution::repository::{
+    ExecutionEffectAdmissionOutcome, ExecutionEffectOwner, ExecutionRepository, ExecutionScope,
+};
+use moa_execution::wire::ExecutionToolDispatchRejection;
 use moa_hands::{
     PendingConnectorToolOutput, ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution,
     ToolRouter,
@@ -31,7 +38,9 @@ use sha2::{Digest, Sha256};
 
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{blocked_canary_message, blocked_canary_tool_output};
-use crate::workflows::errors::moa_error_to_handler_error;
+use crate::workflows::errors::{
+    authz_error_to_handler_error, moa_error_to_handler_error, sqlx_error_to_handler_error,
+};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -45,10 +54,10 @@ pub trait ToolExecutor {
         request: Json<ToolCallRequest>,
     ) -> Result<Json<SecuredToolOutput>, HandlerError>;
 
-    /// Executes one dynamic execution task without writing root-session tool events.
-    async fn execute_execution_task(
-        request: Json<ExecutionTaskToolCallRequest>,
-    ) -> Result<Json<SecuredToolOutput>, HandlerError>;
+    /// Executes one dynamic execution task or compensation without writing root-session events.
+    async fn execute_execution(
+        request: Json<ExecutionToolCallRequest>,
+    ) -> Result<Json<ExecutionToolCallOutcome>, HandlerError>;
 
     /// Lists tools in one authenticated session and agent catalog scope.
     async fn list_tools(
@@ -70,6 +79,11 @@ pub trait ToolExecutor {
         request: Json<ReleaseExecutionTaskHandsRequest>,
     ) -> Result<(), HandlerError>;
 
+    /// Releases the generation-independent hand scope owned by one compensation.
+    async fn release_execution_compensation_hands(
+        request: Json<ReleaseExecutionCompensationHandsRequest>,
+    ) -> Result<(), HandlerError>;
+
     /// Releases every hand and durable lease under a session at terminal teardown.
     async fn release_session_hands(
         request: Json<ReleaseSessionHandsRequest>,
@@ -86,14 +100,50 @@ pub struct ScopedToolCatalogRequest {
     pub caller_identity: moa_core::traits::Identity,
 }
 
-/// Tool request owned by one persisted dynamic execution task.
+/// Exact durable owner of one execution-scoped tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "coordinates",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ExecutionToolCallOrigin {
+    /// Forward execution task coordinates.
+    Task(ExecutionTaskOrigin),
+    /// Rollback compensation coordinates.
+    Compensation(ExecutionCompensationOrigin),
+}
+
+/// Tool request owned by one persisted execution operation.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ExecutionTaskToolCallRequest {
+#[serde(deny_unknown_fields)]
+pub struct ExecutionToolCallRequest {
     /// Normal governed tool call carrying the owning session and trusted-file context.
     pub call: ToolCallRequest,
-    /// Required execution provenance; optional on the wire so missing data fails explicitly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<ExecutionTaskOrigin>,
+    /// Required typed execution provenance.
+    pub origin: ExecutionToolCallOrigin,
+}
+
+/// Typed execution-only result that keeps ambiguous external effects out of errors.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionToolCallOutcome {
+    /// The tool produced a classified terminal output.
+    Completed {
+        /// Classified tool output journaled by ToolExecutor.
+        output: Box<SecuredToolOutput>,
+    },
+    /// A non-idempotent external effect may have committed and cannot be resent safely.
+    UnknownOutcome {
+        /// Stable diagnostic requiring operator reconciliation.
+        message: String,
+    },
+    /// The durable owner was fenced or stale before the external effect began.
+    NotDispatched {
+        /// Closed reason the atomic execution-origin admission rejected dispatch.
+        reason: ExecutionToolDispatchRejection,
+    },
 }
 
 /// Request to release one finishing worker's scoped hands during its cleanup.
@@ -114,6 +164,18 @@ pub struct ReleaseExecutionTaskHandsRequest {
     pub run_uid: uuid::Uuid,
     /// Stable task identifier shared by every generation.
     pub task_id: moa_execution::state::ExecutionTaskId,
+}
+
+/// Request to release one settled compensation's scoped hands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseExecutionCompensationHandsRequest {
+    /// Owning parent session.
+    pub session_id: SessionId,
+    /// Owning execution run.
+    pub run_uid: uuid::Uuid,
+    /// Stable compensation identifier shared by every generation.
+    pub compensation_id: moa_execution::state::CompensationId,
 }
 
 /// Request to release every hand under a session at terminal teardown.
@@ -137,6 +199,52 @@ enum JournaledToolExecution {
     InstalledConnector(PendingConnectorToolOutput),
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(
+    tag = "outcome",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum JournaledExecutionToolOutcome {
+    Completed(Box<JournaledToolExecution>),
+    UnknownOutcome { message: String },
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "admission", rename_all = "snake_case", deny_unknown_fields)]
+enum JournaledExecutionEffectAdmission {
+    Admitted,
+    NotDispatched {
+        reason: ExecutionToolDispatchRejection,
+    },
+}
+
+impl From<ExecutionEffectAdmissionOutcome> for JournaledExecutionEffectAdmission {
+    fn from(outcome: ExecutionEffectAdmissionOutcome) -> Self {
+        match outcome {
+            ExecutionEffectAdmissionOutcome::Admitted => Self::Admitted,
+            ExecutionEffectAdmissionOutcome::Rejected(reason) => Self::NotDispatched { reason },
+        }
+    }
+}
+
+fn classify_execution_tool_result(
+    result: moa_core::error::Result<JournaledToolExecution>,
+) -> moa_core::error::Result<JournaledExecutionToolOutcome> {
+    match result {
+        Ok(output) => Ok(JournaledExecutionToolOutcome::Completed(Box::new(output))),
+        Err(MoaError::ExternalEffectUnknownOutcome { operation_id }) => {
+            Ok(JournaledExecutionToolOutcome::UnknownOutcome {
+                message: format!(
+                    "external effect {operation_id} has unknown outcome; manual reconciliation required"
+                ),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// The two session-log contracts durable tool execution reads through.
 ///
 /// They are supplied together because no path needs only one: a tool call is
@@ -157,6 +265,7 @@ pub struct ToolExecutorImpl {
     connector_catalogs: ScopedConnectorCatalogProvider,
     connector_completion: ConnectorInvocationCompletionService,
     session_access: SessionAccess,
+    execution_repository: ExecutionRepository,
 }
 
 impl ToolExecutorImpl {
@@ -168,12 +277,14 @@ impl ToolExecutorImpl {
         connector_completion: ConnectorInvocationCompletionService,
         sessions: Arc<dyn SessionStore>,
         events: Arc<dyn SessionEventLookupStore>,
+        pool: sqlx::PgPool,
     ) -> Self {
         Self {
             router,
             connector_catalogs,
             connector_completion,
             session_access: SessionAccess { sessions, events },
+            execution_repository: ExecutionRepository::new(pool),
         }
     }
 
@@ -552,12 +663,14 @@ impl ToolExecutor for ToolExecutorImpl {
             JournaledToolExecution::Standard(output) => output,
             JournaledToolExecution::InstalledConnector(pending) => {
                 let (secured, metadata, ticket) = pending.into_parts();
-                self.connector_completion
-                    .finalize_succeeded(&ticket, metadata)
-                    .await
-                    .map_err(|error| {
-                        moa_error_to_handler_error(MoaError::StorageError(error.to_string()))
-                    })?;
+                finalize_connector_succeeded(
+                    &ctx,
+                    self.connector_completion.clone(),
+                    request.tool_call_id,
+                    ticket,
+                    metadata,
+                )
+                .await?;
                 secured
             }
         };
@@ -569,21 +682,21 @@ impl ToolExecutor for ToolExecutorImpl {
 
     #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal execution workflow call; the embedded session is loaded as the policy and identity owner.
-    async fn execute_execution_task(
+    async fn execute_execution(
         &self,
         ctx: Context<'_>,
-        request: Json<ExecutionTaskToolCallRequest>,
-    ) -> Result<Json<SecuredToolOutput>, HandlerError> {
+        request: Json<ExecutionToolCallRequest>,
+    ) -> Result<Json<ExecutionToolCallOutcome>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
-        annotate_restate_handler_span("ToolExecutor", "execute_execution_task");
+        annotate_restate_handler_span("ToolExecutor", "execute_execution");
         let request = request.into_inner();
-        let origin = require_execution_task_origin(&request)?;
+        let origin = request.origin;
         let session_id = request.call.session_id;
         let session =
             resolve_session(&ctx, &request.call, self.session_access.sessions.clone()).await?;
         if session.id != session_id || session.tenant_id != request.call.caller_identity.tenant_id {
             return Err(TerminalError::new(
-                "execution task tool call does not match its owning session",
+                "execution tool call does not match its owning session",
             )
             .into());
         }
@@ -595,10 +708,12 @@ impl ToolExecutor for ToolExecutorImpl {
             screen_tool_input_for_canary(request.call.active_canary.as_deref(), &serialized_input),
             ToolInputCanaryScreening::Blocked(_)
         ) {
-            return Ok(Json::from(secured_handler_output(
-                &request.call,
-                blocked_canary_tool_output(&request.call.tool_name),
-            )));
+            return Ok(Json::from(ExecutionToolCallOutcome::Completed {
+                output: Box::new(secured_handler_output(
+                    &request.call,
+                    blocked_canary_tool_output(&request.call.tool_name),
+                )),
+            }));
         }
         let service = self.clone();
         let session_for_catalog = session.clone();
@@ -620,57 +735,109 @@ impl ToolExecutor for ToolExecutorImpl {
         let activated_catalog = admission.pin;
         annotate_activated_catalog_span(&activated_catalog);
         if let Some(output) = tool_contract_denial(&request.call, &activated_catalog) {
-            return Ok(Json::from(secured_handler_output(&request.call, output)));
+            return Ok(Json::from(ExecutionToolCallOutcome::Completed {
+                output: Box::new(secured_handler_output(&request.call, output)),
+            }));
         }
         if let Some(output) =
             agent_deployment_tool_denial(&session, &request.call, &activated_catalog)
         {
-            return Ok(Json::from(secured_handler_output(&request.call, output)));
+            return Ok(Json::from(ExecutionToolCallOutcome::Completed {
+                output: Box::new(secured_handler_output(&request.call, output)),
+            }));
         }
         let Some(definition) = admission.definition else {
-            return Ok(Json::from(secured_handler_output(
-                &request.call,
-                ToolOutput::from(ToolFailureClass::Fatal {
-                    reason: format!("unknown tool: {}", request.call.tool_name),
-                }),
-            )));
+            return Ok(Json::from(ExecutionToolCallOutcome::Completed {
+                output: Box::new(secured_handler_output(
+                    &request.call,
+                    ToolOutput::from(ToolFailureClass::Fatal {
+                        reason: format!("unknown tool: {}", request.call.tool_name),
+                    }),
+                )),
+            }));
         };
-        let run_name = execution_task_tool_run_name(&definition, &request.call, origin);
-        let hand_scope = execution_task_hand_scope(origin);
+        let run_name = execution_tool_run_name(&definition, &request.call, origin);
+        let hand_scope = execution_hand_scope(origin);
         let request_for_run = request.call.clone();
         let session_for_run = session.clone();
         let service = self.clone();
-        let journaled = ctx
+        let admission_repository = self.execution_repository.clone();
+        let admission_scope = execution_scope_for_session(&session);
+        let admission_run_uid = execution_run_uid(origin);
+        let admission_session_id = session.id;
+        let admission_owner = execution_effect_owner(origin);
+        let admission_name = execution_effect_admission_run_name(origin, request.call.tool_call_id);
+        let effect_admission = ctx
             .run(|| async move {
-                service
-                    .execute_scoped_with_scope(
-                        &session_for_run,
-                        &request_for_run,
-                        Some(hand_scope.as_str()),
+                admission_repository
+                    .admit_execution_effect(
+                        admission_scope,
+                        admission_run_uid,
+                        admission_session_id,
+                        admission_owner,
                     )
                     .await
+                    .map(JournaledExecutionEffectAdmission::from)
                     .map(Json::from)
-                    .map_err(moa_error_to_handler_error)
+                    .map_err(execution_repository_error)
+            })
+            .name(admission_name)
+            .await?
+            .into_inner();
+        if let JournaledExecutionEffectAdmission::NotDispatched { reason } = effect_admission {
+            return Ok(Json::from(ExecutionToolCallOutcome::NotDispatched {
+                reason,
+            }));
+        }
+
+        // This journaled admission is the linearization cut point. A terminal fence that wins
+        // the same run-row lock returns above without calling the router; an admitted replay must
+        // continue into this stable Restate effect operation and be joined by terminal settlement.
+        let journaled = ctx
+            .run(|| async move {
+                classify_execution_tool_result(
+                    service
+                        .execute_scoped_with_scope(
+                            &session_for_run,
+                            &request_for_run,
+                            Some(hand_scope.as_str()),
+                        )
+                        .await,
+                )
+                .map(Json::from)
+                .map_err(moa_error_to_handler_error)
             })
             .name(run_name)
             .retry_policy(RunRetryPolicy::new().max_attempts(1))
             .await?
             .into_inner();
+        let journaled = match journaled {
+            JournaledExecutionToolOutcome::Completed(journaled) => *journaled,
+            JournaledExecutionToolOutcome::UnknownOutcome { message } => {
+                return Ok(Json::from(ExecutionToolCallOutcome::UnknownOutcome {
+                    message,
+                }));
+            }
+        };
         let output = match journaled {
             JournaledToolExecution::Standard(output) => output,
             JournaledToolExecution::InstalledConnector(pending) => {
                 let (secured, metadata, ticket) = pending.into_parts();
-                self.connector_completion
-                    .finalize_succeeded(&ticket, metadata)
-                    .await
-                    .map_err(|error| {
-                        moa_error_to_handler_error(MoaError::StorageError(error.to_string()))
-                    })?;
+                finalize_connector_succeeded(
+                    &ctx,
+                    self.connector_completion.clone(),
+                    request.call.tool_call_id,
+                    ticket,
+                    metadata,
+                )
+                .await?;
                 secured
             }
         };
 
-        Ok(Json::from(output))
+        Ok(Json::from(ExecutionToolCallOutcome::Completed {
+            output: Box::new(output),
+        }))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -769,6 +936,33 @@ impl ToolExecutor for ToolExecutorImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal terminal-compensation teardown reclaims only the typed run/compensation hand scope and returns no caller-owned data.
+    async fn release_execution_compensation_hands(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ReleaseExecutionCompensationHandsRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "release_execution_compensation_hands");
+        let request = request.into_inner();
+        let scope = execution_compensation_hand_scope(ExecutionCompensationOrigin {
+            run_uid: request.run_uid,
+            compensation_id: request.compensation_id.as_uuid(),
+            generation: 1,
+        });
+        if !self
+            .router
+            .reclaim_hands(&request.session_id, Some(scope.as_str()))
+            .await
+        {
+            return Err(
+                TerminalError::new("execution compensation hand cleanup incomplete").into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal teardown dispatched at session terminal teardown. It reclaims only
     // that session's own hands/leases and reads no caller-owned data back. The router logs
     // and swallows its own failures, so this is non-fatal and always returns Ok.
@@ -782,6 +976,43 @@ impl ToolExecutor for ToolExecutorImpl {
         let request = request.into_inner();
         self.router.reclaim_hands(&request.session_id, None).await;
         Ok(())
+    }
+}
+
+async fn finalize_connector_succeeded(
+    ctx: &Context<'_>,
+    completion: ConnectorInvocationCompletionService,
+    tool_call_id: ToolCallId,
+    ticket: ConnectorInvocationCompletionTicket,
+    metadata: SecuredConnectorOutputMetadata,
+) -> Result<(), HandlerError> {
+    ctx.run(|| async move {
+        completion
+            .finalize_succeeded(&ticket, metadata)
+            .await
+            .map_err(connector_completion_error)
+    })
+    .name(format!("connector_finalize_succeeded:{tool_call_id}"))
+    .retry_policy(
+        RunRetryPolicy::new()
+            .initial_delay(Duration::from_millis(250))
+            .exponentiation_factor(2.0)
+            .max_delay(Duration::from_secs(5))
+            .max_attempts(5),
+    )
+    .await
+    .map_err(HandlerError::from)
+}
+
+fn connector_completion_error(error: moa_connectors::Error) -> HandlerError {
+    match error {
+        moa_connectors::Error::DatabaseScope(error) => moa_error_to_handler_error(error),
+        moa_connectors::Error::Authorization(error) => authz_error_to_handler_error(error),
+        moa_connectors::Error::Storage(error) => sqlx_error_to_handler_error(error),
+        retryable @ moa_connectors::Error::AuthorizationUnavailable => {
+            HandlerError::from(retryable)
+        }
+        other => TerminalError::new(other.to_string()).into(),
     }
 }
 
@@ -807,6 +1038,79 @@ pub fn execution_task_hand_scope(origin: ExecutionTaskOrigin) -> String {
     format!("execution:{}:{}", origin.run_uid, origin.task_uid)
 }
 
+/// Builds the isolated hand scope shared by generations of one compensation.
+pub fn execution_compensation_hand_scope(origin: ExecutionCompensationOrigin) -> String {
+    format!(
+        "execution_compensation:{}:{}",
+        origin.run_uid, origin.compensation_id
+    )
+}
+
+/// Builds the isolated hand scope for one typed execution operation.
+pub fn execution_hand_scope(origin: ExecutionToolCallOrigin) -> String {
+    match origin {
+        ExecutionToolCallOrigin::Task(origin) => execution_task_hand_scope(origin),
+        ExecutionToolCallOrigin::Compensation(origin) => execution_compensation_hand_scope(origin),
+    }
+}
+
+fn execution_scope_for_session(session: &SessionMeta) -> ExecutionScope {
+    session.contact.as_ref().map_or(
+        ExecutionScope::Tenant {
+            tenant_id: session.tenant_id,
+        },
+        |contact| ExecutionScope::Contact {
+            tenant_id: session.tenant_id,
+            contact_id: contact.contact_id,
+        },
+    )
+}
+
+fn execution_run_uid(origin: ExecutionToolCallOrigin) -> uuid::Uuid {
+    match origin {
+        ExecutionToolCallOrigin::Task(origin) => origin.run_uid,
+        ExecutionToolCallOrigin::Compensation(origin) => origin.run_uid,
+    }
+}
+
+fn execution_effect_owner(origin: ExecutionToolCallOrigin) -> ExecutionEffectOwner {
+    match origin {
+        ExecutionToolCallOrigin::Task(origin) => ExecutionEffectOwner::Task {
+            task_id: moa_execution::state::ExecutionTaskId::from_uuid(origin.task_uid),
+            generation: origin.generation,
+        },
+        ExecutionToolCallOrigin::Compensation(origin) => ExecutionEffectOwner::Compensation {
+            compensation_id: moa_execution::state::CompensationId::from_uuid(
+                origin.compensation_id,
+            ),
+            generation: origin.generation,
+        },
+    }
+}
+
+fn execution_effect_admission_run_name(
+    origin: ExecutionToolCallOrigin,
+    tool_call_id: ToolCallId,
+) -> String {
+    match origin {
+        ExecutionToolCallOrigin::Task(origin) => format!(
+            "execution_effect_admission:task:{}:{}:{}:{tool_call_id}",
+            origin.run_uid, origin.task_uid, origin.generation
+        ),
+        ExecutionToolCallOrigin::Compensation(origin) => format!(
+            "execution_effect_admission:compensation:{}:{}:{}:{tool_call_id}",
+            origin.run_uid, origin.compensation_id, origin.generation
+        ),
+    }
+}
+
+fn execution_repository_error(error: moa_execution::Error) -> HandlerError {
+    match error {
+        error @ moa_execution::Error::Storage { .. } => HandlerError::from(error),
+        error => TerminalError::new(format!("execution effect admission failed: {error}")).into(),
+    }
+}
+
 /// Builds the Restate run-operation name fenced by execution generation.
 pub fn execution_task_tool_run_name(
     definition: &ToolDefinition,
@@ -823,12 +1127,31 @@ pub fn execution_task_tool_run_name(
     )
 }
 
-fn require_execution_task_origin(
-    request: &ExecutionTaskToolCallRequest,
-) -> Result<ExecutionTaskOrigin, TerminalError> {
-    request
-        .origin
-        .ok_or_else(|| TerminalError::new("execution task tool call requires execution origin"))
+/// Builds the Restate run-operation name fenced by the typed execution generation.
+pub fn execution_tool_run_name(
+    definition: &ToolDefinition,
+    request: &ToolCallRequest,
+    origin: ExecutionToolCallOrigin,
+) -> String {
+    match origin {
+        ExecutionToolCallOrigin::Task(origin) => {
+            execution_task_tool_run_name(definition, request, origin)
+        }
+        ExecutionToolCallOrigin::Compensation(origin) => {
+            let idempotency = match definition.idempotency_class {
+                IdempotencyClass::Idempotent => "idempotent",
+                IdempotencyClass::NonIdempotent => "non_idempotent",
+            };
+            format!(
+                "execution_compensation_tool_execute:{idempotency}:{}:{}:{}:{}:{}",
+                origin.run_uid,
+                origin.compensation_id,
+                origin.generation,
+                request.tool_name,
+                request.tool_call_id
+            )
+        }
+    }
 }
 
 /// Returns whether the given event slice already contains a terminal tool result for the call id.
@@ -1055,7 +1378,7 @@ async fn resolve_session(
                 .get_session(session_id)
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(moa_error_to_handler_error)
         })
         .name("tool_executor_get_session")
         .await?
@@ -1082,7 +1405,7 @@ async fn prior_non_idempotent_result_exists(
                 )
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(moa_error_to_handler_error)
         })
         .name("tool_executor_tool_result_exists")
         .await?
@@ -1110,7 +1433,7 @@ async fn prior_tool_call_event_exists(
                 )
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(moa_error_to_handler_error)
         })
         .name("tool_executor_tool_call_exists")
         .await?
@@ -1287,6 +1610,7 @@ mod tests {
     use moa_config::{McpServerConfig, MoaConfig};
     use moa_core::{
         events::Event, events::EventType, traits::BuiltInTool, traits::HandProvider,
+        types::action_policy::ExecutionCompensationOrigin,
         types::action_policy::ExecutionTaskOrigin, types::action_policy::RiskLevel,
         types::agent::AgentContext, types::agent::AgentPolicySnapshot,
         types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
@@ -1310,10 +1634,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ExecutionTaskToolCallRequest, ScopedToolCatalogRequest, agent_deployment_tool_denial,
-        blocked_canary_tool_output, execute_buffered_with_trusted_files, execution_task_hand_scope,
-        execution_task_tool_run_name, has_prior_tool_call_event, is_installed_connector_action,
-        require_execution_task_origin, root_trusted_file_read, tool_contract_denial,
+        ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallRequest,
+        JournaledExecutionEffectAdmission, ScopedToolCatalogRequest, agent_deployment_tool_denial,
+        blocked_canary_tool_output, classify_execution_tool_result,
+        execute_buffered_with_trusted_files, execution_compensation_hand_scope,
+        execution_hand_scope, execution_task_hand_scope, execution_task_tool_run_name,
+        execution_tool_run_name, has_prior_tool_call_event, is_installed_connector_action,
+        root_trusted_file_read, tool_contract_denial,
     };
 
     struct ConnectorLookingBuiltIn;
@@ -1492,17 +1819,113 @@ mod tests {
     }
 
     #[test]
-    fn execution_task_tool_executor_rejects_missing_origin() {
-        // Pins: execution dispatch cannot silently fall back to the root tool path.
-        let request = ExecutionTaskToolCallRequest {
-            call: tool_request("memory_search"),
-            origin: None,
-        };
+    fn execution_tool_executor_rejects_missing_or_legacy_origin() {
+        // Pins: execution dispatch cannot silently fall back to the root tool path
+        // or accept the removed optional forward-task origin shape.
+        let missing = serde_json::json!({ "call": tool_request("memory_search") });
+        assert!(serde_json::from_value::<ExecutionToolCallRequest>(missing).is_err());
 
-        let error = require_execution_task_origin(&request)
-            .expect_err("missing execution provenance must fail closed");
+        let legacy = serde_json::json!({
+            "call": tool_request("memory_search"),
+            "origin": {
+                "run_uid": Uuid::from_u128(1),
+                "task_uid": Uuid::from_u128(2),
+                "generation": 1,
+            },
+        });
+        assert!(serde_json::from_value::<ExecutionToolCallRequest>(legacy).is_err());
+    }
 
-        assert!(error.to_string().contains("requires execution origin"));
+    #[test]
+    fn execution_tool_executor_preserves_only_explicit_effect_ambiguity() {
+        // Pins: the execution envelope turns only typed external-effect ambiguity
+        // into durable data; ordinary tool errors remain errors for Restate policy.
+        let unknown = classify_execution_tool_result(Err(
+            moa_core::error::MoaError::ExternalEffectUnknownOutcome {
+                operation_id: "operation-1".to_string(),
+            },
+        ))
+        .expect("typed ambiguity should become a journaled execution outcome");
+        assert!(matches!(
+            unknown,
+            super::JournaledExecutionToolOutcome::UnknownOutcome { .. }
+        ));
+
+        let ordinary = classify_execution_tool_result(Err(moa_core::error::MoaError::ToolError(
+            "ordinary failure".to_string(),
+        )));
+        assert!(matches!(
+            ordinary,
+            Err(moa_core::error::MoaError::ToolError(_))
+        ));
+    }
+
+    #[test]
+    fn execution_origin_rejection_is_typed_and_strict() {
+        // Pins: a fenced run is control data proving that the external effect never
+        // started, not ambiguity, a classified tool error, or an extensible string.
+        let reason = moa_execution::wire::ExecutionToolDispatchRejection::RunNotDispatchable;
+        let admission = JournaledExecutionEffectAdmission::from(
+            moa_execution::repository::ExecutionEffectAdmissionOutcome::Rejected(reason),
+        );
+        assert!(matches!(
+            admission,
+            JournaledExecutionEffectAdmission::NotDispatched {
+                reason: moa_execution::wire::ExecutionToolDispatchRejection::RunNotDispatchable
+            }
+        ));
+
+        let outcome = ExecutionToolCallOutcome::NotDispatched { reason };
+        let encoded = serde_json::to_value(&outcome).expect("serialize fenced execution outcome");
+        assert_eq!(
+            serde_json::from_value::<ExecutionToolCallOutcome>(encoded.clone())
+                .expect("strict fenced execution outcome should decode"),
+            outcome
+        );
+        let mut extended = encoded;
+        extended
+            .as_object_mut()
+            .expect("execution outcome should serialize as an object")
+            .insert("legacy_retry".to_string(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<ExecutionToolCallOutcome>(extended).is_err(),
+            "unknown admission fields must not create a compatibility path"
+        );
+    }
+
+    #[test]
+    fn execution_origin_admission_is_the_journaled_pre_dispatch_cut_point() {
+        // Pins: moving the database fence after the router call, or peeking outside
+        // a named Restate run, can send an effect after its owner has terminalized.
+        let source = include_str!("tool_executor.rs");
+        let handler_start = source
+            .find("// SAFETY: internal execution workflow call")
+            .expect("execution handler marker should exist");
+        let handler_end = source[handler_start..]
+            .find("async fn list_tools(")
+            .map(|offset| handler_start + offset)
+            .expect("execution handler should end before list_tools");
+        let handler = &source[handler_start..handler_end];
+        let admission = handler
+            .find(".admit_execution_effect(")
+            .expect("execution handler should perform atomic origin admission");
+        let journal_start = handler[..admission]
+            .rfind(".run(|| async move")
+            .expect("execution origin admission should be inside a Restate run");
+        let named_journal = handler
+            .find(".name(admission_name)")
+            .expect("execution admission journal should have a stable name");
+        let rejection = handler
+            .find("JournaledExecutionEffectAdmission::NotDispatched")
+            .expect("fenced admission should return before dispatch");
+        let external_dispatch = handler
+            .find(".execute_scoped_with_scope(")
+            .expect("execution handler should retain its external dispatch");
+
+        assert!(journal_start < admission);
+        assert!(admission < named_journal);
+        assert!(named_journal < rejection);
+        assert!(rejection < external_dispatch);
     }
 
     #[test]
@@ -1580,6 +2003,42 @@ mod tests {
 
         assert!(first_name.contains(":3:"));
         assert!(next_name.contains(":4:"));
+        assert_ne!(first_name, next_name);
+    }
+
+    #[test]
+    fn execution_compensation_origin_has_distinct_scope_and_generation_fence() {
+        // Pins: rollback effects use compensation coordinates in both sandbox
+        // ownership and Restate journal names, never forward-task coordinates.
+        let definition = ToolRegistry::default_local()
+            .get("memory_search")
+            .expect("memory_search is registered")
+            .clone();
+        let request = tool_request("memory_search");
+        let first = ExecutionCompensationOrigin {
+            run_uid: Uuid::from_u128(10),
+            compensation_id: Uuid::from_u128(30),
+            generation: 3,
+        };
+        let next = ExecutionCompensationOrigin {
+            generation: 4,
+            ..first
+        };
+        let first_origin = ExecutionToolCallOrigin::Compensation(first);
+        let next_origin = ExecutionToolCallOrigin::Compensation(next);
+
+        assert_eq!(
+            execution_hand_scope(first_origin),
+            execution_hand_scope(next_origin)
+        );
+        assert_eq!(
+            execution_compensation_hand_scope(first),
+            execution_compensation_hand_scope(next)
+        );
+        let first_name = execution_tool_run_name(&definition, &request, first_origin);
+        let next_name = execution_tool_run_name(&definition, &request, next_origin);
+        assert!(first_name.starts_with("execution_compensation_tool_execute:"));
+        assert!(first_name.contains(&first.compensation_id.to_string()));
         assert_ne!(first_name, next_name);
     }
 

@@ -2,10 +2,15 @@
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::reference::ArtifactRef;
+
+/// Only execution-plan schema version accepted by the runtime reader.
+pub const EXECUTION_PLAN_SCHEMA_VERSION: u32 = 2;
+/// Only plan-amendment schema version accepted by the runtime reader.
+pub const PLAN_AMENDMENT_SCHEMA_VERSION: u32 = 2;
 
 /// Immutable user-derived goal and completion contract for an execution run.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -127,14 +132,30 @@ pub enum CompletionCheckKind {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanDefinition {
-    /// Execution-plan schema version, which must be `1`.
+    /// Execution-plan schema version, which must be `2`.
+    #[serde(deserialize_with = "deserialize_execution_plan_schema_version")]
     pub schema_version: u32,
+    /// Explicit policy for effects already committed when the run is cancelled.
+    pub cancel_policy: ExecutionCancelPolicy,
     /// JSON Schema for run input.
     pub input_schema: Value,
     /// JSON Schema for terminal output.
     pub output_schema: Value,
     /// Acyclic execution nodes in deterministic authoring order.
     pub nodes: Vec<ExecutionNode>,
+}
+
+fn deserialize_execution_plan_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != EXECUTION_PLAN_SCHEMA_VERSION {
+        return Err(D::Error::custom(format!(
+            "execution plan schema_version must equal {EXECUTION_PLAN_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
 }
 
 /// One node in an execution plan.
@@ -155,10 +176,70 @@ pub struct ExecutionNode {
     pub output_schema: Value,
     /// Operation performed by the node.
     pub operation: ExecutionOperation,
+    /// Exact opt-in rollback contract for a direct side-effecting capability.
+    pub compensation: Option<ExecutionCompensation>,
     /// Retry policy applied to executable work.
     pub retry: RetryPolicy,
     /// Optional per-node resource ceiling.
     pub budget: Option<ExecutionBudgetLimit>,
+}
+
+/// Policy for committed effects when an execution run is cancelled.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCancelPolicy {
+    /// Keep effects that reached a durable terminal outcome before cancellation.
+    RetainEffects,
+    /// Undo committed effects whose capability contract promises exact rollback.
+    CompensateCommitted,
+}
+
+/// Exact rollback contract selected by one direct capability node.
+///
+/// Compilation accepts this contract only when it exactly matches the forward
+/// capability's immutable catalog-owned rollback contract.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensation {
+    /// Exact governed capability version that reverses the forward effect.
+    pub compensator: CapabilityReference,
+    /// Bounded construction of compensator input from committed forward values.
+    pub input_mapping: CompensationInputMapping,
+}
+
+/// Bounded object-field mapping used to construct compensator input.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompensationInputMapping {
+    /// Deterministically ordered target bindings. Compilation rejects duplicates
+    /// and more than 64 bindings.
+    pub bindings: Vec<CompensationInputBinding>,
+}
+
+/// One JSON Pointer target populated from the committed forward invocation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompensationInputBinding {
+    /// JSON Pointer in the compensator input object to populate.
+    pub target_pointer: String,
+    /// Exact committed value source for this binding.
+    pub source: CompensationValueSource,
+}
+
+/// Values visible to the bounded compensation mapping language.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompensationValueSource {
+    /// Read a value from the exact resolved forward capability input.
+    OriginalInput {
+        /// RFC 6901 JSON Pointer, with an empty pointer selecting the whole input.
+        pointer: String,
+    },
+    /// Read a value from the exact committed forward capability output.
+    OriginalOutput {
+        /// RFC 6901 JSON Pointer, with an empty pointer selecting the whole output.
+        pointer: String,
+    },
 }
 
 /// Stable reference to one registered governed capability version.
@@ -375,6 +456,11 @@ pub enum ExecutionTaskResult {
         /// Human-readable cancellation reason.
         reason: String,
     },
+    /// A side effect may have committed, so automatic replay or compensation is unsafe.
+    UnknownOutcome {
+        /// Human-readable reconciliation guidance.
+        message: String,
+    },
     /// Task failed with a typed failure class.
     Failed {
         /// Failure class used by retry and terminal policy.
@@ -452,7 +538,8 @@ pub struct ExecutionCitation {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAmendment {
-    /// Amendment schema version, which must be `1`.
+    /// Amendment schema version, which must be `2`.
+    #[serde(deserialize_with = "deserialize_plan_amendment_schema_version")]
     pub schema_version: u32,
     /// Active plan revision to which the amendment applies.
     pub base_plan_revision: u64,
@@ -462,6 +549,19 @@ pub struct PlanAmendment {
     pub evidence: Value,
     /// Restricted pending/downstream patch operations.
     pub operations: Vec<PlanAmendmentOperation>,
+}
+
+fn deserialize_plan_amendment_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != PLAN_AMENDMENT_SCHEMA_VERSION {
+        return Err(D::Error::custom(format!(
+            "plan amendment schema_version must equal {PLAN_AMENDMENT_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
 }
 
 /// Restricted operations available in a plan amendment.

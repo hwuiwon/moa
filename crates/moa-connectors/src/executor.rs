@@ -232,8 +232,10 @@ impl ConnectorInvocationCoordinator {
 
     /// Reserves the replay key after the selected transport is fully prepared.
     ///
-    /// A replay or in-flight record is returned as a closed error and never as
-    /// a carrier that could reach the transmission transition.
+    /// An in-flight transmission can be resumed only when the governed
+    /// operation supplied an upstream idempotency key. A non-idempotent
+    /// transmission is closed as an explicit unknown outcome instead of being
+    /// sent again.
     pub async fn reserve(
         &self,
         authorized: AuthorizedConnectorInvocation,
@@ -259,7 +261,43 @@ impl ConnectorInvocationCoordinator {
                     repository: Arc::clone(&self.invocations),
                 })
             }
+            InvocationReservation::InFlight(record)
+                if record.state == crate::domain::ConnectorInvocationState::Transmitting
+                    && record.upstream_idempotency_key.is_some() =>
+            {
+                validate_replay_record(&request, &record)?;
+                Ok(ReservedConnectorInvocation {
+                    authorized,
+                    record,
+                    repository: Arc::clone(&self.invocations),
+                })
+            }
+            InvocationReservation::InFlight(record)
+                if record.state == crate::domain::ConnectorInvocationState::Transmitting =>
+            {
+                validate_replay_record(&request, &record)?;
+                let invocation_id = record.invocation_id;
+                self.invocations
+                    .finish_invocation(
+                        record.tenant_id,
+                        invocation_id,
+                        ConnectorInvocationTerminal::UnknownOutcome {
+                            error_metadata: unknown_outcome_metadata("effect_journal_ambiguous"),
+                        },
+                    )
+                    .await?;
+                Err(Error::ManualReconciliationRequired { invocation_id })
+            }
+            InvocationReservation::Replay(record)
+                if record.state == crate::domain::ConnectorInvocationState::UnknownOutcome =>
+            {
+                validate_replay_record(&request, &record)?;
+                Err(Error::ManualReconciliationRequired {
+                    invocation_id: record.invocation_id,
+                })
+            }
             InvocationReservation::Replay(record) | InvocationReservation::InFlight(record) => {
+                validate_replay_record(&request, &record)?;
                 Err(Error::InvocationUnavailable {
                     state: record.state,
                 })
@@ -337,11 +375,12 @@ impl fmt::Debug for AuthorizedConnectorInvocation {
     }
 }
 
-/// One newly reserved connector invocation that has not crossed the send fence.
+/// One connector invocation authorized to attempt transport.
 ///
-/// This carrier can move only to `failed_before_send` or consume itself into a
-/// [`TransmittingConnectorInvocation`]. It cannot be cloned or constructed by
-/// runtime callers.
+/// A fresh carrier can move to `failed_before_send` or cross the transmission
+/// fence. A replay carrier already in `transmitting` exists only when its
+/// governed operation supplies an upstream idempotency key. It cannot be cloned
+/// or constructed by runtime callers.
 pub struct ReservedConnectorInvocation {
     authorized: AuthorizedConnectorInvocation,
     record: crate::domain::ConnectorInvocationRecord,
@@ -357,6 +396,9 @@ impl ReservedConnectorInvocation {
 
     /// Records a known failure before transmission and consumes send authority.
     pub async fn fail_before_send<T>(self, error: Error, code: &'static str) -> Result<T> {
+        if self.record.state == crate::domain::ConnectorInvocationState::Transmitting {
+            return Err(error);
+        }
         self.repository
             .finish_invocation(
                 self.authorized.invocation.tenant_id(),
@@ -371,6 +413,15 @@ impl ReservedConnectorInvocation {
 
     /// Atomically crosses the one-way transmission fence.
     pub async fn mark_transmitting(self) -> Result<TransmittingConnectorInvocation> {
+        if self.record.state == crate::domain::ConnectorInvocationState::Transmitting
+            && self.record.upstream_idempotency_key.is_some()
+        {
+            return Ok(TransmittingConnectorInvocation {
+                authorized: self.authorized,
+                record: self.record,
+                repository: self.repository,
+            });
+        }
         let marked = self
             .repository
             .mark_transmitting(
@@ -432,8 +483,15 @@ impl TransmittingConnectorInvocation {
         self.finish_error(error, code, false).await
     }
 
-    /// Records an unsafe-to-retry transport outcome and consumes completion authority.
+    /// Records an unsafe-to-retry transport outcome.
+    ///
+    /// Operations with upstream idempotency remain `transmitting` so a replay
+    /// can send the same keyed request. Non-idempotent operations become a
+    /// terminal unknown outcome that requires manual reconciliation.
     pub async fn unknown<T>(self, error: Error, code: &'static str) -> Result<T> {
+        if self.record.upstream_idempotency_key.is_some() {
+            return Err(error);
+        }
         self.finish_error(error, code, true).await
     }
 
@@ -459,7 +517,7 @@ impl TransmittingConnectorInvocation {
     async fn finish_error<T>(self, error: Error, code: &'static str, unknown: bool) -> Result<T> {
         let terminal = if unknown {
             ConnectorInvocationTerminal::UnknownOutcome {
-                error_metadata: serde_json::json!({"code": code}),
+                error_metadata: unknown_outcome_metadata(code),
             }
         } else {
             ConnectorInvocationTerminal::Failed {
@@ -578,6 +636,32 @@ fn validate_reserved_record(
     Ok(())
 }
 
+fn validate_replay_record(
+    request: &InvocationReservationRequest,
+    record: &crate::domain::ConnectorInvocationRecord,
+) -> Result<()> {
+    if record.tenant_id != request.tenant_id
+        || record.connection_id != request.connection_id
+        || record.binding_id != request.binding_id
+        || record.connection_generation != request.connection_generation
+        || record.tool_call_id != request.tool_call_id
+        || record.request_hash != request.request_hash
+        || record.upstream_idempotency_key != request.upstream_idempotency_key
+    {
+        return Err(Error::CatalogInvariant {
+            message: "invocation repository returned a mismatched replay record".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn unknown_outcome_metadata(code: &'static str) -> Value {
+    serde_json::json!({
+        "code": code,
+        "manual_reconciliation_required": true,
+    })
+}
+
 fn validate_connector_schema(
     schema: &Value,
     instance: &Value,
@@ -642,8 +726,10 @@ impl RawConnectorActionResult {
     /// persist only secured metadata, and then call
     /// [`ConnectorInvocationCompletionService::finalize_succeeded`] only after
     /// the surrounding durable runtime has journaled that secured result.
-    /// Abandoning the ticket leaves the invocation in `transmitting`, which
-    /// recovery treats as an unknown outcome and never retransmits automatically.
+    /// Abandoning the ticket leaves the invocation in `transmitting`. Recovery
+    /// may resend only when the governed contract supplied an upstream
+    /// idempotency key; otherwise it closes the ledger as an unknown outcome
+    /// requiring manual reconciliation.
     #[must_use]
     pub fn into_parts(self) -> (Value, ConnectorInvocationCompletionTicket) {
         (self.output, self.completion)

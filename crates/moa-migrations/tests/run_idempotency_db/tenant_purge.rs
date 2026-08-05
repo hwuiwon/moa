@@ -709,7 +709,7 @@ async fn seed_tenant_purge_activated_release_chain(
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
-    // Pins: a pristine final schema persists exactly 133 purge stages, installs
+    // Pins: a pristine final schema persists exactly 134 purge stages, installs
     // statement fences, and advances a real purge in fixed-size batches.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -1308,7 +1308,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
             true,
         )
     );
-    assert_eq!(catalog_count, 133);
+    assert_eq!(catalog_count, 134);
     assert_eq!(
         trigger_kinds,
         vec![

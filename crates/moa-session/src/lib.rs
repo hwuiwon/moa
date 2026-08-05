@@ -24,8 +24,8 @@ pub use neon::NeonBranchManager;
 pub use store::{
     EventAppend, ExperienceEmbeddingNeighbor, MissingTaskEmbedding, OpenProposalSource,
     PostgresSessionStore, RecentSkillPromotion, RecurrenceExperienceMember,
-    RecurringExperienceCluster, SessionChannelBindingReplacement, SessionCreateOutcome,
-    SkillCandidateDecision, SkillResolutionSample,
+    RecurringExperienceCluster, SessionArchiveStoreError, SessionChannelBindingReplacement,
+    SessionCreateOutcome, SkillCandidateDecision, SkillResolutionSample,
 };
 
 /// Creates the shared Postgres session store from config and verifies connectivity.

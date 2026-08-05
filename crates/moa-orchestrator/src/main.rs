@@ -14,29 +14,24 @@ use axum::routing::get;
 use axum::{Router, serve};
 use clap::{Parser, Subcommand};
 use moa_observability::{TelemetryConfig, init_observability, metrics_endpoint_url};
+use moa_orchestrator::objects::session_status_migrator::build_status_migration_endpoint;
 use moa_orchestrator::services::scim::{self, ScimState};
 use moa_orchestrator::{
-    config::{
-        ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
-        skip_fga_from_env,
-    },
+    config::{ProvidersOverride, load_moa_config_from_env, restate_ingress_url, skip_fga_from_env},
     credential_ingress,
     runtime::{
+        bootstrap::{BootstrapOptions, run as run_bootstrap, wait_for_session_status_cutover},
         channel_ingress::spawn_channel_ingress,
         database::{build_database_pool, database_search_path},
         deps::RuntimeDeps,
-        endpoint::{
-            DeploymentListResponse, RegisteredDeployment, build_endpoint, services_registered,
-        },
+        endpoint::build_endpoint,
         jobs::{
-            restate_ingress_base_url, spawn_default_cron_bootstrap, start_action_review_reaper,
-            start_authz_challenge_reaper_if_configured, start_hand_lease_reaper,
-            start_mcp_catalog_refresh,
+            start_action_review_reaper, start_authz_challenge_reaper_if_configured,
+            start_hand_lease_reaper, start_mcp_catalog_refresh,
         },
         kms::KmsRuntime,
     },
 };
-use reqwest::Client;
 use restate_sdk::prelude::*;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -46,7 +41,6 @@ const DEFAULT_RESTATE_PORT: u16 = 10020;
 const DEFAULT_HEALTH_PORT: u16 = 10021;
 const DEFAULT_SCIM_PORT: u16 = 10022;
 const DEFAULT_CONNECTOR_CREDENTIAL_PORT: u16 = 10023;
-const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(15);
 const ORCHESTRATOR_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
@@ -75,6 +69,32 @@ struct Args {
 enum Command {
     /// Apply database migrations and exit.
     Migrate,
+    /// Serve only the raw Session state cutover handlers.
+    ServeStatusMigration,
+    /// Block a normal runtime replica until the raw-state cutover is complete.
+    WaitStatusCutover {
+        /// Runtime Postgres URL used only to read and verify the cutover receipt.
+        #[arg(long)]
+        database_url: String,
+    },
+    /// Reconcile Restate control-plane state from a dedicated least-privilege process.
+    Bootstrap {
+        /// Restate Admin API URL used to observe Operator registration.
+        #[arg(long)]
+        admin_url: String,
+        /// Restate ingress URL used for public bootstrap handlers.
+        #[arg(long)]
+        ingress_url: String,
+        /// Privileged Postgres URL used for the one-way Session state cutover.
+        #[arg(long)]
+        database_url: String,
+        /// Migration-only handler URI registered for the raw-state stage.
+        #[arg(long)]
+        migration_deployment_uri: String,
+        /// Steady-state handler URI to register after cutover without an Operator.
+        #[arg(long)]
+        runtime_deployment_uri: Option<String>,
+    },
     /// Activate the required root-key generation and rewrap live KEKs in batches.
     KmsRewrap {
         /// Maximum KEKs claimed and committed per transaction.
@@ -100,6 +120,48 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if matches!(args.command.as_ref(), Some(Command::ServeStatusMigration)) {
+        let listener = bind_listener(args.port).await?;
+        let shutdown = CancellationToken::new();
+        let server = spawn_restate_server(
+            build_status_migration_endpoint(),
+            listener,
+            shutdown.clone(),
+        );
+        tracing::info!(port = args.port, "starting migration-only Restate endpoint");
+        shutdown_signal().await?;
+        shutdown.cancel();
+        let _ = server.await;
+        return Ok(());
+    }
+    if let Some(Command::WaitStatusCutover { database_url }) = args.command.as_ref() {
+        wait_for_session_status_cutover(database_url).await?;
+        return Ok(());
+    }
+    if let Some(Command::Bootstrap {
+        admin_url,
+        ingress_url,
+        database_url,
+        migration_deployment_uri,
+        runtime_deployment_uri,
+    }) = args.command.as_ref()
+    {
+        let report = run_bootstrap(BootstrapOptions {
+            admin_url: admin_url.clone(),
+            ingress_url: ingress_url.clone(),
+            database_url: database_url.clone(),
+            migration_deployment_uri: migration_deployment_uri.clone(),
+            runtime_deployment_uri: runtime_deployment_uri.clone(),
+        })
+        .await?;
+        tracing::info!(
+            sessions = report.sessions_migrated,
+            status_keys_rewritten = report.status_keys_rewritten,
+            meta_statuses_rewritten = report.meta_statuses_rewritten,
+            "Restate bootstrap complete"
+        );
+        return Ok(());
+    }
     let moa_config = load_moa_config_from_env()?;
     let skip_fga = skip_fga_from_env();
     let moa_config = Arc::new(moa_config);
@@ -140,10 +202,13 @@ async fn async_main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
+        Some(Command::Bootstrap { .. }) => unreachable!("bootstrap returned before runtime config"),
+        Some(Command::ServeStatusMigration) | Some(Command::WaitStatusCutover { .. }) => {
+            unreachable!("pre-runtime command returned before runtime config")
+        }
         None => {}
     }
 
-    let restate_admin_url = restate_admin_url(moa_config.as_ref())?;
     let restate_ingress_url = restate_ingress_url(moa_config.as_ref())?;
     let providers_override = ProvidersOverride::from_env();
     providers_override.ensure_allowed(moa_config.as_ref())?;
@@ -186,9 +251,8 @@ async fn async_main() -> anyhow::Result<()> {
         readiness.clone(),
         pool.clone(),
         runtime_deps.kms.clone(),
-        restate_admin_url,
         runtime_deps.lineage.writer.clone(),
-    )?;
+    );
     let shutdown = CancellationToken::new();
     let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
         &runtime_deps.background_pool,
@@ -240,21 +304,11 @@ async fn async_main() -> anyhow::Result<()> {
         health_port = args.health_port,
         scim_port = args.scim_port,
         credential_port = args.credential_port,
-        restate_admin_url = %probe_state.admin_base_url(),
-        metrics_url = metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
+        metrics_url =
+            metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
         "starting moa-orchestrator"
     );
     readiness.store(true, Ordering::Release);
-    let cron_bootstrap = {
-        let probe_state = probe_state.clone();
-        spawn_default_cron_bootstrap(
-            move || {
-                let probe_state = probe_state.clone();
-                async move { probe_state.fetch_deployments().await }
-            },
-            restate_ingress_base_url(&restate_ingress_url),
-        )
-    };
 
     tokio::select! {
         result = &mut restate_server => {
@@ -322,10 +376,6 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::info!("shutdown signal received, draining");
             readiness.store(false, Ordering::Release);
 
-            if probe_state.deregister_on_shutdown() {
-                best_effort_deregister(&probe_state).await;
-            }
-
             // Give the load balancer a bounded window to observe readiness=false
             // before closing ingress. Audit admission stays open throughout this
             // interval because in-flight requests may still emit records.
@@ -363,8 +413,6 @@ async fn async_main() -> anyhow::Result<()> {
             if let Some(handle) = mcp_catalog_refresh_handle {
                 abort_and_join_task("MCP catalog refresh", handle).await;
             }
-            abort_and_join_task("cron bootstrap", cron_bootstrap).await;
-
             if let Some(poller_handle) = runtime_deps.authz_outbox_poller.take() {
                 let _ = shutdown_future_bounded(
                     "authz outbox poller",
@@ -478,10 +526,6 @@ struct ProbeState {
     readiness: Arc<AtomicBool>,
     pool: sqlx::PgPool,
     kms: KmsRuntime,
-    admin_base_url: String,
-    client: Client,
-    require_registration: bool,
-    deregister_on_shutdown: bool,
     /// Durable lineage writer, when this deployment owns one.
     ///
     /// Held so readiness can refuse traffic for a writer that is dead, draining,
@@ -497,32 +541,14 @@ impl ProbeState {
         readiness: Arc<AtomicBool>,
         pool: sqlx::PgPool,
         kms: KmsRuntime,
-        admin_base_url: String,
         lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
-    ) -> anyhow::Result<Self> {
-        let client = Client::builder()
-            .timeout(ADMIN_CHECK_TIMEOUT)
-            .build()
-            .context("build Restate admin HTTP client")?;
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             readiness,
             pool,
             kms,
-            admin_base_url: admin_base_url.trim_end_matches('/').to_string(),
-            client,
-            require_registration: env_flag("MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS", false),
-            deregister_on_shutdown: env_flag("MOA_DEREGISTER_ON_SHUTDOWN", false),
             lineage_writer,
-        })
-    }
-
-    fn admin_base_url(&self) -> &str {
-        &self.admin_base_url
-    }
-
-    fn deregister_on_shutdown(&self) -> bool {
-        self.deregister_on_shutdown
+        }
     }
 
     async fn check_ready(&self) -> anyhow::Result<()> {
@@ -543,29 +569,7 @@ impl ProbeState {
             bail!("lineage writer not ready: {reason}");
         }
 
-        let deployments = self.fetch_deployments().await?;
-        if self.require_registration && !services_registered(&deployments) {
-            bail!("expected Restate services are not registered yet");
-        }
-
         Ok(())
-    }
-
-    async fn fetch_deployments(&self) -> anyhow::Result<Vec<RegisteredDeployment>> {
-        let response = self
-            .client
-            .get(format!("{}/deployments", self.admin_base_url))
-            .send()
-            .await
-            .context("reach Restate admin API")?
-            .error_for_status()
-            .context("Restate admin API returned an error")?;
-
-        let payload = response
-            .json::<DeploymentListResponse>()
-            .await
-            .context("decode Restate deployment list response")?;
-        Ok(payload.deployments)
     }
 }
 
@@ -689,104 +693,5 @@ async fn shutdown_signal() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         ctrl_c.await
-    }
-}
-
-async fn best_effort_deregister(state: &ProbeState) {
-    let Some(uri) = std::env::var("MOA_RESTATE_DEPLOYMENT_URI").ok() else {
-        tracing::info!(
-            "skipping Restate deregistration because MOA_RESTATE_DEPLOYMENT_URI is unset"
-        );
-        return;
-    };
-
-    let deployments = match state.fetch_deployments().await {
-        Ok(deployments) => deployments,
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to list Restate deployments during shutdown");
-            return;
-        }
-    };
-
-    let Some(deployment_id) = deployments
-        .into_iter()
-        .find(|deployment| deployment.uri.as_deref() == Some(uri.as_str()))
-        .map(|deployment| deployment.id)
-    else {
-        tracing::info!(
-            uri,
-            "no Restate deployment matched MOA_RESTATE_DEPLOYMENT_URI"
-        );
-        return;
-    };
-
-    match state
-        .client
-        .delete(format!(
-            "{}/deployments/{deployment_id}",
-            state.admin_base_url
-        ))
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => {
-            tracing::info!(deployment_id, "requested Restate deployment deregistration")
-        }
-        Ok(response) => tracing::warn!(
-            deployment_id,
-            status = %response.status(),
-            "Restate deployment deregistration returned a non-success status"
-        ),
-        Err(error) => tracing::warn!(
-            deployment_id,
-            error = %error,
-            "failed to deregister Restate deployment during shutdown"
-        ),
-    }
-}
-
-fn env_flag(key: &str, default: bool) -> bool {
-    env_flag_from_reader(key, default, |name| std::env::var(name).ok())
-}
-
-fn env_flag_from_reader(
-    key: &str,
-    default: bool,
-    mut read_var: impl FnMut(&str) -> Option<String>,
-) -> bool {
-    read_var(key)
-        .and_then(|value: String| match value.to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::env_flag_from_reader;
-
-    #[test]
-    fn env_flag_understands_common_truthy_and_falsey_values() {
-        assert!(env_flag_from_reader(
-            "MOA_TEST_ENV_FLAG",
-            false,
-            |key| match key {
-                "MOA_TEST_ENV_FLAG" => Some("true".to_string()),
-                _ => None,
-            }
-        ));
-
-        assert!(!env_flag_from_reader(
-            "MOA_TEST_ENV_FLAG",
-            true,
-            |key| match key {
-                "MOA_TEST_ENV_FLAG" => Some("off".to_string()),
-                _ => None,
-            }
-        ));
-
-        assert!(env_flag_from_reader("MOA_TEST_ENV_FLAG", true, |_| None));
     }
 }

@@ -353,7 +353,8 @@ fn template_skill_source() -> String {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: io_schema.clone(),
             output_schema: io_schema.clone(),
             nodes: vec![ExecutionNode {
@@ -366,6 +367,7 @@ fn template_skill_source() -> String {
                 operation: ExecutionOperation::Output {
                     value: json!({"result": {"$ref": "$.input.result"}}),
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,

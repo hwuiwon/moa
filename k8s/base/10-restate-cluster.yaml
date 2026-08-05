@@ -11,6 +11,31 @@ spec:
     labels:
       moa.hwuiwon.com/restate-cluster: moa-restate
     image: docker.restate.dev/restatedev/restate:1.7.2
+    # Restate waits up to ten minutes to finish its own shutdown. Kubernetes
+    # must not send SIGKILL before that deadline expires.
+    terminationGracePeriodSeconds: 660
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                moa.hwuiwon.com/restate-cluster: moa-restate
+            topologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 3
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            moa.hwuiwon.com/restate-cluster: moa-restate
+      - maxSkew: 1
+        minDomains: 3
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            moa.hwuiwon.com/restate-cluster: moa-restate
     resources:
       requests:
         cpu: "2"
@@ -30,6 +55,20 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: moa-edge
+        # Normal replicas call ingress for detached background delivery, but
+        # receive no Admin peer grant.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-orchestrator
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-restate-bootstrap
       node:
         # Alloy discovers and scrapes each Restate pod directly on the node
         # port. Keep this path inside the cluster without exposing it through a
@@ -46,13 +85,15 @@ spec:
               kubernetes.io/metadata.name: moa-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: moa-orchestrator
+              app.kubernetes.io/name: moa-restate-bootstrap
   config: |
     auto-provision = false
     shutdown-timeout = "10m"
     default-num-partitions = 128
     default-replication = 2
-    # v1.7 limitation: vqueues can only be enabled on a fresh cluster (no
-    # in-flight invocations); a cluster with in-flight invocations will
-    # refuse to boot with this flag set.
-    experimental-enable-vqueues = true
+    [metadata-client]
+    addresses = [
+      "http://restate-0.restate-cluster.moa-restate.svc.cluster.local:5122",
+      "http://restate-1.restate-cluster.moa-restate.svc.cluster.local:5122",
+      "http://restate-2.restate-cluster.moa-restate.svc.cluster.local:5122",
+    ]

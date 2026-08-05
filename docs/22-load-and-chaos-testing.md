@@ -49,7 +49,7 @@ Per-turn cost bill (measured, not assumed — T2 produces these numbers):
 
 | Resource | Cost per turn | Shared limit |
 |---|---|---|
-| Restate invocations | ~5–10 | per-tenant scope concurrency (1000 in compose/prod rules) |
+| Restate invocations | ~5–10 | Session `TurnAdmission` fleet and per-tenant Valkey leases |
 | Postgres event appends | 3–8 rows + blob offload >64KiB | foreground orchestrator pool (production base 20 conns/replica), single writer |
 | Postgres reads | snapshot load + authz + retrieval legs | same foreground pool + edge pool (production base 8) |
 | Background Postgres work | outbox, analytics, lineage, memory ingestion | independent orchestrator pool (production base 1 conn/replica) |
@@ -58,9 +58,9 @@ Per-turn cost bill (measured, not assumed — T2 produces these numbers):
 
 Aggregate capacity ≈ per-replica sustainable turn rate × orchestrator
 replicas, until a shared resource saturates. Expected first wall: Postgres
-write path (event appends are per-turn and unbatched). The per-tenant scope
-cap of 1000 concurrent invocations means a 10k QPS claim is only meaningful
-with a multi-tenant workload distribution.
+write path (event appends are per-turn and unbatched). The configured shared
+fleet and per-tenant turn limits mean a 10k QPS claim is only meaningful with
+a multi-tenant workload distribution and matching Valkey admission capacity.
 
 Production connection admission is explicit. `MOA_DATABASE_MAX_CONNECTIONS`
 controls the foreground orchestrator pool,
@@ -143,8 +143,8 @@ Prometheus metrics — never traces, because Restate replay suppresses spans.
 ## Runbooks
 
 **T1 mock smoke (PR gate).** `make loadtest-mock` starts compose dependencies,
-installs the idempotent Restate `*` concurrency rule, bootstraps OpenFGA into
-`.env.fga`, restarts the orchestrator with
+boots the required Valkey admission backend, bootstraps OpenFGA into `.env.fga`,
+and restarts the orchestrator with
 `scripts/perf-gate.json`, and runs `cargo run --release -p moa-loadtest --bin
 perf_gate -- --profile mock-short`. The target defaults RustFS to host ports
 `10090` and `10091` for this local smoke path. Gates: corrected p95, turn error
@@ -161,7 +161,7 @@ client is missing. The release `retrieval` profile remains strict and is the
 only source for baseline updates.
 
 **T2 capacity (nightly).** `make loadtest-capacity` — recreates the
-dependencies, installs the Restate concurrency rule, bootstraps OpenFGA, then
+dependencies, bootstraps OpenFGA, then
 recreates the orchestrator with `scripts/realistic.json` (real latency/TTFT
 pacing, tool loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants.
 The capacity target and Kubernetes base use 20 foreground database connections
@@ -169,10 +169,8 @@ per orchestrator. To test a comparison profile, run
 `MOA_DATABASE_MAX_CONNECTIONS=<n> make loadtest-capacity` and record that
 profile with the result. The direct lane writes
 `target/perf-gate/capacity-direct.json`; `make loadtest-capacity-edge` writes the
-separate production-path `target/perf-gate/capacity-edge.json`. Each report is
-paired with `-restate-before.json` and `-restate-after.json` snapshots containing
-`sys_rules` and `sys_user_limits`; the report manifest also records the exact
-pre-run rule JSON, source revision/state, database pools, state identity, lane,
+separate production-path `target/perf-gate/capacity-edge.json`. The report
+manifest records source revision/state, database pools, state identity, lane,
 hardware, and resolved load options. Classify the knee from completed throughput,
 corrected latency, dropped arrivals, failures, and queue/utilization metrics;
 dispatch-delay p95 is one signal, not the sole criterion. Record the per-replica

@@ -16,9 +16,11 @@ use crate::agent::{
 };
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::execution_plan::{
-    CapabilityReference, CompletionCheckKind, ExecutionCondition, ExecutionGoalContract,
+    CapabilityReference, CompensationValueSource, CompletionCheckKind,
+    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionCondition, ExecutionGoalContract,
     ExecutionGoalTemplate, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
-    ExecutionReducer, ExecutionTaskOutcome, MapTask, PlanAmendment, PlanAmendmentOperation,
+    ExecutionReducer, ExecutionTaskOutcome, MapTask, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment,
+    PlanAmendmentOperation,
 };
 use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
 use crate::simulation::{
@@ -250,11 +252,12 @@ pub fn validate_execution_task_outcome(outcome: &ExecutionTaskOutcome) -> Valida
 #[must_use]
 pub fn validate_plan_amendment(amendment: &PlanAmendment) -> ValidationReport {
     let mut report = ValidationReport::default();
-    validate_schema_version(
-        "plan_amendment.schema_version",
-        amendment.schema_version,
-        &mut report,
-    );
+    if amendment.schema_version != PLAN_AMENDMENT_SCHEMA_VERSION {
+        report.push_error(
+            "plan_amendment.schema_version",
+            format!("schema_version must equal {PLAN_AMENDMENT_SCHEMA_VERSION}"),
+        );
+    }
     for (index, operation) in amendment.operations.iter().enumerate() {
         let root = format!("plan_amendment.operations[{index}]");
         match operation {
@@ -930,11 +933,12 @@ fn validate_execution_plan_at(
     definition: &ExecutionPlanDefinition,
     report: &mut ValidationReport,
 ) {
-    validate_schema_version(
-        &format!("{root}.schema_version"),
-        definition.schema_version,
-        report,
-    );
+    if definition.schema_version != EXECUTION_PLAN_SCHEMA_VERSION {
+        report.push_error(
+            format!("{root}.schema_version"),
+            format!("schema_version must equal {EXECUTION_PLAN_SCHEMA_VERSION}"),
+        );
+    }
     validate_json_schema(
         &format!("{root}.input_schema"),
         &definition.input_schema,
@@ -1027,6 +1031,97 @@ fn validate_execution_node(
     );
     validate_retry_policy(root, node, report);
     validate_execution_operation(root, node, report);
+    validate_execution_compensation(root, node, report);
+}
+
+fn validate_execution_compensation(
+    root: &str,
+    node: &ExecutionNode,
+    report: &mut ValidationReport,
+) {
+    let Some(compensation) = &node.compensation else {
+        return;
+    };
+    let compensation_root = format!("{root}.compensation");
+    if !matches!(node.operation, ExecutionOperation::Capability { .. }) {
+        report.push_error(
+            compensation_root.clone(),
+            "compensation is supported only on direct capability nodes",
+        );
+    }
+    validate_capability_reference(
+        &format!("{compensation_root}.compensator"),
+        &compensation.compensator,
+        report,
+    );
+
+    let bindings = &compensation.input_mapping.bindings;
+    if bindings.is_empty() {
+        report.push_error(
+            format!("{compensation_root}.input_mapping.bindings"),
+            "compensation input mapping must include at least one binding",
+        );
+    }
+    if bindings.len() > 64 {
+        report.push_error(
+            format!("{compensation_root}.input_mapping.bindings"),
+            "compensation input mapping must include at most 64 bindings",
+        );
+    }
+
+    let mut targets = HashSet::new();
+    let mut decoded_targets = Vec::<Vec<String>>::new();
+    let mut previous_target: Option<&str> = None;
+    for (index, binding) in bindings.iter().enumerate() {
+        let binding_root = format!("{compensation_root}.input_mapping.bindings[{index}]");
+        if binding.target_pointer.is_empty() {
+            report.push_error(
+                format!("{binding_root}.target_pointer"),
+                "compensation target pointer must select an object field",
+            );
+        } else {
+            validate_json_pointer(
+                &format!("{binding_root}.target_pointer"),
+                &binding.target_pointer,
+                report,
+            );
+            if let Some(decoded) = decode_json_pointer_segments(&binding.target_pointer) {
+                if decoded_targets.iter().any(|existing| {
+                    pointer_segments_are_strict_prefix(existing, &decoded)
+                        || pointer_segments_are_strict_prefix(&decoded, existing)
+                }) {
+                    report.push_error(
+                        format!("{binding_root}.target_pointer"),
+                        "compensation target pointers must not overlap by parent/child path",
+                    );
+                }
+                decoded_targets.push(decoded);
+            }
+        }
+        if !targets.insert(binding.target_pointer.as_str()) {
+            report.push_error(
+                format!("{binding_root}.target_pointer"),
+                "duplicate compensation target pointer",
+            );
+        }
+        if previous_target.is_some_and(|previous| previous > binding.target_pointer.as_str()) {
+            report.push_error(
+                format!("{binding_root}.target_pointer"),
+                "compensation target pointers must be sorted lexicographically",
+            );
+        }
+        previous_target = Some(binding.target_pointer.as_str());
+
+        let source_pointer = match &binding.source {
+            CompensationValueSource::OriginalInput { pointer }
+            | CompensationValueSource::OriginalOutput { pointer } => pointer,
+        };
+        validate_json_pointer(
+            &format!("{binding_root}.source.pointer"),
+            source_pointer,
+            report,
+        );
+    }
 }
 
 fn validate_retry_policy(root: &str, node: &ExecutionNode, report: &mut ValidationReport) {
@@ -1714,6 +1809,36 @@ fn is_json_pointer(pointer: &str) -> bool {
         }
     }
     true
+}
+
+fn decode_json_pointer_segments(pointer: &str) -> Option<Vec<String>> {
+    if pointer.is_empty() {
+        return Some(Vec::new());
+    }
+    let encoded_segments = pointer.strip_prefix('/')?;
+    encoded_segments
+        .split('/')
+        .map(|encoded| {
+            let mut decoded = String::with_capacity(encoded.len());
+            let mut characters = encoded.chars();
+            while let Some(character) = characters.next() {
+                if character != '~' {
+                    decoded.push(character);
+                    continue;
+                }
+                match characters.next() {
+                    Some('0') => decoded.push('~'),
+                    Some('1') => decoded.push('/'),
+                    Some(_) | None => return None,
+                }
+            }
+            Some(decoded)
+        })
+        .collect()
+}
+
+fn pointer_segments_are_strict_prefix(left: &[String], right: &[String]) -> bool {
+    left.len() < right.len() && right.starts_with(left)
 }
 
 /// Validates that skill action ids in `definition.spec.actions[*]` are present
