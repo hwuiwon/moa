@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-ORCHESTRATOR_NAME="ghcr.io/hwuiwon/moa-orchestrator"
-EDGE_NAME="ghcr.io/hwuiwon/moa-edge"
+ORCHESTRATOR_NAME="moa/orchestrator"
+EDGE_NAME="moa/edge"
 DIGEST_PATTERN='^([a-z0-9]+([._-][a-z0-9]+)*)(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$'
 
 die() {

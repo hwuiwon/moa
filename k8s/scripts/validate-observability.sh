@@ -169,12 +169,12 @@ assert_contains "${LOCAL_LGTM_TEXT}" "mountPath: /var/log/pods" \
 assert_contains "${LOCAL_LGTM_TEXT}" "readOnly: true" \
   "the local collector pod-log host mount is not read-only"
 assert_contains "${LOCAL_LGTM_TEXT}" \
-  "moa.hwuiwon.com/restate-cluster: moa-restate" \
+  "moa.dev/restate-cluster: moa-restate" \
   "the local collector is not co-located with the single local Restate pod"
 assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" "prometheus/restate:" \
   "the local collector declares no Restate Prometheus receiver"
 assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" \
-  "__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster" \
+  "__meta_kubernetes_pod_label_moa_dev_restate_cluster" \
   "the local Restate scrape is not restricted to the MOA Restate pods"
 assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" 'regex: "5122"' \
   "the local Restate scrape does not select the node metrics port"
@@ -239,7 +239,7 @@ assert_excludes "${ALLOY_CONFIG_TEXT}" "restate.moa-restate.svc.cluster.local:51
   "Alloy scrapes Restate through a load-balanced Service and blends per-node counters"
 assert_contains "${ALLOY_CONFIG_TEXT}" 'discovery.relabel "restate"' \
   "Alloy does not derive Restate scrape targets from Kubernetes pod discovery"
-assert_contains "${ALLOY_CONFIG_TEXT}" "__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster" \
+assert_contains "${ALLOY_CONFIG_TEXT}" "__meta_kubernetes_pod_label_moa_dev_restate_cluster" \
   "Restate pod discovery is not restricted to the labeled MOA cluster"
 assert_contains "${ALLOY_CONFIG_TEXT}" "__meta_kubernetes_pod_container_port_number" \
   "Restate pod discovery does not select one metrics target per pod"

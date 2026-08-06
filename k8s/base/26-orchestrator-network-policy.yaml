@@ -17,7 +17,7 @@ spec:
               kubernetes.io/metadata.name: moa-restate
           podSelector:
             matchLabels:
-              moa.hwuiwon.com/restate-cluster: moa-restate
+              moa.dev/restate-cluster: moa-restate
       ports:
         - protocol: TCP
           port: 9080

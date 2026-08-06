@@ -46,7 +46,7 @@ bind `127.0.0.1:10020:9080` in a developer-only override.
   `moa-edge`, and Restate admin accepts `moa-orchestrator`.
 - The base Kubernetes manifests add a `NetworkPolicy` for
   `moa-orchestrator` pods. Port 9080 accepts traffic only from Restate pods in
-  `moa-restate` labeled `moa.hwuiwon.com/restate-cluster: moa-restate`; edge
+  `moa-restate` labeled `moa.dev/restate-cluster: moa-restate`; edge
   pods must not call 9080 directly.
 - The orchestrator `ClusterIP` Service exposes credential port 10023 only
   inside the cluster. The same `NetworkPolicy` permits that port only from

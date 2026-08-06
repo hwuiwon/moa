@@ -14,9 +14,9 @@ resources:
   - 50-edge-deployment.yaml
   - 55-edge-service.yaml
 images:
-  - name: ghcr.io/hwuiwon/moa-orchestrator
+  - name: moa/orchestrator
     # Non-runnable sentinel. Production is rendered only through
     # k8s/scripts/render-production.sh, which replaces this with a pushed digest.
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-  - name: ghcr.io/hwuiwon/moa-edge
+  - name: moa/edge
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

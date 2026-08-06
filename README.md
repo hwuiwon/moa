@@ -1,6 +1,6 @@
 # MOA
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hwuiwon/moa)
+![Ask DeepWiki](https://deepwiki.com/badge.svg)
 
 **MOA is a cloud-first, Rust-based, multi-tenant AI agent operations platform for enterprises.**
 

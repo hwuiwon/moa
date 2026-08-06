@@ -206,10 +206,10 @@ validate_manifests() {
   assert_occurrences "$(<"${local_manifest}")" 5 "image: moa/orchestrator:kind" \
     "local runtime, migration-only stage, and bootstrap must use the same orchestrator image"
   assert_occurrences "$(<"${production_manifest}")" 5 \
-    "image: ghcr.io/hwuiwon/moa-orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+    "image: moa/orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
     "unrendered production runtime, migration-only stage, and bootstrap must use the same immutable sentinel"
   assert_occurrences "${production_edge}" 1 \
-    "image: ghcr.io/hwuiwon/moa-edge@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+    "image: moa/edge@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
     "unrendered production edge must use the immutable sentinel"
   [[ "${local_orchestrator_readiness}" == "/_health/ready" ]] \
     || die "local orchestrator readiness must remain local process readiness; found '${local_orchestrator_readiness}'"
@@ -348,7 +348,7 @@ validate_manifests() {
   done
   assert_contains "${local_restate}" "replicas: 1" \
     "local Restate must remain an explicit single-node deployment"
-  assert_contains "${local_restate}" "moa.hwuiwon.com/deployment-topology: local-single-node" \
+  assert_contains "${local_restate}" "moa.dev/deployment-topology: local-single-node" \
     "local Restate does not label its single-node placement semantics"
   assert_excludes "${local_restate}" "topologyKey: topology.kubernetes.io/zone" \
     "local Restate inherits the production three-zone scheduling requirement"
@@ -409,7 +409,7 @@ validate_manifests() {
     "local RustFS ingress policy is not in RustFS's namespace"
   assert_contains "${local_rustfs_policy}" "kubernetes.io/metadata.name: moa-restate" \
     "local RustFS ingress policy does not admit the Restate namespace"
-  assert_contains "${local_rustfs_policy}" "moa.hwuiwon.com/restate-cluster: moa-restate" \
+  assert_contains "${local_rustfs_policy}" "moa.dev/restate-cluster: moa-restate" \
     "local RustFS ingress policy does not restrict the Restate caller pods"
   assert_occurrences "${local_rustfs_policy}" 2 "port: 9000" \
     "local RustFS ingress must expose only S3 to application and Restate callers"
@@ -439,7 +439,7 @@ validate_manifests() {
 
   assert_contains "${rewrap_job}" $'args:\n        - kms-rewrap\n        - --batch-size\n        - "100"' "KMS rewrap Job command is not exact"
   assert_contains "${rewrap_job}" \
-    "image: ghcr.io/hwuiwon/moa-orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+    "image: moa/orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
     "unrendered maintenance Job must use the immutable orchestrator sentinel"
   assert_contains "${rewrap_job}" "name: moa-postgres" "maintenance Job does not use the database Secret"
   assert_contains "${rewrap_job}" "value: postgres" "maintenance Job does not use Postgres KMS"

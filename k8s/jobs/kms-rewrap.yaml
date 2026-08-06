@@ -26,7 +26,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: kms-rewrap
-          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          image: moa/orchestrator:latest
           args:
             - kms-rewrap
             - --batch-size

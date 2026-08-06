@@ -60,7 +60,7 @@ All per-turn runtime state belongs in the dynamic tail:
 <system-reminder>
 Current date: 2026-04-16
 Current project: moa
-Current working directory: /Users/example/Github/moa
+Current working directory: <repo-root>
 Current git branch: main
 Current tenant: 00000000-0000-0000-0000-000000000201
 Current contact: 00000000-0000-0000-0000-000000000301

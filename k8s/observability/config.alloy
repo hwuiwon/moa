@@ -176,7 +176,7 @@ discovery.relabel "restate" {
 	}
 
 	rule {
-		source_labels = ["__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster"]
+		source_labels = ["__meta_kubernetes_pod_label_moa_dev_restate_cluster"]
 		regex         = "moa-restate"
 		action        = "keep"
 	}
@@ -249,7 +249,7 @@ discovery.relabel "pod_logs" {
 	rule {
 		source_labels = [
 			"__meta_kubernetes_namespace",
-			"__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster",
+			"__meta_kubernetes_pod_label_moa_dev_restate_cluster",
 		]
 		regex  = "moa-restate;moa-restate"
 		action = "drop"
@@ -337,7 +337,7 @@ discovery.relabel "restate_logs" {
 	}
 
 	rule {
-		source_labels = ["__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster"]
+		source_labels = ["__meta_kubernetes_pod_label_moa_dev_restate_cluster"]
 		regex         = "moa-restate"
 		action        = "keep"
 	}

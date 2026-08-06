@@ -27,7 +27,7 @@ metadata:
     app.kubernetes.io/part-of: moa
     app.kubernetes.io/component: migration
   annotations:
-    moa.hwuiwon.com/image-revision: "image-revision"
+    moa.dev/image-revision: "image-revision"
 spec:
   activeDeadlineSeconds: 1200
   backoffLimit: 3
@@ -47,7 +47,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: database-migrations
-          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          image: moa/orchestrator:latest
           args:
             - migrate
           envFrom:
@@ -71,7 +71,7 @@ spec:
                 - ALL
       containers:
         - name: status-migrator
-          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          image: moa/orchestrator:latest
           command:
             - /bin/sh
             - -ec
@@ -125,7 +125,7 @@ spec:
               kubernetes.io/metadata.name: moa-restate
           podSelector:
             matchLabels:
-              moa.hwuiwon.com/restate-cluster: moa-restate
+              moa.dev/restate-cluster: moa-restate
       ports:
         - protocol: TCP
           port: 9080

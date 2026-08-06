@@ -9,7 +9,7 @@ spec:
   compute:
     replicas: 3
     labels:
-      moa.hwuiwon.com/restate-cluster: moa-restate
+      moa.dev/restate-cluster: moa-restate
     image: docker.restate.dev/restatedev/restate:1.7.2
     # Restate waits up to ten minutes to finish its own shutdown. Kubernetes
     # must not send SIGKILL before that deadline expires.
@@ -19,7 +19,7 @@ spec:
         requiredDuringSchedulingIgnoredDuringExecution:
           - labelSelector:
               matchLabels:
-                moa.hwuiwon.com/restate-cluster: moa-restate
+                moa.dev/restate-cluster: moa-restate
             topologyKey: kubernetes.io/hostname
     topologySpreadConstraints:
       - maxSkew: 1
@@ -28,14 +28,14 @@ spec:
         whenUnsatisfiable: DoNotSchedule
         labelSelector:
           matchLabels:
-            moa.hwuiwon.com/restate-cluster: moa-restate
+            moa.dev/restate-cluster: moa-restate
       - maxSkew: 1
         minDomains: 3
         topologyKey: topology.kubernetes.io/zone
         whenUnsatisfiable: DoNotSchedule
         labelSelector:
           matchLabels:
-            moa.hwuiwon.com/restate-cluster: moa-restate
+            moa.dev/restate-cluster: moa-restate
     resources:
       requests:
         cpu: "2"

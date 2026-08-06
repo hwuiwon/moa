@@ -19,8 +19,8 @@ prevent-self-review, and only the minimum benchmark secrets described below.
 The lane supports only `formation_mode=live`; recorded formation is a local
 workflow because there is no recorded-manifest artifact input here.
 
-The lane runs against
-`ghcr.io/hwuiwon/moa-postgres:pg17-pgvector0.8.2-pgaudit` with database `moa`,
+The lane runs against the repository's
+`moa-postgres:pg17-pgvector0.8.2-pgaudit` image with database `moa`,
 password `ci`, and a `pg_isready` health check. It exports:
 
 ```text

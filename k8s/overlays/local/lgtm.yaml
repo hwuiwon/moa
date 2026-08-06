@@ -28,7 +28,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  moa.hwuiwon.com/restate-cluster: moa-restate
+                  moa.dev/restate-cluster: moa-restate
               namespaces:
                 - moa-restate
               topologyKey: kubernetes.io/hostname

@@ -2,7 +2,7 @@
   path: /spec/compute/replicas
   value: 1
 - op: add
-  path: /spec/compute/labels/moa.hwuiwon.com~1deployment-topology
+  path: /spec/compute/labels/moa.dev~1deployment-topology
   value: local-single-node
 - op: remove
   path: /spec/compute/affinity

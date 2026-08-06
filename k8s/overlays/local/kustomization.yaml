@@ -56,10 +56,10 @@ configMapGenerator:
       - otelcol-local-restate.yaml
 
 images:
-  - name: ghcr.io/hwuiwon/moa-orchestrator
+  - name: moa/orchestrator
     newName: moa/orchestrator
     newTag: kind
-  - name: ghcr.io/hwuiwon/moa-edge
+  - name: moa/edge
     newName: moa/edge
     newTag: kind
 

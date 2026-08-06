@@ -54,7 +54,7 @@ fixture and pinned by a test. Do not paraphrase them away.
 
 ## Workflow
 
-1. Start from `/Users/hwuiwon/Github/moa` unless the user gives another MOA checkout.
+1. Start from the MOA repository root unless the user gives another checkout.
 2. Check current status before running:
    - `git status --short`
    - latest reports under `docs/engineering-discipline/live-runs/`

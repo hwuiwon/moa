@@ -24,7 +24,7 @@ spec:
         # normal replica receives only the runtime database credential and
         # cannot start its hard-break reader before that stage writes a receipt.
         - name: wait-status-cutover
-          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          image: moa/orchestrator:latest
           command:
             - /bin/sh
             - -ec
@@ -40,7 +40,7 @@ spec:
                   key: url
       containers:
         - name: orchestrator
-          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          image: moa/orchestrator:latest
           args:
             - --port
             - "9080"

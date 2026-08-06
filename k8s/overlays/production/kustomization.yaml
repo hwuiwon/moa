@@ -5,10 +5,10 @@ resources:
   - ../../observability
 
 images:
-  - name: ghcr.io/hwuiwon/moa-orchestrator
+  - name: moa/orchestrator
     # render-production.sh replaces this sentinel in a temporary copy.
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-  - name: ghcr.io/hwuiwon/moa-edge
+  - name: moa/edge
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 patches:

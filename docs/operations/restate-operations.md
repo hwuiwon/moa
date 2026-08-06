@@ -40,8 +40,8 @@ Provide the pre-provisioned resources to the renderer:
 export RESTATE_SNAPSHOT_BUCKET=GLOBALLY_UNIQUE_BUCKET
 export RESTATE_SNAPSHOT_PREFIX=SNAPSHOT_PREFIX
 export RESTATE_SNAPSHOT_GSA=SERVICE_ACCOUNT_NAME@PROJECT_ID.iam.gserviceaccount.com
-export MOA_ORCHESTRATOR_IMAGE=ghcr.io/hwuiwon/moa-orchestrator@sha256:DIGEST
-export MOA_EDGE_IMAGE=ghcr.io/hwuiwon/moa-edge@sha256:DIGEST
+export MOA_ORCHESTRATOR_IMAGE=registry.example/moa/orchestrator@sha256:DIGEST
+export MOA_EDGE_IMAGE=registry.example/moa/edge@sha256:DIGEST
 k8s/scripts/render-production.sh /new/output/directory
 ```
 
