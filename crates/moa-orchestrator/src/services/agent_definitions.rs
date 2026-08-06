@@ -7,11 +7,10 @@ use moa_artifacts::registry::{
     ArtifactRegistry, ArtifactScopeParts, ReleaseRepository, StoredArtifactRevision,
 };
 use moa_artifacts::release::{ActivationRequest, ActivationTarget, TenantScope};
-use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
 use moa_core::{
-    error::MoaError, types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
+    types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
@@ -29,9 +28,10 @@ use sqlx::{PgPool, Row, types::Json as SqlJson};
 use uuid::Uuid;
 
 use crate::connector_catalog::ScopedConnectorCatalogProvider;
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
-use crate::workflows::errors::{bad_request, moa_error_to_handler_error};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity};
+use crate::workflows::errors::{
+    bad_request, moa_error_to_handler_error, sqlx_error_to_handler_error,
+};
 
 const DEFAULT_DEPLOYMENT_LIST_LIMIT: i64 = 50;
 
@@ -726,24 +726,24 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
 
 async fn authorize_agent_operator(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     agent_id: Uuid,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = authz.require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
+    crate::handlers::authz_shim::journal_context_authz(
+        ctx,
+        fga,
+        identity,
         ObjectType::Agent,
         agent_id,
         Relation::Operator,
     )
     .await
-    .map_err(translate_authz_error)
 }
 
 fn sqlx_handler_error(error: sqlx::Error) -> HandlerError {
-    HandlerError::from(MoaError::StorageError(error.to_string()))
+    sqlx_error_to_handler_error(error)
 }
 
 fn release_handler_error(error: moa_artifacts::Error) -> HandlerError {

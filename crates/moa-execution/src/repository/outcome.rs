@@ -2,8 +2,8 @@
 
 use super::*;
 use super::{
-    materialize::reconcile_outcome_usage, outcome_support::*, rows::*, sql::*,
-    transition::task_outcome_is_exact_replay,
+    compensation::register_compensation_for_completed_task, materialize::reconcile_outcome_usage,
+    outcome_support::*, rows::*, sql::*, transition::task_outcome_is_exact_replay,
 };
 
 impl ExecutionRepository {
@@ -49,6 +49,8 @@ impl ExecutionRepository {
         let task = task_from_row(&task_row)?;
 
         if task_outcome_is_exact_replay(&task, generation, &outcome) {
+            register_compensation_for_completed_task(&mut conn, &run, &task, &outcome, true)
+                .await?;
             let budget_overrun = run.budget_overrun;
             conn.commit().await.map_err(storage_error)?;
             return Ok(TaskOutcomeWrite::Replayed {
@@ -58,6 +60,8 @@ impl ExecutionRepository {
             });
         }
 
+        let terminal = task_outcome_is_terminal(&outcome);
+        let fenced_terminal_settlement = run.pending_terminal.is_some() && terminal;
         let rejection = if outcome.schema_version != 1 {
             Some(TaskOutcomeRejection::UnsupportedSchemaVersion)
         } else if run.status.is_terminal() {
@@ -66,7 +70,9 @@ impl ExecutionRepository {
             Some(TaskOutcomeRejection::TerminalTask)
         } else if task.generation != generation {
             Some(TaskOutcomeRejection::StaleGeneration)
-        } else if task.status != ExecutionTaskStatus::Running {
+        } else if (task.status != ExecutionTaskStatus::Running && !fenced_terminal_settlement)
+            || (run.pending_terminal.is_some() && !terminal)
+        {
             Some(TaskOutcomeRejection::InvalidTaskStatus)
         } else if !usage_is_cumulative(&task.actual, &outcome.usage) {
             Some(TaskOutcomeRejection::NonCumulativeUsage)
@@ -81,7 +87,6 @@ impl ExecutionRepository {
             return Ok(TaskOutcomeWrite::Rejected { task, reason });
         }
 
-        let terminal = task_outcome_is_terminal(&outcome);
         let Some(reconciliation) = reconcile_outcome_usage(&run, &task, &outcome, terminal) else {
             let reason = TaskOutcomeRejection::NonCumulativeUsage;
             let task =
@@ -198,6 +203,23 @@ impl ExecutionRepository {
             .await
             .map_err(sqlx_error)?;
         let task = task_from_row(&row)?;
+        register_compensation_for_completed_task(&mut conn, &run, &task, &outcome, false).await?;
+        if matches!(outcome.result, ExecutionTaskResult::UnknownOutcome { .. }) {
+            sqlx::query(
+                "UPDATE moa.execution_run SET manual_repair_required = TRUE, \
+                 wake_epoch = wake_epoch + 1, updated_at = NOW() WHERE run_uid = $1",
+            )
+            .bind(run_uid)
+            .execute(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        }
+        let run_row = sqlx::query(LOAD_RUN_SQL)
+            .bind(run_uid)
+            .fetch_one(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        let run = run_from_row(&run_row)?;
         conn.commit().await.map_err(storage_error)?;
         Ok(TaskOutcomeWrite::Applied {
             run,
@@ -240,6 +262,33 @@ impl ExecutionRepository {
             .iter()
             .map(task_from_row)
             .collect::<Result<Vec<_>>>()?;
+        let replan_stop_receipt_at_revision = tasks.iter().find_map(|task| {
+            let task_id = task.task_id.to_string();
+            task.outcome_audit.iter().find(|entry| {
+                entry.get("kind").and_then(Value::as_str) == Some("replan_stop_fenced")
+                    && entry.get("accepted").and_then(Value::as_bool) == Some(true)
+                    && entry.get("task_id").and_then(Value::as_str) == Some(task_id.as_str())
+                    && entry.get("task_generation").and_then(Value::as_u64) == Some(task.generation)
+                    && entry.get("base_plan_revision").and_then(Value::as_u64)
+                        == Some(expected_revision)
+            })
+        });
+        if exact_history.is_none()
+            && let Some(receipt) = replan_stop_receipt_at_revision
+        {
+            let outcome = if receipt.get("amendment_hash").and_then(Value::as_str)
+                == Some(amendment_hash_text.as_str())
+            {
+                AmendmentReplayOutcome::Replayed(Box::new(AmendmentCommit {
+                    run,
+                    task_ids_to_release: Vec::new(),
+                }))
+            } else {
+                AmendmentReplayOutcome::Conflict
+            };
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(outcome);
+        }
         let audited_task_ids = tasks
             .iter()
             .filter(|task| {

@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use chrono::{Duration, TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheck, CompletionCheckKind, CoverageRequirement,
-    ExecutionBudgetLimit, ExecutionCitation, ExecutionDeliverable, ExecutionGoalContract,
-    ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionRequirement,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
+    ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCitation, ExecutionDeliverable,
+    ExecutionGoalContract, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
+    ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask,
+    RetryPolicy,
 };
 use moa_execution::{
     budget::BudgetLedger,
@@ -592,7 +593,8 @@ fn request(
 fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes,
@@ -613,6 +615,7 @@ fn node(id: &str, dependencies: &[&str], operation: ExecutionOperation) -> Execu
         input: json!({}),
         output_schema: json!({ "type": "object" }),
         operation,
+        compensation: None,
         retry: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 0,

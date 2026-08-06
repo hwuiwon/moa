@@ -109,7 +109,7 @@ impl FgaClient {
         let http = Client::builder()
             .timeout(Duration::from_millis(cfg.timeout_ms))
             .build()
-            .map_err(AuthzError::Transport)?;
+            .map_err(AuthzError::from)?;
         Ok(Self {
             inner: Arc::new(FgaInner {
                 base: cfg.url.trim_end_matches('/').to_string(),

@@ -26,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "macros", "json", "uuid", "chrono"] }
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true

@@ -9,8 +9,12 @@ use moa_core::{
 use moa_wire::turn::{TurnOutcomeKind, TurnPhase};
 use restate_sdk::prelude::*;
 
-use crate::services::llm_gateway::{BoundedCompletionRequest, LLMGatewayClient};
+use crate::services::llm_gateway::{
+    BoundedCompletionRequest, LLMCompletionAction, LLMCompletionOwner, LLMGatewayClient,
+    attach_completion_owner, completion_idempotency_key,
+};
 use crate::turn_driver::{guardrails as driver_guardrails, progress as driver_progress};
+use crate::workflows::child_invocation::{ChildInvocationOutcome, cancel_and_join_child_call};
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::turn_events::append_session_event;
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL, SUMMARY_CHECKING_RESULTS};
@@ -46,22 +50,53 @@ pub(super) async fn evaluate_input_guardrail(
         workflow.channel_adapters.as_ref(),
     )
     .await?;
-    let guardrail_request = crate::guardrails::guardrail_completion_request(
+    let mut guardrail_request = crate::guardrails::guardrail_completion_request(
         workflow.config.as_ref(),
         GuardrailDirection::Input,
         stage,
         user_message,
     );
-    let response = crate::restate_identity::replay_safe_request(
+    attach_completion_owner(
+        &mut guardrail_request,
+        &LLMCompletionOwner::root_turn(ctx.key()),
+    );
+    let call = crate::restate_identity::replay_safe_request(
         ctx.service_client::<LLMGatewayClient>()
             .complete_bounded(Json::from(BoundedCompletionRequest {
                 request: guardrail_request,
                 budget: super::per_model_call_budget(resource_budget),
-            })),
+            }))
+            .idempotency_key(completion_idempotency_key(
+                ctx.invocation_id(),
+                LLMCompletionAction::RootInputGuardrail,
+            )),
     )
-    .call()
+    .call();
+    let response = match cancel_and_join_child_call(
+        ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE),
+        call,
+    )
     .await?
-    .into_inner();
+    {
+        ChildInvocationOutcome::Completed(response) => response.into_inner(),
+        ChildInvocationOutcome::Cancelled(reason) => {
+            return Ok(Some(BodyOutcome {
+                kind: TurnOutcomeKind::Cancelled,
+                message: reason,
+                post_outcome_assessment: None,
+            }));
+        }
+    };
+    if response.stop_reason == moa_core::types::completion::StopReason::Cancelled {
+        let reason = ctx
+            .promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE)
+            .await?;
+        return Ok(Some(BodyOutcome {
+            kind: TurnOutcomeKind::Cancelled,
+            message: reason,
+            post_outcome_assessment: None,
+        }));
+    }
     let evaluation = crate::guardrails::evaluate_guardrail_response(
         &agent_context.policy_hash,
         GuardrailDirection::Input,
@@ -117,20 +152,21 @@ pub(super) async fn visible_response_after_output_guardrail(
     meta: &SessionMeta,
     response: &CompletionResponse,
     resource_budget: ResourceBudget,
-) -> Result<(CompletionResponse, bool), HandlerError> {
+    model_turn: usize,
+) -> Result<OutputGuardrailOutcome, HandlerError> {
     if response.text.is_empty() {
-        return Ok((response.clone(), false));
+        return Ok(OutputGuardrailOutcome::Completed(response.clone(), false));
     }
     let Some(agent_context) = meta.agent_context.as_ref() else {
-        return Ok((response.clone(), false));
+        return Ok(OutputGuardrailOutcome::Completed(response.clone(), false));
     };
     let policy =
         AgentContext::parsed_policy_snapshot(agent_context).map_err(moa_error_to_handler_error)?;
     let Some(stage) = policy.guardrail_policy.stage(GuardrailDirection::Output) else {
-        return Ok((response.clone(), false));
+        return Ok(OutputGuardrailOutcome::Completed(response.clone(), false));
     };
     if !stage.is_active() {
-        return Ok((response.clone(), false));
+        return Ok(OutputGuardrailOutcome::Completed(response.clone(), false));
     }
 
     driver_progress::set_phase(ctx, TurnPhase::Persisting);
@@ -143,22 +179,45 @@ pub(super) async fn visible_response_after_output_guardrail(
         workflow.channel_adapters.as_ref(),
     )
     .await?;
-    let guardrail_request = crate::guardrails::guardrail_completion_request(
+    let mut guardrail_request = crate::guardrails::guardrail_completion_request(
         workflow.config.as_ref(),
         GuardrailDirection::Output,
         stage,
         &response.text,
     );
-    let judge_response = crate::restate_identity::replay_safe_request(
+    attach_completion_owner(
+        &mut guardrail_request,
+        &LLMCompletionOwner::root_turn(ctx.key()),
+    );
+    let call = crate::restate_identity::replay_safe_request(
         ctx.service_client::<LLMGatewayClient>()
             .complete_bounded(Json::from(BoundedCompletionRequest {
                 request: guardrail_request,
                 budget: super::per_model_call_budget(resource_budget),
-            })),
+            }))
+            .idempotency_key(completion_idempotency_key(
+                ctx.invocation_id(),
+                LLMCompletionAction::RootOutputGuardrail { turn: model_turn },
+            )),
     )
-    .call()
+    .call();
+    let judge_response = match cancel_and_join_child_call(
+        ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE),
+        call,
+    )
     .await?
-    .into_inner();
+    {
+        ChildInvocationOutcome::Completed(response) => response.into_inner(),
+        ChildInvocationOutcome::Cancelled(reason) => {
+            return Ok(OutputGuardrailOutcome::Cancelled(reason));
+        }
+    };
+    if judge_response.stop_reason == moa_core::types::completion::StopReason::Cancelled {
+        let reason = ctx
+            .promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE)
+            .await?;
+        return Ok(OutputGuardrailOutcome::Cancelled(reason));
+    }
     let evaluation = crate::guardrails::evaluate_guardrail_response(
         &agent_context.policy_hash,
         GuardrailDirection::Output,
@@ -179,8 +238,16 @@ pub(super) async fn visible_response_after_output_guardrail(
                 response,
                 stage,
             });
-        return Ok((visible_response, true));
+        return Ok(OutputGuardrailOutcome::Completed(visible_response, true));
     }
 
-    Ok((response.clone(), false))
+    Ok(OutputGuardrailOutcome::Completed(response.clone(), false))
+}
+
+/// Result of evaluating the optional output guardrail.
+pub(super) enum OutputGuardrailOutcome {
+    /// The guardrail completed and reports whether it replaced the response.
+    Completed(CompletionResponse, bool),
+    /// The turn was cancelled while the guardrail model call was in flight.
+    Cancelled(String),
 }

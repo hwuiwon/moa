@@ -2,7 +2,8 @@
 
 use chrono::{Duration, Utc};
 use moa_artifacts::execution_plan::{
-    ExecutionBudgetLimit, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
+    CapabilityReference, CompensationInputMapping, ExecutionBudgetLimit, ExecutionCancelPolicy,
+    ExecutionCompensation, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
     ExecutionPlanDefinition, MapTask, RetryPolicy,
 };
 
@@ -20,7 +21,8 @@ fn map_execution_task_validates_the_item_output_schema() {
     let catalog = ExecutionCapabilityCatalog::build(Vec::new()).expect("build empty catalog");
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: serde_json::json!({}),
             output_schema: serde_json::json!({}),
             nodes: vec![ExecutionNode {
@@ -45,6 +47,7 @@ fn map_execution_task_validates_the_item_output_schema() {
                         max_turns: 1,
                     },
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -113,6 +116,7 @@ fn empty_map_is_reported_as_first_materialization_without_a_logical_task() {
                 max_turns: 1,
             },
         },
+        compensation: None,
         retry: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -132,7 +136,8 @@ fn empty_map_is_reported_as_first_materialization_without_a_logical_task() {
         },
         plan: CanonicalExecutionPlan {
             definition: ExecutionPlanDefinition {
-                schema_version: 1,
+                schema_version: 2,
+                cancel_policy: ExecutionCancelPolicy::RetainEffects,
                 input_schema: serde_json::json!({}),
                 output_schema: serde_json::json!({}),
                 nodes: vec![map_node],
@@ -177,4 +182,133 @@ fn empty_map_is_reported_as_first_materialization_without_a_logical_task() {
             .expect("derive nonempty map")
             .is_empty()
     );
+}
+
+#[test]
+fn only_direct_capability_task_materializes_compensation_contract() {
+    // Pins: compensation belongs only to a direct capability node; aggregate task
+    // expansion cannot inherit or synthesize the node-level rollback contract.
+    let catalog = ExecutionCapabilityCatalog::build(Vec::new()).expect("build empty catalog");
+    let compensation = ExecutionCompensation {
+        compensator: CapabilityReference {
+            name: "delete-created-resource".to_string(),
+            version: "1".to_string(),
+        },
+        input_mapping: CompensationInputMapping {
+            bindings: Vec::new(),
+        },
+    };
+    let direct_node = ExecutionNode {
+        id: "create".to_string(),
+        requirement_ids: Vec::new(),
+        depends_on: Vec::new(),
+        when: None,
+        input: serde_json::json!({}),
+        output_schema: serde_json::json!({}),
+        operation: ExecutionOperation::Capability {
+            reference: CapabilityReference {
+                name: "create-resource".to_string(),
+                version: "1".to_string(),
+            },
+        },
+        compensation: Some(compensation.clone()),
+        retry: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        budget: None,
+    };
+    let request = ScheduleRequest {
+        run_uid: Uuid::now_v7(),
+        goal: ExecutionGoalContract {
+            objective: "create then possibly undo".to_string(),
+            requirements: Vec::new(),
+            deliverables: Vec::new(),
+            coverage: Vec::new(),
+            constraints: Vec::new(),
+            completion_checks: Vec::new(),
+        },
+        plan: CanonicalExecutionPlan {
+            definition: ExecutionPlanDefinition {
+                schema_version: 2,
+                cancel_policy: ExecutionCancelPolicy::CompensateCommitted,
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                nodes: vec![direct_node.clone()],
+            },
+            plan_hash: ExecutionHash::from_bytes([2; 32]),
+            catalog_hash: catalog.catalog_hash,
+            estimate: ExecutionEstimate::default(),
+            report: ExecutionValidationReport::default(),
+        },
+        catalog,
+        run_input: serde_json::json!({}),
+        projection: ExecutionProjection {
+            plan_revision: 1,
+            node_statuses: BTreeMap::new(),
+            tasks: Vec::new(),
+        },
+        config: ExecutionConfig::default(),
+        budget_ledger: BudgetLedger::new(ExecutionBudgetLimit {
+            max_cost_microusd: None,
+            max_tokens: None,
+            max_tasks: None,
+            max_tool_calls: None,
+            max_retrieved_bytes: None,
+            deadline_at: None,
+        }),
+        now: Utc::now(),
+    };
+
+    let direct = logical_task(
+        &request,
+        &direct_node,
+        String::new(),
+        serde_json::json!({}),
+        LogicalTaskKind::Capability {
+            reference: CapabilityReference {
+                name: "create-resource".to_string(),
+                version: "1".to_string(),
+            },
+        },
+        ExecutionEstimate {
+            tasks: 1,
+            ..ExecutionEstimate::default()
+        },
+    )
+    .expect("direct capability task should materialize");
+    assert_eq!(direct.compensation, Some(compensation.clone()));
+
+    let mut aggregate_node = direct_node;
+    aggregate_node.operation = ExecutionOperation::Map {
+        items: serde_json::json!([]),
+        item_key: "/id".to_string(),
+        max_items: 1,
+        item_output_schema: serde_json::json!({}),
+        task: MapTask::Capability {
+            reference: CapabilityReference {
+                name: "create-resource".to_string(),
+                version: "1".to_string(),
+            },
+        },
+    };
+    let aggregate = logical_task(
+        &request,
+        &aggregate_node,
+        "item-1".to_string(),
+        serde_json::json!({}),
+        LogicalTaskKind::Capability {
+            reference: CapabilityReference {
+                name: "create-resource".to_string(),
+                version: "1".to_string(),
+            },
+        },
+        ExecutionEstimate {
+            tasks: 1,
+            ..ExecutionEstimate::default()
+        },
+    )
+    .expect("aggregate capability task should materialize");
+    assert_eq!(aggregate.compensation, None);
 }

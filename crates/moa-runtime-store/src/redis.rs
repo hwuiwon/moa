@@ -391,17 +391,102 @@ fn ttl_millis(ttl: Duration) -> Result<i64> {
 }
 
 fn map_redis_error(error: redis::RedisError) -> MoaError {
-    MoaError::StorageError(error.to_string())
+    let unavailable = match error.kind() {
+        redis::ErrorKind::BusyLoadingError
+        | redis::ErrorKind::TryAgain
+        | redis::ErrorKind::ClusterDown
+        | redis::ErrorKind::MasterDown
+        | redis::ErrorKind::ClusterConnectionNotFound
+        | redis::ErrorKind::MasterNameNotFoundBySentinel
+        | redis::ErrorKind::NoValidReplicasFoundBySentinel => true,
+        redis::ErrorKind::IoError => !matches!(error.retry_method(), redis::RetryMethod::NoRetry),
+        _ => false,
+    };
+    if unavailable {
+        MoaError::StorageUnavailable(error.to_string())
+    } else {
+        MoaError::StorageError(error.to_string())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::time::Duration;
 
-    use moa_core::error::MoaError;
+    use moa_core::error::{FailureProvenance, MoaError};
     use moa_core::traits::RuntimeCacheStore;
+    use redis::{ErrorKind, RedisError};
 
-    use super::RedisRuntimeCacheStore;
+    use super::{RedisRuntimeCacheStore, map_redis_error};
+
+    // Pins: a live turn-admission heartbeat must remain retryable across Redis
+    // transport loss and temporary server/topology unavailability.
+    #[test]
+    fn redis_transport_and_unavailability_errors_are_transient_offline() {
+        let errors = [
+            RedisError::from(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "connection reset",
+            )),
+            RedisError::from((ErrorKind::BusyLoadingError, "loading")),
+            RedisError::from((ErrorKind::TryAgain, "try again")),
+            RedisError::from((ErrorKind::ClusterDown, "cluster down")),
+            RedisError::from((ErrorKind::MasterDown, "master down")),
+            RedisError::from((
+                ErrorKind::ClusterConnectionNotFound,
+                "cluster connection unavailable",
+            )),
+            RedisError::from((
+                ErrorKind::MasterNameNotFoundBySentinel,
+                "master temporarily unavailable",
+            )),
+            RedisError::from((
+                ErrorKind::NoValidReplicasFoundBySentinel,
+                "replicas temporarily unavailable",
+            )),
+        ];
+
+        for source in errors {
+            let kind = source.kind();
+            let mapped = map_redis_error(source);
+            assert!(
+                matches!(mapped, MoaError::StorageUnavailable(_)),
+                "Redis {kind:?} must preserve transient provenance, observed {mapped:?}"
+            );
+            assert_eq!(mapped.failure_provenance(), FailureProvenance::Transient);
+        }
+    }
+
+    // Pins: malformed data, invalid commands/configuration, and authentication
+    // failures cannot become an infinite Restate retry loop.
+    #[test]
+    fn redis_data_validation_and_configuration_errors_are_permanent_offline() {
+        let errors = [
+            RedisError::from((ErrorKind::ResponseError, "response error")),
+            RedisError::from((ErrorKind::ParseError, "parse error")),
+            RedisError::from((ErrorKind::AuthenticationFailed, "authentication failed")),
+            RedisError::from((ErrorKind::TypeError, "type error")),
+            RedisError::from((ErrorKind::ExecAbortError, "script aborted")),
+            RedisError::from((ErrorKind::InvalidClientConfig, "invalid client config")),
+            RedisError::from((ErrorKind::CrossSlot, "cross-slot")),
+            RedisError::from((ErrorKind::ReadOnly, "read-only")),
+            RedisError::from(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "socket permission denied",
+            )),
+        ];
+
+        for source in errors {
+            let kind = source.kind();
+            let mapped = map_redis_error(source);
+            assert!(
+                matches!(mapped, MoaError::StorageError(_)),
+                "Redis {kind:?} must remain permanent, observed {mapped:?}"
+            );
+            assert_eq!(mapped.failure_provenance(), FailureProvenance::Permanent);
+        }
+    }
 
     #[tokio::test]
     async fn redis_runtime_cache_rejects_unparseable_url_at_construction() {

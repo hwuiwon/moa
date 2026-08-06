@@ -16,8 +16,8 @@ use tokio::time::sleep;
 use crate::support::graph_ingest::wait_for_ingested_brain_responses;
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
-    restate_ingress_url, test_user_identity, with_identity,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_ingress_url,
+    restate_test_admin_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, start_turn_request,
@@ -103,7 +103,7 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
         .context("connect to test Postgres")?;
 
     let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
 
         let create_request = client.post(format!(
             "{}/restate/call/SessionStore/create_session",
@@ -161,18 +161,12 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("start_turn should succeed")?;
 
-        let status = wait_for_status(
-            &client,
-            ingress,
-            &identity,
-            session_id,
-            SessionStatus::Paused,
-        )
-        .await?;
+        let status =
+            wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Idle).await?;
         assert_eq!(
             status,
-            SessionStatus::Paused,
-            "start_turn through TurnExecution eventually maps idle sessions to Paused"
+            SessionStatus::Idle,
+            "start_turn through TurnExecution eventually maps idle sessions to Idle"
         );
 
         let events = wait_for_brain_response(&client, ingress, &identity, session_id).await?;
@@ -188,7 +182,7 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
         let _ = orchestrator.kill();
         let _ = orchestrator.wait();
         orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
 
         let status_after_restart_request = client.post(object_url(ingress, session_id, "status"));
         let status_after_restart = with_identity(status_after_restart_request, &identity)
@@ -200,7 +194,7 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .json::<SessionStatus>()
             .await
             .context("deserialize restarted status response")?;
-        assert_eq!(status_after_restart, SessionStatus::Paused);
+        assert_eq!(status_after_restart, SessionStatus::Idle);
 
         let cancel_request = client
             .post(object_url(ingress, session_id, "cancel"))
@@ -220,17 +214,11 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("start_turn after cancel should succeed")?;
 
-        let resumed_status = wait_for_status(
-            &client,
-            ingress,
-            &identity,
-            session_id,
-            SessionStatus::Paused,
-        )
-        .await?;
+        let resumed_status =
+            wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Idle).await?;
         assert_eq!(
             resumed_status,
-            SessionStatus::Paused,
+            SessionStatus::Idle,
             "a stale cancel without an active turn must not prevent a later message from completing"
         );
 

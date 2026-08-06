@@ -189,6 +189,7 @@ pub fn terminal_cause(
             .as_ref()
             .and_then(|outcome| match &outcome.result {
                 ExecutionTaskResult::Failed { class, .. } => Some(class.clone()),
+                ExecutionTaskResult::UnknownOutcome { .. } => Some(ExecutionFailureClass::Terminal),
                 _ => None,
             })
     }) {
@@ -295,6 +296,12 @@ pub fn execution_terminal_reason(
                 return invalid_terminal_combination(cause, projection);
             }
             ExecutionTerminalReason::InternalFailure
+        }
+        ExecutionTerminalCause::CompensationFailure { .. } => {
+            if !matches!(projection, TerminalProjection::Failed { .. }) {
+                return invalid_terminal_combination(cause, projection);
+            }
+            ExecutionTerminalReason::CompensationFailed
         }
         ExecutionTerminalCause::ReplanStop { reason } => {
             if !matches!(
@@ -1112,6 +1119,18 @@ fn map_item(
             usage: outcome.usage.clone(),
             citations: Vec::new(),
         },
+        ExecutionTaskResult::UnknownOutcome { message } => ExecutionMapItem {
+            item_key: task.item_key.clone(),
+            status: ExecutionMapItemStatus::Failed,
+            output: None,
+            failure: Some(ExecutionTaskFailure {
+                class: ExecutionFailureClass::Terminal,
+                message: message.clone(),
+                capability_ref: map_capability(node),
+            }),
+            usage: outcome.usage.clone(),
+            citations: Vec::new(),
+        },
         ExecutionTaskResult::NeedsInput { .. } | ExecutionTaskResult::NeedsReplan { .. } => {
             return Ok(None);
         }
@@ -1145,6 +1164,7 @@ pub(crate) fn completed_output(task: &ExecutionTaskProjection) -> Option<Value> 
             ExecutionTaskResult::NeedsInput { .. }
             | ExecutionTaskResult::NeedsReplan { .. }
             | ExecutionTaskResult::Cancelled { .. }
+            | ExecutionTaskResult::UnknownOutcome { .. }
             | ExecutionTaskResult::Failed { .. } => None,
         })
 }

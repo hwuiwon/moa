@@ -1,7 +1,9 @@
 //! Scoped PostgreSQL persistence for durable execution runs and logical tasks.
 
+mod admission;
 mod audit;
 mod audit_codec;
+mod compensation;
 mod materialize;
 mod outcome;
 mod outcome_support;
@@ -17,8 +19,8 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::{
-    ExecutionBudgetLimit, ExecutionCitation, ExecutionGoalContract, ExecutionOperation,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, PlanAmendment,
+    ExecutionBudgetLimit, ExecutionCitation, ExecutionCompensation, ExecutionGoalContract,
+    ExecutionOperation, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, PlanAmendment,
 };
 use moa_core::{
     types::contact::ContactId,
@@ -46,21 +48,23 @@ use crate::{
     },
     compiler::CanonicalExecutionPlan,
     completion::{
-        CompletionEvaluation, cancellation_terminal_evidence, execution_terminal_reason,
-        run_status_from_completion, terminal_evidence_from_evaluation,
+        CompletionEvaluation, execution_terminal_reason, run_status_from_completion,
+        terminal_evidence_from_evaluation,
     },
     replan::failure_fingerprint,
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
-        ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
-        ExecutionTerminalEvidence, ExecutionTerminalReason, FailureFingerprintInput, LogicalTask,
-        LogicalTaskKind, TerminalProjection, WaitingReason, cancelled_task_outcome,
-        run_status_after_task_outcome, run_status_from_terminal_projection,
-        task_outcome_is_terminal, task_status_from_outcome,
+        CompensationId, CompensationRegistrationProjection, CompensationStatus,
+        ExecutionCompensationOutcome, ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus,
+        ExecutionSourceKind, ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus,
+        ExecutionTerminalCause, ExecutionTerminalEvidence, ExecutionTerminalReason,
+        FailureFingerprintInput, LogicalTask, LogicalTaskKind, PendingExecutionTerminal,
+        TerminalProjection, WaitingReason, run_status_after_task_outcome,
+        run_status_from_terminal_projection, task_outcome_is_terminal, task_status_from_outcome,
     },
     wire::{
         ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
-        ExecutionTemplateAdmissionRequest, ExecutionTerminalDelivery, PinnedInstructionSkill,
+        ExecutionTemplateAdmissionRequest, ExecutionTerminalDelivery,
+        ExecutionToolDispatchRejection, PinnedInstructionSkill,
         execution_terminal_delivery_from_state,
     },
 };
@@ -70,6 +74,59 @@ const MAX_RUN_PAGE_LIMIT: u32 = 1_000;
 const DEFAULT_TASK_PAGE_LIMIT: u32 = 100;
 const MAX_TASK_PAGE_LIMIT: u32 = 1_000;
 const EXECUTION_AUDIT_NAMESPACE: Uuid = Uuid::from_u128(0x7b83_c5c2_5cf7_5fa0_8eb6_2d7c_6e0f_1d11);
+
+/// Persisted execution operation seeking permission to begin one external effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionEffectOwner {
+    /// Forward task coordinates fenced by the current task generation.
+    Task {
+        /// Stable forward task identifier.
+        task_id: ExecutionTaskId,
+        /// Exact current task generation.
+        generation: u64,
+    },
+    /// Compensation coordinates fenced by the current compensation generation.
+    Compensation {
+        /// Stable compensation identifier.
+        compensation_id: CompensationId,
+        /// Exact current compensation generation.
+        generation: u64,
+    },
+}
+
+/// Row-locked external-effect admission result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionEffectAdmissionOutcome {
+    /// The operation was current and linearized before any terminal fence.
+    Admitted,
+    /// The effect was definitively rejected before dispatch.
+    Rejected(ExecutionToolDispatchRejection),
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompensationPersistedOutcome {
+    result: Option<ExecutionCompensationOutcome>,
+    review_audit: Vec<CompensationReviewAuditEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompensationReviewAuditEntry {
+    review_uid: Uuid,
+    generation: u64,
+    accepted: bool,
+    resolution: ExecutionActionReviewResolution,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PendingTerminalEvidencePayload {
+    terminal_evidence: ExecutionTerminalEvidence,
+    completion_check_results: Vec<Value>,
+    terminal_gaps: Vec<String>,
+}
 
 /// Database scope used for one repository operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,6 +367,12 @@ pub struct ExecutionRunRecord {
     pub wake_epoch: u64,
     /// Last scheduler epoch acknowledged by compare-and-set.
     pub processed_wake_epoch: u64,
+    /// Next monotonic compensation registration sequence.
+    pub next_compensation_sequence: u64,
+    /// Original terminal intent held after compensation admission is fenced.
+    pub pending_terminal: Option<PendingExecutionTerminal>,
+    /// Whether compensation ambiguity or failure requires governed manual repair.
+    pub manual_repair_required: bool,
     /// Scoped idempotency key.
     pub idempotency_key: Option<String>,
     /// Cancellation reason, when cancelled.
@@ -481,6 +544,8 @@ pub struct ExecutionTaskRecord {
     pub resume_input_history: Vec<Value>,
     /// Executable task descriptor.
     pub kind: LogicalTaskKind,
+    /// Immutable exact rollback contract for a direct capability task.
+    pub compensation_contract: Option<ExecutionCompensation>,
     /// Retry policy serialized with the task.
     pub retry: moa_artifacts::execution_plan::RetryPolicy,
     /// Worst-case reservation requested by this task.
@@ -748,6 +813,146 @@ pub enum TaskOutcomeRejection {
     UnsupportedSchemaVersion,
 }
 
+/// Exact amendment identity that caused a compensation-safe replan-stop fence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplanStopReceipt {
+    /// Waiting-replan task whose current outcome triggered amendment evaluation.
+    pub task_id: ExecutionTaskId,
+    /// Exact generation of the waiting-replan task.
+    pub task_generation: u64,
+    /// Plan revision against which the amendment was evaluated.
+    pub base_plan_revision: u64,
+    /// Domain-separated hash of the exact amendment request.
+    pub amendment_hash: ExecutionHash,
+}
+
+/// Durable result of installing the pre-compensation admission fence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalFenceCommit {
+    /// Run projection with a persisted pending terminal intent.
+    pub run: ExecutionRunRecord,
+    /// Exact nonterminal forward task projections that must settle before undo begins.
+    pub tasks_to_settle: Vec<ExecutionTaskRecord>,
+}
+
+/// Result of fencing new forward admission before cancellation settlement.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TerminalFenceOutcome {
+    /// The terminal intent was persisted and forward admission was fenced.
+    Applied(Box<TerminalFenceCommit>),
+    /// The exact terminal intent and fence already exist.
+    Replayed(Box<TerminalFenceCommit>),
+    /// No visible run exists.
+    NotFound,
+    /// Revision, wake epoch, run state, or prior terminal intent differed.
+    Conflict,
+}
+
+/// Durable handoff after all forward work settled and compensation began.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeginCompensationCommit {
+    /// Run projection in the nonterminal `compensating` state.
+    pub run: ExecutionRunRecord,
+    /// Registered undo work in strict descending commit sequence.
+    pub registrations: Vec<CompensationRegistrationProjection>,
+}
+
+/// Result of transitioning a fenced run into compensation execution.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BeginCompensationOutcome {
+    /// The run entered compensation.
+    Applied(Box<BeginCompensationCommit>),
+    /// The run was already compensating under the exact pending terminal intent.
+    Replayed(Box<BeginCompensationCommit>),
+    /// No committed effect requires undo; finalize the held terminal intent directly.
+    NoCompensations(Box<ExecutionRunRecord>),
+    /// Forward tasks still require a definitive generation-fenced settlement.
+    ForwardTasksPending(Vec<ExecutionTaskRecord>),
+    /// No visible run exists.
+    NotFound,
+    /// Revision, wake epoch, fence, or run state differed.
+    Conflict,
+}
+
+/// Result of installing a fenced terminal intent without executing undo work.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FencedTerminalFinalizationOutcome {
+    /// The held terminal intent was installed and its fence cleared.
+    Finalized(ExecutionRunRecord),
+    /// The exact terminal state was already installed.
+    Replayed(ExecutionRunRecord),
+    /// A forward ambiguity finalized as compensation failure with manual repair required.
+    ManualRepairRequired(ExecutionRunRecord),
+    /// Forward tasks still require generation-fenced settlement.
+    ForwardTasksPending(Vec<ExecutionTaskRecord>),
+    /// No visible run exists.
+    NotFound,
+    /// Revision, wake epoch, or pending terminal intent differed.
+    Conflict,
+}
+
+/// Complete repository projection used to drive compensation workflows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionCompensationSnapshot {
+    /// Current durable run.
+    pub run: ExecutionRunRecord,
+    /// Registrations in descending commit sequence.
+    pub registrations: Vec<CompensationRegistrationProjection>,
+    /// Nonterminal forward tasks that must settle before compensation starts.
+    pub nonterminal_forward_tasks: Vec<ExecutionTaskRecord>,
+    /// Whether automatic compensation progress is blocked on manual repair.
+    pub manual_repair_required: bool,
+}
+
+/// Result of claiming the next strict reverse-order compensation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompensationClaimOutcome {
+    /// The highest pending sequence entered the requested running generation.
+    Claimed(CompensationRegistrationProjection),
+    /// The same registration and generation were already claimed.
+    Replayed(CompensationRegistrationProjection),
+    /// Budget admission failed terminally and manual repair is required.
+    BudgetRejected(CompensationRegistrationProjection),
+    /// No visible registration exists.
+    NotFound,
+    /// Another higher sequence, generation, run status, or repair fence blocks this claim.
+    Conflict,
+}
+
+/// Result of recording one generation-fenced compensation attempt outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompensationOutcomeWrite {
+    /// The attempt completed and the registration settled successfully.
+    Completed(CompensationRegistrationProjection),
+    /// A typed retryable failure advanced attempt and generation and returned to pending.
+    Requeued(CompensationRegistrationProjection),
+    /// A terminal failure persisted and fenced automatic progress for manual repair.
+    Failed(CompensationRegistrationProjection),
+    /// An ambiguous effect persisted and fenced automatic progress for manual repair.
+    UnknownOutcome(CompensationRegistrationProjection),
+    /// The exact outcome was already accepted for this generation.
+    Replayed(CompensationRegistrationProjection),
+    /// No visible registration exists.
+    NotFound,
+    /// The generation, run state, or registration status rejected this outcome.
+    Conflict,
+}
+
+/// Result of installing the pending terminal intent after compensation settles.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompensationFinalizationOutcome {
+    /// All undo work completed and the original terminal intent was installed.
+    Finalized(ExecutionRunRecord),
+    /// The same final state was already committed.
+    Replayed(ExecutionRunRecord),
+    /// Automatic finalization is blocked by failed or ambiguous undo work.
+    ManualRepairRequired(ExecutionRunRecord),
+    /// No visible run exists.
+    NotFound,
+    /// Wake epoch, active registrations, or terminal intent differed.
+    Conflict,
+}
+
 /// Compiler-validated amendment data persisted under a revision fence.
 #[derive(Clone, Debug)]
 pub struct ValidatedAmendment {
@@ -795,37 +1000,6 @@ pub enum AmendmentWrite {
     /// No visible run exists.
     NotFound,
     /// Current revision, status, plan, or superseded task did not match.
-    Conflict,
-}
-
-/// Result of cancelling one run.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CancellationCommit {
-    /// Cancelled run carrying the persisted wake epoch.
-    pub run: ExecutionRunRecord,
-    /// Stable task workflows that must receive terminal cancellation.
-    pub task_ids_to_release: Vec<ExecutionTaskId>,
-}
-
-/// Request to atomically cancel one run with a complete terminal replay identity.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CancellationRequest {
-    /// Human-readable caller cancellation reason.
-    pub reason: String,
-    /// Typed cancellation cause and coverage computed from the observed projection.
-    pub terminal_evidence: ExecutionTerminalEvidence,
-}
-
-/// Result of cancelling one run.
-#[derive(Clone, Debug, PartialEq)]
-pub enum CancellationOutcome {
-    /// The run and all nonterminal tasks were cancelled atomically.
-    Cancelled(Box<CancellationCommit>),
-    /// The exact reason was already committed with the same task handoff set.
-    Replayed(Box<CancellationCommit>),
-    /// No visible run exists.
-    NotFound,
-    /// A different terminal outcome already exists.
     Conflict,
 }
 
@@ -949,57 +1123,6 @@ pub struct RunFinalizationRequest {
     /// Exact terminal projection selected by the scheduler.
     pub terminal_projection: TerminalProjection,
     /// Deterministic completion evaluation over the observed projection.
-    pub completion_evaluation: CompletionEvaluation,
-    /// Exact typed cause and requirement-count replay identity.
-    pub terminal_evidence: ExecutionTerminalEvidence,
-    /// Exact normalized terminal reason selected from typed evidence.
-    pub terminal_reason: ExecutionTerminalReason,
-}
-
-/// Committed run and originating task projections for a terminal replan stop.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ReplanStopFinalization {
-    /// Finalized partial or blocked run.
-    pub run: ExecutionRunRecord,
-    /// Cancelled originating waiting-replan task.
-    pub task: ExecutionTaskRecord,
-    /// Stable task workflows terminalized by the stop decision.
-    pub task_ids_to_release: Vec<ExecutionTaskId>,
-}
-
-/// Result of atomically cancelling one waiting-replan task and finalizing its run.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ReplanStopOutcome {
-    /// Task cancellation, reservation reconciliation, and run finalization committed.
-    Finalized(Box<ReplanStopFinalization>),
-    /// The exact generation/revision-fenced stop was already committed.
-    Replayed(Box<ReplanStopFinalization>),
-    /// No visible run or task exists.
-    NotFound,
-    /// Run revision, task generation/status, or terminal evidence did not match.
-    Conflict,
-}
-
-/// Generation- and revision-fenced request for terminal replan-stop finalization.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ReplanStopRequest {
-    /// Run to finalize.
-    pub run_uid: Uuid,
-    /// Active plan revision observed by the scheduler.
-    pub expected_revision: u64,
-    /// Wake epoch of the structured projection used for stop evaluation.
-    pub expected_wake_epoch: u64,
-    /// Waiting-replan task that triggered stop evaluation.
-    pub task_id: ExecutionTaskId,
-    /// Current generation of the originating waiting task.
-    pub expected_generation: u64,
-    /// Exact amendment hash whose stop evaluation caused finalization, when amendment-driven.
-    pub amendment_hash: Option<ExecutionHash>,
-    /// Typed cancellation reason written to every active task.
-    pub cancellation_reason: String,
-    /// Partial or blocked terminal projection for the run.
-    pub terminal_projection: TerminalProjection,
-    /// Deterministic completion evidence persisted with the run.
     pub completion_evaluation: CompletionEvaluation,
     /// Exact typed cause and requirement-count replay identity.
     pub terminal_evidence: ExecutionTerminalEvidence,

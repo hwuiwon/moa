@@ -14,11 +14,7 @@ use moa_core::{
         ActionReviewOwner, ActionReviewStatus, action_review_timed_out_dedupe_key,
     },
 };
-use moa_execution::wire::ExecutionActionReviewAcknowledgement;
-use moa_observability::propagation::{
-    ValidatedTraceContext, with_reqwest_validated_trace_headers,
-    with_reqwest_validated_trace_link_headers,
-};
+use moa_observability::propagation::{ValidatedTraceContext, with_reqwest_validated_trace_headers};
 use moa_observability::{
     record_action_review_decision, record_action_review_oldest_pending_age,
     record_action_review_pending_depth, record_approval_wait,
@@ -29,9 +25,11 @@ use tokio::sync::oneshot;
 use tokio::time::interval;
 
 use crate::action_reviews::store as action_review_store;
+use crate::services::action_review_dispatcher::{
+    DispatchActionReviewsRequest, DispatchActionReviewsResponse,
+};
 use moa_wire::session_store::AppendEventRequest;
 
-const EXECUTION_REVIEW_DISPATCH_BATCH_SIZE: i64 = 32;
 const OWNER_RELEASE_DISPATCH_BATCH_SIZE: i64 = 32;
 
 /// Action-review reaper failures.
@@ -40,6 +38,9 @@ pub enum ActionReviewReaperError {
     /// Database operation failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    /// The Restate-owned execution-review dispatcher could not be awakened.
+    #[error("Restate action-review dispatcher error: {0}")]
+    Dispatcher(String),
 }
 
 /// Background worker that times out expired reviews and samples queue gauges.
@@ -126,7 +127,7 @@ impl ActionReviewReaper {
             if released > 0 {
                 tracing::info!(count = released, "action-review owner releases dispatched");
             }
-            let dispatched = self.dispatch_execution_review_resolutions().await?;
+            let dispatched = self.trigger_execution_review_dispatch().await?;
             if dispatched > 0 {
                 tracing::info!(
                     count = dispatched,
@@ -200,7 +201,8 @@ impl ActionReviewReaper {
                 ActionReviewOwner::Worker { worker_id, .. } => {
                     format!("{ingress_url}/restate/call/Worker/{worker_id}/release_action_review")
                 }
-                ActionReviewOwner::ExecutionTask { .. } => {
+                ActionReviewOwner::ExecutionTask { .. }
+                | ActionReviewOwner::ExecutionCompensation { .. } => {
                     tracing::error!(
                         review_id = %delivery.release.review_id,
                         "execution action review reached conversational release dispatch"
@@ -240,90 +242,38 @@ impl ActionReviewReaper {
         Ok(pending_count)
     }
 
-    /// Claims and attempts one bounded persisted execution-review outbox batch.
-    pub async fn dispatch_execution_review_resolutions(
+    /// Wakes the Restate-owned dispatcher that drains execution-review outbox rows.
+    pub async fn trigger_execution_review_dispatch(
         &self,
     ) -> Result<usize, ActionReviewReaperError> {
         let Some(ingress_url) = self.restate_ingress_url.as_deref() else {
             return Ok(0);
         };
-        let claimed = action_review_store::claim_execution_review_resolutions(
-            &self.pool,
-            EXECUTION_REVIEW_DISPATCH_BATCH_SIZE,
+        let response = crate::restate_identity::with_reqwest_trace_headers(
+            self.client
+                .post(format!(
+                    "{ingress_url}/restate/call/ActionReviewDispatcher/dispatch"
+                ))
+                .json(&DispatchActionReviewsRequest::default()),
         )
-        .await?;
-        let claimed_count = claimed.len();
-        for delivery in claimed {
-            let endpoint = format!(
-                "{ingress_url}/restate/call/ExecutionTask/{}/resolve_action_review",
-                delivery.request.task_id
-            );
-            let request = with_reqwest_validated_trace_headers(
-                self.client
-                    .post(endpoint)
-                    .header("idempotency-key", delivery.review_uid.to_string())
-                    .json(&delivery.request),
-                delivery.resolution_trace_context.as_ref(),
-            );
-            let response = with_reqwest_validated_trace_link_headers(
-                request,
-                delivery.task_trace_context.as_ref(),
-            )
-            .send()
-            .await;
-            let acknowledgement = match response {
-                Ok(response) if response.status().is_success() => response
-                    .json::<ExecutionActionReviewAcknowledgement>()
-                    .await
-                    .map_err(|error| error.to_string()),
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|error| format!("<unreadable body: {error}>"));
-                    Err(format!("Restate returned {status}: {body}"))
-                }
-                Err(error) => Err(error.to_string()),
-            };
-            match acknowledgement {
-                Ok(
-                    ExecutionActionReviewAcknowledgement::Applied
-                    | ExecutionActionReviewAcknowledgement::Replayed
-                    | ExecutionActionReviewAcknowledgement::AuditedStale,
-                ) => {
-                    let marked = action_review_store::mark_execution_review_delivered(
-                        &self.pool,
-                        delivery.review_uid,
-                        delivery.attempt_count,
-                    )
-                    .await?;
-                    if !marked {
-                        tracing::warn!(
-                            review_uid = %delivery.review_uid,
-                            attempt = delivery.attempt_count,
-                            "execution review acknowledgement lost its outbox claim fence"
-                        );
-                    }
-                }
-                Err(error) => {
-                    action_review_store::mark_execution_review_failed(
-                        &self.pool,
-                        delivery.review_uid,
-                        delivery.attempt_count,
-                        &error,
-                    )
-                    .await?;
-                    tracing::warn!(
-                        review_uid = %delivery.review_uid,
-                        attempt = delivery.attempt_count,
-                        error,
-                        "execution review delivery failed and was rescheduled"
-                    );
-                }
-            }
+        .send()
+        .await
+        .map_err(|error| ActionReviewReaperError::Dispatcher(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("<unreadable body: {error}>"));
+            return Err(ActionReviewReaperError::Dispatcher(format!(
+                "Restate returned {status}: {body}"
+            )));
         }
-        Ok(claimed_count)
+        response
+            .json::<DispatchActionReviewsResponse>()
+            .await
+            .map(|response| response.claimed)
+            .map_err(|error| ActionReviewReaperError::Dispatcher(error.to_string()))
     }
 
     /// Sample the pending-review queue and publish operator gauges.

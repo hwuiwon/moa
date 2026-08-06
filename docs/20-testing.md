@@ -98,6 +98,17 @@ suffixes as they are touched.
 | Behavior Lab live | `make test-behavior-lab-live` | Behavior Lab harness plus billed provider credentials and an approved budget |
 | Provider E2E | `make test-provider-e2e` | service E2E harness plus live/billed provider credentials |
 
+Pull requests also run the bounded `restate-recovery-pr` nextest profile. Tests
+selected by that profile use the `recovery_matrix_` prefix, run one at a time,
+and own a dedicated fixture whose orchestrator is killed with `SIGKILL` and
+reaped while Restate, Postgres, Valkey, OpenFGA, provider JSONL, and fixture
+capability state remain alive. Recovery assertions must stop at exact provider,
+capability, or database barriers; elapsed sleeps are never crash gates.
+
+The 500-task and chaos matrices remain in their nightly/heavy profiles rather
+than expanding the pull-request lane. Destructive Restate member and PVC
+replacement remains an operator-run procedure, not repository test automation.
+
 The nextest profiles in `.config/nextest.toml` are mostly suffix-based. Keep
 new out-of-line test targets on one of these suffixes so the filters stay short:
 `*_unit.rs`, `*_offline.rs`, `*_component.rs`, `*_db.rs`, `*_db_memory.rs`,
@@ -244,7 +255,7 @@ binaries are scheduled by two named profiles, both invoked from
 
 | Profile | Binaries | Restate stack |
 | --- | --- | --- |
-| `behavior-lab-service-e2e` | `experiment_trial_run_e2e`, `skill_learning_gate_e2e` | external: reads `MOA_RESTATE_INGRESS_URL`/`MOA_RESTATE_ADMIN_URL`, spawns its own orchestrator on reserved ports |
+| `behavior-lab-service-e2e` | `experiment_trial_run_e2e`, `skill_learning_gate_e2e` | external: reads `MOA_RESTATE_INGRESS_URL`/`RESTATE_ADMIN_URL`, spawns its own orchestrator on reserved ports; the Admin URL belongs to test infrastructure, not the runtime process |
 | `behavior-lab-fixture-service-e2e` | `artifact_release_service_e2e` | self-contained: `OrchestratorTestFixture` starts its own containers and **fails** if `MOA_RESTATE_INGRESS_URL` is set |
 
 That split is why there are two profiles rather than one: the two halves need

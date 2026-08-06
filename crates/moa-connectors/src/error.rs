@@ -176,6 +176,14 @@ pub enum Error {
         /// Durable state blocking retransmission.
         state: ConnectorInvocationState,
     },
+    /// A non-idempotent invocation may have reached the upstream system and needs operator review.
+    #[error(
+        "connector invocation {invocation_id} has unknown outcome; manual_reconciliation_required"
+    )]
+    ManualReconciliationRequired {
+        /// Durable invocation whose external effect cannot be inferred safely.
+        invocation_id: ConnectorInvocationId,
+    },
     /// Credential selection, audit, or opening failed before transmission.
     #[error("connector credential resolution failed: {0}")]
     Credential(#[from] moa_core::types::credentials::CredentialError),

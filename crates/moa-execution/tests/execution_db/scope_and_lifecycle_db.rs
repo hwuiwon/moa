@@ -277,21 +277,32 @@ async fn terminal_delivery_is_derived_from_durable_run_state_db() -> TestResult 
     };
     let evidence = terminal_evidence_from_evaluation(cause.clone(), &evaluation)?;
     let terminal_reason = execution_terminal_reason(&cause, &terminal, &evaluation)?;
-    let finalized = repository
-        .finalize_run(
+    let fence = repository
+        .fence_run_for_terminal(
             scope,
-            RunFinalizationRequest {
-                run_uid: run.run_uid,
-                expected_revision: 1,
-                expected_wake_epoch: prefinal.wake_epoch,
-                terminal_projection: terminal,
-                completion_evaluation: evaluation,
+            run.run_uid,
+            1,
+            prefinal.wake_epoch,
+            PendingExecutionTerminal {
+                status: ExecutionRunStatus::Partial,
+                reason: terminal_reason,
                 terminal_evidence: evidence,
-                terminal_reason,
+                output: Some(output.clone()),
+                completion_check_results: Vec::new(),
+                terminal_gaps: evaluation.gaps,
+                cancellation_reason: None,
             },
         )
         .await?;
-    assert!(matches!(finalized, FinalizationOutcome::Finalized(_)));
+    let TerminalFenceOutcome::Applied(fence) = fence else {
+        panic!("partial terminal intent must enter the compensation fence: {fence:?}");
+    };
+    assert!(matches!(
+        repository
+            .finalize_fenced_terminal(scope, run.run_uid, 1, fence.run.wake_epoch)
+            .await?,
+        FencedTerminalFinalizationOutcome::Finalized(_)
+    ));
 
     let delivery = repository
         .load_terminal_delivery(scope, run.run_uid)
@@ -828,7 +839,8 @@ async fn terminal_finalization_persists_every_runtime_cause_and_replays_exactly_
                 | ExecutionTerminalCause::SchedulerNoProgress
                 | ExecutionTerminalCause::ReplanStop { .. }
                 | ExecutionTerminalCause::Cancellation
-                | ExecutionTerminalCause::InternalFailure => None,
+                | ExecutionTerminalCause::InternalFailure
+                | ExecutionTerminalCause::CompensationFailure { .. } => None,
             },
             checks: Vec::new(),
             satisfied_requirement_ids: Vec::new(),
@@ -844,6 +856,79 @@ async fn terminal_finalization_persists_every_runtime_cause_and_replays_exactly_
         };
         let evidence = terminal_evidence_from_evaluation(cause.clone(), &evaluation)?;
         let terminal_reason = execution_terminal_reason(&cause, &terminal, &evaluation)?;
+        if status != CompletionStatus::Completed {
+            let direct = repository
+                .finalize_run(
+                    scope,
+                    RunFinalizationRequest {
+                        run_uid: run.run_uid,
+                        expected_revision: 1,
+                        expected_wake_epoch,
+                        terminal_projection: terminal.clone(),
+                        completion_evaluation: evaluation.clone(),
+                        terminal_evidence: evidence.clone(),
+                        terminal_reason,
+                    },
+                )
+                .await;
+            assert!(
+                matches!(
+                    direct,
+                    Err(moa_execution::Error::InvalidRepositoryInput { .. })
+                ),
+                "{name} bypassed the compensation fence: {direct:?}"
+            );
+            let fence = repository
+                .fence_run_for_terminal(
+                    scope,
+                    run.run_uid,
+                    1,
+                    expected_wake_epoch,
+                    PendingExecutionTerminal {
+                        status: moa_execution::state::run_status_from_terminal_projection(
+                            &terminal,
+                        ),
+                        reason: terminal_reason,
+                        terminal_evidence: evidence.clone(),
+                        output: match &terminal {
+                            TerminalProjection::Completed { output } => Some(output.clone()),
+                            TerminalProjection::Partial { output, .. } => output.clone(),
+                            TerminalProjection::Cancelled { .. }
+                            | TerminalProjection::Blocked { .. }
+                            | TerminalProjection::Unsupported { .. }
+                            | TerminalProjection::Failed { .. } => None,
+                        },
+                        completion_check_results: Vec::new(),
+                        terminal_gaps: evaluation.gaps.clone(),
+                        cancellation_reason: match &terminal {
+                            TerminalProjection::Cancelled { reason } => Some(reason.clone()),
+                            _ => None,
+                        },
+                    },
+                )
+                .await?;
+            let TerminalFenceOutcome::Applied(fence) = fence else {
+                panic!("{name} must fence before terminal settlement: {fence:?}");
+            };
+            let finalized = repository
+                .finalize_fenced_terminal(scope, run.run_uid, 1, fence.run.wake_epoch)
+                .await?;
+            let FencedTerminalFinalizationOutcome::Finalized(finalized) = finalized else {
+                panic!("{name} must finalize from the fence: {finalized:?}");
+            };
+            assert_eq!(
+                finalized.terminal_evidence,
+                Some(evidence.clone()),
+                "{name}"
+            );
+            assert!(matches!(
+                ExecutionRepository::new(pool.clone())
+                    .finalize_fenced_terminal(scope, run.run_uid, 1, fence.run.wake_epoch)
+                    .await?,
+                FencedTerminalFinalizationOutcome::Replayed(_)
+            ));
+            continue;
+        }
         let finalized = repository
             .finalize_run(
                 scope,
@@ -942,21 +1027,19 @@ async fn terminal_finalization_rejects_a_projection_changed_after_evaluation_db(
         panic!("fixture must be running");
     };
     let evaluation = CompletionEvaluation {
-        status: CompletionStatus::Failed,
+        status: CompletionStatus::Completed,
         limit_stop: None,
         checks: Vec::new(),
         satisfied_requirement_ids: Vec::new(),
         unsatisfied_requirement_ids: Vec::new(),
         gaps: Vec::new(),
     };
-    let terminal_evidence =
-        terminal_evidence_from_evaluation(ExecutionTerminalCause::InternalFailure, &evaluation)?;
-    let terminal = terminal_failure_projection(ExecutionFailureClass::Terminal);
-    let terminal_reason = execution_terminal_reason(
-        &ExecutionTerminalCause::InternalFailure,
-        &terminal,
-        &evaluation,
-    )?;
+    let cause = ExecutionTerminalCause::Completion { limit_stop: None };
+    let terminal_evidence = terminal_evidence_from_evaluation(cause.clone(), &evaluation)?;
+    let terminal = TerminalProjection::Completed {
+        output: json!({"result": "complete"}),
+    };
+    let terminal_reason = execution_terminal_reason(&cause, &terminal, &evaluation)?;
     repository
         .materialize_tasks(
             scope,
@@ -1087,13 +1170,14 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
-    const RUN_STATUSES: [&str; 12] = [
+    const RUN_STATUSES: [&str; 13] = [
         "awaiting_confirmation",
         "queued",
         "running",
         "waiting_input",
         "waiting_review",
         "waiting_replan",
+        "compensating",
         "completed",
         "partial",
         "blocked",
@@ -1163,7 +1247,7 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             rejected_run_edges += 1;
         }
     }
-    assert_eq!(rejected_run_edges, 98);
+    assert_eq!(rejected_run_edges, 112);
 
     let task_run = create_run(
         &repository,

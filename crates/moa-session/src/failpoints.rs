@@ -2,9 +2,9 @@
 //!
 //! Compiled only with the `failpoints` feature; production builds carry no
 //! trace of them. A failpoint fails the first `budget` calls that pass
-//! through it with a `StorageError`, then permanently disarms. Container-
-//! killing chaos can rarely land a fault between "row committed" and "ack
-//! returned"; failpoints make exactly that instant reproducible.
+//! through it with a transient `StorageUnavailable`, then permanently disarms.
+//! Container-killing chaos can rarely land a fault between "row committed" and
+//! "ack returned"; failpoints make exactly that instant reproducible.
 //!
 //! Arm programmatically with [`arm`] (in-process tests) or via environment
 //! (`MOA_FAILPOINT_<NAME>=<n>`, upper-cased) for containerized processes.
@@ -53,7 +53,7 @@ pub fn hit(name: &str) -> Option<MoaError> {
         return None;
     }
     entry.seen += 1;
-    Some(MoaError::StorageError(format!(
+    Some(MoaError::StorageUnavailable(format!(
         "failpoint {name} injected failure {}/{}",
         entry.seen, entry.budget
     )))

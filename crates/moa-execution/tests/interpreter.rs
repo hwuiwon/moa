@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit,
-    ExecutionCondition, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
-    ExecutionPlanDefinition, ExecutionReference, ExecutionRequirement, ExecutionTaskOutcome,
-    ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
+    ExecutionCancelPolicy, ExecutionCondition, ExecutionGoalContract, ExecutionNode,
+    ExecutionOperation, ExecutionPlanDefinition, ExecutionReference, ExecutionRequirement,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use moa_core::types::{
@@ -121,6 +121,7 @@ fn scheduler_materializes_every_ready_map_item_with_stable_typed_keys() {
                     reference: capability(),
                 },
             },
+            compensation: None,
             retry: retry(),
             budget: None,
         },
@@ -178,6 +179,7 @@ fn scheduler_rejects_duplicate_dynamic_map_keys() {
                     reference: capability(),
                 },
             },
+            compensation: None,
             retry: retry(),
             budget: None,
         },
@@ -901,7 +903,8 @@ fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     let catalog = catalog();
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes,
@@ -922,6 +925,7 @@ fn node(id: &str, dependencies: &[&str], operation: ExecutionOperation) -> Execu
         input: json!({}),
         output_schema: json!({ "type": "object" }),
         operation,
+        compensation: None,
         retry: retry(),
         budget: None,
     }
@@ -1011,6 +1015,7 @@ fn catalog() -> ExecutionCapabilityCatalog {
             retrieved_bytes: 13,
             tasks: 1,
         },
+        rollback: None,
     };
     let catalog_hash =
         catalog_hash(1, std::slice::from_ref(&capability)).expect("catalog fixture should hash");

@@ -126,7 +126,7 @@ struct SessionsListInput {
     limit: Option<usize>,
     /// Opaque cursor returned by a previous call.
     cursor: Option<String>,
-    /// Optional exact session status: `created`, `running`, `paused`, `completed`, `failed`, or `cancelled`.
+    /// Optional exact session status: `created`, `running`, `idle`, `completed`, `failed`, or `cancelled`.
     status: Option<String>,
     /// Optional exact channel: `chat`, `slack`, `email`, or `sms`.
     channel: Option<String>,

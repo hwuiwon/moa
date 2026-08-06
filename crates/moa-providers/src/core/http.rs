@@ -55,9 +55,9 @@ pub(crate) fn build_json_http_client() -> Result<Client> {
 
 /// Sends a bearer-authenticated JSON POST and decodes the JSON response.
 ///
-/// Transport failures and JSON decode failures map to
-/// [`MoaError::ProviderError`]; non-success HTTP statuses map to
-/// [`MoaError::HttpStatus`] carrying the response body.
+/// Transport failures map to typed provider transport/timeout variants, JSON
+/// decode failures map to [`MoaError::ProviderQuirk`], and non-success HTTP
+/// statuses map to [`MoaError::HttpStatus`] carrying the response body.
 pub(crate) async fn post_json<Req, Resp>(
     client: &Client,
     url: &str,
@@ -74,12 +74,12 @@ where
         .json(body)
         .send()
         .await
-        .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        .map_err(provider_transport_error)?;
     decode_json_response(response).await
 }
 
 /// Decodes a JSON provider response, mapping non-success statuses to
-/// [`MoaError::HttpStatus`] and decode failures to [`MoaError::ProviderError`].
+/// [`MoaError::HttpStatus`] and decode failures to [`MoaError::ProviderQuirk`].
 pub(crate) async fn decode_json_response<Resp>(response: Response) -> Result<Resp>
 where
     Resp: DeserializeOwned,
@@ -100,13 +100,32 @@ where
     response
         .json::<Resp>()
         .await
-        .map_err(|error| MoaError::ProviderError(error.to_string()))
+        .map_err(|error| MoaError::ProviderQuirk(error.to_string()))
+}
+
+/// Converts a typed reqwest failure without inspecting its display message.
+pub(crate) fn provider_transport_error(error: reqwest::Error) -> MoaError {
+    if error.is_timeout() {
+        MoaError::ProviderTimeout(error.to_string())
+    } else if error.is_connect() || error.is_body() || (error.is_request() && !error.is_builder()) {
+        MoaError::ProviderTransport(error.to_string())
+    } else {
+        MoaError::ProviderError(error.to_string())
+    }
+}
+
+/// Returns whether a reqwest failure is transient without parsing its text.
+pub(crate) fn is_retryable_reqwest_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_body()
+        || (error.is_request() && !error.is_builder())
 }
 
 /// Rejects an embedding response whose row count differs from the request size.
 pub(crate) fn validate_embedding_count(expected: usize, got: usize) -> Result<()> {
     if got != expected {
-        return Err(MoaError::ProviderError(format!(
+        return Err(MoaError::ProviderQuirk(format!(
             "embedding response length mismatch: expected {expected}, got {got}"
         )));
     }
@@ -116,7 +135,7 @@ pub(crate) fn validate_embedding_count(expected: usize, got: usize) -> Result<()
 /// Rejects an embedding whose width does not match the model's fixed dimension.
 pub(crate) fn validate_embedding_dimension(expected: usize, got: &[f32]) -> Result<()> {
     if got.len() != expected {
-        return Err(MoaError::ProviderError(format!(
+        return Err(MoaError::ProviderQuirk(format!(
             "embedding dimension mismatch: expected {expected}, got {}",
             got.len()
         )));

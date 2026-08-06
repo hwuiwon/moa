@@ -37,8 +37,9 @@ Status: early active development. The architecture is stable enough to document,
 The full local port map lives in
 [`docs/operations/local-ports.md`](docs/operations/local-ports.md).
 
-The orchestrator registers its handlers with Restate automatically through the
-`restate-register` sidecar service.
+RestateDeployment Operator owns handler registration in Kubernetes. Compose
+uses the one-shot `restate-bootstrap` service for registration observation,
+local-only registration, Session state cutover, and default cron reconciliation.
 
 To wait for everything to be ready:
 
@@ -145,7 +146,7 @@ MOA_DATABASE_ADMIN_URL=postgres://migration-role@... \
   cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- migrate
 
 MOA_DATABASE_URL=postgres://runtime-role@... \
-MOA_RESTATE_ADMIN_URL=http://localhost:10011 \
+MOA_RESTATE_INGRESS_URL=http://localhost:10010 \
 MOA_OPENAI_API_KEY=...
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
@@ -172,7 +173,7 @@ Required cloud process configuration includes:
 
 ```bash
 MOA_DATABASE_URL=postgres://runtime-role@...
-MOA_RESTATE_ADMIN_URL=http://localhost:10011
+MOA_RESTATE_INGRESS_URL=http://localhost:10010
 MOA_OPENAI_API_KEY=...
 DAYTONA_API_KEY=... # optional, depending on hand provider
 ```

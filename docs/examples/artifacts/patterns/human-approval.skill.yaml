@@ -28,7 +28,8 @@ definition:
             kind:
               kind: output_schema
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema:
           type: object
         output_schema:
@@ -45,6 +46,7 @@ definition:
               reference:
                 name: action://refund_policy.draft_refund
                 version: v1
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -60,6 +62,7 @@ definition:
             operation:
               kind: review
               prompt: Approve or reject the drafted customer-visible action.
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -77,6 +80,7 @@ definition:
               reference:
                 name: action://orders.refund
                 version: v1
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -91,6 +95,7 @@ definition:
               kind: output
               value:
                 $ref: $.nodes.execute_action.output
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0

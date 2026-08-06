@@ -32,7 +32,8 @@ use crate::turn::util::{
 use crate::turn_driver::progress as driver_progress;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::turn_events::{
-    append_tool_call_event, append_tool_result_event, record_segment_tool_use,
+    COORDINATOR_SECURITY_INPUT_TIMEOUT_MESSAGE, append_tool_call_event, append_tool_result_event,
+    record_segment_tool_use,
 };
 use crate::workflows::turn_progress;
 use crate::workflows::turn_responsiveness::{
@@ -147,6 +148,8 @@ pub(super) enum ToolDispatchOutcome {
     ToolBudgetExceeded(ToolBudgetExhausted),
     /// The prompt-injection circuit reached its halt threshold for this owner.
     SecurityHalt,
+    /// The coordinator's bounded security-input wait expired without an answer.
+    SecurityInputTimedOut,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,6 +476,14 @@ pub(super) async fn dispatch_response_tool_calls(
             ToolCallDisposition::SecurityHalt => {
                 return Ok(ToolDispatchOutcome::SecurityHalt);
             }
+            ToolCallDisposition::Cancelled(reason) => {
+                *last_summary = Some(reason);
+                return Ok(ToolDispatchOutcome::Cancelled);
+            }
+            ToolCallDisposition::SecurityInputTimedOut => {
+                *last_summary = Some(COORDINATOR_SECURITY_INPUT_TIMEOUT_MESSAGE.to_string());
+                return Ok(ToolDispatchOutcome::SecurityInputTimedOut);
+            }
             // `handle_tool_call` already parked on the user's reply before
             // returning, so by the time control reaches here the suspend has been
             // answered and the loop may continue with the capability disabled.
@@ -648,25 +659,40 @@ async fn handle_tool_call(
                 *tool_context.delegated_worker = true;
             }
         }
+        GovernedInvocationOutcome::UnknownOutcome { .. }
+        | GovernedInvocationOutcome::NotDispatched { .. } => {
+            return Err(TerminalError::new(
+                "root-turn governed invocation returned an execution-only outcome",
+            )
+            .into());
+        }
     }
     if disposition == ToolCallDisposition::SecurityNeedsInput {
         // Idle until the user answers. Until then this turn makes no further tool
         // calls, which is the point of a score-3 suspend.
         let (suspend_session_id, suspend_tool_id) = suspend_context;
-        await_coordinator_security_input(
+        let input_outcome = await_coordinator_security_input(
             ctx,
             suspend_session_id,
             tool_context.turn_id,
             tool_context.generation,
             suspend_tool_id,
+            workflow.session_limits().coordinator_input_timeout_ms,
         )
         .await?;
+        disposition = match input_outcome {
+            CoordinatorSecurityInputOutcome::Answered => disposition,
+            CoordinatorSecurityInputOutcome::Cancelled(reason) => {
+                ToolCallDisposition::Cancelled(reason)
+            }
+            CoordinatorSecurityInputOutcome::TimedOut => ToolCallDisposition::SecurityInputTimedOut,
+        };
     }
     Ok(disposition)
 }
 
 /// Whether one dispatched tool call left the turn able to continue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ToolCallDisposition {
     /// The turn may keep running.
     Continue,
@@ -674,6 +700,10 @@ enum ToolCallDisposition {
     SecurityHalt,
     /// The circuit suspended this owner pending the user's answer.
     SecurityNeedsInput,
+    /// Cancellation won while the coordinator was parked for user input.
+    Cancelled(String),
+    /// The bounded coordinator input wait expired.
+    SecurityInputTimedOut,
 }
 
 /// Records the refusal of a tool whose capability the circuit already disabled.
@@ -736,10 +766,12 @@ async fn await_coordinator_security_input(
     turn_id: &str,
     generation: u64,
     tool_id: ToolCallId,
-) -> Result<(), HandlerError> {
+    timeout_ms: u64,
+) -> Result<CoordinatorSecurityInputOutcome, HandlerError> {
     let input_request_id = format!("security:{turn_id}:{generation}:{tool_id}");
     let awakeable = ctx.awakeable::<String>();
     let (awakeable_id, reply) = awakeable;
+    let waiting_workflow_id = turn_id.to_string();
 
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<crate::objects::session::SessionClient>(session_id.to_string())
@@ -747,9 +779,9 @@ async fn await_coordinator_security_input(
                 moa_wire::turn::RegisterCoordinatorInputRequest {
                     turn_id: turn_id.to_string(),
                     generation,
-                    input_request_id,
+                    input_request_id: input_request_id.clone(),
                     awakeable_id,
-                    waiting_workflow_id: turn_id.to_string(),
+                    waiting_workflow_id: waiting_workflow_id.clone(),
                     question: COORDINATOR_SECURITY_INPUT_QUESTION.to_string(),
                 },
             )),
@@ -757,8 +789,43 @@ async fn await_coordinator_security_input(
     .call()
     .await?;
 
-    reply.await?;
-    Ok(())
+    let outcome = restate_sdk::select! {
+        answer = reply => {
+            answer?;
+            CoordinatorSecurityInputOutcome::Answered
+        },
+        reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
+            CoordinatorSecurityInputOutcome::Cancelled(reason?)
+        },
+        _ = ctx.sleep(std::time::Duration::from_millis(timeout_ms)) => {
+            CoordinatorSecurityInputOutcome::TimedOut
+        }
+    };
+
+    if !matches!(outcome, CoordinatorSecurityInputOutcome::Answered) {
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<crate::objects::session::SessionClient>(session_id.to_string())
+                .clear_coordinator_input(Json::from(
+                    moa_wire::turn::ClearCoordinatorInputRequest {
+                        turn_id: turn_id.to_string(),
+                        generation,
+                        input_request_id,
+                        waiting_workflow_id,
+                    },
+                )),
+        )
+        .call()
+        .await?;
+    }
+
+    Ok(outcome)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoordinatorSecurityInputOutcome {
+    Answered,
+    Cancelled(String),
+    TimedOut,
 }
 
 /// Fixed question asked when the circuit suspends a coordinator turn.

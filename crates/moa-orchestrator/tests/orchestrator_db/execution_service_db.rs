@@ -217,7 +217,8 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
     };
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: Vec::new(),
@@ -290,6 +291,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         kind: LogicalTaskKind::Output {
             value: json!({"answer": "durable"}),
         },
+        compensation: None,
         retry: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 0,

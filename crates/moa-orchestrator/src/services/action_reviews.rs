@@ -1,7 +1,6 @@
 //! Tenant-admin action review queue and decision service.
 
 use chrono::{DateTime, Utc};
-use moa_artifacts::execution_plan::ExecutionFailureClass;
 use moa_authz_schema::Relation;
 use moa_core::{
     events::Event, types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
@@ -30,7 +29,10 @@ use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::SessionClient;
 use crate::objects::worker::WorkerClient;
 use crate::services::session_store::RestateSessionStoreClient;
-use crate::services::tool_executor::{ExecutionTaskToolCallRequest, ToolExecutorClient};
+use crate::services::tool_executor::{
+    ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallRequest, ToolExecutorClient,
+};
+use crate::workflows::errors::moa_error_to_handler_error;
 use moa_core::traits::SessionEventLookupStore;
 use moa_execution::wire::ExecutionActionReviewResolution;
 
@@ -101,6 +103,28 @@ pub struct DecideActionReviewRequest {
     pub reason: Option<String>,
 }
 
+/// Internal request to settle an execution-owned review before its owner terminates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettleExecutionActionReviewRequest {
+    /// Tenant that owns the review row.
+    pub tenant_id: TenantId,
+    /// Stable review identifier, equal to the governed execution tool-call id.
+    pub review_id: Uuid,
+    /// Exact task or compensation owner expected in the durable envelope.
+    pub owner: ActionReviewOwner,
+}
+
+/// Durable settlement chosen while holding the action-review row lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionActionReviewSettlement {
+    /// The review was still unclaimed and is now terminal, so no tool may dispatch.
+    Revoked,
+    /// A decision already claimed the reviewed effect, so the owner must join its resolution.
+    JoinRequired,
+}
+
 /// Wire decision kind for `ActionReviews/decide`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,6 +151,22 @@ pub trait ActionReviews {
 
     /// Decide one tenant action review.
     async fn decide(request: Json<DecideActionReviewRequest>) -> Result<(), HandlerError>;
+
+    /// Revoke an unclaimed execution review or require its owner to join claimed work.
+    async fn settle_execution_owner_review(
+        request: Json<SettleExecutionActionReviewRequest>,
+    ) -> Result<Json<ExecutionActionReviewSettlement>, HandlerError>;
+}
+
+/// Settles an execution-owned action review against the durable row state.
+///
+/// This public adapter exists so DB-backed tests exercise the same transaction
+/// used by the Restate handler rather than restating its SQL.
+pub async fn settle_execution_action_review(
+    pool: sqlx::PgPool,
+    request: SettleExecutionActionReviewRequest,
+) -> Result<ExecutionActionReviewSettlement, HandlerError> {
+    action_review_app::settle_execution_owner_review(pool, request).await
 }
 
 /// Concrete action-review service implementation.
@@ -170,13 +210,10 @@ impl ActionReviews for ActionReviewsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ActionReviews", "request");
         let mut request = request.into_inner();
-        let execution_task_trace_context = request
-            .envelope
-            .owner
-            .execution_origin()
-            .is_some()
-            .then(|| incoming_trace_context(&ctx))
-            .flatten();
+        let execution_task_trace_context = (request.envelope.owner.execution_origin().is_some()
+            || request.envelope.owner.compensation_origin().is_some())
+        .then(|| incoming_trace_context(&ctx))
+        .flatten();
         action_review_app::prepare_request(&mut request)?;
         let event = action_review_app::requested_event(&request);
         let pool = self.pool.clone();
@@ -300,46 +337,18 @@ impl ActionReviews for ActionReviewsImpl {
             .await?
             .into_inner();
 
-        if let (Some(tool_request), Some(origin)) = (
-            decided.tool_request.clone(),
-            decided.owner.execution_origin(),
-        ) {
+        if let Some(execution_request) =
+            execution_review_request(&decided.owner, decided.tool_request.as_ref())
+        {
             let execution = crate::restate_identity::replay_safe_request(
                 ctx.service_client::<ToolExecutorClient>()
-                    .execute_execution_task(Json::from(ExecutionTaskToolCallRequest {
-                        call: tool_request,
-                        origin: Some(origin),
-                    })),
+                    .execute_execution(Json::from(execution_request)),
             )
             .call()
             .await;
             let resolution = match execution {
-                Ok(secured) => {
-                    // The reviewed tool's output was classified inside the
-                    // executor's `ctx.run`. This path consumes that envelope
-                    // whole — it never re-derives a summary from raw bytes and
-                    // never reclassifies.
-                    let secured = secured.into_inner();
-                    if secured.is_error() {
-                        ExecutionActionReviewResolution::Failed {
-                            class: ExecutionFailureClass::Terminal,
-                            message: "reviewed tool returned a classified error".to_string(),
-                        }
-                    } else {
-                        ExecutionActionReviewResolution::Completed {
-                            tool_output: serde_json::to_value(&secured).map_err(|error| {
-                                TerminalError::new(format!(
-                                    "serialize execution review tool output: {error}"
-                                ))
-                            })?,
-                        }
-                    }
-                }
-                Err(_) => ExecutionActionReviewResolution::Failed {
-                    class: ExecutionFailureClass::Terminal,
-                    message: "reviewed tool execution failed before producing a classified result"
-                        .to_string(),
-                },
+                Ok(Json(outcome)) => execution_review_resolution(outcome)?,
+                Err(error) => return Err(error.into()),
             };
             let pool = self.pool.clone();
             decided = ctx
@@ -392,11 +401,11 @@ impl ActionReviews for ActionReviewsImpl {
         let mut executed_output: Option<SecuredToolOutput> = None;
         if let Some(tool_request) = decided.tool_request.as_ref() {
             if let Some(execution_request) =
-                execution_task_review_request(decided.owner.execution_origin(), tool_request)
+                execution_review_request(&decided.owner, Some(tool_request))
             {
                 crate::restate_identity::replay_safe_request(
                     ctx.service_client::<ToolExecutorClient>()
-                        .execute_execution_task(Json::from(execution_request)),
+                        .execute_execution(Json::from(execution_request)),
                 )
                 .call()
                 .await?;
@@ -438,8 +447,8 @@ impl ActionReviews for ActionReviewsImpl {
             }
         }
 
-        // An execution-task owner keeps its existing run/task outbox and ack path and
-        // receives zero conversational callbacks.
+        // Execution-task and compensation owners keep their workflow outbox/ack
+        // paths and receive zero conversational callbacks.
         if decided.owner.is_conversational()
             && let Some(receipt) = conversational_receipt(
                 &ctx,
@@ -470,13 +479,33 @@ impl ActionReviews for ActionReviewsImpl {
         }
         Ok(())
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: invoked by the exact keyed execution task or compensation workflow before terminal settlement.
+    async fn settle_execution_owner_review(
+        &self,
+        ctx: Context<'_>,
+        request: Json<SettleExecutionActionReviewRequest>,
+    ) -> Result<Json<ExecutionActionReviewSettlement>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ActionReviews", "settle_execution_owner_review");
+        let pool = self.pool.clone();
+        Ok(ctx
+            .run(|| async move {
+                settle_execution_action_review(pool, request.into_inner())
+                    .await
+                    .map(Json::from)
+            })
+            .name("action_reviews_settle_execution_owner_review")
+            .await?)
+    }
 }
 
 /// Registers one pending conversational review on its typed owner.
 ///
-/// An `ExecutionTask` owner is routed nowhere: it is resumed by the durable
-/// execution outbox, and sending it to a Session or Worker handler would resume a
-/// conversation that never issued the action.
+/// Execution owners are routed nowhere: they are resumed by the durable
+/// execution outbox, and sending either to a Session or Worker handler would
+/// resume a conversation that never issued the action.
 async fn register_conversational_review(
     ctx: &Context<'_>,
     owner: &ActionReviewOwner,
@@ -503,7 +532,8 @@ async fn register_conversational_review(
             .call()
             .await?;
         }
-        ActionReviewOwner::ExecutionTask { .. } => {}
+        ActionReviewOwner::ExecutionTask { .. }
+        | ActionReviewOwner::ExecutionCompensation { .. } => {}
     }
     Ok(())
 }
@@ -530,7 +560,8 @@ async fn deliver_conversational_resolution(
             .call()
             .await?;
         }
-        ActionReviewOwner::ExecutionTask { .. } => {}
+        ActionReviewOwner::ExecutionTask { .. }
+        | ActionReviewOwner::ExecutionCompensation { .. } => {}
     }
     Ok(())
 }
@@ -584,7 +615,8 @@ async fn release_conversational_review(
             .call()
             .await?;
         }
-        ActionReviewOwner::ExecutionTask { .. } => {}
+        ActionReviewOwner::ExecutionTask { .. }
+        | ActionReviewOwner::ExecutionCompensation { .. } => {}
     }
     Ok(())
 }
@@ -624,7 +656,9 @@ async fn conversational_receipt(
                 }
             }
         }
-        ActionReviewStatus::Pending | ActionReviewStatus::Timeout => return Ok(None),
+        ActionReviewStatus::Pending | ActionReviewStatus::Timeout | ActionReviewStatus::Revoked => {
+            return Ok(None);
+        }
     };
 
     Ok(Some(ActionReviewReceipt {
@@ -649,14 +683,39 @@ fn executed_terminal_fact(secured: &SecuredToolOutput) -> ToolTerminalFact {
     })
 }
 
-fn execution_task_review_request(
-    origin: Option<moa_core::types::action_policy::ExecutionTaskOrigin>,
-    tool_request: &moa_core::types::tools::ToolCallRequest,
-) -> Option<ExecutionTaskToolCallRequest> {
-    origin.map(|origin| ExecutionTaskToolCallRequest {
-        call: tool_request.clone(),
-        origin: Some(origin),
-    })
+fn execution_review_resolution(
+    outcome: ExecutionToolCallOutcome,
+) -> Result<ExecutionActionReviewResolution, HandlerError> {
+    match outcome {
+        ExecutionToolCallOutcome::Completed { output } => {
+            Ok(ExecutionActionReviewResolution::Completed {
+                tool_output: serde_json::to_value(output).map_err(|error| {
+                    TerminalError::new(format!("serialize execution review tool output: {error}"))
+                })?,
+            })
+        }
+        ExecutionToolCallOutcome::UnknownOutcome { message } => {
+            Ok(ExecutionActionReviewResolution::UnknownOutcome { message })
+        }
+        ExecutionToolCallOutcome::NotDispatched { reason } => {
+            Ok(ExecutionActionReviewResolution::NotDispatched { reason })
+        }
+    }
+}
+
+fn execution_review_request(
+    owner: &ActionReviewOwner,
+    tool_request: Option<&moa_core::types::tools::ToolCallRequest>,
+) -> Option<ExecutionToolCallRequest> {
+    let call = tool_request?.clone();
+    let origin = match owner {
+        ActionReviewOwner::ExecutionTask { origin, .. } => ExecutionToolCallOrigin::Task(*origin),
+        ActionReviewOwner::ExecutionCompensation { origin, .. } => {
+            ExecutionToolCallOrigin::Compensation(*origin)
+        }
+        ActionReviewOwner::Coordinator { .. } | ActionReviewOwner::Worker { .. } => return None,
+    };
+    Some(ExecutionToolCallRequest { call, origin })
 }
 
 /// Loads the terminal fact already durable for one reviewed call.
@@ -675,7 +734,7 @@ async fn prior_tool_terminal_fact(
                 .tool_terminal_fact(&storage_partition_id, session_id, tool_call_id)
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(moa_error_to_handler_error)
         })
         .name("action_reviews_tool_terminal_fact")
         .await?
@@ -700,15 +759,17 @@ fn current_trace_context() -> Option<ValidatedTraceContext> {
 mod tests {
     use moa_core::traits::{Identity, IdentityType};
     use moa_core::types::{
-        action_policy::ExecutionTaskOrigin,
-        identifiers::{TenantId, ToolCallId},
+        action_policy::{ActionReviewOwner, ExecutionCompensationOrigin, ExecutionTaskOrigin},
+        identifiers::{SessionId, TenantId, ToolCallId},
         tools::ToolCallRequest,
     };
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{executed_terminal_fact, execution_task_review_request};
+    use super::{executed_terminal_fact, execution_review_request, execution_review_resolution};
+    use crate::services::tool_executor::{ExecutionToolCallOrigin, ExecutionToolCallOutcome};
     use moa_core::types::action_policy::{ToolResultSecurityMetadata, ToolTerminalFact};
+    use moa_execution::wire::ExecutionActionReviewResolution;
 
     #[test]
     fn executed_terminal_fact_preserves_tool_result_success_bit() {
@@ -766,11 +827,109 @@ mod tests {
             resource_budget: Default::default(),
         };
 
-        let request = execution_task_review_request(Some(origin), &call)
+        let owner = ActionReviewOwner::ExecutionTask {
+            session_id: call.session_id,
+            origin,
+        };
+        let request = execution_review_request(&owner, Some(&call))
             .expect("execution provenance should select execution-task dispatch");
 
         assert_eq!(request.call, call);
-        assert_eq!(request.origin, Some(origin));
-        assert!(execution_task_review_request(None, &call).is_none());
+        assert_eq!(request.origin, ExecutionToolCallOrigin::Task(origin));
+        assert!(
+            execution_review_request(
+                &ActionReviewOwner::Coordinator {
+                    session_id: SessionId::new(),
+                    turn_id: "turn-1".to_string(),
+                    generation: 1,
+                },
+                Some(&call),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn action_policy_clear_preserves_execution_compensation_review_provenance() {
+        // Pins: a cleared rollback review carries its exact compensation id and
+        // generation to ToolExecutor instead of masquerading as a forward task.
+        let call = ToolCallRequest {
+            tool_call_id: ToolCallId::new(),
+            caller_identity: Identity {
+                identity_type: IdentityType::Operator,
+                id: Uuid::from_u128(2),
+                tenant_id: TenantId::from(Uuid::from_u128(1)),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
+            provider_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            expected_tool_contract_revision: "contract-v1".to_string(),
+            input: json!({"cmd": "printf undo"}),
+            active_canary: None,
+            session_id: SessionId::new(),
+            trusted_sandbox_manifest: None,
+            worker_id: None,
+            resource_budget: Default::default(),
+        };
+        let origin = ExecutionCompensationOrigin {
+            run_uid: Uuid::from_u128(10),
+            compensation_id: Uuid::from_u128(30),
+            generation: 7,
+        };
+        let owner = ActionReviewOwner::ExecutionCompensation {
+            session_id: call.session_id,
+            origin,
+        };
+
+        let request = execution_review_request(&owner, Some(&call))
+            .expect("compensation provenance should select execution dispatch");
+
+        assert_eq!(request.call, call);
+        assert_eq!(
+            request.origin,
+            ExecutionToolCallOrigin::Compensation(origin)
+        );
+    }
+
+    #[test]
+    fn execution_review_preserves_classified_error_for_owner_specific_terminalization() {
+        // Pins: ActionReviews persists the valid classified envelope even when it
+        // is an error, so the task can use its pinned idempotency contract while a
+        // compensation can apply its own definitive-failure rule.
+        let output = moa_core::types::tools::SecuredToolOutput::assessed_safe(
+            moa_core::types::tools::ToolOutput::error(
+                "upstream rejected request",
+                std::time::Duration::ZERO,
+            ),
+            moa_core::types::security::ToolCapabilityId::builtin("fixture"),
+        );
+        let resolution = execution_review_resolution(ExecutionToolCallOutcome::Completed {
+            output: Box::new(output.clone()),
+        })
+        .expect("classified execution output should serialize");
+
+        let ExecutionActionReviewResolution::Completed { tool_output } = resolution else {
+            panic!("a classified tool error must remain a completed execution envelope");
+        };
+        let decoded: moa_core::types::tools::SecuredToolOutput =
+            serde_json::from_value(tool_output)
+                .expect("stored execution review output should decode");
+        assert_eq!(decoded, output);
+    }
+
+    #[test]
+    fn execution_review_persists_definitive_not_dispatched_resolution() {
+        // Pins: once an admin has claimed a review, a stale owner resolves
+        // definitively instead of leaving the review pending or implying execution.
+        let reason = moa_execution::wire::ExecutionToolDispatchRejection::OperationNotRunning;
+        let resolution =
+            execution_review_resolution(ExecutionToolCallOutcome::NotDispatched { reason })
+                .expect("typed non-dispatch should be a valid review resolution");
+
+        assert_eq!(
+            resolution,
+            ExecutionActionReviewResolution::NotDispatched { reason }
+        );
     }
 }

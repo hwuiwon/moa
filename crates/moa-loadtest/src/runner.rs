@@ -586,7 +586,6 @@ async fn run_collector(
                 replacement_safe,
             } => {
                 match kind {
-                    TurnFailureKind::Rejected => state.errors.turn_rejections += 1,
                     TurnFailureKind::StartFailed => state.errors.turn_start_failures += 1,
                     TurnFailureKind::Timeout => state.errors.turn_timeouts += 1,
                     TurnFailureKind::Failed | TurnFailureKind::Transport => {
@@ -736,7 +735,7 @@ fn session_status_failure_reason(
         SessionStatus::Failed | SessionStatus::Cancelled => {
             Some(format!("session ended in status {status:?}"))
         }
-        SessionStatus::Paused if completed_turns < planned_turns => {
+        SessionStatus::Idle if completed_turns < planned_turns => {
             Some(format!("session ended in status {status:?}"))
         }
         SessionStatus::Running if execution_admissions == 0 => {
@@ -945,20 +944,20 @@ mod tests {
     }
 
     #[test]
-    fn paused_after_all_planned_turns_is_success_status() {
-        // Pins: a Restate Session parked in Paused after all planned turns is a successful idle session.
+    fn idle_after_all_planned_turns_is_success_status() {
+        // Pins: a Restate Session parked in Idle after all planned turns is a successful idle session.
         assert_eq!(
-            session_status_failure_reason(&SessionStatus::Paused, 5, 5, 0),
+            session_status_failure_reason(&SessionStatus::Idle, 5, 5, 0),
             None
         );
     }
 
     #[test]
-    fn paused_before_all_planned_turns_is_failure_status() {
-        // Pins: Paused is still a failure when the remote turn loop stopped before the plan completed.
+    fn idle_before_all_planned_turns_is_failure_status() {
+        // Pins: Idle is still a failure when the remote turn loop stopped before the plan completed.
         assert_eq!(
-            session_status_failure_reason(&SessionStatus::Paused, 4, 5, 0),
-            Some("session ended in status Paused".to_string())
+            session_status_failure_reason(&SessionStatus::Idle, 4, 5, 0),
+            Some("session ended in status Idle".to_string())
         );
     }
 
@@ -981,10 +980,10 @@ mod tests {
     }
 
     #[test]
-    fn end_of_run_drain_treats_incomplete_paused_sessions_as_healthy() {
+    fn end_of_run_drain_treats_incomplete_idle_sessions_as_healthy() {
         // Pins: sessions cut short because the schedule ended are not failures;
         // only Failed/Cancelled statuses count during pool drain.
-        assert_eq!(end_of_run_status_failure(&SessionStatus::Paused, 0), None);
+        assert_eq!(end_of_run_status_failure(&SessionStatus::Idle, 0), None);
         assert_eq!(end_of_run_status_failure(&SessionStatus::Running, 1), None);
         assert!(end_of_run_status_failure(&SessionStatus::Running, 0).is_some());
         assert!(end_of_run_status_failure(&SessionStatus::Failed, 0).is_some());

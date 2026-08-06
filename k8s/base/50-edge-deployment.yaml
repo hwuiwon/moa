@@ -38,11 +38,17 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
           startupProbe:
-            httpGet:
-              path: /healthz
-              port: http
-            failureThreshold: 30
-            periodSeconds: 10
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - >-
+                  wget -q -O /dev/null
+                  --header='content-type: application/json'
+                  --post-data='{}'
+                  http://restate.moa-restate.svc.cluster.local:8080/restate/call/Health/check
+            failureThreshold: 60
+            periodSeconds: 5
           env:
             - name: RUST_LOG
               value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off

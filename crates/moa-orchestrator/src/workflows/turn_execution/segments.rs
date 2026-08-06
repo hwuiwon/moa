@@ -148,7 +148,8 @@ pub(super) async fn ensure_current_segment(
                         update: completed.update.clone(),
                     })),
             )
-            .send();
+            .call()
+            .await?;
             moa_core::coordination_counters::record_durable_append();
             crate::restate_identity::replay_safe_request(
                 ctx.service_client::<RestateSessionStoreClient>()
@@ -158,7 +159,8 @@ pub(super) async fn ensure_current_segment(
                         dedupe_key: None,
                     })),
             )
-            .send();
+            .call()
+            .await?;
             assess_completed_segment_at_transition(
                 workflow,
                 ctx,
@@ -187,7 +189,8 @@ pub(super) async fn ensure_current_segment(
                     dedupe_key: None,
                 })),
         )
-        .send();
+        .call()
+        .await?;
 
         active_segment = Some(transition.active_segment);
     }

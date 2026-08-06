@@ -218,7 +218,7 @@ async fn load_active_channel_binding(
                     .get_active_session_channel_binding(session_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(crate::workflows::errors::moa_error_to_handler_error)
             }
         })
         .name("turn_progress_load_active_channel_binding")

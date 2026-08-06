@@ -14,6 +14,7 @@ use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateReport, ConsolidateRequest, consolidate_workflow_id,
 };
+use crate::workflows::errors::sqlx_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 const K_CONFIG: &str = "config";
@@ -260,7 +261,7 @@ async fn count_graph_nodes(pool: &sqlx::PgPool, tenant_id: TenantId) -> Result<u
     .bind(storage_partition_id)
     .fetch_one(pool)
     .await
-    .map_err(HandlerError::from)?;
+    .map_err(sqlx_error_to_handler_error)?;
     Ok(count.max(0) as u64)
 }
 

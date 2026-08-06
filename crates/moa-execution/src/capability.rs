@@ -5,7 +5,8 @@ use std::{fmt, str::FromStr};
 use moa_artifacts::{
     document::ArtifactKind,
     execution_plan::{
-        CapabilityReference, ExecutionPlanDefinition, PlanAmendment, PlanAmendmentOperation,
+        CapabilityReference, CompensationInputMapping, ExecutionCompensation,
+        ExecutionPlanDefinition, PlanAmendment, PlanAmendmentOperation,
     },
     reference::ArtifactRef,
 };
@@ -237,6 +238,27 @@ pub struct ExecutionCapability {
     pub policy_context: CapabilityPolicyContext,
     /// Required worst-case estimate; catalog capabilities must declare one task.
     pub estimate: ExecutionEstimate,
+    /// Exact compensator and mapping this capability promises will undo its effect.
+    pub rollback: Option<CapabilityRollbackContract>,
+}
+
+/// Catalog-owned promise that one governed capability exactly undoes another.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityRollbackContract {
+    /// Exact governed capability version that performs the undo.
+    pub compensator: CapabilityReference,
+    /// Bounded mapping from committed forward input/output to compensator input.
+    pub input_mapping: CompensationInputMapping,
+}
+
+impl CapabilityRollbackContract {
+    /// Returns whether this catalog promise exactly matches a node's opt-in contract.
+    #[must_use]
+    pub fn matches(&self, compensation: &ExecutionCompensation) -> bool {
+        self.compensator == compensation.compensator
+            && self.input_mapping == compensation.input_mapping
+    }
 }
 
 impl ExecutionCapability {
@@ -817,6 +839,7 @@ mod tests {
                 tasks: 1,
                 ..ExecutionEstimate::default()
             },
+            rollback: None,
         }
     }
 

@@ -355,7 +355,8 @@ fn output_only_template() -> ExecutionPlanTemplate {
             }]
         },
         "plan": {
-            "schema_version": 1,
+            "schema_version": 2,
+            "cancel_policy": "retain_effects",
             "input_schema": {
                 "type": "object",
                 "additionalProperties": false
@@ -372,6 +373,7 @@ fn output_only_template() -> ExecutionPlanTemplate {
                     "kind": "output",
                     "value": {"status": "validated"}
                 },
+                "compensation": null,
                 "retry": {
                     "max_attempts": 1,
                     "initial_backoff_ms": 0,
@@ -435,7 +437,8 @@ fn governed_capability_template(
             }]
         },
         "plan": {
-            "schema_version": 1,
+            "schema_version": 2,
+            "cancel_policy": "retain_effects",
             "input_schema": {
                 "type": "object",
                 "additionalProperties": false
@@ -453,6 +456,7 @@ fn governed_capability_template(
                         "kind": "capability",
                         "reference": reference
                     },
+                    "compensation": null,
                     "retry": {
                         "max_attempts": 1,
                         "initial_backoff_ms": 0,
@@ -471,6 +475,7 @@ fn governed_capability_template(
                         "kind": "output",
                         "value": {"$ref": "$.nodes.read_fixture.output"}
                     },
+                    "compensation": null,
                     "retry": {
                         "max_attempts": 1,
                         "initial_backoff_ms": 0,

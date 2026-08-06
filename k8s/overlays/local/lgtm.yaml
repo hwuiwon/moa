@@ -19,6 +19,19 @@ spec:
         app.kubernetes.io/name: moa-lgtm
         app.kubernetes.io/part-of: moa
     spec:
+      serviceAccountName: moa-lgtm
+      # The local Restate overlay runs one node. Co-locating this development
+      # collector lets its read-only host log mount see that node's CRI files;
+      # production uses the dedicated Alloy deployment instead.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  moa.hwuiwon.com/restate-cluster: moa-restate
+              namespaces:
+                - moa-restate
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: lgtm
           image: grafana/otel-lgtm:0.29.2
@@ -36,6 +49,8 @@ spec:
               value: Viewer
             - name: PROMETHEUS_EXTRA_ARGS
               value: --storage.tsdb.retention.time=24h
+            - name: OTELCOL_EXTRA_ARGS
+              value: --config=file:/etc/moa/otelcol-local-restate.yaml
           ports:
             - name: grafana
               containerPort: 3000
@@ -68,6 +83,13 @@ spec:
               mountPath: /otel-lgtm/grafana/conf/provisioning/datasources/moa-postgres.yaml
               subPath: postgres-datasource.yaml
               readOnly: true
+            - name: lgtm-config
+              mountPath: /etc/moa/otelcol-local-restate.yaml
+              subPath: otelcol-local-restate.yaml
+              readOnly: true
+            - name: host-pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
             - name: tempo-data
               mountPath: /data/tempo
             - name: grafana-data
@@ -96,6 +118,10 @@ spec:
           emptyDir: {}
         - name: pyroscope-data
           emptyDir: {}
+        - name: host-pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
@@ -127,3 +153,42 @@ spec:
     - name: prometheus
       port: 9090
       targetPort: prometheus
+---
+# Local-only discovery grant for the collector's per-pod Restate scrape. It
+# carries no Secret, ConfigMap, workload, or Admin API permissions.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: moa-lgtm
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-lgtm
+    app.kubernetes.io/part-of: moa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: moa-local-lgtm-restate-discovery
+  labels:
+    app.kubernetes.io/name: moa-lgtm
+    app.kubernetes.io/part-of: moa
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: moa-local-lgtm-restate-discovery
+  labels:
+    app.kubernetes.io/name: moa-lgtm
+    app.kubernetes.io/part-of: moa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: moa-local-lgtm-restate-discovery
+subjects:
+  - kind: ServiceAccount
+    name: moa-lgtm
+    namespace: moa-system

@@ -148,9 +148,10 @@ pub(crate) async fn apply_reviewed_conversational_assessment(
             turn_id: turn_id.clone(),
             generation: *generation,
         },
-        ActionReviewOwner::ExecutionTask { .. } => {
+        ActionReviewOwner::ExecutionTask { .. }
+        | ActionReviewOwner::ExecutionCompensation { .. } => {
             return Err(TerminalError::new(
-                "execution-task reviews do not have a conversational security-circuit owner",
+                "execution reviews do not have a conversational security-circuit owner",
             )
             .into());
         }
@@ -184,7 +185,8 @@ pub(crate) async fn apply_reviewed_conversational_assessment(
             .await?
             .into_inner()
         }
-        ActionReviewOwner::ExecutionTask { .. } => unreachable!("handled above"),
+        ActionReviewOwner::ExecutionTask { .. }
+        | ActionReviewOwner::ExecutionCompensation { .. } => unreachable!("handled above"),
     };
 
     let Some(transition) = applied.transition else {

@@ -10,7 +10,7 @@ impl SessionImpl {
     ) -> Result<Json<SessionProgress>, HandlerError> {
         annotate_restate_handler_span("Session", "progress");
         let session_id = parse_session_key(ctx.key())?;
-        require_session_participant(&self.authz, &ctx, session_id).await?;
+        require_shared_session_participant(&self.authz, &ctx, session_id).await?;
         let event_range = request.into_inner().normalized_event_range();
         let pending_state = load_pending_state(&ctx).await?;
         let children = SessionVoState::load_children(&ctx).await?;

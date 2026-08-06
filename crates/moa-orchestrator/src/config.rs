@@ -28,15 +28,6 @@ pub fn skip_fga_from_env() -> bool {
     env_flag_from_reader("MOA_SKIP_FGA", false, |key| std::env::var(key).ok())
 }
 
-/// Resolves the Restate admin URL from the shared MOA config.
-pub fn restate_admin_url(config: &MoaConfig) -> Result<String> {
-    config
-        .orchestrator
-        .restate_admin_url
-        .clone()
-        .context("orchestrator.restate_admin_url config missing")
-}
-
 /// Resolves the Restate ingress URL from the shared MOA config.
 pub fn restate_ingress_url(config: &MoaConfig) -> Result<String> {
     config
@@ -135,8 +126,7 @@ mod tests {
     use moa_config::MoaConfig;
 
     use super::{
-        ProvidersOverride, apply_orchestrator_defaults, env_flag_from_reader, restate_admin_url,
-        restate_ingress_url,
+        ProvidersOverride, apply_orchestrator_defaults, env_flag_from_reader, restate_ingress_url,
     };
 
     #[test]
@@ -161,13 +151,8 @@ mod tests {
     fn restate_urls_resolve_from_moa_config() {
         // Pins: orchestrator boot reads Restate URLs from the shared MoaConfig.
         let mut config = MoaConfig::default();
-        config.orchestrator.restate_admin_url = Some("http://restate:9070".to_string());
         config.orchestrator.restate_ingress_url = Some("http://restate:8080".to_string());
 
-        assert_eq!(
-            restate_admin_url(&config).expect("admin url"),
-            "http://restate:9070"
-        );
         assert_eq!(
             restate_ingress_url(&config).expect("ingress url"),
             "http://restate:8080"

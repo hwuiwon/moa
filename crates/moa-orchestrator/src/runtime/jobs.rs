@@ -1,6 +1,6 @@
 //! Background job wiring for orchestrator startup.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as AnyhowContext, Result, bail};
 use moa_authz::{AwakeableResolver, FgaClient};
@@ -13,14 +13,9 @@ use tokio::task::JoinHandle;
 
 use crate::services::authz_challenges_reaper::{AuthzChallengeReaper, AuthzChallengeReaperHandle};
 
-use crate::{
-    runtime::endpoint::{RegisteredDeployment, services_registered},
-    services::action_reviews_reaper::{ActionReviewReaper, ActionReviewReaperHandle},
-};
+use crate::services::action_reviews_reaper::{ActionReviewReaper, ActionReviewReaperHandle};
 
 const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;
-const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
-const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 /// Initial delay before retrying default cron jobs that failed a reconcile pass.
 const CRON_RECONCILE_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 /// Upper bound on the exponential backoff between cron reconcile passes.
@@ -120,57 +115,6 @@ pub fn start_mcp_catalog_refresh(
     ))
 }
 
-/// Spawns default cron-job bootstrap after Restate service registration appears.
-pub fn spawn_default_cron_bootstrap<F, Fut>(
-    mut fetch_deployments: F,
-    ingress_url: String,
-) -> JoinHandle<()>
-where
-    F: FnMut() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<Vec<RegisteredDeployment>>> + Send + 'static,
-{
-    tokio::spawn(async move {
-        for attempt in 1..=CRON_BOOTSTRAP_ATTEMPTS {
-            match fetch_deployments().await {
-                Ok(deployments) if services_registered(&deployments) => {
-                    match cron_bootstrap_client() {
-                        Ok(client) => {
-                            let ingress = ingress_url.trim_end_matches('/').to_string();
-                            reconcile_default_cron_jobs(
-                                &client,
-                                &ingress,
-                                default_cron_jobs(),
-                                CronReconcileBackoff::default(),
-                            )
-                            .await;
-                        }
-                        Err(error) => tracing::error!(
-                            error = %error,
-                            "failed to build cron-bootstrap HTTP client; cannot install default cron jobs"
-                        ),
-                    }
-                    return;
-                }
-                Ok(_) => tracing::debug!(
-                    attempt,
-                    "waiting for Restate service registration before cron bootstrap"
-                ),
-                Err(error) => tracing::debug!(
-                    attempt,
-                    error = %error,
-                    "failed to check Restate registration before cron bootstrap"
-                ),
-            }
-            tokio::time::sleep(CRON_BOOTSTRAP_INTERVAL).await;
-        }
-
-        tracing::warn!(
-            attempts = CRON_BOOTSTRAP_ATTEMPTS,
-            "default cron job bootstrap timed out waiting for Restate registration"
-        );
-    })
-}
-
 /// Normalizes the Restate ingress URL used by cron bootstrap and awakeables.
 #[must_use]
 pub fn restate_ingress_base_url(configured_ingress_url: &str) -> String {
@@ -203,6 +147,22 @@ fn cron_bootstrap_client() -> Result<Client> {
         .timeout(Duration::from_secs(10))
         .build()
         .context("build cron-bootstrap HTTP client")
+}
+
+/// Installs all required Restate cron jobs and keeps retrying incomplete passes.
+///
+/// This is called only by the dedicated bootstrap process. Runtime replicas do
+/// not own deployment registration or cluster bootstrap reconciliation.
+pub async fn install_default_cron_jobs(ingress_url: &str) -> Result<()> {
+    let client = cron_bootstrap_client()?;
+    reconcile_default_cron_jobs(
+        &client,
+        ingress_url.trim_end_matches('/'),
+        default_cron_jobs(),
+        CronReconcileBackoff::default(),
+    )
+    .await;
+    Ok(())
 }
 
 /// Reconciles every default cron job independently, retrying failures forever.

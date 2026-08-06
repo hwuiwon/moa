@@ -33,6 +33,71 @@ use uuid::Uuid;
 
 const FIXTURE_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
+/// Stable registered name of the deterministic reversible fixture effect.
+pub const REVERSIBLE_FIXTURE_FORWARD_TOOL: &str = "fixture_effect_apply";
+/// Stable registered name of the deterministic fixture effect compensator.
+pub const REVERSIBLE_FIXTURE_COMPENSATOR_TOOL: &str = "fixture_effect_revert";
+
+/// Returns a real source-declared exact rollback pair for catalog and workflow fixtures.
+#[must_use]
+pub fn reversible_fixture_tool_definitions() -> (
+    moa_core::types::tools::ToolDefinition,
+    moa_core::types::tools::ToolDefinition,
+) {
+    use moa_core::types::{
+        action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+        tools::{
+            IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
+            ToolRollbackDefinition, ToolRollbackInputBinding, ToolRollbackInputMapping,
+            ToolRollbackValueSource,
+        },
+    };
+
+    let input_schema = json!({
+        "type": "object",
+        "properties": {"effect_id": {"type": "string"}},
+        "required": ["effect_id"],
+        "additionalProperties": false
+    });
+    let policy = ToolPolicySpec {
+        risk_level: RiskLevel::High,
+        default_effect: ActionPolicyEffect::Allow,
+        action_class: ActionClass::ExternalWrite,
+        input_shape: ToolInputShape::Json,
+        diff_strategy: ToolDiffStrategy::None,
+    };
+    let forward = moa_core::types::tools::ToolDefinition {
+        name: REVERSIBLE_FIXTURE_FORWARD_TOOL.to_string(),
+        description: "Apply one deterministic fixture effect by stable effect id.".to_string(),
+        schema: input_schema.clone(),
+        policy: policy.clone(),
+        idempotency_class: IdempotencyClass::NonIdempotent,
+        rollback: Some(ToolRollbackDefinition {
+            compensator_tool_name: REVERSIBLE_FIXTURE_COMPENSATOR_TOOL.to_string(),
+            input_mapping: ToolRollbackInputMapping {
+                bindings: vec![ToolRollbackInputBinding {
+                    target_pointer: "/effect_id".to_string(),
+                    source: ToolRollbackValueSource::OriginalInput {
+                        pointer: "/effect_id".to_string(),
+                    },
+                }],
+            },
+        }),
+        max_output_tokens: 128,
+    };
+    let compensator = moa_core::types::tools::ToolDefinition {
+        name: REVERSIBLE_FIXTURE_COMPENSATOR_TOOL.to_string(),
+        description: "Revert one applied deterministic fixture effect by stable effect id."
+            .to_string(),
+        schema: input_schema,
+        policy,
+        idempotency_class: IdempotencyClass::Idempotent,
+        rollback: None,
+        max_output_tokens: 128,
+    };
+    (forward, compensator)
+}
+
 /// One deterministic result returned by a fixture MCP capability.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FixtureCapabilityOutcome {
@@ -60,6 +125,12 @@ pub enum FixtureCapabilityOutcome {
         /// Stable tool error returned to the execution task.
         message: String,
     },
+    /// Apply the logical upstream effect, then drop the HTTP request before a response exists.
+    ///
+    /// This models the irreducibly ambiguous non-idempotent boundary: the
+    /// caller cannot infer from the disconnected transport whether the effect
+    /// happened, while the fixture's exact effect counter proves that it did.
+    ApplyThenDisconnect,
 }
 
 /// One MCP tool exposed by the parent-process fixture capability server.
@@ -73,6 +144,8 @@ pub struct FixtureCapabilityTool {
     pub input_schema: Value,
     /// RFC 6901 pointer used by production map-key extraction, or `None` for ordinary tasks.
     pub item_key_pointer: Option<String>,
+    /// Whether the upstream contract permits an identical retry after an ambiguous transport loss.
+    pub idempotent: bool,
     /// Ordered unique-invocation outcomes; the final outcome repeats after the list is exhausted.
     pub outcomes: Vec<FixtureCapabilityOutcome>,
 }
@@ -190,6 +263,20 @@ impl FixtureCapabilityController {
         lock_unpoisoned(&self.state.observations)
             .transport_attempts
             .clone()
+    }
+
+    /// Returns the exact number of HTTP `tools/call` arrivals, including replays.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        lock_unpoisoned(&self.state.observations)
+            .transport_attempts
+            .len()
+    }
+
+    /// Returns the exact number of unique logical upstream effects applied.
+    #[must_use]
+    pub fn effect_count(&self) -> usize {
+        lock_unpoisoned(&self.state.observations).calls.len()
     }
 
     /// Derives stable task IDs for unique map item keys using production algorithms.
@@ -471,7 +558,7 @@ impl FixtureCapabilityState {
                     "annotations": {
                         "readOnlyHint": true,
                         "destructiveHint": false,
-                        "idempotentHint": true,
+                        "idempotentHint": tool.idempotent,
                         "openWorldHint": false
                     }
                 })
@@ -652,6 +739,12 @@ async fn handle_tool_call(
                 }),
             )
         }
+        EffectResolution::Outcome(FixtureCapabilityOutcome::ApplyThenDisconnect) => {
+            // Panicking the request task after `record_call` has committed the
+            // fixture effect makes hyper tear down this HTTP exchange without
+            // producing a response. The server and future requests stay alive.
+            panic!("fixture applied logical effect, then disconnected transport")
+        }
         EffectResolution::Reset => (
             StatusCode::SERVICE_UNAVAILABLE,
             "fixture capability observations reset",
@@ -754,6 +847,7 @@ mod tests {
                 "additionalProperties": false
             }),
             item_key_pointer: Some("/company".to_string()),
+            idempotent: true,
             outcomes: vec![FixtureCapabilityOutcome::SuccessWithInput {
                 output: json!({ "mentions": 7 }),
             }],
@@ -954,6 +1048,65 @@ mod tests {
         );
         assert_eq!(runtime.controller().calls().len(), 1);
         assert_eq!(runtime.controller().transport_attempts().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn non_idempotent_apply_then_disconnect_exposes_exact_ambiguous_counts() {
+        // Pins: the upstream effect exists before the response disappears, and
+        // the fixture distinguishes one applied effect from transport retries.
+        let mut ambiguous_tool = tool();
+        ambiguous_tool.idempotent = false;
+        ambiguous_tool.outcomes = vec![FixtureCapabilityOutcome::ApplyThenDisconnect];
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![ambiguous_tool],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start ambiguous non-idempotent capability");
+        let client = reqwest::Client::new();
+
+        let listed = client
+            .post(runtime.endpoint())
+            .json(&request(1, "tools/list", json!({})))
+            .send()
+            .await
+            .expect("list non-idempotent tool")
+            .json::<Value>()
+            .await
+            .expect("decode non-idempotent tool list");
+        assert_eq!(
+            listed.pointer("/result/tools/0/annotations/idempotentHint"),
+            Some(&json!(false))
+        );
+
+        let call = request(
+            2,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "AMBIGUOUS" },
+                "_meta": { "moa/toolInvocationId": "ambiguous-effect" }
+            }),
+        );
+        let request_task = tokio::spawn({
+            let endpoint = runtime.endpoint().to_string();
+            async move { client.post(endpoint).json(&call).send().await }
+        });
+        runtime
+            .controller()
+            .wait_for_calls(1, Duration::from_secs(2))
+            .await
+            .expect("wait for applied ambiguous effect");
+        assert_eq!(runtime.controller().request_count(), 1);
+        assert_eq!(runtime.controller().effect_count(), 1);
+        runtime.controller().release(1);
+        let response = request_task.await.expect("join disconnected request");
+        assert!(
+            response.is_err(),
+            "apply-then-disconnect must not produce an HTTP response"
+        );
+        assert_eq!(runtime.controller().request_count(), 1);
+        assert_eq!(runtime.controller().effect_count(), 1);
     }
 
     #[tokio::test]

@@ -277,20 +277,17 @@ mod tests {
         // Pins: the reusable driver cannot send the next message while any current turn,
         // queued message, detached execution, or conversational worker remains active.
         let settled = progress();
-        assert!(conversation_is_settled(&SessionStatus::Paused, &settled));
+        assert!(conversation_is_settled(&SessionStatus::Idle, &settled));
         assert!(!conversation_is_settled(&SessionStatus::Running, &settled));
 
         let mut active_turn = progress();
         active_turn.snapshot.active_turn_id = Some("turn-active".to_string());
-        assert!(!conversation_is_settled(
-            &SessionStatus::Paused,
-            &active_turn
-        ));
+        assert!(!conversation_is_settled(&SessionStatus::Idle, &active_turn));
 
         let mut pending_message = progress();
         pending_message.snapshot.pending_message_count = 1;
         assert!(!conversation_is_settled(
-            &SessionStatus::Paused,
+            &SessionStatus::Idle,
             &pending_message
         ));
 
@@ -300,7 +297,7 @@ mod tests {
             .active_execution_run_uids
             .push(uuid::Uuid::nil());
         assert!(!conversation_is_settled(
-            &SessionStatus::Paused,
+            &SessionStatus::Idle,
             &active_execution
         ));
 
@@ -308,7 +305,7 @@ mod tests {
             let mut active_worker = progress();
             active_worker.child_progress.push(worker(state));
             assert!(
-                !conversation_is_settled(&SessionStatus::Paused, &active_worker),
+                !conversation_is_settled(&SessionStatus::Idle, &active_worker),
                 "{state:?} worker must keep the conversation active"
             );
         }
@@ -320,7 +317,7 @@ mod tests {
             worker(WorkerState::Cancelled),
         ];
         assert!(conversation_is_settled(
-            &SessionStatus::Paused,
+            &SessionStatus::Idle,
             &terminal_workers
         ));
     }

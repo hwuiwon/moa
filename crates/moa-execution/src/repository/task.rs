@@ -64,7 +64,8 @@ impl ExecutionRepository {
         if !matches!(
             run.status,
             ExecutionRunStatus::Queued | ExecutionRunStatus::Running
-        ) {
+        ) || run.pending_terminal.is_some()
+        {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ReservationOutcome::Rejected(
                 ReservationRejection::InvalidRunStatus,
@@ -175,7 +176,8 @@ impl ExecutionRepository {
         if !matches!(
             run.status,
             ExecutionRunStatus::Queued | ExecutionRunStatus::Running
-        ) {
+        ) || run.pending_terminal.is_some()
+        {
             conn.commit().await.map_err(storage_error)?;
             return Ok(TransitionOutcome::Rejected(
                 TransitionRejection::InvalidRunStatus,
@@ -331,7 +333,7 @@ impl ExecutionRepository {
                 TransitionRejection::InvalidTaskStatus,
             ));
         }
-        if !allowed_run_status {
+        if !allowed_run_status || run.pending_terminal.is_some() {
             conn.commit().await.map_err(storage_error)?;
             return Ok(TransitionOutcome::Rejected(
                 TransitionRejection::InvalidRunStatus,
@@ -514,7 +516,10 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(TransitionOutcome::RunAlreadyApplied(current));
         }
-        if current.status != expected_status || current.status.is_terminal() {
+        if current.status != expected_status
+            || current.status.is_terminal()
+            || current.pending_terminal.is_some()
+        {
             conn.commit().await.map_err(storage_error)?;
             return Ok(TransitionOutcome::Rejected(
                 TransitionRejection::InvalidRunStatus,
@@ -589,11 +594,23 @@ impl ExecutionRepository {
         };
         let task = task_from_row(&row)?;
         let review_uid_text = review_uid.to_string();
-        if task.outcome_audit.iter().any(|entry| {
+        if let Some(existing) = task.outcome_audit.iter().find(|entry| {
             entry.get("kind").and_then(Value::as_str) == Some("execution_action_review_resolution")
                 && entry.get("review_uid").and_then(Value::as_str) == Some(review_uid_text.as_str())
                 && entry.get("generation").and_then(Value::as_u64) == Some(generation)
         }) {
+            let existing_resolution: ExecutionActionReviewResolution =
+                serde_json::from_value(existing.get("resolution").cloned().ok_or_else(|| {
+                    Error::InvalidRepositoryData {
+                        message: "persisted task review audit is missing its resolution"
+                            .to_string(),
+                    }
+                })?)?;
+            if existing_resolution != *resolution {
+                return Err(Error::InvalidRepositoryData {
+                    message: "task review UID was replayed with a different resolution".to_string(),
+                });
+            }
             conn.commit().await.map_err(storage_error)?;
             return Ok(ActionReviewResolutionWrite::Replayed);
         }

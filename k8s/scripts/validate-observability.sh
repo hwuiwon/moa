@@ -23,9 +23,12 @@ ALLOY_DEPLOYMENT="${REPO_ROOT}/k8s/observability/20-alloy-deployment.yaml"
 ALLOY_PVC="${REPO_ROOT}/k8s/observability/25-alloy-pvc.yaml"
 ALLOY_RBAC="${REPO_ROOT}/k8s/observability/15-alloy-rbac.yaml"
 ALERTS_DIR="${REPO_ROOT}/ops/prometheus/alerts"
-LIVE_SMOKE="${REPO_ROOT}/k8s/scripts/observability-smoke.sh"
 CANONICAL_DASHBOARD_DIR="${REPO_ROOT}/dashboards/grafana"
 LOCAL_PHASE0_REPORT="${REPO_ROOT}/k8s/overlays/local/phase0-observability-report.sh"
+LOCAL_LGTM="${REPO_ROOT}/k8s/overlays/local/lgtm.yaml"
+LOCAL_LGTM_RESTATE="${REPO_ROOT}/k8s/overlays/local/otelcol-local-restate.yaml"
+LOCAL_RESTATE_PATCH="${REPO_ROOT}/k8s/overlays/local/patches/restate-cluster.yaml"
+PRODUCTION_RESTATE_PATCH="${REPO_ROOT}/k8s/overlays/production/patches/restate-observability.yaml"
 
 # Pinned tool versions. A validator that accepts whatever binary happens to be on
 # PATH cannot tell "this config is valid" from "this version of the checker did
@@ -56,6 +59,38 @@ EXPECTED_ALERTS=(
   MOALineageWriterFailed
   MOAOCSFAuditEventsDropped
   MOAProviderConcurrencySaturated
+  MOARestateIngressP99LatencyHigh
+  MOARestateIngressRateLimited
+  MOARestateInvocationTaskFailures
+  MOARestateNodeScrapeDown
+  MOARestatePartitionAppliedLSNLagHigh
+  MOARestatePartitionLeaderMissing
+  MOARestatePartitionStatusStale
+  MOARestateScrapeTargetsMissing
+  MOARestateSnapshotAgeHigh
+  MOARestateSnapshotPartitionsMissing
+  MOARestateSnapshotUploadFailures
+  MOARestateStateStorageGrowingFast
+)
+
+# Prometheus spellings of the server instruments verified against Restate
+# v1.7.2 commit 6f1c0803f4fc3e3110af1e6c77b2a8882ab8ae70. Definitions live in
+# ingress-http, invoker-impl, admin, worker, and partition-store's respective
+# metric_definitions.rs files. Consumer checks below fail closed when an alert,
+# dashboard, or Alloy keep-list introduces a different Restate name. `up` is
+# added separately because Prometheus creates it rather than Restate.
+RESTATE_1_7_2_METRICS=(
+  restate_ingress_request_duration_seconds
+  restate_ingress_requests_total
+  restate_invoker_invocation_tasks_total
+  restate_num_partitions
+  restate_partition_applied_lsn_lag
+  restate_partition_is_effective_leader
+  restate_partition_snapshot_age_seconds
+  restate_partition_store_snapshots_upload_failed_total
+  restate_partition_store_snapshots_upload_total
+  restate_partition_time_since_last_status_update
+  restate_usage_state_storage_bytes
 )
 
 WORK_DIR="$(mktemp -d)"
@@ -117,6 +152,40 @@ assert_excludes "${LOCAL_PHASE0_REPORT_TEXT}" "phase0_" \
   "the local report still depends on deleted custom-collector count connectors"
 assert_excludes "${LOCAL_PHASE0_REPORT_TEXT}" "loki_distributor_bytes_received_total" \
   "the local report still depends on a custom backend self-scrape"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" 'count(up{job="restate"} == 1)' \
+  "the local report does not verify the Restate Prometheus scrape path"
+assert_contains "${LOCAL_PHASE0_REPORT_TEXT}" \
+  'sum(count_over_time({service_name="restate"} | json [1h]))' \
+  "the local report does not prove that collected Restate pod logs are JSON"
+
+echo "Checking the local-only Restate collector extension..."
+LOCAL_LGTM_TEXT="$(<"${LOCAL_LGTM}")"
+LOCAL_LGTM_RESTATE_TEXT="$(<"${LOCAL_LGTM_RESTATE}")"
+assert_contains "${LOCAL_LGTM_TEXT}" \
+  '--config=file:/etc/moa/otelcol-local-restate.yaml' \
+  "the local LGTM image does not load its Restate collector extension"
+assert_contains "${LOCAL_LGTM_TEXT}" "mountPath: /var/log/pods" \
+  "the local collector cannot read co-located Restate CRI logs"
+assert_contains "${LOCAL_LGTM_TEXT}" "readOnly: true" \
+  "the local collector pod-log host mount is not read-only"
+assert_contains "${LOCAL_LGTM_TEXT}" \
+  "moa.hwuiwon.com/restate-cluster: moa-restate" \
+  "the local collector is not co-located with the single local Restate pod"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" "prometheus/restate:" \
+  "the local collector declares no Restate Prometheus receiver"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" \
+  "__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster" \
+  "the local Restate scrape is not restricted to the MOA Restate pods"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" 'regex: "5122"' \
+  "the local Restate scrape does not select the node metrics port"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" "filelog/restate:" \
+  "the local collector declares no Restate filelog receiver"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" "/var/log/pods/moa-restate_" \
+  "the local filelog receiver is not restricted to Restate pod paths"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" "type: container" \
+  "the local Restate log receiver does not remove the CRI envelope"
+assert_contains "${LOCAL_LGTM_RESTATE_TEXT}" "value: restate" \
+  "local Restate logs do not receive their bounded service resource identity"
 
 echo "Validating the Alloy collector configuration..."
 # Catches broken component references and unrecognized argument names - the two
@@ -142,8 +211,20 @@ assert_contains "${ALLOY_CONFIG_TEXT}" '"__meta_kubernetes_pod_container_name"' 
   "production application-log deduplication is pod-wide and would drop init-container logs"
 assert_contains "${ALLOY_CONFIG_TEXT}" 'regex  = "moa-edge;edge|moa-orchestrator;orchestrator"' \
   "production tails edge/orchestrator runtime stdout in addition to their direct OTLP logs"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'regex  = "moa-restate;moa-restate"' \
+  "production sends Restate JSON through both the MOA and Restate log pipelines"
 assert_contains "${ALLOY_CONFIG_TEXT}" 'targets    = discovery.relabel.pod_logs.output' \
   "the Kubernetes log source bypasses the MOA application-log deduplication stage"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'discovery.relabel "restate_logs"' \
+  "production declares no dedicated Restate JSON log discovery"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'targets    = discovery.relabel.restate_logs.output' \
+  "production Restate pod logs bypass their dedicated discovery filter"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'loki.process "restate"' \
+  "production has no Restate 1.7.2 JSON processing pipeline"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'replacement  = "restate"' \
+  "production Restate logs lack a bounded service label"
+assert_excludes "${ALLOY_CONFIG_TEXT}" 'restate.invocation.id = ""' \
+  "production promotes high-cardinality Restate invocation IDs to Loki labels"
 assert_contains "${ALLOY_CONFIG_TEXT}" "mimir.rules.kubernetes" \
   "no PrometheusRule synchronizer is configured, so the checked-in alert rules reach Mimir by no path at all"
 assert_contains "${ALLOY_CONFIG_TEXT}" "moa.dev/rule-sync" \
@@ -176,9 +257,11 @@ assert_contains "${ALLOY_CONFIG_TEXT}" 'forward_to      = [prometheus.relabel.re
   "Restate metrics bypass their ingestion keep-list"
 assert_contains "${ALLOY_CONFIG_TEXT}" 'source_labels = ["__name__"]' \
   "the Restate metric keep-list does not filter by metric name"
-RESTATE_METRIC_KEEP='up|restate_ingress_requests_total|restate_invoker_invocation_tasks_total|restate_ingress_request_duration_seconds|restate_rocksdb_estimate_live_data_size_bytes'
+RESTATE_METRIC_KEEP="$(IFS='|'; printf 'up|%s' "${RESTATE_1_7_2_METRICS[*]}")"
 assert_contains "${ALLOY_CONFIG_TEXT}" "regex         = \"${RESTATE_METRIC_KEEP}\"" \
   "the Restate metric keep-list drifted from the dashboard and smoke contract"
+assert_excludes "${ALLOY_CONFIG_TEXT}" "restate_rocksdb_estimate_live_data_size_bytes" \
+  "the Restate keep-list still depends on the removed RocksDB live-data-size signal"
 
 echo "Checking the Alloy deployment contract..."
 ALLOY_DEPLOYMENT_TEXT="$(<"${ALLOY_DEPLOYMENT}")"
@@ -219,24 +302,21 @@ assert_contains "${RESTATE_CLUSTER_TEXT}" "kubernetes.io/metadata.name: observab
 assert_contains "${RESTATE_CLUSTER_TEXT}" "app.kubernetes.io/name: alloy" \
   "Restate networkPeers does not select the Alloy collector"
 
-echo "Checking the live smoke contract..."
-LIVE_SMOKE_TEXT="$(<"${LIVE_SMOKE}")"
-assert_contains "${LIVE_SMOKE_TEXT}" \
-  'rotate_workload_pods "app.kubernetes.io/name=moa-edge"' \
-  "the live smoke no longer rotates edge pods"
-assert_contains "${LIVE_SMOKE_TEXT}" \
-  '"app.kubernetes.io/name=moa-orchestrator"' \
-  "the live smoke no longer rotates orchestrator pods"
-assert_contains "${LIVE_SMOKE_TEXT}" '"DELETED"' \
-  "the live smoke does not verify the terminal event of each old pod identity"
-assert_contains "${LIVE_SMOKE_TEXT}" 'count(up{job="restate"} == 1) == 3' \
-  "the live smoke does not require all three Restate pod targets"
-assert_contains "${LIVE_SMOKE_TEXT}" 'PGSERVICEFILE="${DATABASE_SERVICE_FILE}"' \
-  "the live smoke does not use a libpq service file"
-assert_contains "${LIVE_SMOKE_TEXT}" 'PGPASSFILE="${DATABASE_PASSWORD_FILE}"' \
-  "the live smoke does not use a protected pgpass file"
-assert_excludes "${LIVE_SMOKE_TEXT}" 'psql "${SMOKE_DATABASE_URL}"' \
-  "the live smoke exposes the database credential in psql process arguments"
+LOCAL_RESTATE_PATCH_TEXT="$(<"${LOCAL_RESTATE_PATCH}")"
+assert_contains "${LOCAL_RESTATE_PATCH_TEXT}" "networkEgressRules" \
+  "local Restate does not declare restricted outbound dependencies"
+assert_contains "${LOCAL_RESTATE_PATCH_TEXT}" "app.kubernetes.io/name: moa-lgtm" \
+  "local Restate cannot send OTLP traces to LGTM"
+assert_contains "${LOCAL_RESTATE_PATCH_TEXT}" "port: 4317" \
+  "local Restate does not allow the LGTM OTLP/gRPC port"
+
+PRODUCTION_RESTATE_PATCH_TEXT="$(<"${PRODUCTION_RESTATE_PATCH}")"
+assert_contains "${PRODUCTION_RESTATE_PATCH_TEXT}" "networkEgressRules" \
+  "production Restate does not declare restricted collector egress"
+assert_contains "${PRODUCTION_RESTATE_PATCH_TEXT}" "app.kubernetes.io/name: alloy" \
+  "production Restate cannot send OTLP traces to Alloy"
+assert_contains "${PRODUCTION_RESTATE_PATCH_TEXT}" "port: 4319" \
+  "production Restate does not allow the dedicated Alloy Restate OTLP port"
 
 echo "Checking that the exporters and the collector agree on transport..."
 # MOA's endpoint-only contract uses its gRPC default. The endpoint and Alloy
@@ -359,8 +439,10 @@ assert_contains "${RESTATE_PATCH_TEXT}" 'tracing-filter = "warn,restate_ingress_
   "production Restate trace filtering is not scoped"
 assert_contains "${RESTATE_PATCH_TEXT}" 'log-filter = "warn,restate=info"' \
   "production Restate logging is not scoped"
-assert_contains "${RESTATE_PATCH_TEXT}" "experimental-enable-vqueues = true" \
-  "production's replacement Restate config drops the base vqueues setting"
+assert_contains "${RESTATE_PATCH_TEXT}" 'log-format = "json"' \
+  "production Restate logs are not newline-delimited JSON"
+assert_contains "${RESTATE_PATCH_TEXT}" "log-disable-ansi-codes = true" \
+  "production Restate logs may contain ANSI control sequences"
 
 echo "Checking that nothing blocks the push path to the collector..."
 # MOA pushes telemetry out; nothing scrapes it. That makes egress from moa-system
@@ -466,128 +548,119 @@ if [[ "${DECLARED_ALERTS}" != "${EXPECTED_SORTED}" ]]; then
     "$(comm -13 "${WORK_DIR}/expected-alerts" "${WORK_DIR}/declared-alerts" | tr '\n' ' ')")"
 fi
 
-echo "Cross-checking emitted metrics against repository consumers..."
-[[ -d "${CANONICAL_DASHBOARD_DIR}" ]] \
-  || die "canonical Grafana dashboard directory is missing: ${CANONICAL_DASHBOARD_DIR}"
-GRAFANA_SYNC_SCRIPT_TEXT="$(<"${REPO_ROOT}/scripts/observability/sync-grafana-dashboards.sh")"
-GRAFANA_SYNC_WORKFLOW_TEXT="$(<"${REPO_ROOT}/.github/workflows/sync-grafana-dashboards.yml")"
-assert_contains "${GRAFANA_SYNC_SCRIPT_TEXT}" "dashboards/grafana" \
-  "Grafana sync does not publish the canonical dashboard directory"
-assert_contains "${GRAFANA_SYNC_WORKFLOW_TEXT}" "sync-grafana-dashboards.sh" \
-  "the dashboard sync workflow does not invoke the canonical publisher"
-python3 - "${REPO_ROOT}" "${CANONICAL_DASHBOARD_DIR}" <<'PY' || exit 1
+echo "Checking Restate 1.7.2 metric consumers and dashboard bounds..."
+python3 - "${REPO_ROOT}" "${CANONICAL_DASHBOARD_DIR}/moa-restate-internals.json" \
+  "${RESTATE_1_7_2_METRICS[@]}" <<'PY' || exit 1
+import json
 import pathlib
 import re
 import sys
 
+import yaml
+
 root = pathlib.Path(sys.argv[1])
-dashboard_dir = pathlib.Path(sys.argv[2])
+dashboard_path = pathlib.Path(sys.argv[2])
+allowed = set(sys.argv[3:])
+allowed.add("up")
+metric_pattern = re.compile(r"(?:restate_[a-z0-9_]+|\bup\b)")
 
-# These low-volume degradation and incident signals are intentionally retained
-# for ad-hoc backend queries even when no checked-in dashboard or alert consumes
-# them. Keeping the exception list here makes every other unconsumed instrument
-# fail closed.
-keepers = {
-    "moa_tool_failure_total",
-    "moa_tool_call_duration_seconds",
-    "moa_tool_reprovision_total",
-    "moa_turn_outcomes_total",
-    "moa_memory_operations_total",
-    "moa_knowledge_sync_runs_total",
-    "moa_retrieval_leg_degraded_total",
-    "moa_retrieval_window_abstained_total",
-    "moa_retrieval_evidence_floor_dropped_total",
-    "moa_retrieval_enrichment_dropped_total",
-    "moa_retrieval_lexical_backend_total",
-    "moa_provider_coordination_degraded_total",
-    "moa_provider_coordination_rejected_total",
-    "moa_llm_retry_budget_exhausted_total",
-    "moa_lineage_malformed_total",
-    "moa_cron_bootstrap_configure_failures_total",
-    "moa_turn_admission_decisions_total",
-    "moa_session_message_admission_decisions_total",
+dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
+panels = dashboard.get("panels") or []
+if not panels or len(panels) > 12:
+    raise SystemExit(
+        f"{dashboard_path} must contain between 1 and 12 bounded panels; "
+        f"found {len(panels)}"
+    )
+
+panel_ids = [panel.get("id") for panel in panels]
+if len(panel_ids) != len(set(panel_ids)):
+    raise SystemExit(f"{dashboard_path} contains duplicate panel ids")
+
+required_dashboard_metrics = {
+    "up",
+    "restate_ingress_request_duration_seconds",
+    "restate_ingress_requests_total",
+    "restate_invoker_invocation_tasks_total",
+    "restate_num_partitions",
+    "restate_partition_applied_lsn_lag",
+    "restate_partition_is_effective_leader",
+    "restate_partition_snapshot_age_seconds",
+    "restate_partition_store_snapshots_upload_failed_total",
+    "restate_partition_store_snapshots_upload_total",
+    "restate_partition_time_since_last_status_update",
+    "restate_usage_state_storage_bytes",
 }
-
-metric_token = re.compile(
-    r"(?:moa|perf_gate)_[a-z0-9_]+|gen_ai(?:\.[a-z0-9_]+)+|gen_ai_[a-z0-9_]+"
-)
-constant = re.compile(
-    r"(?:pub\s+)?const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"
-    r'"((?:moa|perf_gate)_[a-z0-9_]+|gen_ai(?:\.[a-z0-9_]+)+|gen_ai_[a-z0-9_]+)"'
-)
-emission = re.compile(
-    r"(?<!describe_)\b(?:metrics::)?(?:counter|gauge|histogram)!\s*\(\s*"
-    r'(?:"((?:moa|perf_gate)_[a-z0-9_]+|gen_ai(?:\.[a-z0-9_]+)+|gen_ai_[a-z0-9_]+)"'
-    r"|([A-Z][A-Z0-9_]*))"
-)
-
-
-def canonical(name: str) -> str:
-    """Normalize OTLP dotted names and Prometheus histogram series names."""
-    name = name.replace(".", "_")
-    for suffix in ("_bucket", "_sum", "_count", "_created"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
-
-
-source_files = sorted((root / "crates").glob("**/src/**/*.rs"))
-source_text = {path: path.read_text(encoding="utf-8") for path in source_files}
-constants = {}
-for text in source_text.values():
-    constants.update(constant.findall(text))
-
-emitted = set()
-for path, text in source_text.items():
-    for literal, constant_name in emission.findall(text):
-        name = literal or constants.get(constant_name)
-        if not name:
+dashboard_metrics = set()
+for panel in panels:
+    for target in panel.get("targets") or []:
+        expression = target.get("expr", "")
+        dashboard_metrics.update(metric_pattern.findall(expression))
+        # Per-partition panels must cap their output; otherwise one panel grows
+        # linearly with the cluster's partition count.
+        if "by (partition)" in expression and "topk(10," not in expression:
             raise SystemExit(
-                f"{path} emits metric through unresolved constant {constant_name}; "
-                "teach validate-observability.sh how to resolve it"
+                f"{dashboard_path} panel {panel.get('title')!r} exposes an "
+                "unbounded partition series"
             )
-        emitted.add(canonical(name))
 
-consumer_files = []
-consumer_files.extend(sorted(dashboard_dir.glob("*.json")))
-consumer_files.extend(sorted((root / "ops/prometheus/alerts").glob("*.yaml")))
-consumer_files.extend(sorted((root / "crates/moa-loadtest").glob("**/*")))
-consumer_files.extend(
-    path
-    for path in sorted((root / "docs").glob("**/*"))
-    if path.is_file() and "engineering-discipline/plans" not in path.as_posix()
+missing = required_dashboard_metrics - dashboard_metrics
+if missing:
+    raise SystemExit(
+        f"{dashboard_path} is missing required Restate health metrics: "
+        + ", ".join(sorted(missing))
+    )
+
+consumer_metrics = set(dashboard_metrics)
+
+# Parse alert expressions rather than prose so comments cannot masquerade as a
+# real metric consumer.
+for path in sorted((root / "ops/prometheus/alerts").glob("moa-restate*.yaml")):
+    resource = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for group in resource.get("spec", {}).get("groups") or []:
+        for rule in group.get("rules") or []:
+            consumer_metrics.update(metric_pattern.findall(rule.get("expr", "")))
+
+# Likewise, read only the Restate relabel component's metric-name regex. The
+# Alloy file also contains Kubernetes metadata labels with `restate_` prefixes;
+# those are not instruments.
+alloy_text = (root / "k8s/observability/config.alloy").read_text(encoding="utf-8")
+relabel = re.search(
+    r'prometheus\.relabel "restate" \{(?P<body>.*?)\n\}', alloy_text, re.DOTALL
 )
+if not relabel:
+    raise SystemExit("the Restate Prometheus relabel component is missing")
+keep_rule = re.search(r'regex\s*=\s*"([^"]+)"', relabel.group("body"))
+if not keep_rule:
+    raise SystemExit("the Restate Prometheus metric keep-list is missing")
+consumer_metrics.update(metric_pattern.findall(keep_rule.group(1)))
 
-referenced = set()
-for path in consumer_files:
-    if not path.is_file():
-        continue
-    try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        continue
-    referenced.update(canonical(name) for name in metric_token.findall(text))
-
-canonical_keepers = {canonical(name) for name in keepers}
-stale_keepers = canonical_keepers - emitted
-if stale_keepers:
+unknown = consumer_metrics - allowed
+if unknown:
     raise SystemExit(
-        "ad-hoc metric keeper allowlist names instruments that are no longer "
-        f"emitted: {', '.join(sorted(stale_keepers))}"
+        "Restate observability assets reference metrics outside the pinned "
+        "v1.7.2 set: " + ", ".join(sorted(unknown))
     )
 
-unreferenced = emitted - referenced - canonical_keepers
-if unreferenced:
+unused = allowed - consumer_metrics
+if unused:
     raise SystemExit(
-        "metrics are emitted but have no alert, canonical dashboard, docs, or "
-        "load-test consumer and are not deliberate ad-hoc keepers: "
-        + ", ".join(sorted(unreferenced))
+        "the pinned Restate v1.7.2 metric set contains unused names: "
+        + ", ".join(sorted(unused))
     )
+
+if "restate_rocksdb_estimate_live_data_size_bytes" in consumer_metrics:
+    raise SystemExit("the removed RocksDB live-data-size metric is still consumed")
 
 print(
-    f"  OK {len(emitted)} emitted metrics are consumed or explicitly retained; "
-    f"canonical dashboards: {dashboard_dir.relative_to(root)}"
+    f"  OK {len(panels)} bounded dashboard panels use "
+    f"{len(consumer_metrics - {'up'})} pinned Restate 1.7.2 metrics"
 )
 PY
 
+echo "Checking Grafana dashboard delivery..."
+[[ -d "${CANONICAL_DASHBOARD_DIR}" ]] \
+  || die "canonical Grafana dashboard directory is missing: ${CANONICAL_DASHBOARD_DIR}"
+GRAFANA_SYNC_WORKFLOW_TEXT="$(<"${REPO_ROOT}/.github/workflows/sync-grafana-dashboards.yml")"
+assert_contains "${GRAFANA_SYNC_WORKFLOW_TEXT}" "sync-grafana-dashboards.sh" \
+  "the dashboard sync workflow does not invoke the canonical publisher"
 echo "Observability validation OK"

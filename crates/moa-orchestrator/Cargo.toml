@@ -114,6 +114,7 @@ moa-analytics-export = { workspace = true }
 moa-eval-core.workspace = true
 moa-test-support = { workspace = true, features = ["connector-api-fixture", "orchestrator-fixture"] }
 tempfile.workspace = true
+wiremock.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

@@ -70,10 +70,13 @@ tool pressure.
 
 Physical backpressure is supplied independently:
 
-- Restate scoped concurrency queues invocations. Expensive tenant-scoped work
-  uses the tenant UUID directly as its Restate scope; the default wildcard rule
-  is `concurrency 1000` per scope. Inspect `sys_rules` and `sys_user_limits`
-  before changing it.
+- Session `TurnAdmission` durably waits on shared Valkey fleet and tenant
+  leases before dispatching coordinator work. Tune
+  `MOA_SESSION_LIMITS_TURN_ADMISSION_FLEET_LIMIT`,
+  `MOA_SESSION_LIMITS_TURN_ADMISSION_TENANT_LIMIT`,
+  `MOA_SESSION_LIMITS_TURN_ADMISSION_LEASE_TTL_MS`, and
+  `MOA_SESSION_LIMITS_TURN_ADMISSION_RETRY_AFTER_MS` together; the lease TTL
+  must remain long enough for three generation-fenced heartbeat opportunities.
 - Provider calls acquire an in-flight permit before request/input pacing and
   hold it for the request. Tune
   `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT`,

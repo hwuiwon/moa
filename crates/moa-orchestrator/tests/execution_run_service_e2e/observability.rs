@@ -90,7 +90,8 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({
                 "type": "object",
@@ -113,6 +114,7 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
                 operation: ExecutionOperation::Output {
                     value: json!({"value": "observable"}),
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,

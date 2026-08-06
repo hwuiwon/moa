@@ -2,18 +2,129 @@
   "title": "MOA Restate Internals",
   "uid": "moa-restate-internals",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "timezone": "browser",
   "time": {
     "from": "now-6h",
     "to": "now"
   },
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "panels": [
     {
       "id": 1,
+      "title": "Healthy Restate Targets",
+      "description": "The production cluster expects three independently scraped Restate node targets.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "count(up{job=\"restate\"} == 1)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "title": "Effective Partition Leader Coverage",
+      "description": "One effective leader is expected for every Restate partition.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(restate_partition_is_effective_leader) / max(restate_num_partitions)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "title": "State Storage",
+      "description": "Total logical Restate state storage from the 1.7.2 usage metric.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "max(restate_usage_state_storage_bytes)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      }
+    },
+    {
+      "id": 4,
+      "title": "Ingress p99 Latency",
+      "description": "Maximum node/service p99. Aggregating summary quantiles by sum is invalid, so this panel keeps one bounded worst-case series.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "max(restate_ingress_request_duration_seconds{quantile=\"0.99\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      }
+    },
+    {
+      "id": 5,
       "title": "Ingress Requests / Status",
+      "description": "Restate 1.7.2 emits the bounded states admitted, completed, and rate-limited.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -26,11 +137,17 @@
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      }
     },
     {
-      "id": 2,
-      "title": "Invoker Tasks / Status",
+      "id": 6,
+      "title": "Invocation Tasks / Status",
+      "description": "Started, suspended, failed, and completed invocation task operations.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -43,11 +160,17 @@
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      }
     },
     {
-      "id": 3,
-      "title": "Ingress p99 Latency",
+      "id": 7,
+      "title": "Snapshot Uploads",
+      "description": "Cluster-wide successful and failed partition snapshot upload rates.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -55,16 +178,27 @@
       },
       "targets": [
         {
-          "expr": "restate_ingress_request_duration_seconds{quantile=\"0.99\"}",
-          "legendFormat": "p99",
+          "expr": "sum(rate(restate_partition_store_snapshots_upload_total[15m]))",
+          "legendFormat": "successful",
           "refId": "A"
+        },
+        {
+          "expr": "sum(rate(restate_partition_store_snapshots_upload_failed_total[15m]))",
+          "legendFormat": "failed",
+          "refId": "B"
         }
       ],
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      }
     },
     {
-      "id": 4,
-      "title": "RocksDB Live Data Size",
+      "id": 8,
+      "title": "Oldest Partition Snapshots",
+      "description": "The ten stalest partitions bound dashboard cardinality while exposing archive lag.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -72,32 +206,83 @@
       },
       "targets": [
         {
-          "expr": "sum(restate_rocksdb_estimate_live_data_size_bytes)",
-          "legendFormat": "bytes",
+          "expr": "topk(10, max by (partition) (restate_partition_snapshot_age_seconds))",
+          "legendFormat": "partition {{partition}}",
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      }
     },
     {
-      "id": 5,
-      "title": "NodeCtl Up Targets",
-      "type": "stat",
+      "id": 9,
+      "title": "Partition Applied LSN Lag",
+      "description": "The ten most delayed partitions; this is the bounded durable-log queue-health signal.",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
-          "expr": "count(up{job=\"restate\"} == 1)",
+          "expr": "topk(10, max by (partition) (restate_partition_applied_lsn_lag))",
+          "legendFormat": "partition {{partition}}",
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      }
+    },
+    {
+      "id": 10,
+      "title": "Partition Status Staleness",
+      "description": "The ten partitions with the oldest processor status update.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, max by (partition) (restate_partition_time_since_last_status_update))",
+          "legendFormat": "partition {{partition}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      }
     }
   ],
   "refresh": "30s",
-  "tags": ["moa", "operations", "restate"],
+  "tags": [
+    "moa",
+    "operations",
+    "restate"
+  ],
   "templating": {
     "list": [
       {

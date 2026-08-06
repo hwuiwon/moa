@@ -1,12 +1,26 @@
 //! Authorization helpers shared by Restate handlers.
 
+use std::fmt;
+use std::time::Duration;
+
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
 use moa_core::types::identifiers::{SessionId, TenantId};
-use restate_sdk::prelude::{HandlerError, TerminalError};
+use restate_sdk::context::{ContextSideEffects, RunFuture};
+use restate_sdk::prelude::{
+    Context, HandlerError, ObjectContext, RunRetryPolicy, SharedObjectContext, TerminalError,
+};
+use restate_sdk::serde::Json;
 
 use crate::ctx::{self, IdentityHeaderError, RequestHeaders};
+use crate::workflows::errors::authz_check_error_to_handler_error;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum JournaledAuthzDecision {
+    Allowed,
+    Forbidden,
+}
 
 /// Explicit authorization dependency shared by Restate handler implementations.
 #[derive(Clone)]
@@ -29,47 +43,235 @@ impl AuthzEnforcer {
     /// Authorizes the caller against a tenant for a specific relation.
     pub async fn authorize_tenant(
         &self,
-        ctx: &impl RequestHeaders,
+        ctx: &Context<'_>,
         tenant_id: TenantId,
         relation: Relation,
     ) -> Result<Identity, HandlerError> {
         let identity = require_identity(ctx)?;
         let fga = self.require_fga_client()?;
-        require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-            .await
-            .map_err(translate_authz_error)?;
+        journal_context_authz(
+            ctx,
+            fga,
+            identity.clone(),
+            ObjectType::Tenant,
+            tenant_id,
+            relation,
+        )
+        .await?;
         Ok(identity)
     }
 
     /// Authorizes the caller as a participant of one parent session.
     pub async fn authorize_session_participant(
         &self,
-        ctx: &impl RequestHeaders,
+        ctx: &Context<'_>,
         session_id: SessionId,
     ) -> Result<Identity, HandlerError> {
         let identity = require_identity(ctx)?;
         let fga = self.require_fga_client()?;
-        require_authz_with_delegation(
-            &fga,
-            &identity,
+        journal_context_authz(
+            ctx,
+            fga,
+            identity.clone(),
             ObjectType::Session,
             session_id,
             Relation::Participant,
         )
-        .await
-        .map_err(translate_authz_error)?;
+        .await?;
         Ok(identity)
     }
 
     /// Authorizes tenant operators and admins for product control-plane work.
     pub async fn authorize_tenant_operator_or_admin(
         &self,
-        ctx: &impl RequestHeaders,
+        ctx: &Context<'_>,
         tenant_id: TenantId,
     ) -> Result<Identity, HandlerError> {
         self.authorize_tenant(ctx, tenant_id, Relation::Operator)
             .await
     }
+
+    /// Authorizes a virtual-object caller as a participant of one parent session.
+    pub async fn authorize_object_session_participant(
+        &self,
+        ctx: &ObjectContext<'_>,
+        session_id: SessionId,
+    ) -> Result<Identity, HandlerError> {
+        let identity = require_identity(ctx)?;
+        let fga = self.require_fga_client()?;
+        journal_object_authz(
+            ctx,
+            fga,
+            identity.clone(),
+            ObjectType::Session,
+            session_id,
+            Relation::Participant,
+        )
+        .await?;
+        Ok(identity)
+    }
+
+    /// Authorizes a shared virtual-object caller as a session participant.
+    pub async fn authorize_shared_object_session_participant(
+        &self,
+        ctx: &SharedObjectContext<'_>,
+        session_id: SessionId,
+    ) -> Result<Identity, HandlerError> {
+        let identity = require_identity(ctx)?;
+        let fga = self.require_fga_client()?;
+        journal_shared_object_authz(
+            ctx,
+            fga,
+            identity.clone(),
+            ObjectType::Session,
+            session_id,
+            Relation::Participant,
+        )
+        .await?;
+        Ok(identity)
+    }
+}
+
+/// Journals one authorization decision from a Restate service handler.
+pub async fn journal_context_authz(
+    ctx: &Context<'_>,
+    fga: FgaClient,
+    identity: Identity,
+    object_type: ObjectType,
+    object_id: impl fmt::Display,
+    relation: Relation,
+) -> Result<(), HandlerError> {
+    let object_id = object_id.to_string();
+    let action_name = authz_action_name(object_type, &object_id, relation);
+    ctx.run(move || async move {
+        require_authz_with_delegation(&fga, &identity, object_type, object_id, relation)
+            .await
+            .map_err(authz_run_error)
+    })
+    .name(action_name)
+    .retry_policy(authz_retry_policy())
+    .await
+    .map_err(HandlerError::from)
+}
+
+/// Journals a primary authorization check with one explicit forbidden-only fallback.
+#[allow(clippy::too_many_arguments)]
+pub async fn journal_context_authz_any(
+    ctx: &Context<'_>,
+    fga: FgaClient,
+    identity: Identity,
+    primary_object_type: ObjectType,
+    primary_object_id: impl fmt::Display,
+    primary_relation: Relation,
+    fallback_object_type: ObjectType,
+    fallback_object_id: impl fmt::Display,
+    fallback_relation: Relation,
+) -> Result<(), HandlerError> {
+    let primary_object_id = primary_object_id.to_string();
+    let fallback_object_id = fallback_object_id.to_string();
+    let primary_action_name =
+        authz_action_name(primary_object_type, &primary_object_id, primary_relation);
+    let primary_fga = fga.clone();
+    let primary_identity = identity.clone();
+    let decision = ctx
+        .run(move || async move {
+            match require_authz_with_delegation(
+                &primary_fga,
+                &primary_identity,
+                primary_object_type,
+                primary_object_id,
+                primary_relation,
+            )
+            .await
+            {
+                Ok(()) => Ok(Json::from(JournaledAuthzDecision::Allowed)),
+                Err(AuthzCheckError::Forbidden { .. }) => {
+                    Ok(Json::from(JournaledAuthzDecision::Forbidden))
+                }
+                Err(engine @ AuthzCheckError::Engine(_)) => {
+                    Err(authz_check_error_to_handler_error(engine))
+                }
+            }
+        })
+        .name(primary_action_name)
+        .retry_policy(authz_retry_policy())
+        .await?
+        .into_inner();
+
+    if matches!(decision, JournaledAuthzDecision::Allowed) {
+        return Ok(());
+    }
+
+    journal_context_authz(
+        ctx,
+        fga,
+        identity,
+        fallback_object_type,
+        fallback_object_id,
+        fallback_relation,
+    )
+    .await
+}
+
+/// Journals one authorization decision from a Restate virtual-object handler.
+pub async fn journal_object_authz(
+    ctx: &ObjectContext<'_>,
+    fga: FgaClient,
+    identity: Identity,
+    object_type: ObjectType,
+    object_id: impl fmt::Display,
+    relation: Relation,
+) -> Result<(), HandlerError> {
+    let object_id = object_id.to_string();
+    let action_name = authz_action_name(object_type, &object_id, relation);
+    ctx.run(move || async move {
+        require_authz_with_delegation(&fga, &identity, object_type, object_id, relation)
+            .await
+            .map_err(authz_run_error)
+    })
+    .name(action_name)
+    .retry_policy(authz_retry_policy())
+    .await
+    .map_err(HandlerError::from)
+}
+
+/// Journals one authorization decision from a shared virtual-object handler.
+pub async fn journal_shared_object_authz(
+    ctx: &SharedObjectContext<'_>,
+    fga: FgaClient,
+    identity: Identity,
+    object_type: ObjectType,
+    object_id: impl fmt::Display,
+    relation: Relation,
+) -> Result<(), HandlerError> {
+    let object_id = object_id.to_string();
+    let action_name = authz_action_name(object_type, &object_id, relation);
+    ctx.run(move || async move {
+        require_authz_with_delegation(&fga, &identity, object_type, object_id, relation)
+            .await
+            .map_err(authz_run_error)
+    })
+    .name(action_name)
+    .retry_policy(authz_retry_policy())
+    .await
+    .map_err(HandlerError::from)
+}
+
+fn authz_action_name(object_type: ObjectType, object_id: &str, relation: Relation) -> String {
+    format!("authz_check:{object_type}:{relation}:{object_id}")
+}
+
+fn authz_retry_policy() -> RunRetryPolicy {
+    RunRetryPolicy::new()
+        .initial_delay(Duration::from_millis(100))
+        .exponentiation_factor(2.0)
+        .max_delay(Duration::from_secs(1))
+        .max_attempts(5)
+        .max_duration(Duration::from_secs(5))
+}
+
+fn authz_run_error(error: AuthzCheckError) -> HandlerError {
+    translate_authz_error(error)
 }
 
 /// Load the required caller identity from a Restate context.
@@ -121,7 +323,7 @@ pub fn translate_authz_error(error: AuthzCheckError) -> HandlerError {
         }
         AuthzCheckError::Engine(error) => {
             tracing::error!(error = %error, "authz engine error; failing closed");
-            TerminalError::new_with_code(503, "authorization engine unavailable").into()
+            authz_check_error_to_handler_error(AuthzCheckError::Engine(error))
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Live provider E2E coverage for bounded Act behavior and supplementary planning checks.
+//! Provider E2E coverage for bounded Act behavior, cancellation recovery, and planning checks.
 //!
 //! These tests intentionally validate observable behavior instead of prompt or
 //! schema structure: a real interactive turn delegates conversational subtasks,
@@ -16,13 +16,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use moa_artifacts::execution_plan::{
-    CompletionCheckKind, ExecutionOperation, GeneratedExecutionCandidate,
+    CompletionCheck, CompletionCheckKind, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
+    ExecutionPlanDefinition, ExecutionRequirement, GeneratedExecutionCandidate, RetryPolicy,
 };
 use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::traits::Identity;
 use moa_core::{
     events::Event,
+    types::completion::CompletionRequest,
     types::contact::SessionActorRef,
+    types::context::MessageRole,
     types::events_stream::EventRange,
     types::events_stream::EventRecord,
     types::execution_planning::{
@@ -36,8 +39,9 @@ use moa_core::{
     types::identifiers::ModelId,
     types::identifiers::SessionId,
     types::identifiers::ToolCallId,
-    types::session::SessionStatus,
+    types::session::{CancelScope, SessionStatus},
     types::tools::ToolContent,
+    types::worker::state::{WorkerState, WorkerStatus},
 };
 use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_execution::state::{
@@ -48,7 +52,7 @@ use moa_execution::wire::{
     ExecutionPlanningContextRequest, ExecutionPlanningContextResponse, ExecutionRunRequest,
     ExecutionStatusResponse, ExecutionTaskListRequest, ExecutionTaskListResponse,
 };
-use moa_wire::turn::{StartTurnRequest, StartTurnResponse};
+use moa_wire::turn::{StartTurnRequest, StartTurnResponse, TurnOutcomeKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -57,12 +61,13 @@ use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
-    restate_ingress_url, test_user_identity, with_identity,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_ingress_url,
+    restate_test_admin_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, storage_partition_id_from_meta, test_session_meta,
 };
+use moa_test_support::OrchestratorTestFixture;
 use moa_test_support::execution_audits::load_execution_planning_audits;
 use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::postgres::test_database_url;
@@ -139,7 +144,6 @@ fn spawn_orchestrator(
         .arg("--scim-port")
         .arg(ports.scim.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
-        .env("MOA_RESTATE_ADMIN_URL", restate_admin_url())
         .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
@@ -367,7 +371,7 @@ async fn run_case(case: LiveActDelegationCase) -> Result<()> {
                     read_log(&orchestrator_log)
                 )
             })?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
         let session = create_initialized_session(&client, &ingress, model, case.name).await?;
         let turn_id = start_turn(&client, &ingress, &session, case).await?;
         wait_for_status(
@@ -375,7 +379,7 @@ async fn run_case(case: LiveActDelegationCase) -> Result<()> {
             &ingress,
             &session.identity,
             session.session_id,
-            SessionStatus::Paused,
+            SessionStatus::Idle,
             Duration::from_secs(180),
         )
         .await
@@ -993,7 +997,7 @@ impl SupplementaryLiveHarness {
                         read_log(&orchestrator_log)
                     )
                 })?;
-            register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+            register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
             create_initialized_session(&client, &ingress, model, name).await
         }
         .await;
@@ -1271,7 +1275,6 @@ fn spawn_supplementary_orchestrator(
         .arg("--scim-port")
         .arg(ports.scim.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
-        .env("MOA_RESTATE_ADMIN_URL", restate_admin_url())
         .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
@@ -1723,7 +1726,7 @@ async fn assert_generated_plan_audits_and_authorization(
                     "planner model must be set"
                 );
                 ensure!(
-                    prompt_version == "execution-planner-v3",
+                    prompt_version == "execution-planner-v4",
                     "planner prompt version drifted"
                 );
                 (
@@ -1914,6 +1917,1146 @@ fn validate_generated_plan_event_order(events: &[EventRecord]) -> Result<()> {
     Ok(())
 }
 
+const RECOVERY_MATRIX_CLASSIFIER_PROMPT: &str =
+    "You classify one user turn into MOA's public execution decision.";
+const RECOVERY_MATRIX_BLOCKED_ROOT: &str =
+    "RECOVERY-MATRIX-BLOCKED-ROOT: answer only after the cancellation probe.";
+const RECOVERY_MATRIX_LATE_ROOT_RESULT: &str = "RECOVERY-MATRIX-LATE-ROOT-RESULT";
+const RECOVERY_MATRIX_REPLACEMENT_ROOT: &str =
+    "RECOVERY-MATRIX-REPLACEMENT-ROOT: prove the admission fence was released.";
+const RECOVERY_MATRIX_REPLACEMENT_RESULT: &str = "RECOVERY-MATRIX-REPLACEMENT-COMPLETED";
+const RECOVERY_MATRIX_CANCELLED_INPUT_TOKENS: usize = 777_777;
+
+fn recovery_matrix_blocked_root_script() -> Value {
+    json!({
+        "default": {
+            "completion": {
+                "content": "unexpected recovery-matrix fallback",
+                "tool_calls": []
+            }
+        },
+        "keyed": [
+            {
+                "match": RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+                "completion": {
+                    "content": r#"{"label":"execute","strategy":"inline","rationale":"The request needs one bounded model turn.","confidence_bps":10000,"missing_inputs":[]}"#,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_REPLACEMENT_ROOT,
+                "completion": {
+                    "content": RECOVERY_MATRIX_REPLACEMENT_RESULT,
+                    "tool_calls": [],
+                    "input_tokens": 73
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_BLOCKED_ROOT,
+                "completion": {
+                    "content": RECOVERY_MATRIX_LATE_ROOT_RESULT,
+                    "tool_calls": [],
+                    "latency_ms": 120000,
+                    "input_tokens": RECOVERY_MATRIX_CANCELLED_INPUT_TOKENS
+                }
+            }
+        ]
+    })
+}
+
+fn recovery_matrix_turn_request(message: &str) -> StartTurnRequest {
+    StartTurnRequest {
+        client_message_id: fresh_client_message_id(),
+        reply_to: None,
+        stream_cursor: None,
+        user_message: message.to_string(),
+        attachments: Vec::new(),
+        model: None,
+        contact: None,
+        max_turns: Some(2),
+        resource_budget: Default::default(),
+        execution_template: None,
+    }
+}
+
+fn recovery_matrix_request_contains(request: &CompletionRequest, marker: &str) -> bool {
+    request
+        .messages
+        .iter()
+        .any(|message| message.content.contains(marker))
+}
+
+fn recovery_matrix_current_user_turn_is(request: &CompletionRequest, expected: &str) -> bool {
+    request
+        .metadata
+        .get("_moa.user_turn")
+        .and_then(Value::as_str)
+        == Some(expected)
+}
+
+fn recovery_matrix_latest_user_message_contains(request: &CompletionRequest, marker: &str) -> bool {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .is_some_and(|message| message.content.contains(marker))
+}
+
+async fn recovery_matrix_wait_for_request(
+    fixture: &OrchestratorTestFixture,
+    marker: &str,
+    exclude_marker: &str,
+    timeout: Duration,
+) -> Result<(CompletionRequest, Vec<Value>)> {
+    let deadline = Instant::now() + timeout;
+    let mut next_count = 1;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "scripted provider did not record request marker {marker:?} within {timeout:?}"
+        );
+        let rows = fixture
+            .wait_for_scripted_requests(next_count, remaining)
+            .await?;
+        let requests = rows
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<CompletionRequest>)
+            .collect::<serde_json::Result<Vec<_>>>()
+            .context("decode recovery-matrix scripted-provider journal")?;
+        if let Some(request) = requests.iter().find(|request| {
+            recovery_matrix_request_contains(request, marker)
+                && !recovery_matrix_request_contains(request, exclude_marker)
+        }) {
+            return Ok((request.clone(), rows));
+        }
+        next_count = rows.len() + 1;
+    }
+}
+
+async fn recovery_matrix_restate_rows(
+    fixture: &OrchestratorTestFixture,
+    query: impl AsRef<str>,
+) -> Result<Vec<Value>> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/query", fixture.admin_url.trim_end_matches('/'));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let last_error = match client
+            .post(&url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&json!({ "query": query.as_ref() }))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                match response.text().await {
+                    Ok(body) if status.is_success() => match serde_json::from_str::<Value>(&body) {
+                        Ok(response) => {
+                            if let Some(rows) = response.get("rows").and_then(Value::as_array) {
+                                return Ok(rows.clone());
+                            }
+                            format!("response omitted rows: {response}")
+                        }
+                        Err(error) => format!("decode JSON response: {error}; body={body:?}"),
+                    },
+                    Ok(body) => format!("status {status}; body={body:?}"),
+                    Err(error) => format!("read response body: {error}"),
+                }
+            }
+            Err(error) => format!("send query: {error}"),
+        };
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Restate recovery-matrix introspection did not become ready: {last_error}"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn recovery_matrix_blocked_llm_invocation(
+    fixture: &OrchestratorTestFixture,
+    workflow_service: &str,
+    workflow_key: Option<&str>,
+) -> Result<(String, String)> {
+    let key_filter = workflow_key
+        .map(|key| format!(" AND target_service_key = '{key}'"))
+        .unwrap_or_default();
+    let parents = recovery_matrix_restate_rows(
+        fixture,
+        format!(
+            "SELECT id FROM sys_invocation WHERE target_service_name = '{workflow_service}'\
+             {key_filter}"
+        ),
+    )
+    .await?;
+    ensure!(
+        !parents.is_empty(),
+        "expected a {workflow_service} invocation, got {parents:?}"
+    );
+    for parent in &parents {
+        let parent_id = parent
+            .get("id")
+            .and_then(Value::as_str)
+            .context("workflow introspection row omitted id")?;
+        let children = recovery_matrix_restate_rows(
+            fixture,
+            format!(
+                "SELECT id, status FROM sys_invocation WHERE invoked_by_id = '{parent_id}' \
+                 AND target_service_name = 'LLMGateway' AND status != 'completed' ORDER BY id"
+            ),
+        )
+        .await?;
+        for child in &children {
+            let Some(invoked_id) = child.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            return Ok((parent_id.to_string(), invoked_id.to_string()));
+        }
+    }
+    bail!("{workflow_service} has no incomplete LLMGateway child: {parents:?}")
+}
+
+async fn recovery_matrix_assert_child_joined(
+    fixture: &OrchestratorTestFixture,
+    parent_id: &str,
+    child_id: &str,
+) -> Result<()> {
+    let rows = recovery_matrix_restate_rows(
+        fixture,
+        format!("SELECT id, invoked_by_id, status FROM sys_invocation WHERE id = '{child_id}'"),
+    )
+    .await?;
+    ensure!(
+        rows.len() == 1
+            && rows[0].get("invoked_by_id").and_then(Value::as_str) == Some(parent_id)
+            && rows[0].get("status").and_then(Value::as_str) == Some("completed"),
+        "cancelled LLM child {child_id} was not joined in parent {parent_id}: {rows:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Redis scripted-provider fixture"]
+async fn recovery_matrix_root_llm_cancel_crash_restart_releases_replacement_service_e2e()
+-> Result<()> {
+    // Pins: cancellation wins while the root's exact LLM child is blocked, joins that child
+    // across a hard orchestrator crash, publishes one normal cancelled outcome, and releases
+    // the session admission fence so one replacement turn can run without old result or usage.
+    let fixture = OrchestratorTestFixture::with_script(recovery_matrix_blocked_root_script())
+        .await
+        .context("boot recovery-matrix scripted orchestrator fixture")?;
+    fixture.reset_scripted_requests()?;
+    let test = fixture.isolated().await;
+    let session_id = test
+        .create_session("recovery-matrix-root-cancellation")
+        .await?;
+    let session = test.client().session(session_id.to_string());
+
+    let first = session
+        .start_turn(
+            recovery_matrix_turn_request(RECOVERY_MATRIX_BLOCKED_ROOT),
+            None,
+        )
+        .await?;
+    ensure!(!first.queued, "fresh blocked turn must start immediately");
+    let first_turn_id = first.turn_id.context("blocked turn omitted turn id")?;
+    let (_, requests_at_barrier) = recovery_matrix_wait_for_request(
+        &fixture,
+        RECOVERY_MATRIX_BLOCKED_ROOT,
+        RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+        Duration::from_secs(30),
+    )
+    .await?;
+    let (parent_invocation_id, child_invocation_id) =
+        recovery_matrix_blocked_llm_invocation(&fixture, "TurnExecution", Some(&first_turn_id))
+            .await?;
+    let old_main_requests_at_barrier = requests_at_barrier
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<CompletionRequest>)
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .iter()
+        .filter(|request| {
+            recovery_matrix_current_user_turn_is(request, RECOVERY_MATRIX_BLOCKED_ROOT)
+                && !recovery_matrix_request_contains(request, RECOVERY_MATRIX_CLASSIFIER_PROMPT)
+        })
+        .count();
+    ensure!(
+        old_main_requests_at_barrier == 1,
+        "blocked root must cross the provider boundary exactly once before cancellation"
+    );
+
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/cancel"),
+            &CancelScope::CoordinatorOnly,
+        )
+        .await?;
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard-crash and restart recovery-matrix orchestrator")?;
+
+    let cancelled = session
+        .await_turn_outcome(
+            &first_turn_id,
+            Duration::from_secs(60),
+            Duration::from_millis(25),
+        )
+        .await?;
+    assert_eq!(cancelled.kind, TurnOutcomeKind::Cancelled);
+    recovery_matrix_assert_child_joined(&fixture, &parent_invocation_id, &child_invocation_id)
+        .await?;
+
+    let replacement = session
+        .start_turn(
+            recovery_matrix_turn_request(RECOVERY_MATRIX_REPLACEMENT_ROOT),
+            None,
+        )
+        .await?;
+    assert!(
+        !replacement.queued,
+        "the exact cancelled outcome must release the admission fence"
+    );
+    let replacement_turn_id = replacement
+        .turn_id
+        .context("replacement turn omitted turn id")?;
+    let completed = session
+        .await_turn_outcome(
+            &replacement_turn_id,
+            Duration::from_secs(60),
+            Duration::from_millis(25),
+        )
+        .await?;
+    assert_eq!(completed.kind, TurnOutcomeKind::Completed);
+    assert_eq!(completed.message, RECOVERY_MATRIX_REPLACEMENT_RESULT);
+
+    let requests = fixture.scripted_requests()?;
+    let decoded = requests
+        .into_iter()
+        .map(serde_json::from_value::<CompletionRequest>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    let old_main_requests = decoded
+        .iter()
+        .filter(|request| {
+            recovery_matrix_current_user_turn_is(request, RECOVERY_MATRIX_BLOCKED_ROOT)
+                && !recovery_matrix_request_contains(request, RECOVERY_MATRIX_CLASSIFIER_PROMPT)
+        })
+        .count();
+    let replacement_main_requests = decoded
+        .iter()
+        .filter(|request| {
+            recovery_matrix_current_user_turn_is(request, RECOVERY_MATRIX_REPLACEMENT_ROOT)
+                && !recovery_matrix_request_contains(request, RECOVERY_MATRIX_CLASSIFIER_PROMPT)
+        })
+        .count();
+    assert_eq!(old_main_requests, 1, "cancelled root LLM must not replay");
+    assert_eq!(
+        replacement_main_requests, 1,
+        "replacement root LLM must execute exactly once"
+    );
+
+    let events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    let old_results = events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::BrainResponse { text, .. } if text == RECOVERY_MATRIX_LATE_ROOT_RESULT
+            )
+        })
+        .count();
+    let replacement_results = events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::BrainResponse { text, .. } if text == RECOVERY_MATRIX_REPLACEMENT_RESULT
+            )
+        })
+        .count();
+    let cancelled_usage_events = events
+        .iter()
+        .filter(|record| record.event.input_tokens() == RECOVERY_MATRIX_CANCELLED_INPUT_TOKENS)
+        .count();
+    assert_eq!(
+        old_results, 0,
+        "cancelled root produced a late visible result"
+    );
+    assert_eq!(
+        cancelled_usage_events, 0,
+        "cancelled root produced late token usage or budget evidence"
+    );
+    assert_eq!(
+        replacement_results, 1,
+        "replacement turn must produce exactly one user-visible result"
+    );
+    Ok(())
+}
+
+const RECOVERY_MATRIX_WORKER_ROOT: &str =
+    "RECOVERY-MATRIX-WORKER-ROOT: delegate the blocked worker probe.";
+const RECOVERY_MATRIX_BLOCKED_WORKER: &str =
+    "RECOVERY-MATRIX-BLOCKED-WORKER: wait for cancellation before answering.";
+const RECOVERY_MATRIX_LATE_WORKER_RESULT: &str = "RECOVERY-MATRIX-LATE-WORKER-RESULT";
+const RECOVERY_MATRIX_WORKER_ROOT_DONE: &str = "RECOVERY-MATRIX-WORKER-DISPATCHED";
+const RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER: &str = "RECOVERY-MATRIX-REPLACEMENT-AFTER-WORKER";
+const RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER_RESULT: &str =
+    "RECOVERY-MATRIX-REPLACEMENT-AFTER-WORKER-COMPLETED";
+const RECOVERY_MATRIX_CANCELLED_WORKER_INPUT_TOKENS: usize = 666_666;
+
+fn recovery_matrix_blocked_worker_script() -> Value {
+    json!({
+        "default": {
+            "completion": {
+                "content": "unexpected worker recovery-matrix fallback",
+                "tool_calls": []
+            }
+        },
+        "keyed": [
+            {
+                "match": RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+                "completion": {
+                    "content": r#"{"label":"execute","strategy":"inline","rationale":"The request delegates one bounded child.","confidence_bps":10000,"missing_inputs":[]}"#,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER,
+                "completion": {
+                    "content": RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER_RESULT,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_BLOCKED_WORKER,
+                "completion": {
+                    "content": RECOVERY_MATRIX_LATE_WORKER_RESULT,
+                    "tool_calls": [],
+                    "latency_ms": 120000,
+                    "input_tokens": RECOVERY_MATRIX_CANCELLED_WORKER_INPUT_TOKENS
+                }
+            },
+            {
+                "match": "Spawned worker",
+                "completion": {
+                    "content": RECOVERY_MATRIX_WORKER_ROOT_DONE,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_WORKER_ROOT,
+                "completion": {
+                    "content": "",
+                    "tool_calls": [{
+                        "name": "spawn_worker",
+                        "id": "recovery-matrix-spawn-blocked-worker",
+                        "input": {
+                            "task": RECOVERY_MATRIX_BLOCKED_WORKER,
+                            "tool_subset": [],
+                            "budget_tokens": 1200,
+                            "max_turns": 1
+                        }
+                    }]
+                }
+            }
+        ]
+    })
+}
+
+async fn recovery_matrix_wait_for_events(
+    client: &moa_test_support::TestApiClient,
+    session_id: SessionId,
+    timeout: Duration,
+    predicate: impl Fn(&[EventRecord]) -> bool,
+) -> Result<Vec<EventRecord>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        let events = client.get_events(session_id, EventRange::all()).await?;
+        if predicate(&events) {
+            return Ok(events);
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "session {session_id} did not reach the expected recovery-matrix event boundary"
+        );
+    }
+}
+
+async fn recovery_matrix_wait_for_worker_state(
+    client: &moa_test_support::TestApiClient,
+    worker_id: &str,
+    expected: WorkerState,
+    timeout: Duration,
+) -> Result<WorkerStatus> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        let status = client
+            .post_empty_call::<WorkerStatus>(&format!("/Worker/{worker_id}/status"))
+            .await?;
+        if status.state == expected {
+            return Ok(status);
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "worker {worker_id} did not reach {expected:?}; last status: {status:?}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Redis scripted-provider fixture"]
+async fn recovery_matrix_worker_llm_cancel_crash_restart_fences_late_delivery_service_e2e()
+-> Result<()> {
+    // Pins: TaskTree cancellation joins a blocked WorkerTurnExecution LLM child across a hard
+    // process crash, records one cancelled worker terminal, drops its result and usage, and
+    // leaves the owning session able to execute one fresh replacement turn.
+    let fixture = OrchestratorTestFixture::with_script(recovery_matrix_blocked_worker_script())
+        .await
+        .context("boot blocked-worker recovery-matrix fixture")?;
+    fixture.reset_scripted_requests()?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("recovery-matrix-worker-cancel").await?;
+    let session = test.client().session(session_id.to_string());
+    let started = session
+        .start_turn(
+            recovery_matrix_turn_request(RECOVERY_MATRIX_WORKER_ROOT),
+            None,
+        )
+        .await?;
+    ensure!(!started.queued, "worker probe root must start immediately");
+    let root_turn_id = started
+        .turn_id
+        .context("worker probe root omitted turn id")?;
+
+    recovery_matrix_wait_for_request(
+        &fixture,
+        RECOVERY_MATRIX_BLOCKED_WORKER,
+        RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+        Duration::from_secs(30),
+    )
+    .await?;
+    let spawned_events = recovery_matrix_wait_for_events(
+        test.client(),
+        session_id,
+        Duration::from_secs(30),
+        |events| {
+            events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::WorkerSpawned { task, .. } if task == RECOVERY_MATRIX_BLOCKED_WORKER
+                )
+            })
+        },
+    )
+    .await?;
+    let worker_id = spawned_events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::WorkerSpawned {
+                worker_id, task, ..
+            } if task == RECOVERY_MATRIX_BLOCKED_WORKER => Some(worker_id.clone()),
+            _ => None,
+        })
+        .context("blocked worker spawn event omitted worker id")?;
+    let (parent_invocation_id, child_invocation_id) =
+        recovery_matrix_blocked_llm_invocation(&fixture, "WorkerTurnExecution", None).await?;
+
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/cancel"),
+            &CancelScope::TaskTree,
+        )
+        .await?;
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard-crash and restart blocked-worker fixture")?;
+
+    let worker = recovery_matrix_wait_for_worker_state(
+        test.client(),
+        &worker_id,
+        WorkerState::Cancelled,
+        Duration::from_secs(60),
+    )
+    .await?;
+    assert_eq!(worker.tokens_used, 0, "cancelled worker consumed tokens");
+    recovery_matrix_assert_child_joined(&fixture, &parent_invocation_id, &child_invocation_id)
+        .await?;
+    let terminal_events = recovery_matrix_wait_for_events(
+        test.client(),
+        session_id,
+        Duration::from_secs(60),
+        |events| {
+            events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::WorkerNotificationDelivered {
+                        worker_id: delivered,
+                        state: WorkerState::Cancelled,
+                        ..
+                    } if delivered == &worker_id
+                )
+            })
+        },
+    )
+    .await?;
+    assert_eq!(
+        terminal_events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::WorkerStatusChanged {
+                        worker_id: changed,
+                        to: WorkerState::Cancelled,
+                        ..
+                    } if changed == &worker_id
+                )
+            })
+            .count(),
+        1,
+        "blocked worker must publish exactly one cancelled status"
+    );
+    assert_eq!(
+        terminal_events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::WorkerNotificationDelivered {
+                        worker_id: delivered,
+                        state: WorkerState::Cancelled,
+                        ..
+                    } if delivered == &worker_id
+                )
+            })
+            .count(),
+        1,
+        "blocked worker must deliver exactly one cancelled terminal"
+    );
+
+    let root_outcome = session
+        .await_turn_outcome(
+            &root_turn_id,
+            Duration::from_secs(60),
+            Duration::from_millis(25),
+        )
+        .await?;
+    assert!(
+        matches!(
+            root_outcome.kind,
+            TurnOutcomeKind::Completed | TurnOutcomeKind::Cancelled
+        ),
+        "task-tree cancellation must settle the owning coordinator before admitting replacement work: {root_outcome:?}"
+    );
+
+    let replacement = session
+        .start_turn(
+            recovery_matrix_turn_request(RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER),
+            None,
+        )
+        .await?;
+    assert!(
+        !replacement.queued,
+        "worker cancellation left a session fence"
+    );
+    let replacement_turn_id = replacement.turn_id.context("replacement omitted turn id")?;
+    let replacement_outcome = session
+        .await_turn_outcome(
+            &replacement_turn_id,
+            Duration::from_secs(60),
+            Duration::from_millis(25),
+        )
+        .await?;
+    assert_eq!(replacement_outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(
+        replacement_outcome.message,
+        RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER_RESULT
+    );
+
+    let requests = fixture
+        .scripted_requests()?
+        .into_iter()
+        .map(serde_json::from_value::<CompletionRequest>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                recovery_matrix_latest_user_message_contains(
+                    request,
+                    RECOVERY_MATRIX_BLOCKED_WORKER,
+                ) && !recovery_matrix_request_contains(request, RECOVERY_MATRIX_CLASSIFIER_PROMPT)
+            })
+            .count(),
+        1,
+        "cancelled worker LLM must not replay"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                recovery_matrix_latest_user_message_contains(
+                    request,
+                    RECOVERY_MATRIX_REPLACEMENT_AFTER_WORKER,
+                ) && !recovery_matrix_request_contains(request, RECOVERY_MATRIX_CLASSIFIER_PROMPT)
+            })
+            .count(),
+        1,
+        "replacement after worker cancellation must execute once"
+    );
+    assert!(terminal_events.iter().all(|record| {
+        !matches!(
+            &record.event,
+            Event::BrainResponse { text, .. } if text == RECOVERY_MATRIX_LATE_WORKER_RESULT
+        ) && record.event.input_tokens() != RECOVERY_MATRIX_CANCELLED_WORKER_INPUT_TOKENS
+    }));
+    Ok(())
+}
+
+const RECOVERY_MATRIX_EXECUTION_ROOT: &str =
+    "RECOVERY-MATRIX-EXECUTION-ROOT: run the cancellable durable agent.";
+const RECOVERY_MATRIX_EXECUTION_TASK: &str =
+    "RECOVERY-MATRIX-BLOCKED-EXECUTION-TASK: wait for cancellation.";
+const RECOVERY_MATRIX_LATE_EXECUTION_RESULT: &str = "RECOVERY-MATRIX-LATE-EXECUTION-RESULT";
+const RECOVERY_MATRIX_REPLACEMENT_EXECUTION_ROOT: &str =
+    "RECOVERY-MATRIX-REPLACEMENT-EXECUTION-ROOT: run the replacement durable agent.";
+const RECOVERY_MATRIX_REPLACEMENT_EXECUTION_TASK: &str =
+    "RECOVERY-MATRIX-REPLACEMENT-EXECUTION-TASK: return the replacement result.";
+const RECOVERY_MATRIX_REPLACEMENT_EXECUTION_RESULT: &str =
+    "RECOVERY-MATRIX-REPLACEMENT-EXECUTION-COMPLETED";
+const RECOVERY_MATRIX_CANCELLED_EXECUTION_INPUT_TOKENS: usize = 555_555;
+
+fn recovery_matrix_execution_candidate(
+    objective: &str,
+    instructions: &str,
+) -> GeneratedExecutionCandidate {
+    let output_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["answer"],
+        "properties": {"answer": {"type": "string"}}
+    });
+    let retry = RetryPolicy {
+        max_attempts: 1,
+        initial_backoff_ms: 0,
+        max_backoff_ms: 0,
+    };
+    GeneratedExecutionCandidate {
+        goal: ExecutionGoalContract {
+            objective: objective.to_string(),
+            requirements: vec![ExecutionRequirement {
+                id: "answer".to_string(),
+                description: "produce the deterministic recovery-matrix answer".to_string(),
+            }],
+            deliverables: Vec::new(),
+            coverage: Vec::new(),
+            constraints: Vec::new(),
+            completion_checks: vec![CompletionCheck {
+                id: "output-schema".to_string(),
+                description: "terminal output satisfies its declared schema".to_string(),
+                requirement_ids: vec!["answer".to_string()],
+                constraint_ids: Vec::new(),
+                kind: CompletionCheckKind::OutputSchema,
+            }],
+        },
+        plan: ExecutionPlanDefinition {
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_schema: json!({"type": "object", "additionalProperties": false}),
+            output_schema: output_schema.clone(),
+            nodes: vec![
+                ExecutionNode {
+                    id: "agent".to_string(),
+                    requirement_ids: vec!["answer".to_string()],
+                    depends_on: Vec::new(),
+                    when: None,
+                    input: json!({}),
+                    output_schema: output_schema.clone(),
+                    operation: ExecutionOperation::Agent {
+                        instructions: instructions.to_string(),
+                        skill_refs: Vec::new(),
+                        capability_refs: Vec::new(),
+                        max_turns: 1,
+                    },
+                    compensation: None,
+                    retry: retry.clone(),
+                    budget: None,
+                },
+                ExecutionNode {
+                    id: "output".to_string(),
+                    requirement_ids: vec!["answer".to_string()],
+                    depends_on: vec!["agent".to_string()],
+                    when: None,
+                    input: json!({}),
+                    output_schema,
+                    operation: ExecutionOperation::Output {
+                        value: json!({"$ref": "$.nodes.agent.output"}),
+                    },
+                    compensation: None,
+                    retry,
+                    budget: None,
+                },
+            ],
+        },
+        run_input: json!({}),
+    }
+}
+
+fn recovery_matrix_blocked_execution_script() -> Result<Value> {
+    let cancelled_candidate = recovery_matrix_execution_candidate(
+        RECOVERY_MATRIX_EXECUTION_ROOT,
+        RECOVERY_MATRIX_EXECUTION_TASK,
+    );
+    let replacement_candidate = recovery_matrix_execution_candidate(
+        RECOVERY_MATRIX_REPLACEMENT_EXECUTION_ROOT,
+        RECOVERY_MATRIX_REPLACEMENT_EXECUTION_TASK,
+    );
+    Ok(json!({
+        "default": {
+            "completion": {
+                "content": "replacement execution synthesis complete",
+                "tool_calls": []
+            }
+        },
+        "keyed": [
+            {
+                "match": RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+                "completion": {
+                    "content": r#"{"label":"execute","strategy":"durable","rationale":"The request requires recoverable durable execution.","confidence_bps":10000,"missing_inputs":[]}"#,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_EXECUTION_TASK,
+                "completion": {
+                    "content": serde_json::to_string(&json!({
+                        "answer": RECOVERY_MATRIX_LATE_EXECUTION_RESULT
+                    }))?,
+                    "tool_calls": [],
+                    "latency_ms": 120000,
+                    "input_tokens": RECOVERY_MATRIX_CANCELLED_EXECUTION_INPUT_TOKENS
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_REPLACEMENT_EXECUTION_TASK,
+                "completion": {
+                    "content": serde_json::to_string(&json!({
+                        "answer": RECOVERY_MATRIX_REPLACEMENT_EXECUTION_RESULT
+                    }))?,
+                    "tool_calls": [],
+                    "input_tokens": 47
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_EXECUTION_ROOT,
+                "completion": {
+                    "content": serde_json::to_string(&cancelled_candidate)?,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": RECOVERY_MATRIX_REPLACEMENT_EXECUTION_ROOT,
+                "completion": {
+                    "content": serde_json::to_string(&replacement_candidate)?,
+                    "tool_calls": []
+                }
+            }
+        ]
+    }))
+}
+
+async fn recovery_matrix_wait_for_execution_status(
+    fixture: &OrchestratorTestFixture,
+    client: &moa_test_support::TestApiClient,
+    request: &ExecutionRunRequest,
+    expected: ExecutionRunStatus,
+    timeout: Duration,
+) -> Result<ExecutionStatusResponse> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        let status: ExecutionStatusResponse = client
+            .post_call("/Execution/status", request)
+            .await
+            .context("poll recovery-matrix Execution/status")?;
+        if status.run.status == expected {
+            return Ok(status);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let invocations = recovery_matrix_restate_rows(
+                fixture,
+                "SELECT id, invoked_by_id, target_service_name, target_service_key, status \
+                 FROM sys_invocation WHERE target_service_name IN \
+                 ('ExecutionRun', 'ExecutionTask', 'LLMGateway') \
+                 ORDER BY target_service_name, id",
+            )
+            .await
+            .unwrap_or_else(|error| vec![json!({"introspection_error": error.to_string()})]);
+            let orchestrator_exit = fixture
+                .unexpected_orchestrator_exit()
+                .await
+                .unwrap_or_else(|error| Some(format!("exit inspection failed: {error}")));
+            bail!(
+                "execution run {} did not reach {expected:?}; last status: {:?}; orchestrator_exit={orchestrator_exit:?}; invocations={invocations:?}",
+                request.run_uid,
+                status.run.status
+            );
+        }
+    }
+}
+
+async fn recovery_matrix_wait_for_session_unfenced(
+    session: &moa_test_support::TestSessionHandle<'_>,
+    run_uid: uuid::Uuid,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        let snapshot = session.snapshot().await?;
+        if snapshot.active_turn_id.is_none()
+            && !snapshot.active_execution_run_uids.contains(&run_uid)
+        {
+            return Ok(());
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "cancelled execution {run_uid} did not release its session-owned run and synthesis fences; last snapshot: {snapshot:?}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Redis scripted-provider fixture"]
+async fn recovery_matrix_execution_task_llm_cancel_crash_restart_fences_budget_service_e2e()
+-> Result<()> {
+    // Pins: cancelling a durable run joins its blocked ExecutionTask LLM child across a hard
+    // orchestrator crash, records one cancelled run/task with zero actual usage, and permits a
+    // fresh replacement durable run to execute its task exactly once.
+    let fixture = OrchestratorTestFixture::with_script(recovery_matrix_blocked_execution_script()?)
+        .await
+        .context("boot execution-task recovery-matrix fixture")?;
+    fixture.reset_scripted_requests()?;
+    let test = fixture.isolated().await;
+    let session_id = test
+        .create_session("recovery-matrix-execution-task-cancel")
+        .await?;
+    let meta = test.client().get_session(session_id).await?;
+    let session = test.client().session(session_id.to_string());
+    let admitted = session
+        .start_turn(
+            recovery_matrix_turn_request(RECOVERY_MATRIX_EXECUTION_ROOT),
+            None,
+        )
+        .await?;
+    let admitted_turn_id = admitted.turn_id.context("durable turn omitted turn id")?;
+    let admitted_outcome = session
+        .await_turn_outcome(
+            &admitted_turn_id,
+            Duration::from_secs(60),
+            Duration::from_millis(25),
+        )
+        .await?;
+    let TurnOutcomeKind::Accepted { execution_run_uid } = admitted_outcome.kind else {
+        bail!("durable recovery-matrix turn was not accepted: {admitted_outcome:?}");
+    };
+    let cancelled_run = ExecutionRunRequest {
+        tenant_id: meta.tenant_id,
+        contact_id: None,
+        session_id,
+        run_uid: execution_run_uid,
+    };
+    recovery_matrix_wait_for_request(
+        &fixture,
+        RECOVERY_MATRIX_EXECUTION_TASK,
+        RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let (parent_invocation_id, child_invocation_id) =
+        recovery_matrix_blocked_llm_invocation(&fixture, "ExecutionTask", None).await?;
+
+    let session_snapshot = session.snapshot().await?;
+    ensure!(
+        session_snapshot
+            .active_execution_run_uids
+            .contains(&execution_run_uid),
+        "session omitted blocked execution run before cancellation: {session_snapshot:?}"
+    );
+
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/cancel"),
+            &CancelScope::TaskTree,
+        )
+        .await?;
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard-crash and restart blocked execution-task fixture")?;
+    let cancelled = recovery_matrix_wait_for_execution_status(
+        &fixture,
+        test.client(),
+        &cancelled_run,
+        ExecutionRunStatus::Cancelled,
+        Duration::from_secs(60),
+    )
+    .await?;
+    assert_eq!(cancelled.run.budget_ledger.consumed.tokens, 0);
+    recovery_matrix_assert_child_joined(&fixture, &parent_invocation_id, &child_invocation_id)
+        .await?;
+    let cancelled_tasks: ExecutionTaskListResponse = test
+        .client()
+        .post_call(
+            "/Execution/list_tasks",
+            &ExecutionTaskListRequest {
+                run: cancelled_run.clone(),
+                limit: Some(100),
+                cursor: None,
+            },
+        )
+        .await?;
+    let cancelled_agent = cancelled_tasks
+        .tasks
+        .iter()
+        .find(|task| task.node_id == "agent")
+        .context("cancelled run omitted its agent task")?;
+    assert_eq!(cancelled_agent.status, ExecutionTaskStatus::Cancelled);
+    let cancelled_usage = cancelled_agent
+        .outcome
+        .as_ref()
+        .map(|outcome| outcome.usage.clone())
+        .unwrap_or(moa_artifacts::execution_plan::ExecutionUsage {
+            cost_microusd: 0,
+            tokens: 0,
+            tool_calls: 0,
+            retrieved_bytes: 0,
+        });
+    assert_eq!(cancelled_usage.tokens, 0);
+    assert_eq!(cancelled_usage.cost_microusd, 0);
+    let cancelled_events = recovery_matrix_wait_for_events(
+        test.client(),
+        session_id,
+        Duration::from_secs(60),
+        |events| {
+            events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::ExecutionCancelled(summary) if summary.run_uid == execution_run_uid
+                )
+            })
+        },
+    )
+    .await?;
+    assert_eq!(
+        cancelled_events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ExecutionCancelled(summary) if summary.run_uid == execution_run_uid
+                )
+            })
+            .count(),
+        1,
+        "cancelled durable run must publish exactly one terminal event"
+    );
+    recovery_matrix_wait_for_session_unfenced(&session, execution_run_uid, Duration::from_secs(60))
+        .await?;
+
+    let replacement = session
+        .start_turn(
+            recovery_matrix_turn_request(RECOVERY_MATRIX_REPLACEMENT_EXECUTION_ROOT),
+            None,
+        )
+        .await?;
+    assert!(
+        !replacement.queued,
+        "cancelled execution left a session fence"
+    );
+    let replacement_turn_id = replacement.turn_id.context("replacement omitted turn id")?;
+    let replacement_outcome = session
+        .await_turn_outcome(
+            &replacement_turn_id,
+            Duration::from_secs(60),
+            Duration::from_millis(25),
+        )
+        .await?;
+    let TurnOutcomeKind::Accepted {
+        execution_run_uid: replacement_run_uid,
+    } = replacement_outcome.kind
+    else {
+        bail!("replacement durable turn was not accepted: {replacement_outcome:?}");
+    };
+    let replacement_run = ExecutionRunRequest {
+        run_uid: replacement_run_uid,
+        ..cancelled_run.clone()
+    };
+    recovery_matrix_wait_for_execution_status(
+        &fixture,
+        test.client(),
+        &replacement_run,
+        ExecutionRunStatus::Completed,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    let requests = fixture
+        .scripted_requests()?
+        .into_iter()
+        .map(serde_json::from_value::<CompletionRequest>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                recovery_matrix_request_contains(request, RECOVERY_MATRIX_EXECUTION_TASK)
+            })
+            .count(),
+        1,
+        "cancelled execution-task LLM must not replay"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                recovery_matrix_request_contains(
+                    request,
+                    RECOVERY_MATRIX_REPLACEMENT_EXECUTION_TASK,
+                )
+            })
+            .count(),
+        1,
+        "replacement execution task must execute exactly once"
+    );
+    assert!(cancelled_events.iter().all(|record| {
+        !matches!(
+            &record.event,
+            Event::BrainResponse { text, .. } if text.contains(RECOVERY_MATRIX_LATE_EXECUTION_RESULT)
+        ) && record.event.input_tokens() != RECOVERY_MATRIX_CANCELLED_EXECUTION_INPUT_TOKENS
+    }));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, local Restate/Postgres, and a supported provider API key"]
 async fn coordinator_ambiguous_selection_pins_execute_inline_route_provider_e2e() -> Result<()> {
@@ -1927,7 +3070,7 @@ async fn coordinator_ambiguous_selection_pins_execute_inline_route_provider_e2e(
         &harness.ingress,
         &harness.session.identity,
         harness.session.session_id,
-        SessionStatus::Paused,
+        SessionStatus::Idle,
         Duration::from_secs(120),
     )
     .await

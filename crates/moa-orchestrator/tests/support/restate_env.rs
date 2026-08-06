@@ -6,8 +6,8 @@ use tokio::sync::Mutex;
 pub static RESTATE_E2E_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Return the Restate admin URL used by e2e tests.
-pub fn restate_admin_url() -> String {
-    std::env::var("MOA_RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
+pub fn restate_test_admin_url() -> String {
+    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
 }
 
 /// Return the Restate ingress URL used by e2e tests.

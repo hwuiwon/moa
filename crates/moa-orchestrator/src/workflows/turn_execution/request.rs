@@ -34,6 +34,7 @@ pub(super) async fn build_request_inside_workflow(
     session_id: SessionId,
     turn_id: TurnId,
     identity: Identity,
+    processing_required: bool,
 ) -> Result<Option<BuiltTurnRequest>, HandlerError> {
     let active_user_sequence_num = ctx
         .get::<Json<u64>>(driver_progress::RootTurnStateKey::USER_MESSAGE_SEQUENCE)
@@ -50,6 +51,7 @@ pub(super) async fn build_request_inside_workflow(
                     session_id,
                     turn_id,
                     identity,
+                    processing_required,
                     active_user_sequence_num,
                     cached_query_rewrite,
                 )

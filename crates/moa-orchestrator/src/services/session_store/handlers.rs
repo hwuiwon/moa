@@ -4,14 +4,12 @@ use std::time::Instant;
 
 use super::inner::{create_agent_session_for_identity, create_session_for_identity};
 use super::*;
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::workflows::session_retention::{
     SessionRetentionClient, SessionRetentionDispatch, SessionRetentionRequest,
     session_retention_workflow_id,
 };
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 
 impl RestateSessionStore for SessionStoreImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -26,17 +24,11 @@ impl RestateSessionStore for SessionStoreImpl {
         let pool = self.pool.clone();
         let meta = meta.into_inner();
         let vo_meta = meta.clone();
-        let identity = require_identity(&ctx)?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, meta.tenant_id, Relation::Operator)
+            .await?;
         let fga = self.authz.require_fga_client()?;
-        require_authz_with_delegation(
-            &fga,
-            &identity,
-            ObjectType::Tenant,
-            meta.tenant_id,
-            Relation::Operator,
-        )
-        .await
-        .map_err(translate_authz_error)?;
 
         let create_identity = identity.clone();
         let session_id = ctx
@@ -70,17 +62,11 @@ impl RestateSessionStore for SessionStoreImpl {
         let pool = self.pool.clone();
         let request = request.into_inner();
         let mut vo_meta = request.meta.clone();
-        let identity = require_identity(&ctx)?;
+        let identity = self
+            .authz
+            .authorize_tenant(&ctx, request.meta.tenant_id, Relation::Operator)
+            .await?;
         let fga = self.authz.require_fga_client()?;
-        require_authz_with_delegation(
-            &fga,
-            &identity,
-            ObjectType::Tenant,
-            request.meta.tenant_id,
-            Relation::Operator,
-        )
-        .await
-        .map_err(translate_authz_error)?;
 
         let create_identity = identity.clone();
         let response = ctx
@@ -132,7 +118,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .emit_event_record(request.session_id, request.event, request.dedupe_key)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("append_event")
             .await;
@@ -165,7 +151,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .get_events(request.session_id, request.range)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("get_events")
             .await?)
@@ -189,7 +175,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .get_session(session_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("get_session")
             .await?)
@@ -212,7 +198,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .update_status(request.session_id, request.status)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("update_status")
             .await?)
@@ -236,7 +222,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .search_events(&request.query, request.filter)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("search_events")
             .await?)
@@ -261,7 +247,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_sessions(request.filter)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_sessions")
             .await?)
@@ -284,7 +270,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .tenant_cost_since(&request.tenant_id, request.since)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("tenant_cost_since")
             .await?)
@@ -326,7 +312,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .create_segment(&request.segment)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("create_segment")
             .await?)
@@ -349,7 +335,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .complete_segment(request.segment_id, request.update)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("complete_segment")
             .await?)
@@ -373,7 +359,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .get_active_segment(session_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("get_active_segment")
             .await?)
@@ -397,7 +383,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_segments(session_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_segments")
             .await?)
@@ -420,7 +406,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .update_segment_assessment(request.segment_id, &request.assessment)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("update_segment_assessment")
             .await?)
@@ -445,7 +431,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .get_segment_baseline(&tenant_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("get_segment_baseline")
             .await?)
@@ -470,7 +456,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_skill_resolution_rates(&tenant_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_skill_resolution_rates")
             .await?)
@@ -495,7 +481,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_task_strategy_success_rates(&tenant_id, &request.task_fingerprint)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_task_strategy_success_rates")
             .await?)
@@ -518,7 +504,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .append_experience_record(&request.experience)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("append_experience_record")
             .await?)
@@ -542,7 +528,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_experience_records(request.session_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_experience_records")
             .await?)
@@ -565,7 +551,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .append_experience_attributions(&request.attributions)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("append_experience_attributions")
             .await?)
@@ -589,7 +575,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_experience_attributions(request.experience_id)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_experience_attributions")
             .await?)
@@ -612,7 +598,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .append_learning_candidate(&request.candidate)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("append_learning_candidate")
             .await?)
@@ -635,7 +621,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .get_learning_candidate(&request.tenant_id, request.candidate_id)
                     .await
-                    .map_err(HandlerError::from)?
+                    .map_err(moa_error_to_handler_error)?
                     .ok_or_else(|| {
                         TerminalError::new_with_code(
                             404,
@@ -671,7 +657,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     .list_learning_candidates(&tenant_id, request.status, request.limit)
                     .await
                     .map(Json::from)
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("list_learning_candidates")
             .await?)
@@ -686,20 +672,12 @@ impl RestateSessionStore for SessionStoreImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "start_session_retention");
         let request = request.into_inner();
-        let identity = require_identity(&ctx)?;
-        let fga = self.authz.require_fga_client()?;
         // Retention deletes a tenant's live conversation history. Tenant
         // operator is not enough: this is the same class of irreversible act as
         // a purge, so it requires tenant admin on the tenant being retained.
-        require_authz_with_delegation(
-            &fga,
-            &identity,
-            ObjectType::Tenant,
-            request.tenant_id,
-            Relation::Admin,
-        )
-        .await
-        .map_err(translate_authz_error)?;
+        self.authz
+            .authorize_tenant(&ctx, request.tenant_id, Relation::Admin)
+            .await?;
 
         let target_date =
             ctx.run(|| async move {
@@ -739,7 +717,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .refresh_segment_materialized_views()
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("refresh_segment_materialized_views")
             .await?)
@@ -761,7 +739,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .refresh_analytics_materialized_views()
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("refresh_analytics_materialized_views")
             .await?)
@@ -788,7 +766,7 @@ impl RestateSessionStore for SessionStoreImpl {
                     chrono::Utc::now(),
                 )
                 .await
-                .map_err(HandlerError::from)?;
+                .map_err(moa_error_to_handler_error)?;
                 Ok::<(), HandlerError>(())
             })
             .name("monitor_skill_regressions")
@@ -831,14 +809,14 @@ impl RestateSessionStore for SessionStoreImpl {
                     chrono::Utc::now(),
                 )
                 .await
-                .map_err(HandlerError::from)?;
+                .map_err(moa_error_to_handler_error)?;
                 moa_skills::embeddings::backfill_skill_embeddings(
                     &registry,
                     embedder_ref,
                     &config.learning.embeddings,
                 )
                 .await
-                .map_err(HandlerError::from)?;
+                .map_err(moa_error_to_handler_error)?;
                 Ok::<(), HandlerError>(())
             })
             .name("backfill_learning_embeddings")
@@ -871,7 +849,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 )
                 .await
                 .map(Json::from)
-                .map_err(HandlerError::from)
+                .map_err(moa_error_to_handler_error)
             })
             .name("mine_task_recurrences")
             .await?
@@ -915,7 +893,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .record_active_segment_tool_use(request.session_id, &request.tool_name)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("record_segment_tool_use")
             .await?)
@@ -938,7 +916,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .record_active_segment_skill_activation(request.session_id, &request.skill_name)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("record_segment_skill_activation")
             .await?)
@@ -961,7 +939,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .record_active_segment_skill_use(request.session_id, &request.skill_name)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("record_segment_skill_use")
             .await?)
@@ -984,7 +962,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .record_active_segment_turn_usage(request.session_id, request.token_cost)
                     .await
-                    .map_err(HandlerError::from)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("record_segment_turn_usage")
             .await?)
@@ -1132,25 +1110,16 @@ fn recurrence_cluster_neighbor_limit(groups: &[moa_session::RecurringExperienceC
 
 async fn authorize_session_read(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = authz.require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Session,
-        session_id,
-        Relation::Participant,
-    )
-    .await
-    .map_err(translate_authz_error)
+    authz.authorize_session_participant(ctx, session_id).await?;
+    Ok(())
 }
 
 async fn authorize_event_search(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     request: &SearchEventsRequest,
 ) -> Result<(), HandlerError> {
     if let Some(session_id) = request.filter.session_id {
@@ -1165,7 +1134,7 @@ async fn authorize_event_search(
 
 async fn authorize_tenant_read(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<(), HandlerError> {
     authz
@@ -1185,7 +1154,7 @@ fn tenant_id_for_session_listing(
 
 async fn authorize_tenant_admin(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<(), HandlerError> {
     authz

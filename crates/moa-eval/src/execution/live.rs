@@ -122,6 +122,16 @@ pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCase) -> Res
             case.case_id
         )));
     }
+    if case
+        .allowed_terminal_statuses
+        .iter()
+        .any(|status| !status.is_terminal())
+    {
+        return Err(invalid_config(format!(
+            "execution task-quality case `{}` lists a nonterminal run status as terminal",
+            case.case_id
+        )));
+    }
     match (case.expected_route, case.expected_strategy) {
         (ExecutionRoutingLabel::Execute, Some(ExecutionStrategy::Durable)) => {
             if case.allowed_terminal_statuses.is_empty()
@@ -649,6 +659,29 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn compensating_status_is_rejected_from_live_terminal_expectations_offline() {
+        // Pins: an in-progress rollback cannot satisfy a live eval's terminal-status contract.
+        let mut case = corpus()
+            .into_iter()
+            .find(|case| case.expected_strategy == Some(ExecutionStrategy::Durable))
+            .expect("fixture corpus must contain one durable case");
+        case.allowed_terminal_statuses = vec![ExecutionRunStatus::Compensating];
+
+        let error = validate_task_quality_case(&case)
+            .expect_err("Compensating must not be accepted as a terminal status");
+        let Error::InvalidConfig(message) = error else {
+            panic!("expected InvalidConfig for nonterminal status, got {error}");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "execution task-quality case `{}` lists a nonterminal run status as terminal",
+                case.case_id
+            )
+        );
     }
 
     fn route_provenance(index: usize) -> ExecutionRouteProvenance {

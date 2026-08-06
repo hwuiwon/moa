@@ -37,7 +37,7 @@ mod tests {
         let session_statuses = [
             (SessionStatus::Created, "created"),
             (SessionStatus::Running, "running"),
-            (SessionStatus::Paused, "paused"),
+            (SessionStatus::Idle, "idle"),
             (SessionStatus::Completed, "completed"),
             (SessionStatus::Cancelled, "cancelled"),
             (SessionStatus::Failed, "failed"),
@@ -179,6 +179,10 @@ mod tests {
     fn unknown_labels_error_with_the_offending_value() {
         let error = from_db::<SessionStatus>("session status", "bogus").unwrap_err();
         assert!(error.to_string().contains("bogus"));
+        assert!(
+            from_db::<SessionStatus>("session status", "paused").is_err(),
+            "the retired paused database label must not remain readable"
+        );
         // PascalCase event types must not accept the snake_case serde form.
         assert!(from_db::<EventType>("event type", "session_created").is_err());
     }

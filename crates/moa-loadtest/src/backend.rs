@@ -16,8 +16,6 @@ const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Classification of a failed turn attempt, used by the error taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnFailureKind {
-    /// Shared turn admission rejected the request with HTTP 429.
-    Rejected,
     /// The start_turn request itself failed.
     StartFailed,
     /// The turn did not reach an outcome within the per-turn timeout.
@@ -177,17 +175,10 @@ impl SessionTarget for RemoteTarget {
                 Some(client_message_id.as_str()),
             )
             .await
-            .map_err(|error| {
-                let rejected = error.is_turn_admission_rejection();
-                TurnFailure {
-                    kind: if rejected {
-                        TurnFailureKind::Rejected
-                    } else {
-                        TurnFailureKind::StartFailed
-                    },
-                    message: error.to_string(),
-                    replacement_safe: rejected,
-                }
+            .map_err(|error| TurnFailure {
+                kind: TurnFailureKind::StartFailed,
+                message: error.to_string(),
+                replacement_safe: false,
             })?;
         let turn_id = response.turn_id.ok_or_else(|| TurnFailure {
             kind: TurnFailureKind::StartFailed,
@@ -648,20 +639,6 @@ enum RemoteHttpError {
     Timeout(Duration),
 }
 
-impl RemoteHttpError {
-    fn is_turn_admission_rejection(&self) -> bool {
-        matches!(
-            self,
-            Self::BadStatus { status, body }
-                if is_turn_admission_rejection(*status, body)
-        )
-    }
-}
-
-pub(crate) fn is_turn_admission_rejection(status: reqwest::StatusCode, body: &str) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS && body.contains("turn admission ")
-}
-
 async fn decode_response<Resp>(
     response: reqwest::Response,
 ) -> std::result::Result<Resp, RemoteHttpError>
@@ -718,23 +695,5 @@ mod tests {
             TurnObservationKind::ExecutionAdmission { run_uid }
         );
         assert!(observation.ttft.is_none());
-    }
-
-    #[test]
-    fn only_shared_admission_429_is_safe_to_replace_immediately() {
-        // Pins: a queue-bound 429 means the old session still owns active work,
-        // while a fleet admission 429 means no turn was dispatched.
-        assert!(is_turn_admission_rejection(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            "turn admission fleet budget is saturated; retry_after_ms=1000"
-        ));
-        assert!(!is_turn_admission_rejection(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            "session pending message queue is full; retry_after_ms=1000"
-        ));
-        assert!(!is_turn_admission_rejection(
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            "turn admission backend unavailable"
-        ));
     }
 }

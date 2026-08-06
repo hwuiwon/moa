@@ -197,7 +197,7 @@ impl GeminiEmbeddingEmbedder {
             .json(body)
             .send()
             .await
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+            .map_err(crate::core::http::provider_transport_error)?;
         decode_json_response(response).await
     }
 }

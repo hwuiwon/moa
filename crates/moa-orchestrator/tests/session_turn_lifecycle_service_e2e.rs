@@ -60,9 +60,6 @@ struct InitializedSession {
 #[derive(Debug, Deserialize)]
 struct TurnProgress {
     turn_id: String,
-    phase: String,
-    cancel_requested: bool,
-    cancel_reason: Option<String>,
 }
 
 fn ingress_url() -> String {
@@ -79,13 +76,6 @@ fn session_url(session_id: &str, handler: &str) -> String {
 
 fn session_store_url(handler: &str) -> String {
     format!("{}/restate/call/SessionStore/{handler}", ingress_url())
-}
-
-fn turn_url(turn_id: &str, handler: &str) -> String {
-    format!(
-        "{}/restate/call/TurnExecution/{turn_id}/{handler}",
-        ingress_url()
-    )
 }
 
 fn live_model() -> &'static str {
@@ -197,6 +187,82 @@ async fn post_start_turn(
         .context("send Session start_turn")
 }
 
+async fn register_coordinator_input(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    turn_id: &str,
+    generation: u64,
+    input_request_id: &str,
+    awakeable_id: &str,
+    waiting_workflow_id: &str,
+) -> Result<()> {
+    client
+        .post(session_url(&session.id, "register_coordinator_input"))
+        .json(&serde_json::json!({
+            "turn_id": turn_id,
+            "generation": generation,
+            "input_request_id": input_request_id,
+            "awakeable_id": awakeable_id,
+            "waiting_workflow_id": waiting_workflow_id,
+            "question": "Which safe path should the coordinator take?",
+        }))
+        .send()
+        .await
+        .context("send Session register_coordinator_input")?
+        .error_for_status()
+        .context("Session register_coordinator_input should succeed")?;
+    Ok(())
+}
+
+async fn clear_coordinator_input(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    turn_id: &str,
+    generation: u64,
+    input_request_id: &str,
+    waiting_workflow_id: &str,
+) -> Result<()> {
+    client
+        .post(session_url(&session.id, "clear_coordinator_input"))
+        .json(&serde_json::json!({
+            "turn_id": turn_id,
+            "generation": generation,
+            "input_request_id": input_request_id,
+            "waiting_workflow_id": waiting_workflow_id,
+        }))
+        .send()
+        .await
+        .context("send Session clear_coordinator_input")?
+        .error_for_status()
+        .context("Session clear_coordinator_input should succeed")?;
+    Ok(())
+}
+
+async fn post_coordinator_reply(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    turn_id: &str,
+    generation: u64,
+    input_request_id: &str,
+) -> Result<reqwest::Response> {
+    let request = client.post(session_url(&session.id, "start_turn"));
+    with_identity(request, &session.identity)
+        .json(&serde_json::json!({
+            "client_message_id": fresh_client_message_id(),
+            "reply_to": {
+                "coordinator_input": {
+                    "turn_id": turn_id,
+                    "generation": generation,
+                    "input_request_id": input_request_id,
+                }
+            },
+            "user_message": "continue without that capability",
+        }))
+        .send()
+        .await
+        .context("send coordinator input reply")
+}
+
 /// Counts durable user-message events carrying `text`.
 ///
 /// Persisted events are externally tagged as `{"type": ..., "data": ...}` with a
@@ -261,43 +327,6 @@ async fn session_progress(
         .json::<SessionProgress>()
         .await
         .context("deserialize Session progress")
-}
-
-async fn turn_progress(client: &reqwest::Client, turn_id: &str) -> Result<TurnProgress> {
-    client
-        .post(turn_url(turn_id, "progress"))
-        .send()
-        .await
-        .context("send TurnExecution progress")?
-        .error_for_status()
-        .context("TurnExecution progress should succeed")?
-        .json::<TurnProgress>()
-        .await
-        .context("deserialize TurnExecution progress")
-}
-
-async fn await_turn_phase(
-    client: &reqwest::Client,
-    turn_id: &str,
-    target: &str,
-    timeout: Duration,
-) -> Result<TurnProgress> {
-    let deadline = Instant::now() + timeout;
-    let mut last_progress = None;
-    while Instant::now() < deadline {
-        let progress = turn_progress(client, turn_id).await?;
-        if progress.phase == target {
-            return Ok(progress);
-        }
-        last_progress = Some(progress);
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    bail!(
-        "turn {turn_id} did not reach phase {target} within {:?}; last progress: {:?}",
-        timeout,
-        last_progress
-    )
 }
 
 async fn await_snapshot_matching<F>(
@@ -580,7 +609,8 @@ async fn start_turn_during_active_turn_is_drained_after_completion() -> Result<(
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn request_cancel_forwards_to_turn_execution() -> Result<()> {
-    // Pins: Session/request_cancel resolves the active TurnExecution workflow cancellation path.
+    // Pins: Session/request_cancel resolves its private TurnExecution child and
+    // publishes the exact cancellation outcome through the public Session projection.
     let client = reqwest::Client::new();
     let session = create_initialized_session(&client, "cancel").await?;
 
@@ -593,12 +623,6 @@ async fn request_cancel_forwards_to_turn_execution() -> Result<()> {
     assert!(cancel.cancelled);
     assert_eq!(cancel.reason, format!("cancel forwarded to turn {turn_id}"));
 
-    let cancelled =
-        await_turn_phase(&client, &turn_id, "Cancelled", Duration::from_secs(10)).await?;
-    assert_eq!(cancelled.turn_id, turn_id);
-    assert!(cancelled.cancel_requested);
-    assert_eq!(cancelled.cancel_reason.as_deref(), Some("user-requested"));
-
     let final_snapshot =
         await_snapshot_matching(&client, &session, Duration::from_secs(10), |current| {
             current.active_turn_id.is_none()
@@ -608,5 +632,74 @@ async fn request_cancel_forwards_to_turn_execution() -> Result<()> {
         })
         .await?;
     assert_eq!(final_snapshot.pending_message_count, 0);
+    let outcome = final_snapshot
+        .last_outcome
+        .expect("cancelled turn should publish a Session outcome");
+    assert_eq!(outcome.turn_id, turn_id);
+    assert_eq!(outcome.kind, "Cancelled");
+    assert_eq!(outcome.message, "user-requested");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
+async fn exact_coordinator_input_cleanup_survives_replay_and_rejects_a_late_reply() -> Result<()> {
+    // Pins: cleanup is one persisted, exact Restate handler. A stale invocation
+    // cannot clear a live generation, replayed registration cannot replace its
+    // owner, and a reply arriving after exact cleanup is rejected without a turn.
+    let client = reqwest::Client::new();
+    let session = create_initialized_session(&client, "coordinator-input-cleanup").await?;
+    let turn_id = format!("coordinator-input-turn:{}", session.id);
+    let input_request_id = format!("security:{turn_id}:6:tool-1");
+
+    register_coordinator_input(
+        &client,
+        &session,
+        &turn_id,
+        6,
+        &input_request_id,
+        "awakeable-current",
+        "workflow-current",
+    )
+    .await?;
+    clear_coordinator_input(
+        &client,
+        &session,
+        &turn_id,
+        4,
+        "security:stale:4:tool-1",
+        "workflow-stale",
+    )
+    .await?;
+    register_coordinator_input(
+        &client,
+        &session,
+        &turn_id,
+        6,
+        &input_request_id,
+        "awakeable-replayed",
+        "workflow-replayed",
+    )
+    .await?;
+    clear_coordinator_input(
+        &client,
+        &session,
+        &turn_id,
+        6,
+        &input_request_id,
+        "workflow-current",
+    )
+    .await?;
+
+    let late_reply =
+        post_coordinator_reply(&client, &session, &turn_id, 6, &input_request_id).await?;
+    assert_eq!(
+        late_reply.status(),
+        reqwest::StatusCode::CONFLICT,
+        "an exact late reply must not resolve a dead awakeable or start a new turn"
+    );
+    let current = snapshot(&client, &session).await?;
+    assert_eq!(current.active_turn_id, None);
+    assert_eq!(current.pending_message_count, 0);
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Restate service for local API key lifecycle operations.
 
 use moa_auth_providers::api_keys::{CreateApiKeyRequest, CreateApiKeyResponse, KeyListItem};
-use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
+use moa_authz::FgaClient;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -9,7 +9,8 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::handlers::authz_shim::{
-    require_configured_fga_client, require_identity, translate_authz_error,
+    journal_context_authz, journal_context_authz_any, require_configured_fga_client,
+    require_identity,
 };
 use crate::identity_admin::api_keys as key_admin;
 
@@ -58,11 +59,12 @@ impl ApiKeys for ApiKeysImpl {
         let request = request.into_inner();
         validate_key_name(&request.name)?;
         let identity = require_identity(&ctx)?;
-        require_tenant_member(self.fga_client.clone(), &identity).await?;
+        require_tenant_member(self.fga_client.clone(), &ctx, identity.clone()).await?;
         if let Some(agent_id) = request.for_agent_id {
             require_agent_operator_or_tenant_admin(
                 self.fga_client.clone(),
-                &identity,
+                &ctx,
+                identity.clone(),
                 agent_id,
                 identity.tenant_id.0,
             )
@@ -93,7 +95,6 @@ impl ApiKeys for ApiKeysImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, id))]
-    // SAFETY: `rotate_key` validates caller ownership or agent operator authz through FGA before mutation.
     async fn rotate(
         &self,
         ctx: Context<'_>,
@@ -102,12 +103,28 @@ impl ApiKeys for ApiKeysImpl {
         annotate_restate_handler_span("ApiKeys", "rotate");
         let identity = require_identity(&ctx)?;
         let key_id = id.into_inner();
+        let load_pool = self.pool.clone();
+        let load_identity = identity.clone();
+        let prepared = ctx
+            .run(|| async move {
+                key_admin::prepare_key_mutation(&load_pool, &load_identity, key_id)
+                    .await
+                    .map(Json::from)
+            })
+            .name(format!("api_keys_rotate_load:{key_id}"))
+            .await?
+            .into_inner();
+        authorize_prepared_key(
+            self.fga_client.clone(),
+            &ctx,
+            identity.clone(),
+            prepared.authorization,
+        )
+        .await?;
         let pool = self.pool.clone();
-        let fga = self.fga_client.clone();
-
         Ok(ctx
             .run(|| async move {
-                rotate_key_for_identity(pool, fga, identity, key_id)
+                key_admin::rotate_prepared_key(pool, identity, prepared)
                     .await
                     .map(Json::from)
             })
@@ -116,17 +133,32 @@ impl ApiKeys for ApiKeysImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, id))]
-    // SAFETY: `revoke_key` validates caller ownership or agent operator authz through FGA before mutation.
     async fn revoke(&self, ctx: Context<'_>, id: Json<Uuid>) -> Result<(), HandlerError> {
         annotate_restate_handler_span("ApiKeys", "revoke");
         let identity = require_identity(&ctx)?;
         let key_id = id.into_inner();
+        let load_pool = self.pool.clone();
+        let load_identity = identity.clone();
+        let prepared = ctx
+            .run(|| async move {
+                key_admin::prepare_key_mutation(&load_pool, &load_identity, key_id)
+                    .await
+                    .map(Json::from)
+            })
+            .name(format!("api_keys_revoke_load:{key_id}"))
+            .await?
+            .into_inner();
+        authorize_prepared_key(
+            self.fga_client.clone(),
+            &ctx,
+            identity.clone(),
+            prepared.authorization,
+        )
+        .await?;
         let pool = self.pool.clone();
-        let fga = self.fga_client.clone();
-
         Ok(ctx
             .run(|| async move {
-                revoke_key_for_identity(pool, fga, identity, key_id, "user_requested").await
+                key_admin::revoke_prepared_key(pool, identity, prepared, "user_requested").await
             })
             .name("api_keys_revoke")
             .await?)
@@ -180,46 +212,81 @@ fn validate_key_name(name: &str) -> Result<(), HandlerError> {
 
 async fn require_tenant_member(
     fga_client: Option<FgaClient>,
-    identity: &Identity,
+    ctx: &Context<'_>,
+    identity: Identity,
 ) -> Result<(), HandlerError> {
     let fga = require_configured_fga_client(fga_client)?;
-    require_authz_with_delegation(
-        &fga,
+    let tenant_id = identity.tenant_id;
+    journal_context_authz(
+        ctx,
+        fga,
         identity,
         ObjectType::Tenant,
-        identity.tenant_id,
+        tenant_id,
         Relation::Operator,
     )
     .await
-    .map_err(translate_authz_error)
 }
 
 async fn require_agent_operator_or_tenant_admin(
     fga_client: Option<FgaClient>,
-    identity: &Identity,
+    ctx: &Context<'_>,
+    identity: Identity,
     agent_id: Uuid,
     tenant_id: Uuid,
 ) -> Result<(), HandlerError> {
     let fga = require_configured_fga_client(fga_client)?;
-    let operator = require_authz_with_delegation(
-        &fga,
+    journal_context_authz_any(
+        ctx,
+        fga,
         identity,
         ObjectType::Agent,
         agent_id,
         Relation::Operator,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
     )
-    .await;
-    match operator {
-        Ok(()) => Ok(()),
-        Err(AuthzCheckError::Forbidden { .. }) => require_authz_with_delegation(
-            &fga,
-            identity,
-            ObjectType::Tenant,
+    .await
+}
+
+async fn authorize_prepared_key(
+    fga_client: Option<FgaClient>,
+    ctx: &Context<'_>,
+    identity: Identity,
+    authorization: key_admin::ApiKeyMutationAuthorization,
+) -> Result<(), HandlerError> {
+    match authorization {
+        key_admin::ApiKeyMutationAuthorization::Direct => Ok(()),
+        key_admin::ApiKeyMutationAuthorization::TenantAdmin { tenant_id } => {
+            let fga = require_configured_fga_client(fga_client)?;
+            journal_context_authz(
+                ctx,
+                fga,
+                identity,
+                ObjectType::Tenant,
+                tenant_id,
+                Relation::Admin,
+            )
+            .await
+        }
+        key_admin::ApiKeyMutationAuthorization::AgentOperatorOrTenantAdmin {
+            agent_id,
             tenant_id,
-            Relation::Admin,
-        )
-        .await
-        .map_err(translate_authz_error),
-        Err(error) => Err(translate_authz_error(error)),
+        } => {
+            let fga = require_configured_fga_client(fga_client)?;
+            journal_context_authz_any(
+                ctx,
+                fga,
+                identity,
+                ObjectType::Agent,
+                agent_id,
+                Relation::Operator,
+                ObjectType::Tenant,
+                tenant_id,
+                Relation::Admin,
+            )
+            .await
+        }
     }
 }

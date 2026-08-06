@@ -126,6 +126,7 @@ impl TurnRequestPreparer {
         session_id: SessionId,
         turn_id: TurnId,
         identity: Identity,
+        processing_required: bool,
         active_user_sequence_num: Option<u64>,
         cached_query_rewrite: Option<QueryRewriteCacheEntry>,
     ) -> Result<PreparedTurnRequestOutput> {
@@ -146,7 +147,11 @@ impl TurnRequestPreparer {
             active_user_sequence_num,
         )
         .await?;
-        if !session_requires_processing(&session, &recent_events) {
+        // Session and Worker VOs admit system-triggered turns directly. A terminal
+        // event from the turn that released that queued work can land after the
+        // control event, so the generic tail heuristic must not veto the admitted
+        // workflow. User-message turns still use the tail as their idle guard.
+        if !processing_required && !session_requires_processing(&session, &recent_events) {
             return Ok(PreparedTurnRequestOutput {
                 prepared: PreparedTurnRequest::Idle,
                 active_canary: None,

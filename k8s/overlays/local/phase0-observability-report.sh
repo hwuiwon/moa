@@ -88,8 +88,7 @@ service_account_token="$(curl --silent --show-error --fail \
   || fail "Grafana service-account token creation returned no token"
 env \
   GRAFANA_URL="${GRAFANA_URL}" \
-  GRAFANA_SERVICE_ACCOUNT_TOKEN="${service_account_token}" \
-  bash "${repo_root}/scripts/observability/sync-grafana-dashboards.sh"
+  GRAFANA_SERVICE_ACCOUNT_TOKEN="${service_account_token}"
 unset service_account_token
 
 prometheus_query() {
@@ -194,6 +193,24 @@ report_prometheus_vector \
   "exact current Prometheus snapshot" \
   "series" \
   'count by (service_name, __name__) ({__name__=~"moa_.+|gen_ai_.+"})'
+
+echo
+echo "Restate scrape and JSON pod logs"
+report_prometheus_vector \
+  "restate_healthy_scrape_targets" \
+  "current local Restate pod targets scraped by the LGTM collector" \
+  "targets" \
+  'count(up{job="restate"} == 1)'
+report_prometheus_vector \
+  "restate_active_metric_series" \
+  "current Restate 1.7.2 Prometheus series grouped by instrument" \
+  "series" \
+  'count by (__name__) ({__name__=~"restate_.+"})'
+report_loki_vector \
+  "restate_json_log_lines_1h" \
+  "Restate CRI records collected by the local-only filelog pipeline; `| json` proves the body is valid server JSON" \
+  "log_lines" \
+  'sum(count_over_time({service_name="restate"} | json [1h]))'
 
 echo
 echo "Collector acceptance and export failures"

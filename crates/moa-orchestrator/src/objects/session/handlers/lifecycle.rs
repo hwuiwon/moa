@@ -88,7 +88,8 @@ impl SessionImpl {
                 ctx.workflow_client::<TurnExecutionClient>(turn_id)
                     .request_cancel(Json::from("session cancel requested".to_string())),
             )
-            .send();
+            .call()
+            .await?;
         }
         // Only `TaskTree` cascades to the registered children; `CoordinatorOnly` leaves them running.
         if scope.cancels_task_tree() {
@@ -97,7 +98,8 @@ impl SessionImpl {
                     ctx.object_client::<WorkerClient>(child.id)
                         .cancel("parent session cancelled".to_string()),
                 )
-                .send();
+                .call()
+                .await?;
             }
             for run_uid in active_execution_run_uids {
                 let call = ctx.service_client::<ExecutionClient>().cancel(Json::from(
@@ -133,7 +135,7 @@ impl SessionImpl {
     ) -> Result<Json<SessionStatus>, HandlerError> {
         annotate_restate_handler_span("Session", "status");
         let session_id = parse_session_key(ctx.key())?;
-        require_session_participant(&self.authz, &ctx, session_id).await?;
+        require_shared_session_participant(&self.authz, &ctx, session_id).await?;
         Ok(Json::from(SessionVoState::load_status(&ctx).await?))
     }
 
@@ -157,7 +159,8 @@ impl SessionImpl {
             ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
                 .request_cancel(reason),
         )
-        .send();
+        .call()
+        .await?;
 
         Ok(Json::from(CancelResponse {
             cancelled: true,
@@ -171,7 +174,7 @@ impl SessionImpl {
     ) -> Result<Json<SessionSnapshot>, HandlerError> {
         annotate_restate_handler_span("Session", "snapshot");
         let session_id = parse_session_key(ctx.key())?;
-        require_session_participant(&self.authz, &ctx, session_id).await?;
+        require_shared_session_participant(&self.authz, &ctx, session_id).await?;
         let pending_state = load_pending_state(&ctx).await?;
         let active_execution_runs = SessionVoState::load_active_execution_runs(&ctx).await?;
         Ok(Json::from(SessionSnapshot {

@@ -9,10 +9,11 @@ impl SessionVoState {
     /// second entry, so a replayed turn does not leave an orphaned awakeable that
     /// nothing will ever resolve.
     pub fn register_coordinator_input(&mut self, pending: CoordinatorPendingInput) -> bool {
-        if self
-            .pending_coordinator_inputs
-            .iter()
-            .any(|entry| entry.input_request_id == pending.input_request_id)
+        if self.coordinator_input_already_delivered(&pending.input_request_id)
+            || self
+                .pending_coordinator_inputs
+                .iter()
+                .any(|entry| entry.input_request_id == pending.input_request_id)
         {
             return false;
         }
@@ -32,6 +33,9 @@ impl SessionVoState {
         generation: u64,
         input_request_id: &str,
     ) -> Option<String> {
+        if self.coordinator_input_already_delivered(input_request_id) {
+            return None;
+        }
         let index = self.pending_coordinator_inputs.iter().position(|entry| {
             entry.input_request_id == input_request_id
                 && entry.turn_id == turn_id
@@ -51,60 +55,39 @@ impl SessionVoState {
             .any(|entry| entry == input_request_id)
     }
 
-    /// Drops every coordinator input request raised by a superseded generation.
+    /// Retracts one exact coordinator input registration and advertised reply target.
     ///
-    /// Called when a turn ends for any reason. Without it a cancelled or failed
-    /// turn would leave its pending target advertised, and the next plain user
-    /// message would be swallowed as a reply to work that no longer exists.
-    pub fn clear_coordinator_inputs_before(&mut self, generation: u64) -> Vec<String> {
-        let (stale, live): (Vec<_>, Vec<_>) = self
-            .pending_coordinator_inputs
-            .drain(..)
-            .partition(|entry| entry.generation < generation);
-        self.pending_coordinator_inputs = live;
-        for entry in &stale {
-            self.pending_user_reply_targets.retain(|target| {
-                !matches!(
-                    target,
-                    PendingUserReplyTarget::CoordinatorInput {
-                        input_request_id,
-                        ..
-                    } if input_request_id == &entry.input_request_id
-                )
-            });
-        }
-        stale.into_iter().map(|entry| entry.awakeable_id).collect()
-    }
-
-    /// Drops the coordinator input requests one finished workflow invocation owns.
-    ///
-    /// Keyed on the waiting workflow, not the turn: a retried invocation of the
-    /// same logical turn registers its own awakeable, and clearing by turn id
-    /// would take down the live retry along with the dead original.
-    pub fn clear_coordinator_inputs_for_workflow(
+    /// Matching every ownership coordinate makes cleanup generation safe: a stale
+    /// workflow invocation becomes a no-op instead of removing a live replacement.
+    pub fn clear_coordinator_input(
         &mut self,
+        turn_id: &str,
+        generation: u64,
+        input_request_id: &str,
         waiting_workflow_id: &str,
-    ) -> Vec<String> {
-        let (finished, live): (Vec<_>, Vec<_>) = self
-            .pending_coordinator_inputs
-            .drain(..)
-            .partition(|entry| entry.waiting_workflow_id == waiting_workflow_id);
-        self.pending_coordinator_inputs = live;
-        for entry in &finished {
-            self.pending_user_reply_targets.retain(|target| {
-                !matches!(
-                    target,
-                    PendingUserReplyTarget::CoordinatorInput {
-                        input_request_id,
-                        ..
-                    } if input_request_id == &entry.input_request_id
-                )
-            });
-        }
-        finished
-            .into_iter()
-            .map(|entry| entry.awakeable_id)
-            .collect()
+    ) -> bool {
+        let Some(index) = self.pending_coordinator_inputs.iter().position(|entry| {
+            entry.turn_id == turn_id
+                && entry.generation == generation
+                && entry.input_request_id == input_request_id
+                && entry.waiting_workflow_id == waiting_workflow_id
+        }) else {
+            return false;
+        };
+        self.pending_coordinator_inputs.remove(index);
+        self.pending_user_reply_targets.retain(|target| {
+            !matches!(
+                target,
+                PendingUserReplyTarget::CoordinatorInput {
+                    turn_id: target_turn_id,
+                    generation: target_generation,
+                    input_request_id: target_input_request_id,
+                } if target_turn_id == turn_id
+                    && *target_generation == generation
+                    && target_input_request_id == input_request_id
+            )
+        });
+        true
     }
 
     /// Inserts or updates one exact pending user reply target.

@@ -422,7 +422,8 @@ fn goal() -> ExecutionGoalContract {
 fn canonical_plan(catalog_hash: ExecutionHash) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: vec![moa_artifacts::execution_plan::ExecutionNode {
@@ -441,6 +442,7 @@ fn canonical_plan(catalog_hash: ExecutionHash) -> CanonicalExecutionPlan {
                         reference: capability_ref(),
                     },
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,

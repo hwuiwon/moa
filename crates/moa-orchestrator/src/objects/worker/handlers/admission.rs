@@ -117,7 +117,7 @@ impl WorkerImpl {
         let input = input.into_inner();
         require_identity(&ctx)?;
         self.authz
-            .authorize_session_participant(&ctx, input.parent_session)
+            .authorize_object_session_participant(&ctx, input.parent_session)
             .await?;
         let text = input
             .input
@@ -204,7 +204,14 @@ impl WorkerImpl {
         let active_turn_id = state.active_turn_id.clone();
         let parent_session = state.parent_session;
         state.cancel_reason = Some(reason.clone());
-        state.status = Some(WorkerState::Cancelled);
+        // An active turn owns the terminal transition. Keeping the worker
+        // nonterminal until that workflow has fenced and joined its children
+        // prevents status readers and parent notification from outrunning
+        // provider cancellation. An idle worker has no workflow left to report
+        // the outcome, so it can become terminal here.
+        if active_turn_id.is_none() {
+            state.status = Some(WorkerState::Cancelled);
+        }
         // Nothing will resolve this child's awakeables once it is cancelled, so every
         // in-flight round-trip is dropped and its advertised reply target retracted.
         let cleared_inputs = state.clear_all_input_requests();
@@ -241,14 +248,16 @@ impl WorkerImpl {
                 ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id)
                     .request_cancel(Json::from(reason.clone())),
             )
-            .send();
+            .call()
+            .await?;
         }
         for child in children {
             crate::restate_identity::replay_safe_request(
                 ctx.object_client::<WorkerClient>(child.id)
                     .cancel(reason.clone()),
             )
-            .send();
+            .call()
+            .await?;
         }
         tracing::info!(key = %ctx.key(), %reason, "worker cancel requested");
         Ok(())

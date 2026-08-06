@@ -5,7 +5,6 @@ use super::*;
 pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
     let path = match field {
         "restate_ingress_url" => &["orchestrator", "restate_ingress_url"][..],
-        "restate_admin_url" => &["orchestrator", "restate_admin_url"],
         "restate_llm_gateway_url" => &["orchestrator", "llm_gateway_url"],
         _ => return None,
     };
@@ -14,7 +13,6 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
 
 pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
     validate_url("MOA_RESTATE_INGRESS_URL", &overlay.restate_ingress_url)?;
-    validate_url("MOA_RESTATE_ADMIN_URL", &overlay.restate_admin_url)?;
     validate_url(
         "MOA_RESTATE_LLM_GATEWAY_URL",
         &overlay.restate_llm_gateway_url,

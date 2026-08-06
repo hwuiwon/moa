@@ -569,7 +569,8 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
             }]
         },
         "plan": {
-            "schema_version": 1,
+            "schema_version": 2,
+            "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
             "nodes": [{
@@ -583,6 +584,7 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
                     "kind": "output",
                     "value": { "status": "complete" }
                 },
+                "compensation": null,
                 "retry": {
                     "max_attempts": max_attempts,
                     "initial_backoff_ms": 0,
@@ -736,6 +738,7 @@ fn execution_amendment_candidate(base_plan_revision: u64, valid: bool) -> String
                         "kind": "output",
                         "value": {"status": "repaired"}
                     },
+                    "compensation": null,
                     "retry": {
                         "max_attempts": 1,
                         "initial_backoff_ms": 0,
@@ -750,7 +753,7 @@ fn execution_amendment_candidate(base_plan_revision: u64, valid: bool) -> String
     };
     json!({
         "amendment": {
-            "schema_version": 1,
+            "schema_version": 2,
             "base_plan_revision": base_plan_revision,
             "reason": "replace unsupported output",
             "evidence": {"shape": "changed"},

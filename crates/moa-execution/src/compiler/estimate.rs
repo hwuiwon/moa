@@ -152,6 +152,17 @@ pub(super) fn estimate_node(
         ExecutionOperation::Capability { reference } => capability_estimate(reference, catalog)
             .and_then(|estimate| {
                 estimate.checked_multiply_resources(attempts, "capability retry estimate")
+            })
+            .and_then(|forward| {
+                let Some(compensation) = &node.compensation else {
+                    return Ok(forward);
+                };
+                let compensation = capability_estimate(&compensation.compensator, catalog)?
+                    .checked_multiply_resources(
+                        attempts,
+                        "capability compensation retry estimate",
+                    )?;
+                forward.checked_add(compensation, "capability compensation estimate")
             }),
         ExecutionOperation::Agent { max_turns, .. } => {
             agent_estimate(config, *max_turns).and_then(|estimate| {

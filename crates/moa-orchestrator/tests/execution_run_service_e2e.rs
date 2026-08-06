@@ -7,6 +7,8 @@ mod execution_execution_support;
 mod admission_replay;
 #[path = "execution_run_service_e2e/bulk_and_recovery.rs"]
 mod bulk_and_recovery;
+#[path = "execution_run_service_e2e/compensation_recovery.rs"]
+mod compensation_recovery;
 #[path = "execution_run_service_e2e/evaluation.rs"]
 mod evaluation;
 #[path = "execution_run_service_e2e/observability.rs"]
@@ -41,31 +43,25 @@ use moa_core::{
     },
 };
 use moa_execution::{
-    capability::{
-        ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionEstimate,
-        ExecutionHash,
-    },
+    capability::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionHash},
     compiler::{CompileExecutionRequest, compile},
     repository::{
         ConfirmationOutcome, ExecutionRepository, ExecutionScope, NewExecutionPlanningContext,
-        NewExecutionRun, PlanningContextWriteOutcome, ReservationOutcome, TaskOutcomeWrite,
-        TransitionOutcome,
+        NewExecutionRun, PlanningContextWriteOutcome,
     },
-    state::{
-        ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus, ExecutionTerminalCause,
-        LogicalTask, LogicalTaskKind,
-    },
+    state::{ExecutionRunStatus, ExecutionTerminalCause},
     wire::{
         ExecutionCancelRequest, ExecutionConfirmRequest, ExecutionMutationResponse,
         ExecutionPlanningContextRequest, ExecutionPlanningContextResponse,
         ExecutionPlanningContextSnapshot, ExecutionRunRequest, ExecutionStartRequest,
-        ExecutionStartResponse, ExecutionStatusResponse, ExecutionTaskWorkflowRequest,
-        planning_context_hash,
+        ExecutionStartResponse, ExecutionStatusResponse, planning_context_hash,
     },
 };
 use moa_orchestrator::objects::session::ExecutionRunStartedDelivery;
 use moa_test_support::OrchestratorTestFixture;
 use serde_json::json;
+
+use execution_execution_support::fixtures::await_execution_terminal;
 
 #[cfg(feature = "execution-planning-failpoints")]
 #[tokio::test]
@@ -131,7 +127,8 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({
                 "type": "object",
@@ -154,6 +151,7 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
                 operation: ExecutionOperation::Output {
                     value: json!({"value": "durable"}),
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,
@@ -343,7 +341,8 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: vec![ExecutionNode {
@@ -356,6 +355,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
                 operation: ExecutionOperation::Output {
                     value: json!({"value": "unused"}),
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,
@@ -385,12 +385,22 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
     let scope = ExecutionScope::Tenant {
         tenant_id: session.tenant_id,
     };
+    let awaiting_origin_sequence = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: "cancel before confirmation".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
     let (awaiting_context_uid, awaiting_context_hash) = create_test_planning_context(
         &repository,
         scope,
         session.tenant_id,
         session_id,
-        1,
+        awaiting_origin_sequence,
         owner_user_id.clone(),
         catalog.clone(),
         authorization.clone(),
@@ -406,7 +416,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
                 tenant_id: session.tenant_id,
                 contact_id: None,
                 session_id,
-                originating_user_sequence_num: 1,
+                originating_user_sequence_num: awaiting_origin_sequence,
                 planning_context_uid: awaiting_context_uid,
                 planning_context_hash: awaiting_context_hash,
                 owner_user_id: owner_user_id.clone(),
@@ -439,8 +449,39 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
     assert!(matches!(
         applied,
         ExecutionMutationResponse::Applied { ref run }
-            if run.status == ExecutionRunStatus::Cancelled && run.queued_at.is_none()
+            if run.status == ExecutionRunStatus::AwaitingConfirmation
+                && run.queued_at.is_none()
+                && run.completed_at.is_none()
     ));
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/execution_run_started"),
+            &ExecutionRunStartedDelivery {
+                started: ExecutionRunStarted {
+                    run_uid: awaiting.run_uid,
+                    originating_user_sequence_num: awaiting_origin_sequence,
+                    plan_revision: awaiting.plan_revision,
+                    status: ExecutionRunAdmissionStatus::AwaitingConfirmation,
+                    confirmation: Some(ExecutionConfirmationEvidence {
+                        active_plan_hash: awaiting.active_plan_hash.to_string(),
+                        estimate: ExecutionAdmissionEstimate {
+                            cost_microusd: awaiting.active_plan.estimate.cost_microusd,
+                            tokens: awaiting.active_plan.estimate.tokens,
+                            tasks: awaiting.active_plan.estimate.tasks,
+                            tool_calls: awaiting.active_plan.estimate.tool_calls,
+                            retrieved_bytes: awaiting.active_plan.estimate.retrieved_bytes,
+                        },
+                        methodology: ExecutionEstimateMethodology::ConservativeWorstCase,
+                    }),
+                },
+                approved_budget: awaiting.approved_budget.clone(),
+            },
+        )
+        .await
+        .context("activate the pre-confirmation cancellation fence")?;
+    let terminal = await_execution_terminal(test.client(), &preconfirm_request.run).await?;
+    assert_eq!(terminal.run.status, ExecutionRunStatus::Cancelled);
+    assert!(terminal.run.queued_at.is_none());
     let preconfirm = repository
         .load_run(scope, awaiting.run_uid)
         .await?
@@ -459,12 +500,22 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
             if run.status == ExecutionRunStatus::Cancelled && run.queued_at.is_none()
     ));
 
+    let queued_origin_sequence = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: "cancel after queue admission".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
     let (queued_context_uid, queued_context_hash) = create_test_planning_context(
         &repository,
         scope,
         session.tenant_id,
         session_id,
-        2,
+        queued_origin_sequence,
         owner_user_id.clone(),
         catalog.clone(),
         authorization.clone(),
@@ -479,7 +530,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
                 tenant_id: session.tenant_id,
                 contact_id: None,
                 session_id,
-                originating_user_sequence_num: 2,
+                originating_user_sequence_num: queued_origin_sequence,
                 planning_context_uid: queued_context_uid,
                 planning_context_hash: queued_context_hash,
                 owner_user_id,
@@ -517,17 +568,45 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
     assert!(matches!(
         postqueue,
         ExecutionMutationResponse::Applied { ref run }
-            if run.status == ExecutionRunStatus::Cancelled
+            if run.status == ExecutionRunStatus::Queued
                 && run.queued_at == Some(queued_at)
+                && run.completed_at.is_none()
     ));
-    assert_eq!(
-        repository
-            .load_run(scope, queued.run_uid)
-            .await?
-            .context("post-queue cancelled run should remain queryable")?
-            .queued_at,
-        Some(queued_at)
-    );
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/execution_run_started"),
+            &ExecutionRunStartedDelivery {
+                started: ExecutionRunStarted {
+                    run_uid: queued.run_uid,
+                    originating_user_sequence_num: queued_origin_sequence,
+                    plan_revision: queued.plan_revision,
+                    status: ExecutionRunAdmissionStatus::Queued,
+                    confirmation: None,
+                },
+                approved_budget: queued.approved_budget.clone(),
+            },
+        )
+        .await
+        .context("activate the post-queue cancellation fence")?;
+    let terminal = await_execution_terminal(
+        test.client(),
+        &ExecutionRunRequest {
+            tenant_id: session.tenant_id,
+            contact_id: None,
+            session_id,
+            run_uid: queued.run_uid,
+        },
+    )
+    .await?;
+    assert_eq!(terminal.run.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(terminal.run.queued_at, Some(queued_at));
+    let postqueue = repository
+        .load_run(scope, queued.run_uid)
+        .await?
+        .context("post-queue cancelled run should remain queryable")?;
+    assert_eq!(postqueue.queued_at, Some(queued_at));
+    assert!(postqueue.confirmed_at.is_none());
+    assert!(postqueue.started_at.is_none());
     Ok(())
 }
 
@@ -618,7 +697,8 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: vec![ExecutionNode {
@@ -631,6 +711,7 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
                 operation: ExecutionOperation::Output {
                     value: json!({"handoff": "completed"}),
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,
@@ -786,585 +867,5 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
     .context("wake was lost across the handoff checkpoint")??;
     assert_eq!(terminal.status, ExecutionRunStatus::Completed);
     assert_eq!(terminal.output, Some(json!({"handoff": "completed"})));
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires local Restate, Postgres, OpenFGA, and the service-e2e feature lane"]
-async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> Result<()> {
-    // Pins: a waiting-replan task whose consumed plus reserved task capacity
-    // exactly exhausts the approved envelope cannot park forever waiting for a
-    // Task 7 amendment; ExecutionRun records evidence and terminates immediately.
-    let fixture = OrchestratorTestFixture::shared().await?;
-    let test = fixture.isolated().await;
-    let session_id = test.create_session("execution-replan-budget-stop").await?;
-    let session = test.client().get_session(session_id).await?;
-    let originating_user_sequence_num = test
-        .client()
-        .append_event(
-            session_id,
-            Event::UserMessage {
-                text: "stop an exhausted replan wait".to_string(),
-                attachments: Vec::new(),
-            },
-        )
-        .await?;
-    let owner_user_id = match session.created_by {
-        Some(SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
-        other => anyhow::bail!("fixture session has no identity owner: {other:?}"),
-    };
-    let catalog = ExecutionCapabilityCatalog::build(Vec::new())?;
-    let authorization = ExecutionAuthorizationEnvelope {
-        capability_refs: Vec::new(),
-        skill_refs: Vec::new(),
-    };
-    let approved_budget = ExecutionBudgetLimit {
-        max_cost_microusd: Some(100),
-        max_tokens: Some(1),
-        max_tasks: Some(3),
-        max_tool_calls: Some(100),
-        max_retrieved_bytes: Some(100),
-        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
-    };
-    let compiled = compile(CompileExecutionRequest {
-        goal: ExecutionGoalContract {
-            objective: "stop an exhausted replan wait".to_string(),
-            requirements: vec![ExecutionRequirement {
-                id: "result".to_string(),
-                description: "return a result when resources permit".to_string(),
-            }],
-            deliverables: Vec::new(),
-            coverage: Vec::new(),
-            constraints: Vec::new(),
-            completion_checks: vec![CompletionCheck {
-                id: "output-schema".to_string(),
-                description: "terminal output matches its schema".to_string(),
-                requirement_ids: vec!["result".to_string()],
-                constraint_ids: Vec::new(),
-                kind: CompletionCheckKind::OutputSchema,
-            }],
-        },
-        plan: ExecutionPlanDefinition {
-            schema_version: 1,
-            input_schema: json!({"type": "object"}),
-            output_schema: json!({"type": "object"}),
-            nodes: vec![ExecutionNode {
-                id: "output".to_string(),
-                requirement_ids: vec!["result".to_string()],
-                depends_on: Vec::new(),
-                when: None,
-                input: json!({}),
-                output_schema: json!({"type": "object"}),
-                operation: ExecutionOperation::Output {
-                    value: json!({"value": "unreachable"}),
-                },
-                retry: RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                budget: None,
-            }],
-        },
-        run_input: json!({}),
-        catalog: catalog.clone(),
-        authorization: authorization.clone(),
-        approved_budget: approved_budget.clone(),
-        config: ExecutionConfig::default(),
-        now: moa_test_support::fixtures::pg_now(),
-    })
-    .compiled
-    .context("waiting-replan fixture plan should compile")?;
-    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
-        .await
-        .context("connect to fixture Postgres")?;
-    let repository = ExecutionRepository::new(pool);
-    let scope = ExecutionScope::Tenant {
-        tenant_id: session.tenant_id,
-    };
-    let (planning_context_uid, planning_context_hash) = create_test_planning_context(
-        &repository,
-        scope,
-        session.tenant_id,
-        session_id,
-        originating_user_sequence_num,
-        owner_user_id.clone(),
-        catalog.clone(),
-        authorization.clone(),
-        approved_budget.clone(),
-    )
-    .await?;
-    let source_provenance = test_source_provenance(&compiled.plan.plan_hash.to_string());
-    let run = repository
-        .create_run(
-            scope,
-            NewExecutionRun {
-                tenant_id: session.tenant_id,
-                contact_id: None,
-                session_id,
-                originating_user_sequence_num,
-                planning_context_uid,
-                planning_context_hash,
-                owner_user_id,
-                goal: compiled.goal,
-                plan: compiled.plan,
-                catalog,
-                authorization,
-                pinned_instruction_skills: Vec::new(),
-                source_provenance,
-                input: json!({}),
-                status: ExecutionRunStatus::Queued,
-                approved_budget,
-                idempotency_key: Some(format!("replan-budget-stop-{session_id}")),
-            },
-        )
-        .await?;
-    let task_id = ExecutionTaskId::derive(run.run_uid, "output", "")?;
-    let task = LogicalTask {
-        task_id,
-        node_id: "output".to_string(),
-        item_key: String::new(),
-        requirement_ids: vec!["result".to_string()],
-        plan_revision: 1,
-        generation: 1,
-        input: json!({}),
-        kind: LogicalTaskKind::Output {
-            value: json!({"value": "unreachable"}),
-        },
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 0,
-            max_backoff_ms: 0,
-        },
-        reservation: ExecutionEstimate {
-            cost_microusd: 0,
-            tokens: 1,
-            tasks: 1,
-            tool_calls: 0,
-            retrieved_bytes: 0,
-        },
-    };
-    let pending_task = LogicalTask {
-        task_id: ExecutionTaskId::derive(run.run_uid, "output", "pending_cleanup")?,
-        node_id: "output".to_string(),
-        item_key: "pending_cleanup".to_string(),
-        requirement_ids: vec!["result".to_string()],
-        plan_revision: 1,
-        generation: 1,
-        input: json!({}),
-        kind: LogicalTaskKind::Output { value: json!({}) },
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 0,
-            max_backoff_ms: 0,
-        },
-        reservation: ExecutionEstimate {
-            cost_microusd: 0,
-            tokens: 0,
-            tasks: 1,
-            tool_calls: 0,
-            retrieved_bytes: 0,
-        },
-    };
-    let running_task = LogicalTask {
-        task_id: ExecutionTaskId::derive(run.run_uid, "output", "running_cleanup")?,
-        node_id: "output".to_string(),
-        item_key: "running_cleanup".to_string(),
-        requirement_ids: vec!["result".to_string()],
-        plan_revision: 1,
-        generation: 1,
-        input: json!({}),
-        kind: LogicalTaskKind::Output { value: json!({}) },
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 0,
-            max_backoff_ms: 0,
-        },
-        reservation: ExecutionEstimate {
-            cost_microusd: 0,
-            tokens: 0,
-            tasks: 1,
-            tool_calls: 0,
-            retrieved_bytes: 0,
-        },
-    };
-    repository
-        .materialize_tasks(
-            scope,
-            run.run_uid,
-            1,
-            vec![task, pending_task.clone(), running_task.clone()],
-        )
-        .await?;
-    assert!(matches!(
-        repository
-            .reserve_task(scope, run.run_uid, task_id, 1)
-            .await?,
-        ReservationOutcome::Reserved(_)
-    ));
-    assert!(matches!(
-        repository
-            .mark_task_running(scope, run.run_uid, task_id, 1)
-            .await?,
-        TransitionOutcome::Applied(_)
-    ));
-    assert!(matches!(
-        repository
-            .reserve_task(scope, run.run_uid, running_task.task_id, 1)
-            .await?,
-        ReservationOutcome::Reserved(_)
-    ));
-    assert!(matches!(
-        repository
-            .mark_task_running(scope, run.run_uid, running_task.task_id, 1)
-            .await?,
-        TransitionOutcome::Applied(_)
-    ));
-    assert!(matches!(
-        repository
-            .record_task_outcome(
-                scope,
-                run.run_uid,
-                task_id,
-                1,
-                moa_artifacts::execution_plan::ExecutionTaskOutcome {
-                    schema_version: 1,
-                    usage: moa_artifacts::execution_plan::ExecutionUsage {
-                        cost_microusd: 0,
-                        tokens: 0,
-                        tool_calls: 0,
-                        retrieved_bytes: 0,
-                    },
-                    result: moa_artifacts::execution_plan::ExecutionTaskResult::NeedsReplan {
-                        reason: "replacement requires exhausted resources".to_string(),
-                        evidence: json!({"reserved_task_capacity": 1}),
-                    },
-                },
-            )
-            .await?,
-        TaskOutcomeWrite::Applied {
-            budget_overrun: false,
-            ..
-        }
-    ));
-
-    test.client()
-        .post_void(
-            &format!("/Session/{session_id}/execution_run_started"),
-            &ExecutionRunStartedDelivery {
-                started: ExecutionRunStarted {
-                    run_uid: run.run_uid,
-                    originating_user_sequence_num,
-                    plan_revision: run.plan_revision,
-                    status: ExecutionRunAdmissionStatus::Queued,
-                    confirmation: None,
-                },
-                approved_budget: run.approved_budget.clone(),
-            },
-        )
-        .await
-        .context("activate the exhausted replan run through Session")?;
-    let finalized = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let current = repository
-                .load_run(scope, run.run_uid)
-                .await?
-                .context("finalized run should remain queryable")?;
-            if current.status.is_terminal() {
-                return Ok::<_, anyhow::Error>(current);
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .context("ExecutionRun parked instead of finalizing exhausted replan")??;
-    assert_eq!(finalized.status, ExecutionRunStatus::Blocked);
-    assert!(finalized.completed_at.is_some());
-    assert!(matches!(
-        finalized
-            .terminal_evidence
-            .as_ref()
-            .map(|evidence| &evidence.cause),
-        Some(ExecutionTerminalCause::ReplanStop {
-            reason: moa_execution::ReplanStopReason::BudgetExhausted,
-        })
-    ));
-    assert!(
-        finalized
-            .terminal_gaps
-            .iter()
-            .any(|gap| gap == "replan stopped: budget exhausted: tokens"),
-        "terminal evidence should name the exhausted replan stop: {:?}",
-        finalized.terminal_gaps
-    );
-    assert_eq!(finalized.reserved, ExecutionEstimate::default());
-    assert_eq!(finalized.consumed.tasks, 3);
-    assert_eq!(finalized.progress_cancelled_tasks, 3);
-    let cancelled_task = repository
-        .load_task(scope, run.run_uid, task_id)
-        .await?
-        .context("stopped waiting-replan task should remain queryable")?;
-    assert_eq!(cancelled_task.status, ExecutionTaskStatus::Cancelled);
-    assert_eq!(cancelled_task.reserved, ExecutionEstimate::default());
-    assert_eq!(cancelled_task.actual_tasks, 1);
-    assert!(matches!(
-        cancelled_task.current_outcome.as_ref().map(|outcome| &outcome.result),
-        Some(moa_artifacts::execution_plan::ExecutionTaskResult::Cancelled { reason })
-            if reason == "replan stopped: budget exhausted: tokens"
-    ));
-    assert!(cancelled_task.outcome_audit.iter().any(|entry| {
-        entry.get("kind").and_then(serde_json::Value::as_str) == Some("replan_stopped")
-            && entry
-                .get("terminal_status")
-                .and_then(serde_json::Value::as_str)
-                == Some("blocked")
-    }));
-    for task_id in [pending_task.task_id, running_task.task_id] {
-        let task = repository
-            .load_task(scope, run.run_uid, task_id)
-            .await?
-            .context("every active task should remain queryable after replan stop")?;
-        assert_eq!(task.status, ExecutionTaskStatus::Cancelled);
-        assert_eq!(task.reserved, ExecutionEstimate::default());
-        assert!(matches!(
-            task.current_outcome.as_ref().map(|outcome| &outcome.result),
-            Some(moa_artifacts::execution_plan::ExecutionTaskResult::Cancelled { reason })
-                if reason == "replan stopped: budget exhausted: tokens"
-        ));
-    }
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires local Restate, Postgres, OpenFGA, and the service-e2e feature lane"]
-async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Result<()> {
-    // Pins: a deadline that elapses before ExecutionTask reserves work becomes
-    // a generation-fenced DeadlineExceeded outcome, wakes the run, and leaves
-    // neither the task nor run parked for retry.
-    let fixture = OrchestratorTestFixture::shared().await?;
-    let test = fixture.isolated().await;
-    let session_id = test
-        .create_session("execution-reservation-deadline")
-        .await?;
-    let session = test.client().get_session(session_id).await?;
-    let originating_user_sequence_num = test
-        .client()
-        .append_event(
-            session_id,
-            Event::UserMessage {
-                text: "record an elapsed reservation".to_string(),
-                attachments: Vec::new(),
-            },
-        )
-        .await?;
-    let owner_user_id = match session.created_by {
-        Some(SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
-        other => anyhow::bail!("fixture session has no identity owner: {other:?}"),
-    };
-    let catalog = ExecutionCapabilityCatalog::build(Vec::new())?;
-    let authorization = ExecutionAuthorizationEnvelope {
-        capability_refs: Vec::new(),
-        skill_refs: Vec::new(),
-    };
-    let compile_budget = ExecutionBudgetLimit {
-        max_cost_microusd: Some(1),
-        max_tokens: Some(1),
-        max_tasks: Some(1),
-        max_tool_calls: Some(1),
-        max_retrieved_bytes: Some(1),
-        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
-    };
-    let compiled = compile(CompileExecutionRequest {
-        goal: ExecutionGoalContract {
-            objective: "record an elapsed reservation".to_string(),
-            requirements: vec![ExecutionRequirement {
-                id: "result".to_string(),
-                description: "record the terminal reservation outcome".to_string(),
-            }],
-            deliverables: Vec::new(),
-            coverage: Vec::new(),
-            constraints: Vec::new(),
-            completion_checks: vec![CompletionCheck {
-                id: "output-schema".to_string(),
-                description: "terminal output matches its schema".to_string(),
-                requirement_ids: vec!["result".to_string()],
-                constraint_ids: Vec::new(),
-                kind: CompletionCheckKind::OutputSchema,
-            }],
-        },
-        plan: ExecutionPlanDefinition {
-            schema_version: 1,
-            input_schema: json!({"type": "object"}),
-            output_schema: json!({"type": "object"}),
-            nodes: vec![ExecutionNode {
-                id: "output".to_string(),
-                requirement_ids: vec!["result".to_string()],
-                depends_on: Vec::new(),
-                when: None,
-                input: json!({}),
-                output_schema: json!({"type": "object"}),
-                operation: ExecutionOperation::Output {
-                    value: json!({"value": "late"}),
-                },
-                retry: RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                budget: None,
-            }],
-        },
-        run_input: json!({}),
-        catalog: catalog.clone(),
-        authorization: authorization.clone(),
-        approved_budget: compile_budget.clone(),
-        config: ExecutionConfig::default(),
-        now: moa_test_support::fixtures::pg_now(),
-    })
-    .compiled
-    .context("elapsed reservation fixture plan should compile")?;
-    let repository = ExecutionRepository::new(
-        sqlx::PgPool::connect(&fixture.postgres_url)
-            .await
-            .context("connect to fixture Postgres")?,
-    );
-    let scope = ExecutionScope::Tenant {
-        tenant_id: session.tenant_id,
-    };
-    let runtime_budget = ExecutionBudgetLimit {
-        deadline_at: Some(moa_test_support::fixtures::pg_now() - chrono::Duration::seconds(1)),
-        ..compile_budget
-    };
-    let (planning_context_uid, planning_context_hash) = create_test_planning_context(
-        &repository,
-        scope,
-        session.tenant_id,
-        session_id,
-        originating_user_sequence_num,
-        owner_user_id.clone(),
-        catalog.clone(),
-        authorization.clone(),
-        runtime_budget.clone(),
-    )
-    .await?;
-    let source_provenance = test_source_provenance(&compiled.plan.plan_hash.to_string());
-    let run = repository
-        .create_run(
-            scope,
-            NewExecutionRun {
-                tenant_id: session.tenant_id,
-                contact_id: None,
-                session_id,
-                originating_user_sequence_num,
-                planning_context_uid,
-                planning_context_hash,
-                owner_user_id,
-                goal: compiled.goal,
-                plan: compiled.plan,
-                catalog,
-                authorization,
-                pinned_instruction_skills: Vec::new(),
-                source_provenance,
-                input: json!({}),
-                status: ExecutionRunStatus::Queued,
-                approved_budget: runtime_budget,
-                idempotency_key: Some(format!("elapsed-reservation-{session_id}")),
-            },
-        )
-        .await?;
-    let task_id = ExecutionTaskId::derive(run.run_uid, "output", "")?;
-    repository
-        .materialize_tasks(
-            scope,
-            run.run_uid,
-            1,
-            vec![LogicalTask {
-                task_id,
-                node_id: "output".to_string(),
-                item_key: String::new(),
-                requirement_ids: vec!["result".to_string()],
-                plan_revision: 1,
-                generation: 1,
-                input: json!({}),
-                kind: LogicalTaskKind::Output {
-                    value: json!({"value": "late"}),
-                },
-                retry: RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                reservation: ExecutionEstimate {
-                    cost_microusd: 0,
-                    tokens: 0,
-                    tasks: 1,
-                    tool_calls: 0,
-                    retrieved_bytes: 0,
-                },
-            }],
-        )
-        .await?;
-    test.client()
-        .post_void(
-            &format!("/ExecutionTask/{task_id}/run"),
-            &ExecutionTaskWorkflowRequest {
-                run_uid: run.run_uid,
-                task_id,
-                generation: 1,
-                tenant_id: session.tenant_id,
-                contact_id: None,
-                session_id,
-                identity: test
-                    .client()
-                    .identity()
-                    .context("fixture client identity")?
-                    .clone(),
-            },
-        )
-        .await
-        .context("reservation rejection should complete the task workflow")?;
-    test.client()
-        .post_void(
-            &format!("/Session/{session_id}/execution_run_started"),
-            &ExecutionRunStartedDelivery {
-                started: ExecutionRunStarted {
-                    run_uid: run.run_uid,
-                    originating_user_sequence_num,
-                    plan_revision: run.plan_revision,
-                    status: ExecutionRunAdmissionStatus::Queued,
-                    confirmation: None,
-                },
-                approved_budget: run.approved_budget.clone(),
-            },
-        )
-        .await
-        .context("activate the directly persisted run through Session")?;
-    let mut finalized = None;
-    for _ in 0..200 {
-        let current = repository
-            .load_run(scope, run.run_uid)
-            .await?
-            .context("elapsed reservation run should remain queryable")?;
-        if current.status.is_terminal() {
-            finalized = Some(current);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let finalized = finalized.context("typed reservation outcome should finalize the run")?;
-    let failed_task = repository
-        .load_task(scope, run.run_uid, task_id)
-        .await?
-        .context("failed reservation task should remain queryable")?;
-    assert_eq!(failed_task.status, ExecutionTaskStatus::Failed);
-    assert!(matches!(
-        failed_task.current_outcome.map(|outcome| outcome.result),
-        Some(moa_artifacts::execution_plan::ExecutionTaskResult::Failed {
-            class: moa_artifacts::execution_plan::ExecutionFailureClass::DeadlineExceeded,
-            ..
-        })
-    ));
-    assert!(finalized.status.is_terminal());
-    assert!(finalized.completed_at.is_some());
     Ok(())
 }

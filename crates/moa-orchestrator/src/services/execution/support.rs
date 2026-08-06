@@ -204,6 +204,9 @@ pub(super) fn task_failure_fingerprint(
         ExecutionTaskResult::NeedsReplan { reason, .. } => {
             (ExecutionFailureClass::Terminal, reason.clone())
         }
+        ExecutionTaskResult::UnknownOutcome { message } => {
+            (ExecutionFailureClass::Terminal, message.clone())
+        }
         ExecutionTaskResult::Completed { .. }
         | ExecutionTaskResult::NeedsInput { .. }
         | ExecutionTaskResult::Cancelled { .. } => return None,
@@ -480,6 +483,7 @@ pub(super) fn persisted_input_audience(
             ExecutionTaskResult::Completed { .. }
             | ExecutionTaskResult::NeedsReplan { .. }
             | ExecutionTaskResult::Cancelled { .. }
+            | ExecutionTaskResult::UnknownOutcome { .. }
             | ExecutionTaskResult::Failed { .. } => None,
         }
     })

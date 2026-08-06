@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_session::PostgresSessionStore;
 use moa_session::archive::{ArchiveOutcome, ArchiveRefusal};
+use moa_session::{PostgresSessionStore, SessionArchiveStoreError};
 
 use restate_sdk::prelude::*;
 use std::sync::Arc;
@@ -273,14 +273,14 @@ impl SessionRetentionSteps for RestateSessionRetentionSteps<'_, '_> {
 
 /// Keeps transient retention storage failures retryable while rejecting invalid
 /// requests and impossible identities without replaying them forever.
-fn retention_store_error(error: moa_core::error::MoaError) -> HandlerError {
+fn retention_store_error(error: SessionArchiveStoreError) -> HandlerError {
     match error {
-        moa_core::error::MoaError::ValidationError(_)
-        | moa_core::error::MoaError::SessionNotFound(_)
-        | moa_core::error::MoaError::SerializationError(_)
-        | moa_core::error::MoaError::SerdeJson(_)
-        | moa_core::error::MoaError::Uuid(_) => TerminalError::new(error.to_string()).into(),
-        other => HandlerError::from(other),
+        SessionArchiveStoreError::Database(error) => {
+            crate::workflows::errors::sqlx_error_to_handler_error(error)
+        }
+        SessionArchiveStoreError::Domain(error) => {
+            crate::workflows::errors::moa_error_to_handler_error(error)
+        }
     }
 }
 
@@ -396,25 +396,38 @@ mod tests {
         }
     }
 
-    // Pins: database and integrity failures remain retryable Restate failures,
-    // while invalid input is terminal. Retention must recover from a transient
-    // database outage without replaying a permanently invalid request forever.
+    // Pins: typed transient database failures remain retryable, while permanent
+    // database, integrity, and validation failures terminate. Retention must
+    // recover from pool pressure without retrying corrupt storage indefinitely.
     #[test]
     fn retention_store_errors_preserve_retryability_offline() {
-        let retryable = retention_store_error(moa_core::error::MoaError::StorageError(
-            "database unavailable".to_string(),
+        let retryable = retention_store_error(SessionArchiveStoreError::Database(
+            sqlx::Error::PoolTimedOut,
         ));
-        let terminal = retention_store_error(moa_core::error::MoaError::ValidationError(
-            "invalid retention request".to_string(),
+        let permanent_database =
+            retention_store_error(SessionArchiveStoreError::Database(sqlx::Error::RowNotFound));
+        let integrity = retention_store_error(SessionArchiveStoreError::Domain(
+            moa_core::error::MoaError::StorageError("archive digest mismatch".to_string()),
+        ));
+        let validation = retention_store_error(SessionArchiveStoreError::Domain(
+            moa_core::error::MoaError::ValidationError("invalid retention request".to_string()),
         ));
 
         assert!(
             format!("{retryable:?}").contains("Retryable"),
-            "storage failures must remain retryable, observed {retryable:?}"
+            "transient database failures must remain retryable, observed {retryable:?}"
         );
         assert!(
-            format!("{terminal:?}").contains("Terminal"),
-            "validation failures must be terminal, observed {terminal:?}"
+            format!("{permanent_database:?}").contains("Terminal"),
+            "permanent database failures must be terminal, observed {permanent_database:?}"
+        );
+        assert!(
+            format!("{integrity:?}").contains("Terminal"),
+            "archive integrity failures must be terminal, observed {integrity:?}"
+        );
+        assert!(
+            format!("{validation:?}").contains("Terminal"),
+            "validation failures must be terminal, observed {validation:?}"
         );
     }
 

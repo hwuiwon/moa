@@ -293,6 +293,7 @@ pub struct CapabilityProvenance {
 
 /// Durable execution-task identity carried through policy, review, and dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionTaskOrigin {
     /// Owning execution run identifier.
     pub run_uid: Uuid,
@@ -302,13 +303,26 @@ pub struct ExecutionTaskOrigin {
     pub generation: u64,
 }
 
+/// Durable compensation identity carried through policy, review, and dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensationOrigin {
+    /// Owning execution run identifier.
+    pub run_uid: Uuid,
+    /// Stable compensation identifier within the execution run.
+    pub compensation_id: Uuid,
+    /// Compensation generation fenced by the execution workflow.
+    pub generation: u64,
+}
+
 /// Exact owner that must be resumed when one action review resolves.
 ///
 /// Every reviewed action has exactly one owner. The owner is decided by the
 /// runtime that issued the tool call and is never inferred from optional fields
 /// later: a conversational owner (`Coordinator`/`Worker`) is resumed by a
-/// continuation turn fenced on `generation`, while an `ExecutionTask` owner stays
-/// on its durable run/task outbox path and receives no conversational callback.
+/// continuation turn fenced on `generation`, while `ExecutionTask` and
+/// `ExecutionCompensation` owners stay on their durable execution outbox paths
+/// and receive no conversational callback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "owner", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionReviewOwner {
@@ -339,6 +353,13 @@ pub enum ActionReviewOwner {
         /// Durable run/task/generation identity fenced by the execution workflow.
         origin: ExecutionTaskOrigin,
     },
+    /// One durable execution compensation issued the action.
+    ExecutionCompensation {
+        /// Session that owns the execution run.
+        session_id: SessionId,
+        /// Durable run/compensation/generation identity fenced by the compensation workflow.
+        origin: ExecutionCompensationOrigin,
+    },
 }
 
 impl ActionReviewOwner {
@@ -349,6 +370,7 @@ impl ActionReviewOwner {
             Self::Coordinator { .. } => "coordinator",
             Self::Worker { .. } => "worker",
             Self::ExecutionTask { .. } => "execution_task",
+            Self::ExecutionCompensation { .. } => "execution_compensation",
         }
     }
 
@@ -358,7 +380,8 @@ impl ActionReviewOwner {
         match self {
             Self::Coordinator { session_id, .. }
             | Self::Worker { session_id, .. }
-            | Self::ExecutionTask { session_id, .. } => *session_id,
+            | Self::ExecutionTask { session_id, .. }
+            | Self::ExecutionCompensation { session_id, .. } => *session_id,
         }
     }
 
@@ -367,7 +390,9 @@ impl ActionReviewOwner {
     pub fn worker_id(&self) -> Option<&WorkerId> {
         match self {
             Self::Worker { worker_id, .. } => Some(worker_id),
-            Self::Coordinator { .. } | Self::ExecutionTask { .. } => None,
+            Self::Coordinator { .. }
+            | Self::ExecutionTask { .. }
+            | Self::ExecutionCompensation { .. } => None,
         }
     }
 
@@ -376,7 +401,7 @@ impl ActionReviewOwner {
     pub fn turn_id(&self) -> Option<&str> {
         match self {
             Self::Coordinator { turn_id, .. } | Self::Worker { turn_id, .. } => Some(turn_id),
-            Self::ExecutionTask { .. } => None,
+            Self::ExecutionTask { .. } | Self::ExecutionCompensation { .. } => None,
         }
     }
 
@@ -387,7 +412,7 @@ impl ActionReviewOwner {
             Self::Coordinator { generation, .. } | Self::Worker { generation, .. } => {
                 Some(*generation)
             }
-            Self::ExecutionTask { .. } => None,
+            Self::ExecutionTask { .. } | Self::ExecutionCompensation { .. } => None,
         }
     }
 
@@ -396,7 +421,18 @@ impl ActionReviewOwner {
     pub fn execution_origin(&self) -> Option<ExecutionTaskOrigin> {
         match self {
             Self::ExecutionTask { origin, .. } => Some(*origin),
-            Self::Coordinator { .. } | Self::Worker { .. } => None,
+            Self::Coordinator { .. } | Self::Worker { .. } | Self::ExecutionCompensation { .. } => {
+                None
+            }
+        }
+    }
+
+    /// Returns the durable execution-compensation identity, when the owner is a compensation.
+    #[must_use]
+    pub fn compensation_origin(&self) -> Option<ExecutionCompensationOrigin> {
+        match self {
+            Self::ExecutionCompensation { origin, .. } => Some(*origin),
+            Self::Coordinator { .. } | Self::Worker { .. } | Self::ExecutionTask { .. } => None,
         }
     }
 
@@ -510,6 +546,8 @@ pub enum ActionReviewStatus {
     Denied,
     /// Review expired without a tenant-admin decision and failed closed.
     Timeout,
+    /// The owning execution operation terminated before the reviewed effect was claimed.
+    Revoked,
 }
 
 impl ActionReviewStatus {
@@ -785,6 +823,49 @@ mod tests {
             Some(5)
         );
         assert_eq!(task.as_str(), "execution_task");
+
+        let compensation = ActionReviewOwner::ExecutionCompensation {
+            session_id,
+            origin: ExecutionCompensationOrigin {
+                run_uid: Uuid::from_u128(12),
+                compensation_id: Uuid::from_u128(13),
+                generation: 6,
+            },
+        };
+        assert_eq!(compensation.session_id(), session_id);
+        assert_eq!(compensation.generation(), None);
+        assert_eq!(compensation.turn_id(), None);
+        assert!(!compensation.is_conversational());
+        assert_eq!(compensation.execution_origin(), None);
+        assert_eq!(
+            compensation.compensation_origin(),
+            Some(ExecutionCompensationOrigin {
+                run_uid: Uuid::from_u128(12),
+                compensation_id: Uuid::from_u128(13),
+                generation: 6,
+            })
+        );
+        assert_eq!(compensation.as_str(), "execution_compensation");
+    }
+
+    #[test]
+    fn execution_compensation_owner_round_trips_exact_coordinates() {
+        // Pins: an execution compensation never masquerades as a forward task;
+        // its durable owner envelope preserves the exact generation-fenced coordinates.
+        let owner = ActionReviewOwner::ExecutionCompensation {
+            session_id: SessionId(Uuid::from_u128(31)),
+            origin: ExecutionCompensationOrigin {
+                run_uid: Uuid::from_u128(32),
+                compensation_id: Uuid::from_u128(33),
+                generation: 9,
+            },
+        };
+        let encoded =
+            serde_json::to_value(&owner).expect("execution compensation owner should serialize");
+        let decoded = serde_json::from_value::<ActionReviewOwner>(encoded)
+            .expect("execution compensation owner should deserialize");
+        assert_eq!(decoded, owner);
+        assert_eq!(decoded.execution_origin(), None);
     }
 
     #[test]
@@ -815,6 +896,29 @@ mod tests {
             "turn_id": "turn-1",
         });
         assert!(serde_json::from_value::<ActionReviewOwner>(missing_generation).is_err());
+
+        let unknown_compensation_field = serde_json::json!({
+            "owner": "execution_compensation",
+            "session_id": session_id,
+            "origin": {
+                "run_uid": Uuid::from_u128(41),
+                "compensation_id": Uuid::from_u128(42),
+                "generation": 1,
+                "task_uid": Uuid::from_u128(43),
+            },
+        });
+        assert!(serde_json::from_value::<ActionReviewOwner>(unknown_compensation_field).is_err());
+
+        let old_execution_task_shape = serde_json::json!({
+            "owner": "execution_compensation",
+            "session_id": session_id,
+            "origin": {
+                "run_uid": Uuid::from_u128(44),
+                "task_uid": Uuid::from_u128(45),
+                "generation": 1,
+            },
+        });
+        assert!(serde_json::from_value::<ActionReviewOwner>(old_execution_task_shape).is_err());
     }
 
     #[test]

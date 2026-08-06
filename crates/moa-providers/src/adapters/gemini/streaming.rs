@@ -105,7 +105,7 @@ impl GeminiStreamState {
             .last_raw_response
             .as_ref()
             .ok_or_else(|| {
-                MoaError::ProviderError(
+                MoaError::ProviderQuirk(
                     "Gemini stream parser lost the last raw response".to_string(),
                 )
             })?

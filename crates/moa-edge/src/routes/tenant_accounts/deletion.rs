@@ -11,7 +11,7 @@ use moa_wire::tenants::{
     tenant_id_from_purge_operation_id, tenant_purge_operation_id,
 };
 
-use crate::ingress::{IngressScope, call_path, send_path};
+use crate::ingress::{call_path, send_path};
 use crate::tenant_accounts::{DeleteTenantRequest, application};
 
 use super::super::{
@@ -125,7 +125,7 @@ pub(crate) async fn tenant_purge_status(
         Err(error) => return super::super::route_error(error),
     };
     let service_path = format!("/TenantPurge/{tenant_id}/status");
-    let path = call_path(&IngressScope::Unscoped, &service_path);
+    let path = call_path(&service_path);
     match state
         .proxy
         .forward(&identity, reqwest::Method::POST, &path, body, &headers)

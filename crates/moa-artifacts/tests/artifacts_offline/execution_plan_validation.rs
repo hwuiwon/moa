@@ -1,10 +1,13 @@
 use moa_artifacts::document::ArtifactDocument;
 use moa_artifacts::execution_plan::{
-    CapabilityReference, CompletionCheck, CompletionCheckKind, CoverageRequirement,
+    CapabilityReference, CompensationInputBinding, CompensationInputMapping,
+    CompensationValueSource, CompletionCheck, CompletionCheckKind, CoverageRequirement,
+    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionCancelPolicy, ExecutionCompensation,
     ExecutionCondition, ExecutionConstraint, ExecutionDeliverable, ExecutionGoalContract,
     ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer,
     ExecutionReference, ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult,
-    ExecutionUsage, InputAudience, MapTask, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    ExecutionUsage, InputAudience, MapTask, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment,
+    PlanAmendmentOperation, RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::validation::{
@@ -212,7 +215,8 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
                             "completion_checks": []
                         },
                         "plan": {
-                            "schema_version": 1,
+                            "schema_version": 2,
+                            "cancel_policy": "retain_effects",
                             "input_schema": { "type": "object" },
                             "output_schema": { "type": "object" },
                             "nodes": [
@@ -301,9 +305,9 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
 
 #[test]
 fn execution_plan_rejects_schema_and_unstable_or_duplicate_ids() {
-    // Pins: v1 plans, nodes, and requirement mappings have stable unambiguous identities.
+    // Pins: only hard-v2 plans, nodes, and requirement mappings have stable identities.
     let mut plan = valid_plan();
-    plan.schema_version = 2;
+    plan.schema_version = 1;
     plan.input_schema = json!([]);
     plan.nodes[0].id = "Bad.ID".to_string();
     plan.nodes[0].requirement_ids = vec!["req_one".to_string(), "req_one".to_string()];
@@ -313,7 +317,7 @@ fn execution_plan_rejects_schema_and_unstable_or_duplicate_ids() {
     assert_error(
         &report,
         "execution_plan.schema_version",
-        "schema_version must equal 1",
+        "schema_version must equal 2",
     );
     assert_error(
         &report,
@@ -329,6 +333,162 @@ fn execution_plan_rejects_schema_and_unstable_or_duplicate_ids() {
         &report,
         "execution_plan.nodes[0].requirement_ids[1]",
         "duplicate requirement id",
+    );
+}
+
+#[test]
+fn execution_plan_v2_round_trips_and_v1_is_rejected() {
+    // Pins: persisted execution plans admit only the hard-v2 cancellation/compensation schema.
+    let plan = valid_plan();
+    let encoded = serde_json::to_value(&plan).expect("serialize v2 plan");
+    assert_eq!(encoded["schema_version"], json!(2));
+    assert_eq!(encoded["cancel_policy"], json!("retain_effects"));
+    assert_eq!(
+        serde_json::from_value::<ExecutionPlanDefinition>(encoded)
+            .expect("deserialize exact v2 plan"),
+        plan
+    );
+
+    let mut persisted_v1 = serde_json::to_value(valid_plan()).expect("serialize plan fixture");
+    persisted_v1["schema_version"] = json!(1);
+    assert!(
+        serde_json::from_value::<ExecutionPlanDefinition>(persisted_v1).is_err(),
+        "v1 persisted JSON must fail at the hard reader boundary"
+    );
+
+    let mut v1 = valid_plan();
+    v1.schema_version = 1;
+    assert_error(
+        &validate_execution_plan_definition(&v1),
+        "execution_plan.schema_version",
+        "schema_version must equal 2",
+    );
+}
+
+#[test]
+fn compensation_mapping_is_direct_bounded_unique_and_sorted() {
+    // Pins: rollback input is a bounded deterministic mapping available only to direct capabilities.
+    let mut plan = valid_plan();
+    plan.nodes[0].compensation = Some(compensation());
+    assert!(
+        validate_execution_plan_definition(&plan).is_ok(),
+        "well-formed direct capability compensation should validate"
+    );
+
+    plan.nodes[0].operation = ExecutionOperation::Agent {
+        instructions: "do work".to_string(),
+        skill_refs: vec![],
+        capability_refs: vec![],
+        max_turns: 1,
+    };
+    assert_error(
+        &validate_execution_plan_definition(&plan),
+        "execution_plan.nodes[0].compensation",
+        "compensation is supported only on direct capability nodes",
+    );
+
+    plan.nodes[0].operation = ExecutionOperation::Capability {
+        reference: capability("unknown.but.well_formed"),
+    };
+    {
+        let mapping = &mut plan.nodes[0]
+            .compensation
+            .as_mut()
+            .expect("compensation fixture")
+            .input_mapping
+            .bindings;
+        mapping.insert(0, mapping[0].clone());
+    }
+    assert_error(
+        &validate_execution_plan_definition(&plan),
+        "execution_plan.nodes[0].compensation.input_mapping.bindings[1].target_pointer",
+        "duplicate compensation target pointer",
+    );
+
+    {
+        let mapping = &mut plan.nodes[0]
+            .compensation
+            .as_mut()
+            .expect("compensation fixture")
+            .input_mapping
+            .bindings;
+        mapping.clear();
+        for index in 0..65 {
+            mapping.push(CompensationInputBinding {
+                target_pointer: format!("/field_{index:02}"),
+                source: CompensationValueSource::OriginalInput {
+                    pointer: String::new(),
+                },
+            });
+        }
+    }
+    assert_error(
+        &validate_execution_plan_definition(&plan),
+        "execution_plan.nodes[0].compensation.input_mapping.bindings",
+        "compensation input mapping must include at most 64 bindings",
+    );
+}
+
+#[test]
+fn compensation_mapping_rejects_overlapping_targets_and_malformed_escapes() {
+    // Pins: mapping shape is deterministic before execution, including decoded parent/child paths
+    // and both source and target RFC 6901 syntax.
+    let mut collision = valid_plan();
+    collision.nodes[0].compensation = Some(ExecutionCompensation {
+        compensator: capability("orders.rollback"),
+        input_mapping: CompensationInputMapping {
+            bindings: vec![
+                CompensationInputBinding {
+                    target_pointer: "/resource".to_string(),
+                    source: CompensationValueSource::OriginalOutput {
+                        pointer: String::new(),
+                    },
+                },
+                CompensationInputBinding {
+                    target_pointer: "/resource/id".to_string(),
+                    source: CompensationValueSource::OriginalOutput {
+                        pointer: "/id".to_string(),
+                    },
+                },
+            ],
+        },
+    });
+    assert_error(
+        &validate_execution_plan_definition(&collision),
+        "execution_plan.nodes[0].compensation.input_mapping.bindings[1].target_pointer",
+        "compensation target pointers must not overlap by parent/child path",
+    );
+
+    let mut malformed_source = valid_plan();
+    malformed_source.nodes[0].compensation = Some(compensation());
+    malformed_source.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture")
+        .input_mapping
+        .bindings[0]
+        .source = CompensationValueSource::OriginalInput {
+        pointer: "/order~2id".to_string(),
+    };
+    assert_error(
+        &validate_execution_plan_definition(&malformed_source),
+        "execution_plan.nodes[0].compensation.input_mapping.bindings[0].source.pointer",
+        "value must be an RFC 6901 JSON Pointer",
+    );
+
+    let mut malformed_target = valid_plan();
+    malformed_target.nodes[0].compensation = Some(compensation());
+    malformed_target.nodes[0]
+        .compensation
+        .as_mut()
+        .expect("compensation fixture")
+        .input_mapping
+        .bindings[0]
+        .target_pointer = "/order~".to_string();
+    assert_error(
+        &validate_execution_plan_definition(&malformed_target),
+        "execution_plan.nodes[0].compensation.input_mapping.bindings[0].target_pointer",
+        "value must be an RFC 6901 JSON Pointer",
     );
 }
 
@@ -719,7 +879,7 @@ fn execution_plan_rejects_invalid_map_pointers_and_duplicate_static_keys() {
 fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() {
     // Pins: task outcomes and amendments cannot carry undeclared graph, budget, or authorization controls.
     let outcome = ExecutionTaskOutcome {
-        schema_version: 2,
+        schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
         usage: ExecutionUsage {
             cost_microusd: 1,
             tokens: 2,
@@ -748,8 +908,28 @@ fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() 
         "outcome unknown graph fields must reject"
     );
 
+    let valid_amendment = PlanAmendment {
+        schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
+        base_plan_revision: 3,
+        reason: "Need another source.".to_string(),
+        evidence: json!({ "missing": "source" }),
+        operations: vec![],
+    };
+    let encoded = serde_json::to_value(&valid_amendment).expect("serialize v2 amendment");
+    assert_eq!(
+        serde_json::from_value::<PlanAmendment>(encoded.clone())
+            .expect("deserialize exact v2 amendment"),
+        valid_amendment
+    );
+    let mut persisted_v1 = encoded;
+    persisted_v1["schema_version"] = json!(1);
+    assert!(
+        serde_json::from_value::<PlanAmendment>(persisted_v1).is_err(),
+        "v1 persisted amendment JSON must fail at the hard reader boundary"
+    );
+
     let amendment = PlanAmendment {
-        schema_version: 2,
+        schema_version: 1,
         base_plan_revision: 3,
         reason: "Need another source.".to_string(),
         evidence: json!({ "missing": "source" }),
@@ -761,7 +941,7 @@ fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() 
     assert_error(
         &report,
         "plan_amendment.schema_version",
-        "schema_version must equal 1",
+        "schema_version must equal 2",
     );
     assert_error(
         &report,
@@ -771,7 +951,7 @@ fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() 
 
     for forbidden in ["plan", "nodes", "budget", "authorization"] {
         let mut value = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "base_plan_revision": 3,
             "reason": "Need another source.",
             "evidence": {},
@@ -878,6 +1058,18 @@ fn task_outcome_variants_round_trip_without_extra_envelope_fields() {
                 evidence: json!({ "capability": "orders.lookup" }),
             },
         },
+        ExecutionTaskOutcome {
+            schema_version: 1,
+            usage: ExecutionUsage {
+                cost_microusd: 9,
+                tokens: 10,
+                tool_calls: 11,
+                retrieved_bytes: 12,
+            },
+            result: ExecutionTaskResult::UnknownOutcome {
+                message: "effect settlement is ambiguous".to_string(),
+            },
+        },
     ];
     for outcome in outcomes {
         let value = serde_json::to_value(&outcome).expect("serialize task outcome");
@@ -891,7 +1083,8 @@ fn task_outcome_variants_round_trip_without_extra_envelope_fields() {
 
 fn valid_plan() -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
-        schema_version: 1,
+        schema_version: 2,
+        cancel_policy: ExecutionCancelPolicy::RetainEffects,
         input_schema: json!({ "type": "object" }),
         output_schema: json!({ "type": "object" }),
         nodes: vec![
@@ -942,12 +1135,27 @@ fn node(id: &str, depends_on: &[&str], operation: ExecutionOperation) -> Executi
         input: Value::Object(serde_json::Map::new()),
         output_schema: json!({ "type": "object" }),
         operation,
+        compensation: None,
         retry: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 0,
             max_backoff_ms: 0,
         },
         budget: None,
+    }
+}
+
+fn compensation() -> ExecutionCompensation {
+    ExecutionCompensation {
+        compensator: capability("orders.rollback"),
+        input_mapping: CompensationInputMapping {
+            bindings: vec![CompensationInputBinding {
+                target_pointer: "/order_id".to_string(),
+                source: CompensationValueSource::OriginalInput {
+                    pointer: "/order_id".to_string(),
+                },
+            }],
+        },
     }
 }
 

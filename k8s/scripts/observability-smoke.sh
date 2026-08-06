@@ -32,6 +32,9 @@ To run it:
   SMOKE_MIMIR_RULER_URL=<https://.../prometheus> \
   SMOKE_MIMIR_USER=<user> SMOKE_MIMIR_KEY=<key> \
   SMOKE_DATABASE_URL=<postgres://...> \
+  SMOKE_TENANT_ID=<authorized-tenant-uuid> \
+  SMOKE_IDENTITY_ID=<authorized-operator-uuid> \
+  SMOKE_AGENT_INSTALLATION_UID=<active-installation-uuid> \
   ./k8s/scripts/observability-smoke.sh
 MSG
   exit 1
@@ -63,7 +66,10 @@ for required in \
   SMOKE_MIMIR_RULER_URL \
   SMOKE_MIMIR_USER \
   SMOKE_MIMIR_KEY \
-  SMOKE_DATABASE_URL; do
+  SMOKE_DATABASE_URL \
+  SMOKE_TENANT_ID \
+  SMOKE_IDENTITY_ID \
+  SMOKE_AGENT_INSTALLATION_UID; do
   require_env "${required}"
 done
 
@@ -352,29 +358,66 @@ done
 
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-TENANT_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-SESSION_META="$(cat <<EOF
-{"id":"${SESSION_ID}","tenant_id":"${TENANT_ID}","title":"Observability smoke","status":"created","channel":"chat","model":"${MODEL}","created_at":"${NOW}","updated_at":"${NOW}","completed_at":null,"parent_session_id":null,"total_input_tokens":0,"total_input_tokens_uncached":0,"total_input_tokens_cache_write":0,"total_input_tokens_cache_read":0,"total_output_tokens":0,"total_cost_cents":0,"event_count":0,"last_checkpoint_seq":null}
-EOF
-)"
+TENANT_ID="${SMOKE_TENANT_ID}"
+IDENTITY_ID="${SMOKE_IDENTITY_ID}"
+AGENT_INSTALLATION_UID="${SMOKE_AGENT_INSTALLATION_UID}"
+for value in "${TENANT_ID}" "${IDENTITY_ID}" "${AGENT_INSTALLATION_UID}"; do
+  [[ "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
+    || die "SMOKE_TENANT_ID, SMOKE_IDENTITY_ID, and SMOKE_AGENT_INSTALLATION_UID must be UUIDs"
+done
+readonly IDENTITY_HEADERS=(
+  -H "x-moa-identity-type: operator"
+  -H "x-moa-identity-id: ${IDENTITY_ID}"
+  -H "x-moa-tenant-id: ${TENANT_ID}"
+)
+SESSION_META="$(jq -cn \
+  --arg id "${SESSION_ID}" \
+  --arg tenant_id "${TENANT_ID}" \
+  --arg identity_id "${IDENTITY_ID}" \
+  --arg model "${MODEL}" \
+  --arg now "${NOW}" \
+  '{
+    id: $id,
+    tenant_id: $tenant_id,
+    title: "Observability smoke",
+    status: "created",
+    channel: "chat",
+    model: $model,
+    created_by: {type: "identity", id: $identity_id},
+    created_at: $now,
+    updated_at: $now,
+    completed_at: null,
+    parent_session_id: null,
+    total_input_tokens: 0,
+    total_input_tokens_uncached: 0,
+    total_input_tokens_cache_write: 0,
+    total_input_tokens_cache_read: 0,
+    total_output_tokens: 0,
+    total_cost_cents: 0,
+    event_count: 0,
+    last_checkpoint_seq: null
+  }')"
 
 SESSION_ID="$(
-  curl -sf --max-time 30 -X POST "http://127.0.0.1:${INGRESS_PORT}/restate/call/SessionStore/create_session" \
-    -H "Content-Type: application/json" -d "${SESSION_META}" | tr -d '"\n'
+  curl -sf --max-time 30 -X POST "http://127.0.0.1:${INGRESS_PORT}/restate/call/SessionStore/create_agent_session" \
+    -H "Content-Type: application/json" "${IDENTITY_HEADERS[@]}" \
+    -d "$(jq -cn \
+      --argjson meta "${SESSION_META}" \
+      --arg installation_uid "${AGENT_INSTALLATION_UID}" \
+      '{meta: $meta, agent: {installation_uid: $installation_uid}}')" \
+    | jq -er '.session_id'
 )" || die "could not create the smoke session"
 [[ -n "${SESSION_ID}" ]] || die "session creation returned an empty id"
-
-curl -sf --max-time 30 -X POST "http://127.0.0.1:${INGRESS_PORT}/restate/call/SessionStore/init_session_vo" \
-  -H "Content-Type: application/json" \
-  -d "{\"session_id\":\"${SESSION_ID}\",\"meta\":${SESSION_META}}" >/dev/null \
-  || die "could not initialize the smoke session object"
 
 # The client message id is this script's retry identity: rerunning the smoke test
 # with the same session and id replays the original admission instead of buying a
 # second turn.
 curl -sf --max-time 120 -X POST "http://127.0.0.1:${INGRESS_PORT}/restate/call/Session/${SESSION_ID}/start_turn" \
-  -H "Content-Type: application/json" \
-  -d "{\"client_message_id\":\"observability-smoke:${SESSION_ID}:0\",\"user_message\":\"${PROMPT}\",\"attachments\":[]}" \
+  -H "Content-Type: application/json" "${IDENTITY_HEADERS[@]}" \
+  -d "$(jq -cn \
+    --arg client_message_id "observability-smoke:${SESSION_ID}:0" \
+    --arg user_message "${PROMPT}" \
+    '{client_message_id: $client_message_id, user_message: $user_message, attachments: []}')" \
   >/dev/null || die "the smoke turn did not start"
 echo "  session ${SESSION_ID}"
 

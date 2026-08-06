@@ -5,22 +5,34 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
-    events::Event, events::EventType, types::events_stream::EventRange,
+    events::Event, events::EventType, types::action_policy::ActionPolicyEffect,
+    types::contact::SessionActorRef, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::provider::ModelTier, types::session::SessionStatus,
+    types::provider::ModelTier, types::session::SessionMeta, types::session::SessionStatus,
 };
+use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
 use moa_test_support::fixtures::fresh_client_message_id;
-use moa_test_support::{OrchestratorTestFixture, TestApiClient};
+use moa_test_support::{
+    FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
+    OrchestratorTestFixture, TestApiClient,
+};
 use moa_wire::turn::{
     SessionProgress, SessionProgressRequest, StartTurnRequest, TurnOutcome, TurnOutcomeKind,
-    TurnPhase, TurnProgress,
+    TurnPhase,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 const CLARIFICATION_RESPONSE: &str =
     "I need the following information before I can continue:\n\n- target\n- specific change";
+const RECOVERY_GATE_TOOL_NAME: &str = "recovery_matrix_gate";
+const RECOVERY_GATE_SERVER_NAME: &str = "fixture-capability";
+const ROUTE_CLASSIFIER_MATCH: &str =
+    "You classify one user turn into MOA's public execution decision.";
+const PROGRESS_MESSAGE: &str = "please answer with the scripted progress response";
+const RECOVERY_MATRIX_TIMEOUT: Duration = Duration::from_secs(90);
+const RECOVERY_MATRIX_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
@@ -193,8 +205,10 @@ async fn turn_responsiveness_vague_fix_this_clarifies_before_main_loop() -> Resu
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn turn_progress_projection_survives_without_persisted_updates() -> Result<()> {
-    // Pins: ProgressUpdate is transient workflow projection state, not durable event-log history.
+async fn public_session_progress_projects_transient_updates_without_persisting_them() -> Result<()>
+{
+    // Pins: Session/progress reads the ingress-private TurnExecution projection service-to-service,
+    // while ProgressUpdate remains transient workflow state rather than durable event-log history.
     let fixture = OrchestratorTestFixture::with_script_and_env(
         progress_script(),
         vec![
@@ -212,13 +226,49 @@ async fn turn_progress_projection_survives_without_persisted_updates() -> Result
     let test = fixture.isolated().await;
     let session_id = test.create_session("turn-progress-projection").await?;
 
-    let (turn_id, outcome, events) = run_scripted_turn(
-        &fixture.client,
-        session_id,
-        "please answer with the scripted progress response",
-    )
-    .await
-    .context("run progress-emitting turn")?;
+    let started = start_recovery_matrix_turn(&fixture.client, session_id, PROGRESS_MESSAGE)
+        .await
+        .context("start progress-emitting turn")?;
+    let turn_id = started
+        .turn_id
+        .context("progress-emitting turn should start immediately")?;
+    let live_progress =
+        await_recovery_matrix_session_progress(&fixture.client, session_id, |progress| {
+            progress.snapshot.active_turn_id.as_deref() == Some(turn_id.as_str())
+                && progress.active_turn_progress.as_ref().is_some_and(|turn| {
+                    turn.turn_id == turn_id
+                        && turn.last_progress_summary.as_deref() == Some("Calling the model")
+                })
+        })
+        .await
+        .context("public Session/progress should expose the active workflow projection")?;
+    let projected = live_progress
+        .active_turn_progress
+        .context("active turn projection should be present")?;
+    assert_eq!(projected.turn_id, turn_id);
+    assert_eq!(projected.phase, TurnPhase::Streaming);
+    assert_eq!(
+        progress_updates(&live_progress.events, &turn_id),
+        Vec::<(String, String)>::new(),
+        "public progress should not expose transient updates as durable rows: {}",
+        event_summary(&live_progress.events)
+    );
+
+    let outcome = fixture
+        .client
+        .session(session_id.to_string())
+        .await_turn_outcome(
+            &turn_id,
+            RECOVERY_MATRIX_TIMEOUT,
+            RECOVERY_MATRIX_POLL_INTERVAL,
+        )
+        .await
+        .context("await progress-emitting turn outcome")?;
+    let events = fixture
+        .client
+        .get_events(session_id, EventRange::all())
+        .await
+        .context("read completed progress-emitting turn events")?;
 
     assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
     assert_eq!(
@@ -247,16 +297,619 @@ async fn turn_progress_projection_survives_without_persisted_updates() -> Result
         event_summary(&replayed)
     );
 
-    let progress = read_turn_progress(&fixture.ingress_url, &turn_id)
-        .await
-        .context("fresh TurnExecution/progress read should recover projection")?;
-    assert_eq!(progress.turn_id, turn_id);
-    assert_eq!(progress.phase, TurnPhase::Completed);
-    assert_eq!(
-        progress.last_progress_summary.as_deref(),
-        Some("Calling the model")
-    );
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Valkey service fixture"]
+async fn recovery_matrix_same_session_messages_stay_fifo_while_another_session_progresses_service_e2e()
+-> Result<()> {
+    // Pins: an active Session VO records later messages in FIFO order without holding an
+    // unrelated Session key behind the first turn's blocked upstream effect.
+    const FIRST_MESSAGE: &str = "recovery FIFO first message";
+    const SECOND_MESSAGE: &str = "recovery FIFO second message";
+    const DISTINCT_MESSAGE: &str = "recovery FIFO distinct-session message";
+    const FIRST_RESULT: &str = "recovery FIFO first result";
+    const SECOND_RESULT: &str = "recovery FIFO second result";
+    const DISTINCT_RESULT: &str = "recovery FIFO distinct result";
+
+    let fixture = OrchestratorTestFixture::with_execution_fixture(
+        recovery_matrix_script(
+            FIRST_MESSAGE,
+            SECOND_MESSAGE,
+            DISTINCT_MESSAGE,
+            FIRST_RESULT,
+            SECOND_RESULT,
+            DISTINCT_RESULT,
+        ),
+        FixtureCapabilityOptions {
+            tools: vec![recovery_gate_tool()],
+            orchestrator_env: vec![
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_FLEET_LIMIT".to_string(),
+                    "2".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_TENANT_LIMIT".to_string(),
+                    "2".to_string(),
+                ),
+            ],
+        },
+    )
+    .await?;
+    let test = fixture.isolated().await;
+    let fifo_session = test.create_session("recovery-fifo-primary").await?;
+    let distinct_session = test.create_session("recovery-fifo-distinct").await?;
+    let tenant_id = test.client().get_session(fifo_session).await?.tenant_id;
+    seed_recovery_gate_allow_policy(&fixture, test.client(), tenant_id).await?;
+
+    let first = start_recovery_matrix_turn(test.client(), fifo_session, FIRST_MESSAGE).await?;
+    let first_turn_id = first
+        .turn_id
+        .context("first FIFO message should start immediately")?;
+    let controller = fixture
+        .fixture_capability()
+        .context("recovery fixture omitted capability controller")?;
+    let blocked_calls = controller
+        .wait_for_calls(1, RECOVERY_MATRIX_TIMEOUT)
+        .await
+        .context("first FIFO turn should reach the exact capability barrier")?;
+    assert_eq!(blocked_calls.len(), 1);
+    assert_eq!(blocked_calls[0].capability, RECOVERY_GATE_TOOL_NAME);
+    assert_eq!(blocked_calls[0].input, json!({"label": FIRST_MESSAGE}));
+
+    let queued = start_recovery_matrix_turn(test.client(), fifo_session, SECOND_MESSAGE).await?;
+    assert!(
+        queued.queued,
+        "the second same-session message must be queued"
+    );
+    assert_eq!(
+        queued.turn_id, None,
+        "queued messages do not mint a turn yet"
+    );
+
+    let blocked_events = test
+        .client()
+        .get_events(fifo_session, EventRange::all())
+        .await?;
+    assert_eq!(user_messages(&blocked_events), vec![FIRST_MESSAGE]);
+    assert_eq!(queued_messages(&blocked_events), vec![SECOND_MESSAGE]);
+    assert_eq!(brain_responses(&blocked_events), Vec::<String>::new());
+
+    let (distinct_turn_id, distinct_outcome, distinct_events) =
+        run_scripted_turn(test.client(), distinct_session, DISTINCT_MESSAGE)
+            .await
+            .context("distinct Session key should complete while the FIFO head is blocked")?;
+    assert_eq!(distinct_outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(distinct_outcome.turn_id, distinct_turn_id);
+    assert_eq!(distinct_outcome.message, DISTINCT_RESULT);
+    assert_eq!(user_messages(&distinct_events), vec![DISTINCT_MESSAGE]);
+    assert_eq!(brain_responses(&distinct_events), vec![DISTINCT_RESULT]);
+
+    let still_blocked = test
+        .client()
+        .session(fifo_session.to_string())
+        .snapshot()
+        .await?;
+    assert_eq!(
+        still_blocked.active_turn_id.as_deref(),
+        Some(first_turn_id.as_str())
+    );
+    assert_eq!(still_blocked.pending_message_count, 1);
+    controller.release(1);
+
+    let settled = await_recovery_matrix_session_progress(test.client(), fifo_session, |progress| {
+        progress.snapshot.active_turn_id.is_none()
+            && progress.snapshot.pending_message_count == 0
+            && progress
+                .snapshot
+                .last_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.message == SECOND_RESULT)
+    })
+    .await?;
+    assert_eq!(
+        user_messages(&settled.events),
+        vec![FIRST_MESSAGE, SECOND_MESSAGE]
+    );
+    assert_eq!(queued_messages(&settled.events), vec![SECOND_MESSAGE]);
+    assert_eq!(
+        brain_responses(&settled.events),
+        vec![FIRST_RESULT, SECOND_RESULT]
+    );
+    assert_eq!(controller.effect_count(), 1);
+    assert_eq!(controller.request_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Valkey service fixture"]
+async fn recovery_matrix_tenant_admission_isolates_tenants_and_keeps_progress_responsive_service_e2e()
+-> Result<()> {
+    // Pins: one tenant's saturated Valkey admission lease delays only that tenant's new
+    // Session turn; another tenant still runs and SharedObjectContext progress stays callable.
+    const TENANT_A_BLOCKING: &str = "recovery tenant A blocking message";
+    const TENANT_A_WAITING: &str = "recovery tenant A waiting message";
+    const TENANT_B_MESSAGE: &str = "recovery tenant B independent message";
+    const TENANT_A_BLOCKING_RESULT: &str = "recovery tenant A blocking result";
+    const TENANT_A_WAITING_RESULT: &str = "recovery tenant A waiting result";
+    const TENANT_B_RESULT: &str = "recovery tenant B independent result";
+
+    let fixture = OrchestratorTestFixture::with_execution_fixture(
+        recovery_matrix_script(
+            TENANT_A_BLOCKING,
+            TENANT_A_WAITING,
+            TENANT_B_MESSAGE,
+            TENANT_A_BLOCKING_RESULT,
+            TENANT_A_WAITING_RESULT,
+            TENANT_B_RESULT,
+        ),
+        FixtureCapabilityOptions {
+            tools: vec![recovery_gate_tool()],
+            orchestrator_env: vec![
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_FLEET_LIMIT".to_string(),
+                    "2".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_TENANT_LIMIT".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_LEASE_TTL_MS".to_string(),
+                    "60000".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_RETRY_AFTER_MS".to_string(),
+                    "50".to_string(),
+                ),
+            ],
+        },
+    )
+    .await?;
+    let template_test = fixture.isolated().await;
+    let template_session = template_test.create_session("tenant-template").await?;
+    let template = template_test.client().get_session(template_session).await?;
+
+    let tenant_a_identity = recovery_matrix_identity(TenantId::new());
+    let tenant_b_identity = recovery_matrix_identity(TenantId::new());
+    let tenant_a_client =
+        TestApiClient::new(&fixture.ingress_url)?.with_identity(tenant_a_identity.clone());
+    let tenant_b_client =
+        TestApiClient::new(&fixture.ingress_url)?.with_identity(tenant_b_identity.clone());
+    let tenant_a_blocking_session = create_recovery_matrix_tenant_session(
+        &fixture,
+        &tenant_a_client,
+        &tenant_a_identity,
+        &template,
+        "tenant-a-blocking",
+    )
+    .await?;
+    let tenant_a_waiting_session = create_recovery_matrix_tenant_session(
+        &fixture,
+        &tenant_a_client,
+        &tenant_a_identity,
+        &template,
+        "tenant-a-waiting",
+    )
+    .await?;
+    let tenant_b_session = create_recovery_matrix_tenant_session(
+        &fixture,
+        &tenant_b_client,
+        &tenant_b_identity,
+        &template,
+        "tenant-b-independent",
+    )
+    .await?;
+    seed_recovery_gate_allow_policy(&fixture, &tenant_a_client, tenant_a_identity.tenant_id)
+        .await?;
+    seed_recovery_gate_allow_policy(&fixture, &tenant_b_client, tenant_b_identity.tenant_id)
+        .await?;
+
+    let blocking = start_recovery_matrix_turn(
+        &tenant_a_client,
+        tenant_a_blocking_session,
+        TENANT_A_BLOCKING,
+    )
+    .await?;
+    let blocking_turn_id = blocking
+        .turn_id
+        .context("tenant A's first session should acquire its tenant lease")?;
+    let controller = fixture
+        .fixture_capability()
+        .context("recovery fixture omitted capability controller")?;
+    controller
+        .wait_for_calls(1, RECOVERY_MATRIX_TIMEOUT)
+        .await
+        .context("tenant A's first session should reach the capability barrier")?;
+
+    let active_tool_invocations = await_restate_rows(
+        &fixture,
+        "SELECT id, status FROM sys_invocation \
+         WHERE target_service_name = 'ToolExecutor' AND status != 'completed'",
+        RECOVERY_MATRIX_TIMEOUT,
+        |rows| !rows.is_empty(),
+    )
+    .await
+    .context("observe the held turn's active ToolExecutor child")?;
+    assert_eq!(
+        active_tool_invocations.len(),
+        1,
+        "the exact capability barrier should hold one ToolExecutor child: {active_tool_invocations:?}"
+    );
+
+    let user_limits = restate_rows(&fixture, "SELECT * FROM sys_user_limits").await?;
+    let virtual_queues = restate_rows(&fixture, "SELECT * FROM sys_vqueues").await?;
+    assert_eq!(
+        user_limits,
+        Vec::<Value>::new(),
+        "Restate user limits must stay inactive while Valkey owns the held turn: {user_limits:?}"
+    );
+    assert_eq!(
+        virtual_queues,
+        Vec::<Value>::new(),
+        "Restate virtual queues must stay inactive while Valkey owns the held turn: {virtual_queues:?}"
+    );
+    fixture.otlp_capture()?.clear().await;
+
+    let waiting_client = tenant_a_client.clone();
+    let waiting_start = tokio::spawn(async move {
+        start_recovery_matrix_turn(&waiting_client, tenant_a_waiting_session, TENANT_A_WAITING)
+            .await
+    });
+    fixture
+        .otlp_capture()?
+        .wait_for_metric(RECOVERY_MATRIX_TIMEOUT, |metric| {
+            metric.name() == "moa_turn_admission_decisions_total"
+                && metric.data_points().iter().any(|point| {
+                    point.attribute("scope") == Some("tenant")
+                        && point.attribute("outcome") == Some("waiting")
+                        && point.value() >= 1.0
+                })
+        })
+        .await
+        .context("observe tenant-scoped admission wait after exact Valkey rejection")?;
+    assert!(
+        !waiting_start.is_finished(),
+        "tenant A's second Session start must remain blocked at admission"
+    );
+
+    let waiting_progress: SessionProgress = tokio::time::timeout(
+        Duration::from_secs(5),
+        tenant_a_client.post_call(
+            &format!("/Session/{tenant_a_waiting_session}/progress"),
+            &SessionProgressRequest::default(),
+        ),
+    )
+    .await
+    .context("Session/progress should not queue behind the blocked exclusive handler")??;
+    assert_eq!(
+        waiting_progress.snapshot.session_id,
+        tenant_a_waiting_session.to_string()
+    );
+    assert_eq!(waiting_progress.snapshot.active_turn_id, None);
+    assert_eq!(waiting_progress.snapshot.pending_message_count, 0);
+    assert_eq!(
+        user_messages(&waiting_progress.events),
+        Vec::<String>::new()
+    );
+
+    let (tenant_b_turn_id, tenant_b_outcome, tenant_b_events) =
+        run_scripted_turn(&tenant_b_client, tenant_b_session, TENANT_B_MESSAGE)
+            .await
+            .context("tenant B should use the remaining fleet slot independently")?;
+    assert_eq!(tenant_b_outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(tenant_b_outcome.turn_id, tenant_b_turn_id);
+    assert_eq!(tenant_b_outcome.message, TENANT_B_RESULT);
+    assert_eq!(user_messages(&tenant_b_events), vec![TENANT_B_MESSAGE]);
+    assert_eq!(brain_responses(&tenant_b_events), vec![TENANT_B_RESULT]);
+    assert!(
+        !waiting_start.is_finished(),
+        "tenant B completing must not bypass tenant A's saturated lease"
+    );
+
+    let blocking_snapshot = tenant_a_client
+        .session(tenant_a_blocking_session.to_string())
+        .snapshot()
+        .await?;
+    assert_eq!(
+        blocking_snapshot.active_turn_id.as_deref(),
+        Some(blocking_turn_id.as_str())
+    );
+    controller.release(1);
+
+    let waiting_started = tokio::time::timeout(RECOVERY_MATRIX_TIMEOUT, waiting_start)
+        .await
+        .context("tenant A's waiting start should resume after lease release")?
+        .context("join tenant A waiting start task")??;
+    let waiting_turn_id = waiting_started
+        .turn_id
+        .context("tenant A's waiting Session should start after capacity returns")?;
+    assert!(!waiting_started.queued);
+    let waiting_outcome = tenant_a_client
+        .session(tenant_a_waiting_session.to_string())
+        .await_turn_outcome(
+            &waiting_turn_id,
+            RECOVERY_MATRIX_TIMEOUT,
+            RECOVERY_MATRIX_POLL_INTERVAL,
+        )
+        .await?;
+    assert_eq!(waiting_outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(waiting_outcome.message, TENANT_A_WAITING_RESULT);
+    let blocking_progress = await_recovery_matrix_session_progress(
+        &tenant_a_client,
+        tenant_a_blocking_session,
+        |progress| {
+            progress.snapshot.active_turn_id.is_none()
+                && progress
+                    .snapshot
+                    .last_outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.message == TENANT_A_BLOCKING_RESULT)
+        },
+    )
+    .await?;
+    assert_eq!(
+        brain_responses(&blocking_progress.events),
+        vec![TENANT_A_BLOCKING_RESULT]
+    );
+    assert_eq!(controller.effect_count(), 1);
+    Ok(())
+}
+
+fn recovery_matrix_script(
+    blocking_message: &str,
+    waiting_message: &str,
+    distinct_message: &str,
+    blocking_result: &str,
+    waiting_result: &str,
+    distinct_result: &str,
+) -> serde_json::Value {
+    json!({
+        "default": {
+            "completion": {"content": "unexpected recovery-matrix scripted fallback"}
+        },
+        "keyed": [
+            {
+                "match": ROUTE_CLASSIFIER_MATCH,
+                "completion": {
+                    "content": json!({
+                        "label": "execute",
+                        "strategy": "inline",
+                        "rationale": "The request fits a bounded deterministic recovery scenario.",
+                        "confidence_bps": 10_000,
+                        "missing_inputs": []
+                    }).to_string()
+                }
+            },
+            // This match precedes the FIFO head because the second turn's context also
+            // contains both the first user message and its tool result after the queued
+            // message is dispatched.
+            {
+                "match": waiting_message,
+                "completion": {"content": waiting_result}
+            },
+            {
+                "match": "capability released",
+                "completion": {"content": blocking_result}
+            },
+            {
+                "match": blocking_message,
+                "completion": {
+                    "content": "",
+                    "tool_calls": [{
+                        "name": recovery_gate_tool_reference(),
+                        "id": "recovery-matrix-gate-call",
+                        "input": {"label": blocking_message}
+                    }]
+                }
+            },
+            {
+                "match": distinct_message,
+                "completion": {"content": distinct_result}
+            }
+        ]
+    })
+}
+
+fn recovery_gate_tool() -> FixtureCapabilityTool {
+    FixtureCapabilityTool {
+        name: RECOVERY_GATE_TOOL_NAME.to_string(),
+        description: "Hold one deterministic recovery-matrix turn at an exact barrier".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label"],
+            "properties": {"label": {"type": "string"}}
+        }),
+        item_key_pointer: None,
+        idempotent: true,
+        outcomes: vec![FixtureCapabilityOutcome::SuccessWithInput {
+            output: json!({"result": "capability released"}),
+        }],
+    }
+}
+
+fn recovery_gate_tool_reference() -> String {
+    moa_hands::mcp_tool_reference(RECOVERY_GATE_SERVER_NAME, RECOVERY_GATE_TOOL_NAME)
+}
+
+async fn seed_recovery_gate_allow_policy(
+    fixture: &OrchestratorTestFixture,
+    client: &TestApiClient,
+    tenant_id: TenantId,
+) -> Result<()> {
+    let identity = client
+        .identity()
+        .context("recovery-matrix client must carry identity headers")?;
+    grant_recovery_matrix_relation(fixture, identity, "admin", &format!("tenant:{tenant_id}"))
+        .await?;
+    client
+        .post_void(
+            "/ActionPolicy/upsert_rule",
+            &UpsertActionPolicyRuleRequest {
+                tenant_id,
+                contact_id: None,
+                tool_name: recovery_gate_tool_reference(),
+                pattern: "*".to_string(),
+                effect: ActionPolicyEffect::Allow,
+                reason: Some("deterministic recovery matrix barrier".to_string()),
+            },
+        )
+        .await
+        .context("allow recovery-matrix capability through production action policy")
+}
+
+async fn start_recovery_matrix_turn(
+    client: &TestApiClient,
+    session_id: SessionId,
+    message: &str,
+) -> Result<moa_wire::turn::StartTurnResponse> {
+    client
+        .session(session_id.to_string())
+        .start_turn(
+            StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
+                user_message: message.to_string(),
+                attachments: Vec::new(),
+                model: None,
+                contact: None,
+                max_turns: None,
+                resource_budget: Default::default(),
+                execution_template: None,
+            },
+            None,
+        )
+        .await
+}
+
+async fn await_recovery_matrix_session_progress<F>(
+    client: &TestApiClient,
+    session_id: SessionId,
+    predicate: F,
+) -> Result<SessionProgress>
+where
+    F: Fn(&SessionProgress) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + RECOVERY_MATRIX_TIMEOUT;
+    loop {
+        let progress: SessionProgress = client
+            .post_call(
+                &format!("/Session/{session_id}/progress"),
+                &SessionProgressRequest::default(),
+            )
+            .await
+            .context("read recovery-matrix Session progress")?;
+        if predicate(&progress) {
+            return Ok(progress);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "session {session_id} did not reach the recovery-matrix state; last progress: {progress:?}"
+            );
+        }
+        tokio::time::sleep(RECOVERY_MATRIX_POLL_INTERVAL).await;
+    }
+}
+
+fn recovery_matrix_identity(tenant_id: TenantId) -> Identity {
+    Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::now_v7(),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
+}
+
+async fn create_recovery_matrix_tenant_session(
+    fixture: &OrchestratorTestFixture,
+    client: &TestApiClient,
+    identity: &Identity,
+    template: &SessionMeta,
+    label: &str,
+) -> Result<SessionId> {
+    let session_id = SessionId::new();
+    fixture
+        .grant_tenant_operator_identity(identity, identity.tenant_id)
+        .await?;
+    grant_recovery_matrix_relation(
+        fixture,
+        identity,
+        "participant",
+        &format!("session:{session_id}"),
+    )
+    .await?;
+
+    let now = chrono::Utc::now();
+    let mut meta = template.clone();
+    meta.id = session_id;
+    meta.tenant_id = identity.tenant_id;
+    meta.title = Some(label.to_string());
+    meta.status = SessionStatus::Created;
+    meta.active_channel_binding_id = None;
+    meta.created_at = now;
+    meta.updated_at = now;
+    meta.completed_at = None;
+    meta.parent_session_id = None;
+    meta.contact = None;
+    meta.created_by = Some(SessionActorRef::Identity { id: identity.id });
+    meta.contact_promoted_from_id = None;
+    meta.total_input_tokens = 0;
+    meta.total_input_tokens_uncached = 0;
+    meta.total_input_tokens_cache_write = 0;
+    meta.total_input_tokens_cache_read = 0;
+    meta.total_output_tokens = 0;
+    meta.total_cost_cents = 0;
+    meta.event_count = 0;
+    meta.last_checkpoint_seq = None;
+
+    client
+        .create_session(meta.clone())
+        .await
+        .context("create recovery-matrix tenant session")?;
+    client
+        .append_event(
+            session_id,
+            Event::SessionCreated {
+                tenant_id: identity.tenant_id,
+                contact_id: None,
+                created_by: Some(SessionActorRef::Identity { id: identity.id }),
+                model: meta.model.clone(),
+                channel: meta.channel,
+            },
+        )
+        .await
+        .context("append recovery-matrix SessionCreated event")?;
+    client
+        .init_session_vo(session_id, meta)
+        .await
+        .context("initialize recovery-matrix Session VO")?;
+    Ok(session_id)
+}
+
+async fn grant_recovery_matrix_relation(
+    fixture: &OrchestratorTestFixture,
+    identity: &Identity,
+    relation: &str,
+    object: &str,
+) -> Result<()> {
+    let fga = fixture
+        .fga_client
+        .as_ref()
+        .context("recovery-matrix fixture requires OpenFGA")?;
+    fga.apply_raw(json!({
+        "authorization_model_id": fga.model_id(),
+        "writes": {"tuple_keys": [{
+            "user": format!("{}:{}", identity.identity_type.as_str(), identity.id),
+            "relation": relation,
+            "object": object
+        }]}
+    }))
+    .await
+    .context("grant recovery-matrix OpenFGA relation")
 }
 
 async fn run_scripted_turn(
@@ -297,20 +950,51 @@ async fn run_scripted_turn(
     Ok((turn_id, outcome, events))
 }
 
-async fn read_turn_progress(ingress_url: &str, turn_id: &str) -> Result<TurnProgress> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/restate/call/TurnExecution/{turn_id}/progress",
-            ingress_url.trim_end_matches('/')
-        ))
+async fn restate_rows(
+    fixture: &OrchestratorTestFixture,
+    query: impl AsRef<str>,
+) -> Result<Vec<Value>> {
+    let response = reqwest::Client::new()
+        .post(format!("{}/query", fixture.admin_url.trim_end_matches('/')))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&json!({ "query": query.as_ref() }))
         .send()
         .await
-        .context("send TurnExecution/progress request")?
+        .context("query Restate flow-control system tables")?
         .error_for_status()
-        .context("TurnExecution/progress should succeed")?
-        .json::<TurnProgress>()
+        .context("Restate flow-control system-table query should succeed")?
+        .json::<Value>()
         .await
-        .context("deserialize TurnExecution/progress response")
+        .context("decode Restate flow-control system-table query")?;
+    response
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .context("Restate flow-control system-table query omitted rows")
+}
+
+async fn await_restate_rows<F>(
+    fixture: &OrchestratorTestFixture,
+    query: impl AsRef<str>,
+    timeout: Duration,
+    predicate: F,
+) -> Result<Vec<Value>>
+where
+    F: Fn(&[Value]) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let rows = restate_rows(fixture, query.as_ref()).await?;
+        if predicate(&rows) {
+            return Ok(rows);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Restate system rows did not reach the held-turn state within {timeout:?}; rows={rows:?}"
+            );
+        }
+        tokio::time::sleep(RECOVERY_MATRIX_POLL_INTERVAL).await;
+    }
 }
 
 fn main_loop_should_not_run_script() -> serde_json::Value {
@@ -343,13 +1027,35 @@ fn main_loop_should_not_run_script() -> serde_json::Value {
 
 fn progress_script() -> serde_json::Value {
     json!({
+        "keyed": [
+            {
+                "match": ROUTE_CLASSIFIER_MATCH,
+                "completion": {
+                    "content": json!({
+                        "label": "respond",
+                        "strategy": null,
+                        "rationale": "The request only needs a direct response.",
+                        "confidence_bps": 10_000,
+                        "missing_inputs": []
+                    }).to_string()
+                }
+            },
+            {
+                "match": PROGRESS_MESSAGE,
+                "completion": {
+                    "content": "progress response complete",
+                    "latency_ms": 2_000,
+                    "ttft_ms": 2_000,
+                    "duration_ms": 1,
+                    "input_tokens": 8,
+                    "output_tokens": 4,
+                    "tool_calls": []
+                }
+            }
+        ],
         "default": {
             "completion": {
-                "content": "progress response complete",
-                "duration_ms": 1,
-                "input_tokens": 8,
-                "output_tokens": 4,
-                "tool_calls": []
+                "content": "unexpected progress fixture fallback"
             }
         }
     })
@@ -375,7 +1081,8 @@ fn execution_candidate(objective: &str) -> String {
             }]
         },
         "plan": {
-            "schema_version": 1,
+            "schema_version": 2,
+            "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
             "nodes": [{
@@ -389,6 +1096,7 @@ fn execution_candidate(objective: &str) -> String {
                     "kind": "output",
                     "value": { "status": "complete" }
                 },
+                "compensation": null,
                 "retry": {
                     "max_attempts": 1,
                     "initial_backoff_ms": 0,
@@ -472,6 +1180,16 @@ fn user_messages(events: &[EventRecord]) -> Vec<String> {
         .iter()
         .filter_map(|record| match &record.event {
             Event::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn queued_messages(events: &[EventRecord]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::QueuedMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()

@@ -53,13 +53,20 @@ instruction-only skills remain valid in both paths. A skill may also declare an
 optional `execution_plan` in `skill.moa.yaml`; this is a pinned reusable plan
 template, not a second skill type.
 
-The template uses the shared acyclic `ExecutionPlanDefinition` with exactly
-seven operations: `Capability`, `Agent`, `Map`, `Reduce`, `Review`,
+The template uses the shared acyclic schema-v2 `ExecutionPlanDefinition`, with
+an explicit `retain_effects` or `compensate_committed` cancellation policy and
+exactly seven operations: `Capability`, `Agent`, `Map`, `Reduce`, `Review`,
 `WaitSignal`, and `Output`. A map task can only be a capability or bounded agent
 and cannot recursively map. Instruction text belongs in an `Agent` node's
 instructions; labels and canvas layout belong in non-semantic `ui` metadata.
 Visual editors round-trip the same artifact document and preserve stable node
 IDs.
+
+Every node carries an explicit nullable compensation field. A non-null contract
+is valid only for a direct side-effecting capability whose pinned catalog entry
+promises the exact compensator and bounded original-input/original-output
+mapping; templates cannot invent rollback authority. Schema-v1 templates are
+rejected after the one-way stored-template migration and are never dual-read.
 
 Learned revisions may currently activate catalog-independent templates made of
 `Review`, `WaitSignal`, and `Output` nodes. Templates containing `Capability`,

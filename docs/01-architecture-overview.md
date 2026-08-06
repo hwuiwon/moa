@@ -43,10 +43,10 @@ Learning loop
 ```
 
 Restate owns durable cloud execution. Postgres owns product-visible data and
-cross-pod correctness records. The optional runtime cache is selected through
-typed config: Redis coordinates short-lived runtime pacing or references across
-replicas when configured, while the in-memory backend is process-local and must
-not be used as an authoritative Kubernetes store. Graph memory is the canonical
+cross-pod correctness records. The orchestrator requires a Redis-compatible
+Valkey runtime cache for Session turn admission, short-lived pacing, and
+cross-replica transient references. The in-memory backend is available only to
+isolated non-orchestrator tests. Graph memory is the canonical
 memory source, with sidecar and vector indexes maintained by graph writes.
 Tenant knowledge-base ingestion is a separate product surface owned by
 `moa-knowledge`; it writes tenant knowledge into the same graph/vector substrate
@@ -138,10 +138,11 @@ deliverables can produce `partial`, `blocked`, or `unsupported`, never a false
 `completed`. Final synthesis receives the contract, check results, aggregate
 outputs, citations, and explicit gaps.
 
-An `ExecutionPlanDefinition` carries `schema_version`, `input_schema`,
-`output_schema`, and `nodes`. Each node carries `id`, `depends_on`, optional
-`when`, `input`, `output_schema`, one `operation`, retry policy, optional budget,
-and the goal requirement IDs it serves. The dependency graph is acyclic, and
+An `ExecutionPlanDefinition` is schema version 2 and carries an explicit
+`cancel_policy`, `input_schema`, `output_schema`, and `nodes`. Each node carries
+`id`, `depends_on`, optional `when`, `input`, `output_schema`, one `operation`,
+an explicit optional compensation contract, retry policy, optional budget, and
+the goal requirement IDs it serves. The dependency graph is acyclic, and
 its operation enum has exactly seven variants:
 
 1. `Capability { reference }` invokes one registered governed capability.
@@ -178,7 +179,7 @@ returns `ExecutionTaskOutcome { schema_version, usage, result }`; cumulative
 `usage` is common to every result. The flattened result is
 `Completed { output, citations }`, `NeedsInput { question, audience }`,
 `NeedsReplan { reason, evidence }`, `Cancelled { reason }`, or
-`Failed { class, message }`. `NeedsReplan` requests a compiler-validated amendment that may add only downstream work,
+`Failed { class, message }`. `NeedsReplan` requests a hard-v2 compiler-validated amendment that may add only downstream work,
 replace or remove pending work, narrow a map, switch to a registered capability,
 or add review/signal input. It cannot alter running or completed tasks, create a
 cycle or recursive map, reuse a task identity with new meaning, exceed remaining
@@ -195,6 +196,17 @@ cannot reserve never starts. Default and tenant/user-approved envelopes govern
 resource consumption only. Authorization, action policy, the capability
 catalog, and node declarations govern what the run may do. Raising a resource
 budget never grants a new skill, tool, task shape, strategy, or permission.
+
+Compensation is opt-in and available only on a direct side-effecting
+`Capability` node whose immutable catalog entry promises an exact governed
+compensator and the same bounded input/output mapping. Reads and indirect
+`Agent`, `Map`, or `Reduce` work cannot claim rollback. Forward commits register
+their compensation atomically; configured failure or
+`cancel_policy = compensate_committed` cancellation enters nonterminal
+`compensating` state and runs registered work in reverse commit order. A run
+with ambiguous or failed undo records `manual_repair_required` rather than
+reporting a clean rollback. `retain_effects` cancellation preserves committed
+effects and their evidence.
 
 Compilation pins a sorted, duplicate-free `ExecutionCapabilityCatalog` and its
 canonical hash. Scheduling requires the caller to supply that exact immutable
@@ -224,8 +236,8 @@ compiled worst-case estimate above the unattended threshold is persisted as
 Ready map items are materialized as stable tasks keyed by
 `(run_uid, node_id, item_key)` and all are submitted durably. There is no
 application-level active-worker or fan-out cap for execution tasks; run budget
-and `max_tasks` bound logical expansion, while Restate concurrency rules and
-provider pacing provide physical backpressure.
+and `max_tasks` bound logical expansion, while provider pacing and governed
+capability or hand capacity provide physical backpressure.
 
 `ExecutionTaskId` is UUIDv5 over length-framed run UUID, node ID, and item key.
 Ordinary tasks use item key `""`, map tasks use the typed canonical extracted
@@ -419,7 +431,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 |---|---|---|
 | `SessionStore` | Append-only event log, sessions, pending signals, snapshots, task segments, experience records, learning candidates, analytics, skill rates | `PostgresSessionStore` |
 | `BlobStore` | Claim-check storage for large session artifacts | `PostgresBlobStore` by default; explicit `FileBlobStore` for local or mounted-path use |
-| `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | in-process memory fallback; optional Redis backend |
+| `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | Redis-compatible Valkey in the orchestrator; in-process memory only in isolated non-orchestrator tests |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `HandProvider` | Declare enforceable capabilities per sandbox tier, then provision, execute, pause/resume, destroy hands. `capabilities()` is required with no default body, and every provisioned hand carries one required six-dimension `EffectiveSandboxProfile` the provider must translate or reject. | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
@@ -512,8 +524,8 @@ narration) that stays off the single-writer `Session` VO, and a low-frequency
 control plane (attention signals, terminal-wake, guarded resume) that routes
 through the coordinator VO. All of this is correct on Kubernetes because its state
 lives in Restate VO/workflow state and Postgres (idempotent event appends guarded
-by `session_event_dedupe`); Redis is a runtime cache only and never a correctness
-owner. The root coordinator is sandbox-free, and each worker owns one ephemeral
+by `session_event_dedupe`). Valkey is the sole shared turn-admission owner, but it
+does not own signals, resume, or terminal results. The root coordinator is sandbox-free, and each worker owns one ephemeral
 sandbox keyed `(session_id, worker_id, provider)` that is released on the
 worker's self-cleanup. `docs/02-brain-orchestration.md` and
 `docs/12-restate-architecture.md` describe these planes in detail.
@@ -596,12 +608,12 @@ policy.
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
 | Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids. `SessionAttachmentStore::put` takes a deterministic slot (tenant, session, client message id, ordinal) whose UUIDv5 is the row's primary key, claims that row before writing the object create-only, and reports whether the write created storage or replayed an identical one |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
-| Runtime cache | Redis or memory | optional TTL cache/coordination for pacing and transient references; memory is per-process and non-authoritative |
+| Runtime cache | Redis-compatible Valkey | required orchestrator admission, pacing, and transient coordination; memory is limited to isolated non-orchestrator tests |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
 The central PostgreSQL migration inventory is a fresh-install-only chain of
-exactly 53 files, `V000001..V000053`. The ownership manifest contains one entry
+exactly 54 files, `V000001..V000054`. The ownership manifest contains one entry
 for every logical table family. `xtask check-migrations` rejects gaps, extra
 files, and missing or stale ownership entries. The 2026-08-03 hard-reset epoch
 removes the retired per-user token-vault tables from their original catalog

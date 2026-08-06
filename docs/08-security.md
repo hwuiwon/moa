@@ -265,8 +265,8 @@ Conversational workers are available only as interactive delegation in `act`;
 they are not the bulk DAG primitive. Sandbox-using `ExecutionTask` instances
 receive equivalent isolation under a stable run/task identity and generation
 fence. Execution maps submit every budget-admitted logical task without an
-application fan-out cap; Restate concurrency and provider pacing control
-physical pressure.
+application fan-out cap; provider pacing and governed capability or hand
+capacity control physical pressure.
 
 ## Prompt Injection Defenses
 

@@ -6,7 +6,13 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
+moa-artifacts.workspace = true
+moa-core.workspace = true
+moa-execution.workspace = true
 refinery = { version = "0.9", features = ["tokio-postgres"] }
+serde_json.workspace = true
+serde_yaml.workspace = true
 sqlx = { workspace = true, features = ["postgres"] }
 tokio.workspace = true
 tokio-postgres = "0.7"

@@ -19,7 +19,6 @@ use moa_wire::artifacts::{
 };
 use restate_sdk::prelude::*;
 
-use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::workflows::errors::moa_error_to_status_handler_error;
 
@@ -394,7 +393,7 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
 
 async fn authorized_write_scope(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     scope: ActionRuleScope,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
@@ -409,7 +408,7 @@ async fn authorized_write_scope(
 
 async fn authorize_read_scope(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     scope: &ActionRuleScope,
 ) -> Result<(), HandlerError> {
     match scope {

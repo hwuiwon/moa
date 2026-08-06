@@ -224,6 +224,7 @@
       "additionalProperties": false,
       "required": [
         "schema_version",
+        "cancel_policy",
         "input_schema",
         "output_schema",
         "nodes"
@@ -232,8 +233,9 @@
         "schema_version": {
           "type": "integer",
           "format": "uint32",
-          "minimum": 0
+          "const": 2
         },
+        "cancel_policy": { "$ref": "#/$defs/ExecutionCancelPolicy" },
         "input_schema": {},
         "output_schema": {},
         "nodes": {
@@ -252,6 +254,7 @@
         "input",
         "output_schema",
         "operation",
+        "compensation",
         "retry"
       ],
       "properties": {
@@ -273,6 +276,12 @@
         "input": {},
         "output_schema": {},
         "operation": { "$ref": "#/$defs/ExecutionOperation" },
+        "compensation": {
+          "anyOf": [
+            { "$ref": "#/$defs/ExecutionCompensation" },
+            { "type": "null" }
+          ]
+        },
         "retry": { "$ref": "#/$defs/RetryPolicy" },
         "budget": {
           "anyOf": [
@@ -281,6 +290,62 @@
           ]
         }
       }
+    },
+    "ExecutionCancelPolicy": {
+      "type": "string",
+      "enum": ["retain_effects", "compensate_committed"]
+    },
+    "ExecutionCompensation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compensator", "input_mapping"],
+      "properties": {
+        "compensator": { "$ref": "#/$defs/CapabilityReference" },
+        "input_mapping": { "$ref": "#/$defs/CompensationInputMapping" }
+      }
+    },
+    "CompensationInputMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings"],
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/CompensationInputBinding" }
+        }
+      }
+    },
+    "CompensationInputBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_pointer", "source"],
+      "properties": {
+        "target_pointer": { "type": "string" },
+        "source": { "$ref": "#/$defs/CompensationValueSource" }
+      }
+    },
+    "CompensationValueSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pointer"],
+          "properties": {
+            "kind": { "const": "original_input" },
+            "pointer": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pointer"],
+          "properties": {
+            "kind": { "const": "original_output" },
+            "pointer": { "type": "string" }
+          }
+        }
+      ]
     },
     "ExecutionCondition": {
       "oneOf": [

@@ -221,7 +221,7 @@ impl SkillLearning for SkillLearningImpl {
                     request_for_run,
                 )
                 .await
-                .map_err(HandlerError::from)?;
+                .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
                 Ok::<_, HandlerError>(Json::from(report))
             })
             .name("skill_learning_generate_proposal")

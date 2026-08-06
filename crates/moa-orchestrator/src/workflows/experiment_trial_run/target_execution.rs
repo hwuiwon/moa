@@ -10,7 +10,9 @@ use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWai
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::{
     execution::ExecutionClient,
-    llm_gateway::{BoundedCompletionRequest, LLMGatewayClient},
+    llm_gateway::{
+        BoundedCompletionRequest, LLMCompletionAction, LLMGatewayClient, completion_idempotency_key,
+    },
 };
 use crate::workflows::durable_utc_now;
 use moa_artifacts::{
@@ -400,7 +402,14 @@ pub(super) async fn run_agent_loop_trial(
                         trial_envelope.deadline,
                         Some(simulator_worst_case),
                     ),
-                })),
+                }))
+                .idempotency_key(completion_idempotency_key(
+                    ctx.invocation_id(),
+                    LLMCompletionAction::ExperimentSimulator {
+                        trial_uid: trial.trial_uid,
+                        turn: turn_index,
+                    },
+                )),
         )
         .call();
         let simulator_turn = restate_sdk::select! {
@@ -2271,7 +2280,7 @@ fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
 
 fn status_for_turn_outcome(outcome: &TurnOutcome) -> Result<SessionStatus, HandlerError> {
     Ok(match outcome.kind {
-        TurnOutcomeKind::Completed => SessionStatus::Paused,
+        TurnOutcomeKind::Completed => SessionStatus::Idle,
         TurnOutcomeKind::Cancelled => SessionStatus::Cancelled,
         TurnOutcomeKind::Failed => SessionStatus::Failed,
         TurnOutcomeKind::Accepted { .. } => {
@@ -2305,7 +2314,7 @@ pub(super) fn stop_for_session_status(
             ExperimentTrialStatus::Failed,
             ExperimentTrialStopReason::Error,
         )),
-        SessionStatus::Created | SessionStatus::Running | SessionStatus::Paused => None,
+        SessionStatus::Created | SessionStatus::Running | SessionStatus::Idle => None,
     }
 }
 
@@ -2340,7 +2349,8 @@ fn trial_stop_for_execution_run_status(status: ExecutionRunStatus) -> Option<Wor
         | ExecutionRunStatus::Running
         | ExecutionRunStatus::WaitingInput
         | ExecutionRunStatus::WaitingReview
-        | ExecutionRunStatus::WaitingReplan => None,
+        | ExecutionRunStatus::WaitingReplan
+        | ExecutionRunStatus::Compensating => None,
     }
 }
 
@@ -2914,6 +2924,7 @@ mod tests {
             ExecutionRunStatus::WaitingInput,
             ExecutionRunStatus::WaitingReview,
             ExecutionRunStatus::WaitingReplan,
+            ExecutionRunStatus::Compensating,
         ] {
             assert_eq!(trial_stop_for_execution_run_status(status), None);
         }
@@ -3045,7 +3056,7 @@ mod tests {
         );
         assert_eq!(
             status_for_turn_outcome(&completed).expect("completed"),
-            SessionStatus::Paused
+            SessionStatus::Idle
         );
         assert_eq!(
             status_for_turn_outcome(&failed).expect("failed"),

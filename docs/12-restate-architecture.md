@@ -18,7 +18,7 @@ what must stay out of Restate state.
 |---|---|---|
 | Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `Execution`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SecurityEvents`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run or task per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `ExecutionCompensation`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run, task, or compensation per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -34,6 +34,7 @@ product database.
 | Worker turn | Workflow | `turn_id` |
 | Execution run | Workflow plus `moa.execution_run` | `run_uid` |
 | Execution task | Workflow plus `moa.execution_task` | stable hash of `(run_uid, node_id, item_key)` |
+| Execution compensation | Workflow plus `moa.execution_compensation` | stable compensation registration ID |
 | Tool execution | Service | none |
 | LLM call | Service | none |
 | Graph-memory ingestion | Virtual Object plus Postgres ingestion claim rows | ingestion key |
@@ -117,36 +118,28 @@ path scheme. Request-response calls use `POST /restate/call/{service}/{handler}`
 The edge only issues request-response calls, so it never uses the fire-and-forget
 `/restate/send/...` form.
 
-Restate 1.7 flow control (experimental vqueues,
-`RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true`) caps concurrent invocations per
-**scope**. A scope is a single opaque path segment on the scoped ingress form,
-`POST /restate/scope/{scopeKey}/call/{service}/{key}/{handler}`. MOA uses the
-36-character tenant UUID directly as the scope key, satisfying Restate's scope
-length limit while preserving one independent counter per tenant. The edge
-tags only the invocations that start expensive agent work — posting a message
-(`Contacts/send_message`, which queues on the `Session` VO and starts a turn) —
-with the tenant scope. Cheap reads and status polls (`Session/progress`,
-`Contacts/progress`, `Contacts/authorize_session`), session lifecycle calls
-(`Contacts/init_session`, promote, channel change), and all read/admin routes
-stay unscoped so a poll can never consume a tenant's turn concurrency.
+MOA has one execution-flow-control owner: the `Session` virtual object's
+`TurnAdmission` policy backed by the required Redis-compatible Valkey runtime
+cache. It acquires both a
+fleet lease and a tenant lease before dispatching a coordinator turn. The
+session ID is the stable lease identity, so replay and heartbeat renewal are
+idempotent across replicas. Limits, lease TTL, and retry cadence come from the
+typed `session_limits.turn_admission_*` configuration.
 
-Limits live in a cluster-wide **rule book**, not on individual scopes. A rule
-matches either an exact scope key or the wildcard `*`. The `*` rule is
-per-scope, not shared: it gives **every** distinct scope key its own counter at
-that limit, so distinct tenant UUIDs each get an independent budget. MOA
-seeds one default rule, `* → concurrency 1000`, via restate-cli
-(`restate rules set "*" --concurrency 1000 --description "scope default"`, backed
-by the admin API); the local compose stack runs it from the one-shot
-`restate-rules-bootstrap` service after Restate is healthy. Tighter per-tenant
-caps are added later as exact-scope rules without code changes.
+When either shared limit is full, the `Session` handler journals the Valkey
+lease attempt with `ctx.run`, durably sleeps for the configured retry interval,
+and tries again. Capacity saturation is a wait state, not a terminal 429 and
+not a second queue. Restate still serializes requests for the same Session, so
+an active session retains its bounded persisted pending-message queue while
+other tenants continue on independent Session keys. `Session/progress` uses a
+`SharedObjectContext`, so progress reads remain responsive while an exclusive
+turn-start handler is waiting for capacity.
 
-Enabling vqueues has a fresh-cluster limitation: a node accepts
-`RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` only when it has no in-flight
-invocations, so the flag must be set before first traffic (wipe the
-`moa-restate-data` volume when flipping it on an existing local node). Admission
-state is observable through the Restate SQL introspection tables: `sys_rules`
-lists the active rule book, and `sys_user_limits` reports per-scope counters and
-current usage.
+The lease spans the real turn lifetime. A generation-fenced heartbeat renews
+it while that turn remains active, and every matching terminal path releases
+both fleet and tenant leases before the next queued turn starts. The TTL only
+reclaims leases after a crashed owner stops heartbeating. No second ingress or
+cluster-level flow-control layer participates in MOA's admission model.
 
 ## Handler Surfaces
 
@@ -159,8 +152,8 @@ Core production bindings:
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SecurityEvents`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `ExecutionCompensation`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
+| Service | `ActionReviews`, `ActionReviewDispatcher`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SecurityEvents`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
 
 Feature-gated bindings:
 
@@ -208,7 +201,7 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Learning log | Postgres |
 | Security events | Postgres |
 | Hand leases and sandbox binding | Postgres `moa.hand_leases`, keyed `(session_id, worker_id, provider)` |
-| Runtime cache/pacing/message refs | Redis when configured; process-local memory only for fallback |
+| Runtime cache/pacing/message refs | Required Redis-compatible Valkey; process-local memory is limited to isolated non-orchestrator tests |
 | Handler journal | Restate |
 
 If a user, admin, customer, or audit export needs to query it later, store it
@@ -219,7 +212,7 @@ Kubernetes request routing is non-sticky. A follow-up request may land on any
 edge or orchestrator replica, so Restate handler state cannot be replaced by
 ordinary process memory. Process-local maps are allowed only as reconnect
 caches, transport demultiplexing, or performance caches whose correctness owner
-is Postgres, Restate, or explicitly configured Redis runtime cache.
+is Postgres, Restate, or the required Redis-compatible Valkey runtime cache.
 
 ## Main-Agent/Worker Coordination In Inline Execute
 
@@ -334,11 +327,14 @@ running. The dead `Soft`/`Hard` `CancelMode` is removed.
 `ExecutionRun` is the only durable graph controller. It loads the persisted
 goal contract and active canonical plan, asks the pure `moa-execution`
 interpreter for all ready logical work, materializes stable task rows, and sends
-every ready `ExecutionTask` invocation durably. It advances only from persisted
-typed outcomes. There is no application active-worker, plan-node, or
+every ready `ExecutionTask` invocation as an attached Restate call. The run
+retains those exact call handles across scheduler wakes, selects child
+completion against its durable wake promise, and cooperatively cancels and
+joins the same handles before terminal settlement. It advances only from
+persisted typed outcomes. There is no application active-worker, plan-node, or
 execution-task concurrency constant. The run's approved `max_tasks` and other
-resource dimensions bound logical work; Restate scoped concurrency and provider
-pacing queue physical execution.
+resource dimensions bound logical work; provider pacing and governed tool or
+hand capacity queue physical execution.
 
 The graph is acyclic and has exactly seven operations: `Capability`, `Agent`,
 `Map`, `Reduce`, `Review`, `WaitSignal`, and `Output`. A map creates one task for
@@ -356,7 +352,7 @@ new work.
 Task-local agents may use declared instruction-only skills and governed
 capabilities for a bounded number of turns. They return only `Completed`,
 `NeedsInput`, `NeedsReplan`, or `Failed`. `NeedsInput` parks the exact run/task.
-`NeedsReplan` asks the planner for a structured amendment using the immutable
+`NeedsReplan` asks the planner for a hard-v2 structured amendment using the immutable
 goal, active plan, completed outputs, evidence, remaining budget, and current
 catalog. The compiler rejects changes to running/completed work, cycles,
 recursive maps, task-identity reuse with new semantics, excess budget, and
@@ -365,8 +361,26 @@ append canonical patch/hash/reason records. Repeated hashes or failure
 fingerprints, no progress, deadline, or resource exhaustion terminate with
 exact partial/blocked coverage; there is no arbitrary amendment-count cap.
 
-Cancellation prevents new reservations and leaves completed task rows
-queryable. Terminal completion requires every immutable goal requirement,
+Cancellation fences new reservations, cancels and joins active tasks, and then
+applies the plan's explicit policy. `retain_effects` preserves committed work;
+`compensate_committed` moves the run into nonterminal `Compensating` and drives
+atomically registered compensators in reverse commit order with stable IDs and
+generation fencing. Restarts skip already completed undo. Every root-turn,
+worker-turn, and execution-task model call carries an internal typed workflow
+owner to `LLMGateway`; execution tasks share their owning run's fence. The
+gateway removes that metadata before provider
+dispatch and, inside the replay-recorded `ctx.run`, observes a kind-scoped,
+hashed cancellation fence in the required shared Valkey runtime cache. Each
+workflow cancellation handler durably writes that fence before resolving its
+local cancellation promise. This lets the gateway drop in-process provider I/O
+even though a Restate cancellation signal cannot preempt an already-running
+`ctx.run` closure. The resulting zero-usage cancelled completion becomes the
+owner's normal `Cancelled` outcome and cannot create an empty `BrainResponse`;
+a provider response already ready at the cancellation boundary retains its
+actual billed usage. An ambiguous or failed compensator records
+`manual_repair_required` instead of a false clean rollback. Forward and
+compensation rows remain queryable. Terminal completion requires every
+immutable goal requirement,
 deliverable, coverage item, schema/citation check, and budget/deadline check to
 pass. The run writes compact aggregate output, citations, failures, and gaps,
 emits terminal session events, and requests at most one synthesis turn. Raw map
@@ -438,8 +452,10 @@ MOA supports both:
 | Restate invocation cancellation | Operator hard-stops a stuck invocation through Restate admin APIs. |
 
 `Execution/cancel` is the product cancellation path for a run. It fences new
-task reservations, durably records the run terminal/partial state, and preserves
-completed task evidence before terminal session delivery.
+task reservations and settles active tasks before applying the schema-v2 plan's
+explicit `retain_effects` or `compensate_committed` policy. Only after retained
+effects or reverse-order compensation reaches a durable settled state does the
+run publish terminal session delivery; all evidence is preserved.
 
 Prefer cooperative cancellation for product flows because it preserves normal
 events, cleanup, and hand teardown.
@@ -449,6 +465,16 @@ events, cleanup, and hand teardown.
 Restate retries failed invocations according to handler configuration. Tool
 calls still need product-level idempotency:
 
+LLM completion is the costly exception to generic handler retry. Provider
+adapters own three retries (four HTTP attempts) for each configured failover
+candidate, while the enclosing `LLMGateway` journaled run permits exactly one
+Restate attempt. The documented upper bound for one logical completion is
+therefore `configured failover candidates * 4`; Restate never multiplies it.
+Every paid workflow call also supplies a versioned Restate idempotency key from
+the caller invocation ID plus its typed action coordinate and attempt or turn
+ordinal. Restate therefore retains the completed gateway result independently
+of the parent journal boundary, so a parent crash cannot redispatch that action.
+
 - read-only tools may retry freely;
 - remote writes should use idempotency keys when available;
 - non-idempotent calls should not be retried after a side effect is confirmed.
@@ -457,12 +483,38 @@ After retry exhaustion, operators should inspect the Restate invocation, trace,
 and Postgres session events before resuming or cancelling. Do not hide repeated
 handler failure behind unbounded application-level retry loops.
 
+Every binding declares the Restate retry baseline in v4 discovery: 50ms initial
+delay, factor 2, 60-second maximum delay, 70 total attempts, then `PAUSE` for
+operator inspection. Typed terminal errors bypass that retry sequence. The
+provider adapters remain the only owner of repeated paid HTTP attempts; the
+`LLMGateway` journaled provider run itself is single-attempt, so handler replay
+reuses its durable result rather than multiplying provider calls.
+
+`LLMGateway`, `ToolExecutor`, `TurnExecution`, `WorkerTurnExecution`,
+`ExecutionRun`, `ExecutionTask`, and `ExecutionCompensation` are ingress-private. They are reachable
+only service-to-service; public traffic enters through edge-owned product
+surfaces. Their inactivity timeout is 360 seconds with a 60-second abort cleanup
+window. Provider stream configuration is capped at 300 seconds, leaving that
+cleanup margin. Durable human waits suspend and therefore do not need a larger
+inactivity timeout. The normal product endpoint does not contain
+`Session/migrate_status_idle` or `StatusMigrationDispatcher`. Those two handlers
+exist only in the pre-runtime migration endpoint; the raw Session handler is
+ingress-private, and the endpoint intentionally omits `Health` and every product
+turn handler so it cannot open edge admission.
+
+The process action-review reaper owns timeout discovery and gauge sampling, but
+it never invokes private workflows. It only wakes `ActionReviewDispatcher`.
+That Restate service journals the outbox claim, invokes
+`ExecutionTask/resolve_action_review` service-to-service, and journals the
+generation-fenced acknowledgement or retry schedule.
+
 ## Journal And Retention
 
 Journals are for recovery and recent debugging, not long-term product history.
-Keep completion retention short for high-volume services such as LLM and tool
-calls. Keep longer retention only where it helps operations, such as
-action-review resolution, consolidation, or slow-path ingestion.
+All bindings explicitly retain idempotency entries and journals for 24 hours,
+preserving the current effective behavior without depending on a mutable server
+default. Every workflow `run` handler likewise declares 24-hour completion
+retention. Postgres remains the long-term product and audit record.
 
 VO state persists until explicitly cleared. Session and worker state should
 be cleared after the product session is terminal and old enough that live
@@ -477,9 +529,13 @@ internal, and expose public traffic through `moa-edge`.
 Deployment requirements:
 
 - Postgres/Neon for product data.
-- Restate ingress/admin URLs for handler registration and invocation.
-- Optional Redis for shared runtime cache coordination; without it the runtime
-  cache backend is process-local and must not be used for global correctness.
+- Restate ingress URL for runtime invocation. Normal replicas have no Admin API
+  configuration or network grant; Operator owns registration and version
+  retention, while the revisioned bootstrap Job receives its Admin URL as an
+  explicit command argument.
+- Redis-compatible Valkey for Session turn admission, pacing, and shared runtime
+  cache coordination. Orchestrator startup fails if this backend is absent or
+  resolves to process-local memory.
 - Configured LLM and embedding provider credentials.
 - Configured hand provider for code/tool execution.
 - OTel, metrics, and logs wired before tenant traffic.

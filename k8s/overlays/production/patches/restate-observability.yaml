@@ -1,6 +1,19 @@
 - op: add
   path: /spec/storage/storageClassName
   value: fast-ssd
+- op: add
+  path: /spec/security/networkEgressRules
+  value:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alloy
+      ports:
+        - protocol: TCP
+          port: 4319
 - op: replace
   path: /spec/config
   value: |
@@ -8,10 +21,20 @@
     shutdown-timeout = "10m"
     default-num-partitions = 128
     default-replication = 2
+    [metadata-client]
+    addresses = [
+      "http://restate-0.restate-cluster.moa-restate.svc.cluster.local:5122",
+      "http://restate-1.restate-cluster.moa-restate.svc.cluster.local:5122",
+      "http://restate-2.restate-cluster.moa-restate.svc.cluster.local:5122",
+    ]
     tracing-endpoint = "http://alloy.observability.svc.cluster.local:4319"
     tracing-filter = "warn,restate_ingress_http=info,restate_invoker_impl=info"
     log-filter = "warn,restate=info"
-    # v1.7 limitation: vqueues can only be enabled on a fresh cluster (no
-    # in-flight invocations); a cluster with in-flight invocations will
-    # refuse to boot with this flag set.
-    experimental-enable-vqueues = true
+    log-format = "json"
+    log-disable-ansi-codes = true
+    [worker]
+    durability-mode = "balanced"
+    [worker.snapshots]
+    snapshot-interval-num-records = 100000
+    snapshot-interval = "60m"
+    num-retained = 2

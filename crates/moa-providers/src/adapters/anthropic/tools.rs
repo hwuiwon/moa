@@ -88,13 +88,13 @@ pub(super) fn anthropic_message(message: &ContextMessage) -> Result<Value> {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
         MessageRole::System => {
-            return Err(MoaError::ProviderError(
+            return Err(MoaError::ProviderQuirk(
                 "unexpected System message in anthropic_message; should be filtered upstream"
                     .to_string(),
             ));
         }
         MessageRole::Tool => {
-            return Err(MoaError::ProviderError(
+            return Err(MoaError::ProviderQuirk(
                 "unexpected Tool message in anthropic_message; should be filtered upstream"
                     .to_string(),
             ));

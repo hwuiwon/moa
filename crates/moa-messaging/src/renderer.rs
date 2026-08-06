@@ -171,7 +171,7 @@ fn session_status_icon(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Created => "🆕",
         SessionStatus::Running => "🔄",
-        SessionStatus::Paused => "⏸",
+        SessionStatus::Idle => "⏸",
         SessionStatus::Completed => "✅",
         SessionStatus::Cancelled => "⏹",
         SessionStatus::Failed => "❌",

@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
+use crate::queries::map_sqlx_error;
+
 const BLOB_REF_MARKER: &str = "__moa_blob_ref";
 const PREVIEW_BYTES: usize = 1024;
 
@@ -493,10 +495,6 @@ fn expand_local_path(path: &Path) -> Result<PathBuf> {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
-    MoaError::StorageError(error.to_string())
 }
 
 #[cfg(test)]

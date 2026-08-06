@@ -1,7 +1,7 @@
 //! Durable keyed workflow that advances one persisted dynamic execution run.
 
 use async_trait::async_trait;
-use moa_artifacts::execution_plan::ExecutionOperation;
+use moa_artifacts::execution_plan::{ExecutionCancelPolicy, ExecutionOperation};
 use moa_brain::execution_planning::{
     AmendmentPlanningEvidence, ExecutionAmendmentPlanningRequest,
     ExecutionAmendmentPlanningResultKind, plan_amendment,
@@ -28,30 +28,42 @@ use moa_execution::{
     interpreter::{ScheduleRequest, ready_empty_map_nodes, schedule},
     replan::{ReplanExhaustion, replan_exhaustion_reason, replan_stop_gaps, replan_stop_status},
     repository::{
+        BeginCompensationOutcome, CompensationClaimOutcome, CompensationFinalizationOutcome,
         CompileAuditWriteOutcome, ExecutionNodeMaterialization, ExecutionRepository,
-        ExecutionRunRecord, ExecutionScope, FinalizationOutcome, MaterializationOutcome,
-        PlannerCallAuditWriteOutcome, ReplanStopOutcome, ReplanStopRequest, RunFinalizationRequest,
-        TransitionOutcome, WakeAckOutcome,
+        ExecutionRunRecord, ExecutionScope, FencedTerminalFinalizationOutcome, FinalizationOutcome,
+        MaterializationOutcome, PlannerCallAuditWriteOutcome, RunFinalizationRequest,
+        TerminalFenceOutcome, TransitionOutcome, WakeAckOutcome,
     },
     state::{
-        ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus, ExecutionTerminalCause,
-        ScheduleDecision, TerminalProjection, WaitingReason,
+        CompensationStatus, ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus,
+        ExecutionTerminalCause, PendingExecutionTerminal, ScheduleDecision, TerminalProjection,
+        WaitingReason, run_status_from_terminal_projection,
     },
     wire::{
-        ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshot,
-        ExecutionRunRequest, ExecutionRunWakeRequest, ExecutionRunWorkflowRequest,
-        ExecutionTaskWorkflowRequest, ExecutionTerminalDelivery, execution_progress_from_run,
+        ExecutionAmendmentRequest, ExecutionCompensationWorkflowRequest, ExecutionMutationResponse,
+        ExecutionPlanningContextSnapshot, ExecutionRunRequest, ExecutionRunWakeRequest,
+        ExecutionRunWorkflowRequest, ExecutionTaskWorkflowRequest, ExecutionTerminalDelivery,
+        execution_progress_from_run,
     },
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use restate_sdk::context::macro_support::SealedDurableFuture;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::objects::session::SessionClient;
-use crate::services::{execution::ExecutionClient, llm_gateway::LLMGatewayClient};
+use crate::services::{
+    execution::ExecutionClient,
+    llm_gateway::{
+        LLMCompletionAction, LLMCompletionOwner, LLMGatewayClient,
+        cancel_completion_owner_from_workflow, completion_idempotency_key,
+    },
+};
+use crate::workflows::execution_compensation::ExecutionCompensationClient;
 use crate::workflows::execution_task::ExecutionTaskClient;
 
 const K_PROCESSED_WAKE_EPOCH: &str = "execution_processed_wake_epoch";
@@ -118,6 +130,8 @@ impl ExecutionRun for ExecutionRunImpl {
         ctx.set(K_AWAITED_WAKE_EPOCH, Json::from(0_u64));
         let scope = execution_scope(&request);
         let mut step_index = 0_u64;
+        let mut owned_task_calls = Vec::new();
+        let mut owned_task_ids = BTreeSet::new();
         loop {
             let repository = self.repository.clone();
             let drive_request = request.clone();
@@ -172,17 +186,31 @@ impl ExecutionRun for ExecutionRunImpl {
                     match amendment_step {
                         RunDriveStep::Continue => continue,
                         RunDriveStep::Terminal { task_ids, reason } => {
-                            for task_id in task_ids {
-                                crate::restate_identity::replay_safe_request(
-                                    ctx.workflow_client::<ExecutionTaskClient>(task_id.to_string())
-                                        .cancel(Json::from(reason.clone())),
+                            if !owned_task_calls.is_empty() || !task_ids.is_empty() {
+                                cancel_completion_owner_from_workflow(
+                                    &ctx,
+                                    LLMCompletionOwner::execution_run(request.run_uid.to_string()),
                                 )
-                                .send();
+                                .await?;
                             }
+                            for (task, _) in &owned_task_calls {
+                                signal_forward_task_cancellation(&ctx, task, &reason).await?;
+                            }
+                            for (_, call) in owned_task_calls.drain(..) {
+                                call.await?;
+                            }
+                            for task_id in task_ids {
+                                if !owned_task_ids.contains(&task_id) {
+                                    signal_task_cancellation(&ctx, task_id, &reason).await?;
+                                }
+                            }
+                            owned_task_ids.clear();
                             return Ok(());
                         }
                         RunDriveStep::PlanAmendment { .. }
                         | RunDriveStep::Dispatch { .. }
+                        | RunDriveStep::SettleForward { .. }
+                        | RunDriveStep::Compensate { .. }
                         | RunDriveStep::Park { .. } => {
                             return Err(TerminalError::new(
                                 "amendment operation returned an invalid driver step",
@@ -193,12 +221,54 @@ impl ExecutionRun for ExecutionRunImpl {
                 }
                 RunDriveStep::Dispatch { tasks } => {
                     for task in tasks {
-                        crate::restate_identity::replay_safe_request(
+                        if !owned_task_ids.insert(task.task_id) {
+                            return Err(TerminalError::new(format!(
+                                "execution task {} was dispatched while its original call was still owned",
+                                task.task_id
+                            ))
+                            .into());
+                        }
+                        let call = crate::restate_identity::replay_safe_request(
                             ctx.workflow_client::<ExecutionTaskClient>(task.task_id.to_string())
-                                .run(Json::from(task)),
+                                .run(Json::from(task.clone())),
                         )
-                        .send();
+                        .call();
+                        owned_task_calls.push((task, call));
                     }
+                }
+                RunDriveStep::SettleForward { tasks, reason } => {
+                    cancel_completion_owner_from_workflow(
+                        &ctx,
+                        LLMCompletionOwner::execution_run(request.run_uid.to_string()),
+                    )
+                    .await?;
+                    let expected = tasks
+                        .iter()
+                        .map(|task| task.task_id)
+                        .collect::<BTreeSet<_>>();
+                    if !expected.is_subset(&owned_task_ids) {
+                        return Err(TerminalError::new(format!(
+                            "execution run settlement task ownership mismatch: expected {expected:?}, owned {owned_task_ids:?}"
+                        ))
+                        .into());
+                    }
+                    for task in &tasks {
+                        signal_forward_task_cancellation(&ctx, task, &reason).await?;
+                    }
+                    for (_, call) in owned_task_calls.drain(..) {
+                        call.await?;
+                    }
+                    owned_task_ids.clear();
+                }
+                RunDriveStep::Compensate { request } => {
+                    crate::restate_identity::replay_safe_request(
+                        ctx.workflow_client::<ExecutionCompensationClient>(
+                            request.compensation_id.to_string(),
+                        )
+                        .run(Json::from(request)),
+                    )
+                    .call()
+                    .await?;
                 }
                 RunDriveStep::Park { processed_epoch } => {
                     ctx.set(K_AWAITED_WAKE_EPOCH, Json::from(processed_epoch));
@@ -234,16 +304,51 @@ impl ExecutionRun for ExecutionRunImpl {
                     test_wake_handoff_checkpoint(&ctx).await?;
                     ctx.set(K_PROCESSED_WAKE_EPOCH, Json::from(processed_epoch));
                     let promise_key = wake_promise_key(processed_epoch);
-                    let _: u64 = ctx.promise(&promise_key).await?;
+                    let wake = ctx.promise::<u64>(&promise_key);
+                    if owned_task_calls.is_empty() {
+                        let _: u64 = wake.await?;
+                    } else {
+                        let mut handles =
+                            Vec::with_capacity(owned_task_calls.len().saturating_add(1));
+                        handles.push(wake.handle());
+                        handles.extend(owned_task_calls.iter().map(|(_, call)| call.handle()));
+                        let selected = wake.inner_context().select(handles).await?;
+                        if selected == 0 {
+                            let _: u64 = wake.await?;
+                        } else {
+                            let call_index = selected.saturating_sub(1);
+                            if call_index >= owned_task_calls.len() {
+                                return Err(TerminalError::new(format!(
+                                    "execution task selector returned invalid branch {selected}"
+                                ))
+                                .into());
+                            }
+                            let (task, call) = owned_task_calls.swap_remove(call_index);
+                            owned_task_ids.remove(&task.task_id);
+                            call.await?;
+                        }
+                    }
                 }
                 RunDriveStep::Terminal { task_ids, reason } => {
-                    for task_id in task_ids {
-                        crate::restate_identity::replay_safe_request(
-                            ctx.workflow_client::<ExecutionTaskClient>(task_id.to_string())
-                                .cancel(Json::from(reason.clone())),
+                    if !owned_task_calls.is_empty() || !task_ids.is_empty() {
+                        cancel_completion_owner_from_workflow(
+                            &ctx,
+                            LLMCompletionOwner::execution_run(request.run_uid.to_string()),
                         )
-                        .send();
+                        .await?;
                     }
+                    for (task, _) in &owned_task_calls {
+                        signal_forward_task_cancellation(&ctx, task, &reason).await?;
+                    }
+                    for (_, call) in owned_task_calls.drain(..) {
+                        call.await?;
+                    }
+                    for task_id in task_ids {
+                        if !owned_task_ids.contains(&task_id) {
+                            signal_task_cancellation(&ctx, task_id, &reason).await?;
+                        }
+                    }
+                    owned_task_ids.clear();
                     return Ok(());
                 }
             }
@@ -325,6 +430,13 @@ enum RunDriveStep {
     },
     Dispatch {
         tasks: Vec<ExecutionTaskWorkflowRequest>,
+    },
+    SettleForward {
+        tasks: Vec<ExecutionTaskWorkflowRequest>,
+        reason: String,
+    },
+    Compensate {
+        request: ExecutionCompensationWorkflowRequest,
     },
     Park {
         processed_epoch: u64,
@@ -457,6 +569,9 @@ async fn deliver_session_projection(
 
 struct RestateAmendmentPlannerProvider<'a> {
     ctx: &'a WorkflowContext<'a>,
+    run_uid: uuid::Uuid,
+    plan_revision: u64,
+    next_attempt: AtomicUsize,
 }
 
 #[async_trait]
@@ -473,10 +588,20 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_> {
         &self,
         request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
+        // Amendment generation and its bounded repair are sequential planner calls.
+        let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
         let response = crate::restate_identity::replay_safe_request(
             self.ctx
                 .service_client::<LLMGatewayClient>()
-                .complete(Json::from(request)),
+                .complete(Json::from(request))
+                .idempotency_key(completion_idempotency_key(
+                    self.ctx.invocation_id(),
+                    LLMCompletionAction::ExecutionAmendment {
+                        run_uid: self.run_uid,
+                        plan_revision: self.plan_revision,
+                        attempt,
+                    },
+                )),
         )
         .call()
         .await
@@ -532,7 +657,12 @@ async fn plan_and_apply_waiting_replan(
         return Ok(RunDriveStep::Continue);
     };
 
-    let provider = RestateAmendmentPlannerProvider { ctx };
+    let provider = RestateAmendmentPlannerProvider {
+        ctx,
+        run_uid: request.run_uid,
+        plan_revision,
+        next_attempt: AtomicUsize::new(0),
+    };
     let planned = plan_amendment(
         &provider,
         ExecutionAmendmentPlanningRequest {
@@ -837,7 +967,7 @@ async fn finalize_amendment_planner_stop(
     {
         return Ok(RunDriveStep::Continue);
     }
-    finalize_replan_stop(
+    fence_replan_stop(
         &repository,
         scope,
         snapshot,
@@ -873,6 +1003,20 @@ async fn drive_once(
             &snapshot.projection.tasks,
             format!("execution run ended as {}", snapshot.run.status.as_str()),
         ));
+    }
+    if snapshot.run.manual_repair_required && snapshot.run.pending_terminal.is_none() {
+        return finalize_internal_failure(
+            &repository,
+            scope,
+            snapshot,
+            "compensation registration requires manual repair".to_string(),
+        )
+        .await;
+    }
+    if snapshot.run.pending_terminal.is_some()
+        || snapshot.run.status == ExecutionRunStatus::Compensating
+    {
+        return drive_compensation(&repository, scope, &request, snapshot).await;
     }
     if snapshot.run.status == ExecutionRunStatus::AwaitingConfirmation {
         return Ok(park_at_epoch(&snapshot.run));
@@ -990,7 +1134,7 @@ async fn drive_once(
         }
         ScheduleDecision::Waiting(waiting) => {
             if let Some(reason) = immediately_knowable_replan_stop(&snapshot) {
-                return finalize_replan_stop(&repository, scope, snapshot, reason).await;
+                return fence_replan_stop(&repository, scope, snapshot, reason).await;
             }
             let waiting_status = waiting_status(&snapshot.projection.tasks, &waiting);
             let transition = repository
@@ -1052,6 +1196,22 @@ async fn drive_once(
             let terminal_reason =
                 execution_terminal_reason(&terminal_evidence.cause, &terminal, &evaluation)
                     .map_err(execution_error)?;
+            if fence_terminal_before_settlement(
+                &repository,
+                scope,
+                &snapshot.run,
+                TerminalFenceInput {
+                    terminal: &terminal,
+                    terminal_evidence: &terminal_evidence,
+                    terminal_reason,
+                    output: snapshot.run.output.clone(),
+                    evaluation: &evaluation,
+                },
+            )
+            .await?
+            {
+                return Ok(RunDriveStep::Continue);
+            }
             match repository
                 .finalize_run(
                     scope,
@@ -1085,7 +1245,237 @@ async fn drive_once(
     }
 }
 
-async fn finalize_replan_stop(
+async fn drive_compensation(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    request: &ExecutionRunWorkflowRequest,
+    scheduling: moa_execution::repository::ExecutionSchedulingSnapshot,
+) -> Result<RunDriveStep, HandlerError> {
+    let snapshot = repository
+        .load_compensation_snapshot(scope, request.run_uid)
+        .await
+        .map_err(execution_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?;
+    if snapshot.run.tenant_id != request.tenant_id
+        || snapshot.run.contact_id != request.contact_id
+        || snapshot.run.session_id != request.session_id
+    {
+        return Err(
+            TerminalError::new_with_code(409, "execution compensation scope mismatch").into(),
+        );
+    }
+    if !snapshot.nonterminal_forward_tasks.is_empty() {
+        return Ok(RunDriveStep::SettleForward {
+            tasks: snapshot
+                .nonterminal_forward_tasks
+                .iter()
+                .map(|task| task_workflow_request(&snapshot.run, task, request))
+                .collect(),
+            reason: "execution run fenced forward work before compensation".to_string(),
+        });
+    }
+    if snapshot.run.status != ExecutionRunStatus::Compensating {
+        let pending_status = snapshot
+            .run
+            .pending_terminal
+            .as_ref()
+            .map(|terminal| terminal.status)
+            .ok_or_else(|| TerminalError::new("fenced execution run omitted pending terminal"))?;
+        if compensation_entry_decision(
+            snapshot.run.active_plan.definition.cancel_policy,
+            pending_status,
+            snapshot.manual_repair_required,
+        ) == CompensationEntryDecision::FinalizeFenced
+        {
+            return finalize_fenced_terminal_step(repository, scope, &snapshot.run, request).await;
+        }
+        return match repository
+            .begin_compensation(
+                scope,
+                snapshot.run.run_uid,
+                snapshot.run.plan_revision,
+                snapshot.run.wake_epoch,
+            )
+            .await
+            .map_err(execution_error)?
+        {
+            BeginCompensationOutcome::Applied(_) | BeginCompensationOutcome::Replayed(_) => {
+                Ok(RunDriveStep::Continue)
+            }
+            BeginCompensationOutcome::NoCompensations(run) => {
+                finalize_fenced_terminal_step(repository, scope, &run, request).await
+            }
+            BeginCompensationOutcome::ForwardTasksPending(tasks) => {
+                Ok(RunDriveStep::SettleForward {
+                    tasks: tasks
+                        .iter()
+                        .map(|task| task_workflow_request(&snapshot.run, task, request))
+                        .collect(),
+                    reason: "execution run fenced forward work before compensation".to_string(),
+                })
+            }
+            BeginCompensationOutcome::Conflict => Ok(RunDriveStep::Continue),
+            BeginCompensationOutcome::NotFound => {
+                Err(TerminalError::new_with_code(404, "execution run not found").into())
+            }
+        };
+    }
+    if snapshot.manual_repair_required {
+        return finalize_compensation_step(repository, scope, &snapshot.run, &scheduling).await;
+    }
+    let next = snapshot.registrations.iter().find(|registration| {
+        compensation_registration_decision(registration.status)
+            != CompensationRegistrationDecision::SkipCompleted
+    });
+    let Some(next) = next else {
+        return finalize_compensation_step(repository, scope, &snapshot.run, &scheduling).await;
+    };
+    let claimed = match compensation_registration_decision(next.status) {
+        CompensationRegistrationDecision::Claim => match repository
+            .claim_next_compensation(
+                scope,
+                snapshot.run.run_uid,
+                next.compensation_id,
+                next.generation,
+            )
+            .await
+            .map_err(execution_error)?
+        {
+            CompensationClaimOutcome::Claimed(registration)
+            | CompensationClaimOutcome::Replayed(registration) => registration,
+            CompensationClaimOutcome::BudgetRejected(_) => return Ok(RunDriveStep::Continue),
+            CompensationClaimOutcome::Conflict => return Ok(RunDriveStep::Continue),
+            CompensationClaimOutcome::NotFound => {
+                return Err(
+                    TerminalError::new_with_code(404, "execution compensation not found").into(),
+                );
+            }
+        },
+        CompensationRegistrationDecision::Dispatch => next.clone(),
+        CompensationRegistrationDecision::Finalize => {
+            return finalize_compensation_step(repository, scope, &snapshot.run, &scheduling).await;
+        }
+        CompensationRegistrationDecision::SkipCompleted => return Ok(RunDriveStep::Continue),
+    };
+    Ok(RunDriveStep::Compensate {
+        request: ExecutionCompensationWorkflowRequest {
+            run_uid: snapshot.run.run_uid,
+            compensation_id: claimed.compensation_id,
+            generation: claimed.generation,
+            tenant_id: snapshot.run.tenant_id,
+            contact_id: snapshot.run.contact_id,
+            session_id: snapshot.run.session_id,
+            identity: request.identity.clone(),
+        },
+    })
+}
+
+async fn finalize_fenced_terminal_step(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run: &ExecutionRunRecord,
+    request: &ExecutionRunWorkflowRequest,
+) -> Result<RunDriveStep, HandlerError> {
+    match repository
+        .finalize_fenced_terminal(scope, run.run_uid, run.plan_revision, run.wake_epoch)
+        .await
+        .map_err(execution_error)?
+    {
+        FencedTerminalFinalizationOutcome::Finalized(finalized)
+        | FencedTerminalFinalizationOutcome::Replayed(finalized)
+        | FencedTerminalFinalizationOutcome::ManualRepairRequired(finalized) => {
+            Ok(RunDriveStep::Terminal {
+                task_ids: Vec::new(),
+                reason: format!("execution run ended as {}", finalized.status.as_str()),
+            })
+        }
+        FencedTerminalFinalizationOutcome::ForwardTasksPending(tasks) => {
+            Ok(RunDriveStep::SettleForward {
+                tasks: tasks
+                    .iter()
+                    .map(|task| task_workflow_request(run, task, request))
+                    .collect(),
+                reason: "execution run fenced forward work before terminal settlement".to_string(),
+            })
+        }
+        FencedTerminalFinalizationOutcome::Conflict => Ok(RunDriveStep::Continue),
+        FencedTerminalFinalizationOutcome::NotFound => {
+            Err(TerminalError::new_with_code(404, "execution run not found").into())
+        }
+    }
+}
+
+async fn finalize_compensation_step(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run: &ExecutionRunRecord,
+    scheduling: &moa_execution::repository::ExecutionSchedulingSnapshot,
+) -> Result<RunDriveStep, HandlerError> {
+    match repository
+        .finalize_compensation(scope, run.run_uid, run.wake_epoch)
+        .await
+        .map_err(execution_error)?
+    {
+        CompensationFinalizationOutcome::Finalized(finalized)
+        | CompensationFinalizationOutcome::Replayed(finalized)
+        | CompensationFinalizationOutcome::ManualRepairRequired(finalized) => Ok(terminal_step(
+            &scheduling.projection.tasks,
+            format!(
+                "execution compensation ended as {}",
+                finalized.status.as_str()
+            ),
+        )),
+        CompensationFinalizationOutcome::Conflict => Ok(RunDriveStep::Continue),
+        CompensationFinalizationOutcome::NotFound => {
+            Err(TerminalError::new_with_code(404, "execution run not found").into())
+        }
+    }
+}
+
+fn task_workflow_request(
+    run: &ExecutionRunRecord,
+    task: &moa_execution::repository::ExecutionTaskRecord,
+    request: &ExecutionRunWorkflowRequest,
+) -> ExecutionTaskWorkflowRequest {
+    ExecutionTaskWorkflowRequest {
+        run_uid: run.run_uid,
+        task_id: task.task_id,
+        generation: task.generation,
+        tenant_id: run.tenant_id,
+        contact_id: run.contact_id,
+        session_id: run.session_id,
+        identity: request.identity.clone(),
+    }
+}
+
+async fn signal_forward_task_cancellation(
+    ctx: &WorkflowContext<'_>,
+    task: &ExecutionTaskWorkflowRequest,
+    reason: &str,
+) -> Result<(), HandlerError> {
+    signal_task_cancellation(ctx, task.task_id, reason).await
+}
+
+async fn signal_task_cancellation(
+    ctx: &WorkflowContext<'_>,
+    task_id: ExecutionTaskId,
+    reason: &str,
+) -> Result<(), HandlerError> {
+    let cancellation = crate::restate_identity::replay_safe_request(
+        ctx.workflow_client::<ExecutionTaskClient>(task_id.to_string())
+            .cancel(Json::from(reason.to_string())),
+    )
+    .call()
+    .await;
+    match cancellation {
+        Ok(()) => {}
+        Err(error) if error.code() == 404 => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+async fn fence_replan_stop(
     repository: &ExecutionRepository,
     scope: ExecutionScope,
     snapshot: moa_execution::repository::ExecutionSchedulingSnapshot,
@@ -1095,12 +1485,16 @@ async fn finalize_replan_stop(
         reason,
         description,
     } = stop;
-    let waiting_task = snapshot
+    if !snapshot
         .projection
         .tasks
         .iter()
-        .find(|task| task.status == ExecutionTaskStatus::WaitingReplan)
-        .ok_or_else(|| TerminalError::new("replan stop has no originating waiting-replan task"))?;
+        .any(|task| task.status == ExecutionTaskStatus::WaitingReplan)
+    {
+        return Err(
+            TerminalError::new("replan stop has no originating waiting-replan task").into(),
+        );
+    }
     let mut evaluation = evaluate_completion(CompletionEvaluationRequest {
         goal: snapshot.run.goal.clone(),
         plan: snapshot.run.active_plan.clone(),
@@ -1135,50 +1529,20 @@ async fn finalize_replan_stop(
     let terminal_reason =
         execution_terminal_reason(&terminal_evidence.cause, &terminal, &evaluation)
             .map_err(execution_error)?;
-    let task_ids = snapshot
-        .projection
-        .tasks
-        .iter()
-        .map(|task| task.task_id)
-        .collect::<Vec<_>>();
-    let cancellation_reason = stop_gaps
-        .get(1)
-        .or_else(|| stop_gaps.first())
-        .cloned()
-        .ok_or_else(|| TerminalError::new("replan stop omitted typed gap evidence"))?;
-    match repository
-        .finalize_replan_stop(
-            scope,
-            ReplanStopRequest {
-                run_uid: snapshot.run.run_uid,
-                expected_revision: snapshot.run.plan_revision,
-                expected_wake_epoch: snapshot.run.wake_epoch,
-                task_id: waiting_task.task_id,
-                expected_generation: waiting_task.generation,
-                amendment_hash: None,
-                cancellation_reason: cancellation_reason.clone(),
-                terminal_projection: terminal,
-                completion_evaluation: evaluation,
-                terminal_evidence,
-                terminal_reason,
-            },
-        )
-        .await
-        .map_err(execution_error)?
-    {
-        ReplanStopOutcome::Finalized(_) => Ok(RunDriveStep::Terminal {
-            task_ids,
-            reason: cancellation_reason,
-        }),
-        ReplanStopOutcome::Replayed(_) => Ok(RunDriveStep::Terminal {
-            task_ids,
-            reason: cancellation_reason,
-        }),
-        ReplanStopOutcome::Conflict => Ok(RunDriveStep::Continue),
-        ReplanStopOutcome::NotFound => {
-            Err(TerminalError::new_with_code(404, "execution run not found").into())
-        }
-    }
+    fence_terminal_before_settlement(
+        repository,
+        scope,
+        &snapshot.run,
+        TerminalFenceInput {
+            terminal: &terminal,
+            terminal_evidence: &terminal_evidence,
+            terminal_reason,
+            output: snapshot.run.output.clone(),
+            evaluation: &evaluation,
+        },
+    )
+    .await?;
+    Ok(RunDriveStep::Continue)
 }
 
 fn immediately_knowable_replan_stop(
@@ -1230,6 +1594,22 @@ async fn finalize_internal_failure(
     let terminal_reason =
         execution_terminal_reason(&terminal_evidence.cause, &terminal, &evaluation)
             .map_err(execution_error)?;
+    if fence_terminal_before_settlement(
+        repository,
+        scope,
+        &snapshot.run,
+        TerminalFenceInput {
+            terminal: &terminal,
+            terminal_evidence: &terminal_evidence,
+            terminal_reason,
+            output: None,
+            evaluation: &evaluation,
+        },
+    )
+    .await?
+    {
+        return Ok(RunDriveStep::Continue);
+    }
     match repository
         .finalize_run(
             scope,
@@ -1278,6 +1658,9 @@ async fn finalize(
                 .and_then(|outcome| match &outcome.result {
                     moa_artifacts::execution_plan::ExecutionTaskResult::Failed {
                         message, ..
+                    }
+                    | moa_artifacts::execution_plan::ExecutionTaskResult::UnknownOutcome {
+                        message,
                     } => Some(message.clone()),
                     _ => None,
                 })
@@ -1312,9 +1695,14 @@ async fn finalize(
     evaluation.gaps.sort();
     evaluation.gaps.dedup();
     if !terminal_projection_matches_completion(&terminal, evaluation.status) {
-        terminal =
-            terminal_projection_from_evaluation(&evaluation, terminal_output, None, None, None)
-                .map_err(execution_error)?;
+        terminal = terminal_projection_from_evaluation(
+            &evaluation,
+            terminal_output.clone(),
+            None,
+            None,
+            None,
+        )
+        .map_err(execution_error)?;
     }
     let terminal_reason = format!("execution run reached terminal projection {terminal:?}");
     let terminal_evidence =
@@ -1322,6 +1710,22 @@ async fn finalize(
     let selected_terminal_reason =
         execution_terminal_reason(&terminal_evidence.cause, &terminal, &evaluation)
             .map_err(execution_error)?;
+    if fence_terminal_before_settlement(
+        repository,
+        scope,
+        &snapshot.run,
+        TerminalFenceInput {
+            terminal: &terminal,
+            terminal_evidence: &terminal_evidence,
+            terminal_reason: selected_terminal_reason,
+            output: terminal_output.clone(),
+            evaluation: &evaluation,
+        },
+    )
+    .await?
+    {
+        return Ok(RunDriveStep::Continue);
+    }
     match repository
         .finalize_run(
             scope,
@@ -1350,6 +1754,113 @@ async fn finalize(
         FinalizationOutcome::NotFound => {
             Err(TerminalError::new_with_code(404, "execution run not found").into())
         }
+    }
+}
+
+struct TerminalFenceInput<'a> {
+    terminal: &'a TerminalProjection,
+    terminal_evidence: &'a moa_execution::state::ExecutionTerminalEvidence,
+    terminal_reason: moa_execution::state::ExecutionTerminalReason,
+    output: Option<Value>,
+    evaluation: &'a CompletionEvaluation,
+}
+
+async fn fence_terminal_before_settlement(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run: &ExecutionRunRecord,
+    input: TerminalFenceInput<'_>,
+) -> Result<bool, HandlerError> {
+    let status = run_status_from_terminal_projection(input.terminal);
+    if status == ExecutionRunStatus::Completed {
+        return Ok(false);
+    }
+    let cancellation_reason = match input.terminal {
+        TerminalProjection::Cancelled { reason } => Some(reason.clone()),
+        TerminalProjection::Completed { .. }
+        | TerminalProjection::Partial { .. }
+        | TerminalProjection::Blocked { .. }
+        | TerminalProjection::Unsupported { .. }
+        | TerminalProjection::Failed { .. } => None,
+    };
+    match repository
+        .fence_run_for_terminal(
+            scope,
+            run.run_uid,
+            run.plan_revision,
+            run.wake_epoch,
+            PendingExecutionTerminal {
+                status,
+                reason: input.terminal_reason,
+                terminal_evidence: input.terminal_evidence.clone(),
+                output: input.output,
+                completion_check_results: input
+                    .evaluation
+                    .checks
+                    .iter()
+                    .map(|check| {
+                        serde_json::to_value(check).map_err(|error| {
+                            TerminalError::new(format!(
+                                "serialize terminal completion check: {error}"
+                            ))
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                terminal_gaps: input.evaluation.gaps.clone(),
+                cancellation_reason,
+            },
+        )
+        .await
+        .map_err(execution_error)?
+    {
+        TerminalFenceOutcome::Applied(_) | TerminalFenceOutcome::Replayed(_) => Ok(true),
+        TerminalFenceOutcome::Conflict => Ok(true),
+        TerminalFenceOutcome::NotFound => {
+            Err(TerminalError::new_with_code(404, "execution run not found").into())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompensationEntryDecision {
+    Begin,
+    FinalizeFenced,
+}
+
+const fn compensation_entry_decision(
+    policy: ExecutionCancelPolicy,
+    status: ExecutionRunStatus,
+    manual_repair_required: bool,
+) -> CompensationEntryDecision {
+    if manual_repair_required
+        || matches!(status, ExecutionRunStatus::Completed)
+        || (matches!(status, ExecutionRunStatus::Cancelled)
+            && matches!(policy, ExecutionCancelPolicy::RetainEffects))
+    {
+        CompensationEntryDecision::FinalizeFenced
+    } else {
+        CompensationEntryDecision::Begin
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompensationRegistrationDecision {
+    Claim,
+    Dispatch,
+    Finalize,
+    SkipCompleted,
+}
+
+const fn compensation_registration_decision(
+    status: CompensationStatus,
+) -> CompensationRegistrationDecision {
+    match status {
+        CompensationStatus::Pending => CompensationRegistrationDecision::Claim,
+        CompensationStatus::Running => CompensationRegistrationDecision::Dispatch,
+        CompensationStatus::Failed | CompensationStatus::UnknownOutcome => {
+            CompensationRegistrationDecision::Finalize
+        }
+        CompensationStatus::Completed => CompensationRegistrationDecision::SkipCompleted,
     }
 }
 
@@ -1506,10 +2017,10 @@ mod tests {
     use chrono::{Duration, Utc};
     use moa_artifacts::execution_plan::{
         CapabilityReference, CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit,
-        ExecutionFailureClass, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
-        ExecutionPlanDefinition, ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult,
-        ExecutionUsage, GeneratedAmendmentCandidate, PlanAmendment, PlanAmendmentOperation,
-        RetryPolicy,
+        ExecutionCancelPolicy, ExecutionFailureClass, ExecutionGoalContract, ExecutionNode,
+        ExecutionOperation, ExecutionPlanDefinition, ExecutionRequirement, ExecutionTaskOutcome,
+        ExecutionTaskResult, ExecutionUsage, GeneratedAmendmentCandidate,
+        PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
     };
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
@@ -1534,9 +2045,9 @@ mod tests {
             PlanningContextWriteOutcome, ReservationOutcome, TaskOutcomeWrite, TransitionOutcome,
         },
         state::{
-            ExecutionLimitStop, ExecutionNodeStatus, ExecutionProjection, ExecutionTaskFailure,
-            ExecutionTaskId, ExecutionTerminalCause, LogicalTask, LogicalTaskKind,
-            TerminalProjection,
+            CompensationStatus, ExecutionLimitStop, ExecutionNodeStatus, ExecutionProjection,
+            ExecutionTaskFailure, ExecutionTaskId, ExecutionTerminalCause, LogicalTask,
+            LogicalTaskKind, TerminalProjection,
         },
         wire::{
             ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshot,
@@ -1548,9 +2059,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ExecutionRunStatus, ReplanExhaustion, RunDriveStep, bounded_failure_evidence,
-        narrow_amendment_context, narrow_authorized_capability_refs, prepare_amendment_planning,
-        replan_exhaustion_reason, terminal_cause, wait_transition_step, wake_promise_epoch,
+        CompensationEntryDecision, CompensationRegistrationDecision, ExecutionRunStatus,
+        ReplanExhaustion, RunDriveStep, bounded_failure_evidence, compensation_entry_decision,
+        compensation_registration_decision, narrow_amendment_context,
+        narrow_authorized_capability_refs, prepare_amendment_planning, replan_exhaustion_reason,
+        terminal_cause, wait_transition_step, wake_promise_epoch,
     };
 
     #[tokio::test]
@@ -1927,7 +2440,8 @@ mod tests {
 
     fn replan_plan() -> ExecutionPlanDefinition {
         ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: vec![
@@ -1944,6 +2458,7 @@ mod tests {
                         capability_refs: Vec::new(),
                         max_turns: 1,
                     },
+                    compensation: None,
                     retry: RetryPolicy {
                         max_attempts: 1,
                         initial_backoff_ms: 0,
@@ -1969,6 +2484,7 @@ mod tests {
             input: json!({}),
             output_schema: json!({"type": "object"}),
             operation: ExecutionOperation::Output { value },
+            compensation: None,
             retry: RetryPolicy {
                 max_attempts: 1,
                 initial_backoff_ms: 0,
@@ -2002,6 +2518,7 @@ mod tests {
             } else {
                 LogicalTaskKind::Output { value }
             },
+            compensation: None,
             retry: RetryPolicy {
                 max_attempts: 1,
                 initial_backoff_ms: 0,
@@ -2058,7 +2575,7 @@ mod tests {
 
     fn replan_amendment_value() -> serde_json::Value {
         json!({
-            "schema_version": 1,
+            "schema_version": PLAN_AMENDMENT_SCHEMA_VERSION,
             "base_plan_revision": 1,
             "reason": "replace stale output",
             "evidence": {"shape": "changed"},
@@ -2077,6 +2594,7 @@ mod tests {
                             "kind": "output",
                             "value": {"value": "repaired"}
                         },
+                        "compensation": null,
                         "retry": {
                             "max_attempts": 1,
                             "initial_backoff_ms": 0,
@@ -2200,7 +2718,7 @@ mod tests {
             goal: compiled.goal,
             active_plan: compiled.plan,
             amendment: PlanAmendment {
-                schema_version: 1,
+                schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
                 base_plan_revision: 1,
                 reason: "Use the retained live capability".to_string(),
                 evidence: json!({"availability": "narrowed"}),
@@ -2314,6 +2832,7 @@ mod tests {
                 tasks: 1,
                 ..ExecutionEstimate::default()
             },
+            rollback: None,
         }
     }
 
@@ -2534,5 +3053,78 @@ mod tests {
             consumed: ExecutionEstimate::default(),
             overrun: false,
         }
+    }
+
+    #[test]
+    fn compensation_entry_selects_direct_finalization_before_any_claim() {
+        // Pins: RetainEffects cancellation and manual-repair forward ambiguity
+        // finalize the fenced terminal directly (zero compensation claims), while
+        // failures and CompensateCommitted cancellation enter the reverse driver.
+        assert_eq!(
+            compensation_entry_decision(
+                ExecutionCancelPolicy::RetainEffects,
+                ExecutionRunStatus::Cancelled,
+                false,
+            ),
+            CompensationEntryDecision::FinalizeFenced,
+        );
+        assert_eq!(
+            compensation_entry_decision(
+                ExecutionCancelPolicy::CompensateCommitted,
+                ExecutionRunStatus::Cancelled,
+                false,
+            ),
+            CompensationEntryDecision::Begin,
+        );
+        assert_eq!(
+            compensation_entry_decision(
+                ExecutionCancelPolicy::RetainEffects,
+                ExecutionRunStatus::Failed,
+                false,
+            ),
+            CompensationEntryDecision::Begin,
+        );
+        assert_eq!(
+            compensation_entry_decision(
+                ExecutionCancelPolicy::CompensateCommitted,
+                ExecutionRunStatus::Failed,
+                true,
+            ),
+            CompensationEntryDecision::FinalizeFenced,
+        );
+        assert_eq!(
+            compensation_entry_decision(
+                ExecutionCancelPolicy::CompensateCommitted,
+                ExecutionRunStatus::Completed,
+                false,
+            ),
+            CompensationEntryDecision::FinalizeFenced,
+        );
+    }
+
+    #[test]
+    fn compensation_replay_skips_completed_and_finalizes_ambiguous_records() {
+        // Pins: replay never dispatches a completed undo again, and a failed or
+        // unknown undo routes directly to finalization without another claim.
+        assert_eq!(
+            compensation_registration_decision(CompensationStatus::Completed),
+            CompensationRegistrationDecision::SkipCompleted,
+        );
+        assert_eq!(
+            compensation_registration_decision(CompensationStatus::Failed),
+            CompensationRegistrationDecision::Finalize,
+        );
+        assert_eq!(
+            compensation_registration_decision(CompensationStatus::UnknownOutcome),
+            CompensationRegistrationDecision::Finalize,
+        );
+        assert_eq!(
+            compensation_registration_decision(CompensationStatus::Pending),
+            CompensationRegistrationDecision::Claim,
+        );
+        assert_eq!(
+            compensation_registration_decision(CompensationStatus::Running),
+            CompensationRegistrationDecision::Dispatch,
+        );
     }
 }

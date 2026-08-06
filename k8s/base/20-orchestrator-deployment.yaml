@@ -20,48 +20,24 @@ spec:
     spec:
       terminationGracePeriodSeconds: 600
       initContainers:
-        # Runtime replicas have no migration credential and never execute DDL.
-        # The same immutable image exposes the explicit migration command used
-        # here before any handler process can start.
-        - name: database-migrations
+        # The migration-only Job owns DDL and the raw Restate KV rewrite. A
+        # normal replica receives only the runtime database credential and
+        # cannot start its hard-break reader before that stage writes a receipt.
+        - name: wait-status-cutover
           image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          command:
+            - /bin/sh
+            - -ec
           args:
-            - migrate
-          envFrom:
-            - configMapRef:
-                name: moa-runtime-config
+            - >-
+              exec /usr/local/bin/moa-orchestrator wait-status-cutover
+              --database-url "$MOA_CUTOVER_DATABASE_URL"
           env:
-            - name: RUST_LOG
-              value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off
-            - name: MOA_DATABASE_URL
+            - name: MOA_CUTOVER_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: moa-postgres
                   key: url
-            - name: MOA_DATABASE_ADMIN_URL
-              valueFrom:
-                secretKeyRef:
-                  name: moa-postgres
-                  key: admin-url
-        # Converge the required per-scope Restate rule before this pod can
-        # accept work. `rules set` is idempotent across replica startups.
-        - name: restate-rules-bootstrap
-          image: docker.restate.dev/restatedev/restate-cli:1.7.2
-          env:
-            - name: RESTATE_ADMIN_URL
-              value: http://restate.moa-restate.svc.cluster.local:9070
-          args:
-            - --connect-timeout
-            - "10000"
-            - --request-timeout
-            - "30000"
-            - rules
-            - set
-            - "*"
-            - --concurrency
-            - "1000"
-            - --description
-            - scope default
       containers:
         - name: orchestrator
           image: ghcr.io/hwuiwon/moa-orchestrator:latest
@@ -159,8 +135,6 @@ spec:
                   name: moa-llm-keys
                   key: openrouter
                   optional: true
-            - name: MOA_RESTATE_ADMIN_URL
-              value: http://restate.moa-restate.svc.cluster.local:9070
             - name: MOA_RESTATE_INGRESS_URL
               value: http://restate.moa-restate.svc.cluster.local:8080
             # Keep the capacity experiment off in production until its A/B wins.
@@ -181,13 +155,6 @@ spec:
             # scrape endpoint that exists.
             - name: MOA_METRICS_EXPORTER
               value: otlp
-            # Gate readiness on the orchestrator's Restate services (Session, Worker,
-            # TurnExecution, WorkerTurnExecution, ...) being registered with the cluster,
-            # so non-sticky traffic never lands on a replica whose handlers aren't live.
-            # Bootstrap is deadlock-free: the pod goes live via /_health/live, the
-            # RestateDeployment operator registers it, then /_health/ready passes.
-            - name: MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS
-              value: "true"
           volumeMounts:
             - name: kms-root-keys
               mountPath: /var/run/secrets/moa-kms/root-keys

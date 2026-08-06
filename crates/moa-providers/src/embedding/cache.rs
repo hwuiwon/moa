@@ -115,7 +115,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
 /// Builds the error returned when the provider under-delivers embeddings.
 fn cache_invariant_error() -> MoaError {
-    MoaError::ProviderError("embedding provider returned fewer vectors than inputs".to_string())
+    MoaError::ProviderQuirk("embedding provider returned fewer vectors than inputs".to_string())
 }
 
 #[cfg(test)]

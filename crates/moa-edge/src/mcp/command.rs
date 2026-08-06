@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::ingress::{IngressScope, call_path};
+use crate::ingress::call_path;
 use crate::proxy::OrchestratorProxy;
 
 /// A compile-time Restate service handler path.
@@ -53,7 +53,7 @@ impl<'a> McpCommandClient<'a> {
         Response: DeserializeOwned,
     {
         let body = serde_json::to_vec(request).map_err(McpCommandError::SerializeRequest)?;
-        let ingress_path = call_path(&IngressScope::Unscoped, path.0);
+        let ingress_path = call_path(path.0);
         let response = self
             .proxy
             .forward(
@@ -76,7 +76,7 @@ impl<'a> McpCommandClient<'a> {
     where
         Response: DeserializeOwned,
     {
-        let ingress_path = call_path(&IngressScope::Unscoped, path.0);
+        let ingress_path = call_path(path.0);
         let response = self
             .proxy
             .forward(

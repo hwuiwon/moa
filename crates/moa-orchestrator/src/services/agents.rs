@@ -1,6 +1,6 @@
 //! Restate service for agent principal lifecycle operations.
 
-use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
+use moa_authz::FgaClient;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -9,7 +9,8 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::handlers::authz_shim::{
-    require_configured_fga_client, require_identity, translate_authz_error,
+    journal_context_authz, journal_context_authz_any, require_configured_fga_client,
+    require_identity,
 };
 use crate::identity_admin::agents as agent_admin;
 
@@ -64,7 +65,7 @@ impl Agents for AgentsImpl {
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
         validate_agent_name(&request.display_name)?;
-        require_tenant_admin(self.fga_client.clone(), &identity).await?;
+        require_tenant_admin(self.fga_client.clone(), &ctx, identity.clone()).await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -81,7 +82,7 @@ impl Agents for AgentsImpl {
     async fn list(&self, ctx: Context<'_>) -> Result<Json<Vec<AgentSummary>>, HandlerError> {
         annotate_restate_handler_span("Agents", "list");
         let identity = require_identity(&ctx)?;
-        require_tenant_member(self.fga_client.clone(), &identity).await?;
+        require_tenant_member(self.fga_client.clone(), &ctx, identity.clone()).await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -103,8 +104,13 @@ impl Agents for AgentsImpl {
         annotate_restate_handler_span("Agents", "get");
         let identity = require_identity(&ctx)?;
         let agent_id = id.into_inner();
-        require_agent_operator_or_tenant_admin(self.fga_client.clone(), &identity, agent_id)
-            .await?;
+        require_agent_operator_or_tenant_admin(
+            self.fga_client.clone(),
+            &ctx,
+            identity.clone(),
+            agent_id,
+        )
+        .await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -122,8 +128,13 @@ impl Agents for AgentsImpl {
         annotate_restate_handler_span("Agents", "deactivate");
         let identity = require_identity(&ctx)?;
         let agent_id = id.into_inner();
-        require_agent_operator_or_tenant_admin(self.fga_client.clone(), &identity, agent_id)
-            .await?;
+        require_agent_operator_or_tenant_admin(
+            self.fga_client.clone(),
+            &ctx,
+            identity.clone(),
+            agent_id,
+        )
+        .await?;
         let fga = require_configured_fga_client(self.fga_client.clone())?;
         let agent_wire = format!("agent:{agent_id}");
         let can_act_as = ctx
@@ -163,7 +174,8 @@ impl Agents for AgentsImpl {
         let request = request.into_inner();
         require_grant_authority(
             self.fga_client.clone(),
-            &identity,
+            &ctx,
+            identity.clone(),
             request.agent_id,
             request.user_id,
         )
@@ -187,7 +199,8 @@ impl Agents for AgentsImpl {
         let request = request.into_inner();
         require_agent_operator_or_tenant_admin(
             self.fga_client.clone(),
-            &identity,
+            &ctx,
+            identity.clone(),
             request.agent_id,
         )
         .await?;
@@ -209,67 +222,73 @@ fn validate_agent_name(name: &str) -> Result<(), HandlerError> {
 
 async fn require_grant_authority(
     fga_client: Option<FgaClient>,
-    identity: &Identity,
+    ctx: &Context<'_>,
+    identity: Identity,
     agent_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), HandlerError> {
-    if actor_user_id(identity) == Some(user_id) {
-        return require_agent_operator_or_tenant_admin(fga_client, identity, agent_id).await;
+    if actor_user_id(&identity) == Some(user_id) {
+        return require_agent_operator_or_tenant_admin(fga_client, ctx, identity, agent_id).await;
     }
-    require_tenant_admin(fga_client, identity).await
+    require_tenant_admin(fga_client, ctx, identity).await
 }
 
 async fn require_tenant_member(
     fga_client: Option<FgaClient>,
-    identity: &Identity,
+    ctx: &Context<'_>,
+    identity: Identity,
 ) -> Result<(), HandlerError> {
     let fga = require_configured_fga_client(fga_client)?;
-    require_authz_with_delegation(
-        &fga,
+    let tenant_id = identity.tenant_id;
+    journal_context_authz(
+        ctx,
+        fga,
         identity,
         ObjectType::Tenant,
-        identity.tenant_id,
+        tenant_id,
         Relation::Operator,
     )
     .await
-    .map_err(translate_authz_error)
 }
 
 async fn require_tenant_admin(
     fga_client: Option<FgaClient>,
-    identity: &Identity,
+    ctx: &Context<'_>,
+    identity: Identity,
 ) -> Result<(), HandlerError> {
     let fga = require_configured_fga_client(fga_client)?;
-    require_authz_with_delegation(
-        &fga,
+    let tenant_id = identity.tenant_id;
+    journal_context_authz(
+        ctx,
+        fga,
         identity,
         ObjectType::Tenant,
-        identity.tenant_id,
+        tenant_id,
         Relation::Admin,
     )
     .await
-    .map_err(translate_authz_error)
 }
 
 async fn require_agent_operator_or_tenant_admin(
     fga_client: Option<FgaClient>,
-    identity: &Identity,
+    ctx: &Context<'_>,
+    identity: Identity,
     agent_id: Uuid,
 ) -> Result<(), HandlerError> {
-    let fga = require_configured_fga_client(fga_client.clone())?;
-    match require_authz_with_delegation(
-        &fga,
+    let fga = require_configured_fga_client(fga_client)?;
+    let tenant_id = identity.tenant_id;
+    journal_context_authz_any(
+        ctx,
+        fga,
         identity,
         ObjectType::Agent,
         agent_id,
         Relation::Operator,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
     )
     .await
-    {
-        Ok(()) => Ok(()),
-        Err(AuthzCheckError::Forbidden { .. }) => require_tenant_admin(fga_client, identity).await,
-        Err(error) => Err(translate_authz_error(error)),
-    }
 }
 
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {

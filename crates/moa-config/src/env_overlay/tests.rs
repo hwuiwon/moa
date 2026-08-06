@@ -290,7 +290,6 @@ fn from_iter_applies_flat_single_underscore_env() {
         ("MOA_MESSAGING_TWILIO_BASE_URL", "https://twilio.example"),
         ("MOA_OPENAI_API_KEY", "CUSTOM_OPENAI_KEY"),
         ("MOA_RESTATE_INGRESS_URL", "http://restate.example:8080"),
-        ("MOA_RESTATE_ADMIN_URL", "http://restate.example:9070"),
         (
             "MOA_RESTATE_LLM_GATEWAY_URL",
             "http://llm-gateway.example:10020",
@@ -427,10 +426,6 @@ fn from_iter_applies_flat_single_underscore_env() {
     assert_eq!(
         config.orchestrator.restate_ingress_url.as_deref(),
         Some("http://restate.example:8080")
-    );
-    assert_eq!(
-        config.orchestrator.restate_admin_url.as_deref(),
-        Some("http://restate.example:9070")
     );
     assert_eq!(
         config.orchestrator.llm_gateway_url.as_deref(),

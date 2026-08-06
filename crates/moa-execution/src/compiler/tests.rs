@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 
 use chrono::Utc;
 use moa_artifacts::execution_plan::{
-    CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit, ExecutionGoalContract,
-    ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionRequirement,
-    PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    CompletionCheck, CompletionCheckKind, EXECUTION_PLAN_SCHEMA_VERSION, ExecutionBudgetLimit,
+    ExecutionCancelPolicy, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
+    ExecutionPlanDefinition, ExecutionRequirement, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment,
+    PlanAmendmentOperation, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use serde_json::json;
@@ -47,7 +48,7 @@ fn execution_planning_amendment_cannot_remove_sole_goal_serving_output() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: 1,
+            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 1,
             reason: "Remove the required output".to_string(),
             evidence: json!({ "failure": "none" }),
@@ -100,7 +101,8 @@ fn output_only_compile_request() -> CompileExecutionRequest {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: vec![ExecutionNode {
@@ -113,6 +115,7 @@ fn output_only_compile_request() -> CompileExecutionRequest {
                 operation: ExecutionOperation::Output {
                     value: json!({ "status": "complete" }),
                 },
+                compensation: None,
                 retry: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 0,

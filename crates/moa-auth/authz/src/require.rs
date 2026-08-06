@@ -13,6 +13,7 @@ use std::time::Duration;
 use crate::client::SecurityAudit;
 use crate::{AuthzError, FgaClient};
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::error::FailureProvenance;
 use moa_core::traits::{Identity, IdentityType};
 use moka::future::Cache;
 use thiserror::Error;
@@ -90,6 +91,17 @@ pub enum AuthzCheckError {
     Engine(#[from] AuthzError),
 }
 
+impl AuthzCheckError {
+    /// Returns the typed provenance of the failed authorization check.
+    #[must_use]
+    pub fn failure_provenance(&self) -> FailureProvenance {
+        match self {
+            Self::Forbidden { .. } => FailureProvenance::Permanent,
+            Self::Engine(error) => error.failure_provenance(),
+        }
+    }
+}
+
 /// Verify that `identity` has `relation` on `object_type:object_id`.
 ///
 /// `Forbidden` is a definitive deny. `Engine` means the authorization engine
@@ -153,7 +165,7 @@ async fn emit_authz_audit(
             false,
         )
         .await
-        .map_err(|error| AuthzCheckError::Engine(AuthzError::Audit(error.to_string())))?;
+        .map_err(|error| AuthzCheckError::Engine(AuthzError::Audit(error)))?;
         return Ok(());
     }
     moa_ocsf::spawn_authz_decision(

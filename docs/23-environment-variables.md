@@ -266,6 +266,7 @@ operator knob for it.
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
+| `MOA_SESSION_LIMITS_COORDINATOR_INPUT_TIMEOUT_MS` | `session_limits.coordinator_input_timeout_ms` | 1800000 | Maximum time a coordinator security-input round-trip blocks before the turn stops safely |
 | `MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD` | `session_limits.loop_detection_threshold` | 3 | Number of identical consecutive turn fingerprints that triggers a loop pause |
 | `MOA_SESSION_LIMITS_MAX_MODEL_TURNS_DELEGATION` | `session_limits.max_model_turns_delegation` | 12 | Maximum model loop iterations once a standard turn has delegated to at least one worker; replaces the base cap for the rest of that turn |
 | `MOA_SESSION_LIMITS_MAX_TOOL_CALLS` | `session_limits.max_tool_calls` | 30 | Maximum tool calls allowed within one turn |
@@ -308,7 +309,6 @@ operator knob for it.
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_ORCHESTRATOR_ENDPOINT` | `orchestrator.endpoint` | http://localhost:10010 | Restate ingress URL fronting the `moa-orchestrator` deployment |
-| `MOA_RESTATE_ADMIN_URL` | `orchestrator.restate_admin_url` | http://localhost:10011 | Restate admin API base URL used for deployment registration and probes |
 | `MOA_RESTATE_INGRESS_URL` | `orchestrator.restate_ingress_url` | http://localhost:10010 | Restate ingress URL used by hosted runtime clients and tests |
 | `MOA_RESTATE_LLM_GATEWAY_URL` | `orchestrator.llm_gateway_url` | _none_ | Optional LLM gateway URL for direct service calls |
 
@@ -316,8 +316,8 @@ operator knob for it.
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_RUNTIME_CACHE_BACKEND` | `runtime_cache.backend` | auto | Backend used for runtime cache operations |
-| `MOA_RUNTIME_CACHE_REDIS_URL` | `runtime_cache.redis_url` | _none_ | Redis URL used when the Redis backend is selected |
+| `MOA_RUNTIME_CACHE_BACKEND` | `runtime_cache.backend` | auto | Backend selector; `moa-orchestrator` requires this to resolve to `redis` |
+| `MOA_RUNTIME_CACHE_REDIS_URL` | `runtime_cache.redis_url` | _none_ | Required Redis-compatible Valkey URL for `moa-orchestrator` startup |
 
 ### `auth`
 
@@ -610,8 +610,6 @@ not trip the unknown-variable audit. They do not affect application config.
 |---|---|
 | `MOA_CONFIG_ENV_STRICT` | This check's own strictness switch (warn vs fail) |
 | `MOA_SKIP_FGA` | Skips OpenFGA bootstrap in local/dev startup |
-| `MOA_DEREGISTER_ON_SHUTDOWN` | Orchestrator: deregister Restate deployment on shutdown |
-| `MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS` | Orchestrator readiness gate |
 | `MOA_ORCHESTRATOR_BIN` / `MOA_ORCHESTRATOR_FEATURES` | e2e harness: orchestrator binary path / cargo features |
 | `MOA_MEMORY_AUTO_BOOTSTRAP` | Auto-run memory schema bootstrap on startup |
 | `MOA_MEMORY_EXTRACTION_MODEL` / `_TIMEOUT_MS` / `_MAX_FACTS_PER_CHUNK` | Memory fact-extraction overrides read directly |

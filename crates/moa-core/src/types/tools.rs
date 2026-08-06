@@ -555,9 +555,55 @@ pub struct ToolDefinition {
     pub policy: ToolPolicySpec,
     /// Declared retry/idempotency semantics for the tool implementation.
     pub idempotency_class: IdempotencyClass,
+    /// Exact source-owned declaration of the governed tool that reverses this effect.
+    pub rollback: Option<ToolRollbackDefinition>,
     /// Approximate maximum output tokens persisted for one successful call.
     #[serde(default = "default_tool_max_output_tokens")]
     pub max_output_tokens: u32,
+}
+
+/// Source-owned promise that one registered governed tool exactly reverses another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRollbackDefinition {
+    /// Stable registered name of the compensating governed tool.
+    pub compensator_tool_name: String,
+    /// Bounded deterministic mapping from committed forward data to compensator input.
+    pub input_mapping: ToolRollbackInputMapping,
+}
+
+/// Source-level rollback input mapping resolved to exact catalog references at projection time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRollbackInputMapping {
+    /// Ordered bindings that construct the compensator input object.
+    pub bindings: Vec<ToolRollbackInputBinding>,
+}
+
+/// One target field populated from the committed forward input or output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRollbackInputBinding {
+    /// RFC 6901 pointer in the compensator input schema.
+    pub target_pointer: String,
+    /// Exact committed value copied into the target.
+    pub source: ToolRollbackValueSource,
+}
+
+/// Closed committed-data sources available to a registered tool rollback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolRollbackValueSource {
+    /// Copy a value from the original forward input.
+    OriginalInput {
+        /// RFC 6901 pointer, or the empty string for the complete input.
+        pointer: String,
+    },
+    /// Copy a value from the committed forward output.
+    OriginalOutput {
+        /// RFC 6901 pointer, or the empty string for the complete output.
+        pointer: String,
+    },
 }
 
 impl ToolDefinition {

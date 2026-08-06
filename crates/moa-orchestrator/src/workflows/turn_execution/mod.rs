@@ -18,7 +18,10 @@ mod responses;
 mod segments;
 mod tools;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -37,7 +40,9 @@ use moa_core::{
     session_replay::scope_turn_replay_counters,
     traits::LLMProvider,
     types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
-    types::completion::{CompletionRequest, CompletionResponse, CompletionStream, TokenUsage},
+    types::completion::{
+        CompletionRequest, CompletionResponse, CompletionStream, StopReason, TokenUsage,
+    },
     types::context::ContextMessage,
     types::execution_planning::{
         AdmittedDurableUpgrade, DurableUpgradeSignal, DurableUpgradeTransitionError,
@@ -76,7 +81,9 @@ use tracing::Instrument;
 use self::event_queries::{
     load_available_skill_names, load_recent_target_events, load_session_meta,
 };
-use self::guardrails::{evaluate_input_guardrail, visible_response_after_output_guardrail};
+use self::guardrails::{
+    OutputGuardrailOutcome, evaluate_input_guardrail, visible_response_after_output_guardrail,
+};
 use self::implementation::TurnExecutionImpl;
 use self::request::{BuiltTurnRequest, build_request_inside_workflow};
 use self::responses::{
@@ -97,7 +104,10 @@ use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::{
     execution::ExecutionClient,
-    llm_gateway::{BoundedCompletionRequest, LLMGatewayClient},
+    llm_gateway::{
+        BoundedCompletionRequest, LLMCompletionAction, LLMCompletionOwner, LLMGatewayClient,
+        attach_completion_owner, completion_idempotency_key,
+    },
     session_store::RestateSessionStoreClient,
 };
 use crate::tool_invocation::governed::completion_tool_catalog_pin;
@@ -109,6 +119,7 @@ use crate::turn::util::{
 use crate::turn_driver::{
     model_loop as driver_model_loop, progress as driver_progress, segments as driver_segments,
 };
+use crate::workflows::child_invocation::{ChildInvocationOutcome, cancel_and_join_child_call};
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::{
     TurnEventAppender, append_session_event, append_zero_cost_assistant_response,
@@ -127,6 +138,21 @@ struct BodyOutcome {
     post_outcome_assessment: Option<PostOutcomeAssessment>,
 }
 
+async fn cancelled_body_outcome(ctx: &WorkflowContext<'_>) -> Result<BodyOutcome, HandlerError> {
+    // The gateway can observe the shared provider-cancellation fence immediately
+    // before `request_cancel` resolves this workflow promise. Awaiting the promise
+    // closes that race without allowing a cancelled completion to enter another
+    // model-loop iteration.
+    let reason = ctx
+        .promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE)
+        .await?;
+    Ok(BodyOutcome {
+        kind: TurnOutcomeKind::Cancelled,
+        message: reason,
+        post_outcome_assessment: None,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct RunOnceContext<'a> {
     session_id: SessionId,
@@ -135,17 +161,42 @@ struct RunOnceContext<'a> {
     workflow_turn_id: &'a str,
     /// Session turn generation that admitted this turn.
     generation: u64,
+    model_turn: usize,
     loop_class: ModelLoopClass,
     objective: &'a str,
+    processing_required: bool,
     durable_upgrade_allowed: bool,
     execution_synthesis_instruction: Option<&'a str>,
     identity: &'a moa_core::traits::Identity,
     resource_budget: moa_core::types::resource::ResourceBudget,
 }
 
+#[derive(Clone, Copy)]
+enum RestateExecutionModelAction {
+    Routing,
+    InitialPlanning,
+}
+
 struct RestateExecutionModelProvider<'a> {
     ctx: &'a WorkflowContext<'a>,
     budget: moa_core::types::resource::ResourceBudget,
+    action: RestateExecutionModelAction,
+    next_attempt: AtomicUsize,
+}
+
+impl<'a> RestateExecutionModelProvider<'a> {
+    fn new(
+        ctx: &'a WorkflowContext<'a>,
+        budget: moa_core::types::resource::ResourceBudget,
+        action: RestateExecutionModelAction,
+    ) -> Self {
+        Self {
+            ctx,
+            budget,
+            action,
+            next_attempt: AtomicUsize::new(0),
+        }
+    }
 }
 
 #[async_trait]
@@ -160,20 +211,46 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
 
     async fn complete(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        let response = crate::restate_identity::replay_safe_request(
+        // Routing and planning invoke the provider sequentially; a planner repair
+        // consumes the next explicit attempt coordinate in the same workflow replay.
+        let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
+        let action = match self.action {
+            RestateExecutionModelAction::Routing => {
+                LLMCompletionAction::ExecutionRouting { attempt }
+            }
+            RestateExecutionModelAction::InitialPlanning => {
+                LLMCompletionAction::InitialPlanning { attempt }
+            }
+        };
+        attach_completion_owner(&mut request, &LLMCompletionOwner::root_turn(self.ctx.key()));
+        let call = crate::restate_identity::replay_safe_request(
             self.ctx
                 .service_client::<LLMGatewayClient>()
                 .complete_bounded(Json::from(BoundedCompletionRequest {
                     request,
                     budget: self.budget,
-                })),
+                }))
+                .idempotency_key(completion_idempotency_key(self.ctx.invocation_id(), action)),
         )
-        .call()
+        .call();
+        let response = match cancel_and_join_child_call(
+            self.ctx
+                .promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE),
+            call,
+        )
         .await
-        .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
-        .into_inner();
+        .map_err(|error| moa_core::error::MoaError::ProviderError(format!("{error:?}")))?
+        {
+            ChildInvocationOutcome::Completed(response) => response.into_inner(),
+            ChildInvocationOutcome::Cancelled(_) => {
+                return Err(moa_core::error::MoaError::Cancelled);
+            }
+        };
+        if response.stop_reason == StopReason::Cancelled {
+            return Err(moa_core::error::MoaError::Cancelled);
+        }
         Ok(CompletionStream::from_response(response))
     }
 }
@@ -205,6 +282,8 @@ enum TurnIterationOutcome {
     ToolBudgetExceeded(ToolBudgetExhausted),
     /// The prompt-injection circuit halted this coordinator turn.
     SecurityHalt,
+    /// The coordinator's bounded security-input wait expired.
+    SecurityInputTimedOut,
 }
 
 struct DurableUpgradeGuard {
@@ -369,17 +448,18 @@ async fn execute_turn_inside_workflow(
             .clone()
             .unwrap_or_else(|| workflow.config.models.main.clone()),
     );
-    let route_provider = RestateExecutionModelProvider {
+    let route_provider = RestateExecutionModelProvider::new(
         ctx,
-        budget: per_model_call_budget(request.resource_budget),
-    };
+        per_model_call_budget(request.resource_budget),
+        RestateExecutionModelAction::Routing,
+    );
     let route_result = if execution_synthesis_turn || action_review_turn {
         None
     } else {
         let available_skill_names =
             load_available_skill_names(ctx, workflow.session_store.pool().clone(), meta.tenant_id)
                 .await?;
-        let mut result = route_execution(
+        let mut result = match route_execution(
             &route_provider,
             ExecutionRoutingInput {
                 objective: &request.user_message,
@@ -390,7 +470,16 @@ async fn execute_turn_inside_workflow(
                 classifier_model: &classifier_model,
             },
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(moa_core::error::MoaError::Cancelled) => {
+                return cancelled_body_outcome(ctx).await;
+            }
+            Err(error) => {
+                return Err(crate::workflows::errors::moa_error_to_handler_error(error));
+            }
+        };
         apply_route_cost(&mut result)?;
         Some(result)
     };
@@ -557,8 +646,10 @@ async fn execute_turn_inside_workflow(
                                 turn_id,
                                 workflow_turn_id: request.turn_id.as_str(),
                                 generation: request.generation,
+                                model_turn: turn_number,
                                 loop_class,
                                 objective: &request.user_message,
+                                processing_required: request_requires_processing(request.trigger),
                                 durable_upgrade_allowed: durable_upgrade_guard.allows_tool_signal()
                                     && request.resource_budget.is_unbounded(),
                                 execution_synthesis_instruction: execution_synthesis_turn
@@ -706,6 +797,24 @@ async fn execute_turn_inside_workflow(
                 return Ok(BodyOutcome {
                     kind: TurnOutcomeKind::Failed,
                     message: SECURITY_CIRCUIT_HALT_MESSAGE.to_string(),
+                    post_outcome_assessment,
+                });
+            }
+            TurnIterationOutcome::SecurityInputTimedOut => {
+                let post_outcome_assessment = capture_current_active_segment_assessment(
+                    workflow,
+                    ctx,
+                    session_id,
+                    AssessmentPhase::Final,
+                    &[],
+                    last_response_cutoff_before_seq(ctx).await?,
+                )
+                .await?;
+                return Ok(BodyOutcome {
+                    kind: TurnOutcomeKind::Failed,
+                    message: last_summary.take().unwrap_or_else(|| {
+                        "The turn stopped safely because required user input timed out.".to_string()
+                    }),
                     post_outcome_assessment,
                 });
             }
@@ -1029,11 +1138,12 @@ async fn execute_durable_admission(
         .clone()
         .unwrap_or_else(|| workflow.config.models.main.clone());
     let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
-    let provider = RestateExecutionModelProvider {
+    let provider = RestateExecutionModelProvider::new(
         ctx,
-        budget: per_model_call_budget(request.resource_budget),
-    };
-    let planned = plan_execution(
+        per_model_call_budget(request.resource_budget),
+        RestateExecutionModelAction::InitialPlanning,
+    );
+    let planned = match plan_execution(
         &provider,
         ExecutionPlanningRequest {
             objective: request.user_message.clone(),
@@ -1046,7 +1156,15 @@ async fn execute_durable_admission(
         },
     )
     .await
-    .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
+    {
+        Ok(planned) => planned,
+        Err(moa_core::error::MoaError::Cancelled) => {
+            return cancelled_body_outcome(ctx).await;
+        }
+        Err(error) => {
+            return Err(crate::workflows::errors::moa_error_to_handler_error(error));
+        }
+    };
     for audit in planned.audits {
         persist_planning_audit(workflow, ctx, audit).await?;
     }
@@ -1161,6 +1279,7 @@ async fn run_once_inside_workflow(
         session_id,
         turn_id,
         turn_context.identity.clone(),
+        turn_context.processing_required,
     )
     .await?
     else {
@@ -1205,6 +1324,7 @@ async fn run_once_inside_workflow(
         DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
         serde_json::json!(true),
     );
+    attach_completion_owner(&mut request, &LLMCompletionOwner::root_turn(ctx.key()));
     let allowed_tools = allowed_tool_names(&request);
     let tool_catalog_pin = completion_tool_catalog_pin(&request)?;
     let request_model = request
@@ -1228,35 +1348,59 @@ async fn run_once_inside_workflow(
     let llm_started = Instant::now();
     let response = {
         let _guard = span.enter();
-        restate_sdk::select! {
-            reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
-                let reason = reason?;
+        let call = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<LLMGatewayClient>()
+                .complete_bounded(Json::from(BoundedCompletionRequest {
+                    request: request.clone(),
+                    budget: per_model_call_budget(turn_context.resource_budget),
+                }))
+                .idempotency_key(completion_idempotency_key(
+                    ctx.invocation_id(),
+                    LLMCompletionAction::RootModel {
+                        turn: turn_context.model_turn,
+                    },
+                )),
+        )
+        .call();
+        match cancel_and_join_child_call(
+            ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE),
+            call,
+        )
+        .await?
+        {
+            ChildInvocationOutcome::Cancelled(reason) => {
                 *last_summary = Some(reason);
                 return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
-            },
-            response = crate::restate_identity::replay_safe_request(
-                ctx.service_client::<LLMGatewayClient>()
-                    .complete_bounded(Json::from(BoundedCompletionRequest {
-                        request: request.clone(),
-                        budget: per_model_call_budget(turn_context.resource_budget),
-                    })),
-            )
-                .call() => {
-                    response?.into_inner()
             }
+            ChildInvocationOutcome::Completed(response) => response.into_inner(),
         }
     };
+    if response.stop_reason == StopReason::Cancelled {
+        let reason = ctx
+            .promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE)
+            .await?;
+        *last_summary = Some(reason);
+        return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
+    }
     let llm_call_duration = llm_started.elapsed();
     record_turn_llm_call_duration(llm_call_duration);
-    let (visible_response, output_blocked) = visible_response_after_output_guardrail(
+    let (visible_response, output_blocked) = match visible_response_after_output_guardrail(
         workflow,
         ctx,
         session_id,
         &meta,
         &response,
         turn_context.resource_budget,
+        turn_context.model_turn,
     )
-    .await?;
+    .await?
+    {
+        OutputGuardrailOutcome::Completed(response, blocked) => (response, blocked),
+        OutputGuardrailOutcome::Cancelled(reason) => {
+            *last_summary = Some(reason);
+            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
+        }
+    };
     let (visible_response, verification_annotated) =
         annotate_unresolved_verification(&visible_response, turn_evidence);
     let response_usage = visible_response.token_usage();
@@ -1264,16 +1408,21 @@ async fn run_once_inside_workflow(
         visible_response.model.as_str(),
         response_usage,
     );
-    let response_event = append_brain_response_from_completion(
-        workflow.event_appender(),
-        ctx,
-        session_id,
-        &visible_response,
-    )
-    .await?;
-    let response_sequence_num = response_event.sequence_num;
-    record_last_response_sequence(ctx, response_sequence_num);
-    ingest_deferred_session_turn(ctx, session_id, &request, response_sequence_num).await?;
+    let response_event = if visible_response.text.trim().is_empty() {
+        None
+    } else {
+        let response_event = append_brain_response_from_completion(
+            workflow.event_appender(),
+            ctx,
+            session_id,
+            &visible_response,
+        )
+        .await?;
+        record_last_response_sequence(ctx, response_event.sequence_num);
+        ingest_deferred_session_turn(ctx, session_id, &request, response_event.sequence_num)
+            .await?;
+        Some(response_event)
+    };
     emit_generation_lineage(
         workflow.lineage.as_ref(),
         turn_id,
@@ -1285,7 +1434,7 @@ async fn run_once_inside_workflow(
         response_cost_micros,
         llm_call_duration,
         &span,
-        Some(&response_event),
+        response_event.as_ref(),
     )
     .await;
 
@@ -1341,11 +1490,18 @@ async fn run_once_inside_workflow(
         ToolDispatchOutcome::SecurityHalt => {
             return Ok(TurnIterationOutcome::SecurityHalt);
         }
+        ToolDispatchOutcome::SecurityInputTimedOut => {
+            return Ok(TurnIterationOutcome::SecurityInputTimedOut);
+        }
     }
 
     Ok(TurnIterationOutcome::Core(turn_outcome_for_response(
         &visible_response,
     )))
+}
+
+fn request_requires_processing(trigger: TurnTrigger) -> bool {
+    trigger != TurnTrigger::UserMessage
 }
 
 /// Whether per-turn `TurnMetrics` telemetry events should be persisted to the durable log.
@@ -1420,7 +1576,8 @@ async fn record_response(
                     token_cost,
                 })),
         )
-        .send();
+        .call()
+        .await?;
     }
     Ok(())
 }
@@ -1438,7 +1595,8 @@ async fn record_selected_segment_skills(
                     skill_name,
                 })),
         )
-        .send();
+        .call()
+        .await?;
     }
     Ok(())
 }
@@ -1519,23 +1677,24 @@ fn parse_turn_id(raw: &str) -> Result<TurnId, HandlerError> {
         .map_err(|error| TerminalError::new(format!("invalid turn_id `{raw}`: {error}")).into())
 }
 
-fn notify_session_of_outcome(
+async fn notify_session_of_outcome(
     ctx: &WorkflowContext<'_>,
     session_id: &str,
     identity: &moa_core::traits::Identity,
     outcome: &TurnOutcome,
-) {
-    moa_core::coordination_counters::record_vo_send();
+) -> Result<(), HandlerError> {
+    moa_core::coordination_counters::record_session_vo_call();
     let request = ctx
         .object_client::<SessionClient>(session_id.to_string())
         .record_turn_outcome(Json::from(outcome.clone()));
-    with_identity_headers(request, identity).send();
+    with_identity_headers(request, identity).call().await?;
     tracing::info!(
         session_id = %session_id,
         turn_id = %outcome.turn_id,
         kind = ?outcome.kind,
         "TurnExecution outcome notified to Session VO"
     );
+    Ok(())
 }
 
 #[cfg(test)]

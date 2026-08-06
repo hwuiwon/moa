@@ -29,8 +29,9 @@ use crate::{
     capability::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionHash},
     compiler::CompiledExecution,
     state::{
-        ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskId,
-        ExecutionTaskProjection, ExecutionTerminalEvidence, ExecutionTerminalReason, WaitingReason,
+        CompensationId, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
+        ExecutionTaskId, ExecutionTaskProjection, ExecutionTerminalEvidence,
+        ExecutionTerminalReason, WaitingReason,
     },
 };
 
@@ -779,6 +780,7 @@ pub fn execution_terminal_delivery_from_state(
                 citation_ids.extend(citations.iter().map(|citation| citation.source_id.clone()))
             }
             ExecutionTaskResult::Failed { message, .. } => failures.push(message.clone()),
+            ExecutionTaskResult::UnknownOutcome { message } => failures.push(message.clone()),
             ExecutionTaskResult::NeedsInput { .. }
             | ExecutionTaskResult::NeedsReplan { .. }
             | ExecutionTaskResult::Cancelled { .. } => {}
@@ -895,6 +897,20 @@ pub struct ExecutionActionReviewResolutionRequest {
     pub resolution: ExecutionActionReviewResolution,
 }
 
+/// Stable reason an execution-scoped tool effect was not dispatched.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionToolDispatchRejection {
+    /// The scoped run or operation does not exist for the owning session.
+    OriginNotFound,
+    /// The request carries an obsolete task or compensation generation.
+    StaleGeneration,
+    /// The operation is no longer in its dispatchable running state.
+    OperationNotRunning,
+    /// The run is terminal, fenced, compensating incorrectly, or awaiting manual repair.
+    RunNotDispatchable,
+}
+
 /// Terminal outcome delivered by the action-review outbox.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -910,6 +926,16 @@ pub enum ExecutionActionReviewResolution {
         class: ExecutionFailureClass,
         /// Human-readable failure message.
         message: String,
+    },
+    /// The reviewed effect may have committed, but no authoritative result was recovered.
+    UnknownOutcome {
+        /// Stable diagnostic describing why the effect remains ambiguous.
+        message: String,
+    },
+    /// The reviewed effect was definitively fenced before dispatch.
+    NotDispatched {
+        /// Closed reason the effect was never started.
+        reason: ExecutionToolDispatchRejection,
     },
     /// Tenant policy denied the action.
     Denied {
@@ -932,6 +958,34 @@ pub enum ExecutionActionReviewAcknowledgement {
     /// This review UID was already applied to the same task generation.
     Replayed,
     /// The resolution was durably audited but its generation is stale or terminal.
+    AuditedStale,
+}
+
+/// Typed terminal action-policy review delivery to a compensation generation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensationReviewResolutionRequest {
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Stable compensation workflow identity.
+    pub compensation_id: CompensationId,
+    /// Compensation generation fenced by the review.
+    pub generation: u64,
+    /// Stable action-review identifier and idempotency key.
+    pub review_uid: Uuid,
+    /// Typed terminal resolution produced by governed action dispatch.
+    pub resolution: ExecutionActionReviewResolution,
+}
+
+/// Idempotent acknowledgement returned to a compensation-review dispatcher.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCompensationReviewAcknowledgement {
+    /// The resolution was applied to the current compensation generation.
+    Applied,
+    /// This review UID was already applied to the same compensation generation.
+    Replayed,
+    /// The resolution was durably audited but its generation is stale or settled.
     AuditedStale,
 }
 
@@ -981,6 +1035,8 @@ pub enum ExecutionRunWakeReason {
     AmendmentAccepted,
     /// The run was cancelled.
     Cancelled,
+    /// A compensation registration or generation changed durably.
+    CompensationProgress,
 }
 
 /// Internal request that dispatches one keyed task generation.
@@ -998,6 +1054,26 @@ pub struct ExecutionTaskWorkflowRequest {
     /// Optional owning contact.
     pub contact_id: Option<ContactId>,
     /// Parent session used for policy and model context.
+    pub session_id: SessionId,
+    /// Exact authenticated identity inherited from the owning run workflow.
+    pub identity: Identity,
+}
+
+/// Internal request that dispatches one keyed compensation generation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensationWorkflowRequest {
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Stable workflow key derived from the forward task.
+    pub compensation_id: CompensationId,
+    /// Current compensation generation fence.
+    pub generation: u64,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional owning contact.
+    pub contact_id: Option<ContactId>,
+    /// Parent session used for policy and action context.
     pub session_id: SessionId,
     /// Exact authenticated identity inherited from the owning run workflow.
     pub identity: Identity,

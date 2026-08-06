@@ -5,4 +5,5 @@ resources:
 
 images:
   - name: ghcr.io/hwuiwon/moa-orchestrator
-    newTag: latest
+    # render-production.sh replaces this sentinel in a temporary copy.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

@@ -367,6 +367,7 @@ impl RegisteredTool {
                 schema,
                 policy,
                 idempotency_class,
+                rollback: None,
                 max_output_tokens: default_budget_for_tool(name),
             },
             execution: ToolExecution::Hand {
@@ -428,6 +429,7 @@ impl RegisteredTool {
                     diff_strategy: ToolDiffStrategy::None,
                 },
                 idempotency_class,
+                rollback: None,
                 max_output_tokens: 8_000,
             },
             execution: ToolExecution::Mcp {
@@ -623,6 +625,7 @@ impl ToolRegistry {
                 diff_strategy: ToolDiffStrategy::None,
             },
             idempotency_class: operation_policy.idempotency,
+            rollback: None,
             max_output_tokens: default_budget_for_tool(&name),
         };
         let execution = ToolExecution::InstalledConnectorAction {

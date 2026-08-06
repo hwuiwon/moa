@@ -182,10 +182,6 @@ services:
     command: ["--node-name=restate-dev"]
     environment:
       RESTATE_LOG_FILTER: "warn,restate=info"
-      # v1.7 limitation: vqueues can only be enabled on a cluster with no
-      # in-flight invocations; wipe the moa-restate-data volume if the node
-      # refuses to boot after upgrading.
-      RESTATE_EXPERIMENTAL_ENABLE_VQUEUES: "true"
       RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE: "1 GiB"
       RESTATE_ADMIN__QUERY_ENGINE__MEMORY_SIZE: "256 MiB"
       RESTATE_BIFROST__RECORD_CACHE_MEMORY_SIZE: "128 MiB"
@@ -220,6 +216,31 @@ services:
       MOA_DATABASE_ADMIN_URL: postgres://moa_owner:dev@postgres:5432/moa
       RUST_LOG: info
 
+  moa-session-status-migrator:
+    image: moa/orchestrator:dev
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-session-status-migrator
+    restart: "no"
+    depends_on:
+      moa-migrate:
+        condition: service_completed_successfully
+      restate:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        server_pid=""
+        trap '[ -z "$${server_pid}" ] || kill "$${server_pid}" 2>/dev/null || true' EXIT
+        /usr/local/bin/moa-orchestrator --port 9080 serve-status-migration &
+        server_pid=$$!
+        /usr/local/bin/moa-orchestrator wait-status-cutover \
+          --database-url "$${MOA_CUTOVER_DATABASE_URL}"
+        kill "$${server_pid}"
+        wait "$${server_pid}" || true
+    environment:
+      MOA_CUTOVER_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
+    expose:
+      - "9080"
+
   moa-orchestrator:
     build:
       context: .
@@ -234,12 +255,20 @@ services:
         condition: service_healthy
       moa-migrate:
         condition: service_completed_successfully
+      moa-session-status-migrator:
+        condition: service_started
       valkey:
         condition: service_healthy
       restate:
         condition: service_healthy
       rustfs-init:
         condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        /usr/local/bin/moa-orchestrator wait-status-cutover \
+          --database-url "$${MOA_DATABASE_URL}"
+        exec /usr/local/bin/moa-orchestrator
     environment:
       HOME: /var/lib/moa
       MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
@@ -247,7 +276,6 @@ services:
       MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS: ${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-2}
       MOA_DATABASE_CONNECT_TIMEOUT_SECONDS: ${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-10}
       MOA_SESSION_DIRECT_TURN_EVENT_APPEND: ${MOA_SESSION_DIRECT_TURN_EVENT_APPEND:-false}
-      MOA_RESTATE_ADMIN_URL: http://restate:9070
       MOA_RESTATE_INGRESS_URL: http://restate:8080
       MOA_RUNTIME_CACHE_BACKEND: redis
       MOA_RUNTIME_CACHE_REDIS_URL: redis://valkey:6379/0
@@ -280,8 +308,6 @@ services:
       MOA_KMS_PROVIDER: postgres
       MOA_KMS_ROOT_KEY_DIR: /var/run/secrets/moa-kms/root-keys
       MOA_KMS_REQUIRED_GENERATION: primary
-      MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
-      MOA_DEREGISTER_ON_SHUTDOWN: "false"
       MOA_METRICS_EXPORTER: ${MOA_METRICS_EXPORTER:-prometheus}
       MOA_METRICS_PROMETHEUS_LISTEN: 0.0.0.0:9090
       RUST_LOG: "info,moa_orchestrator=debug"
@@ -319,6 +345,8 @@ services:
     depends_on:
       moa-orchestrator:
         condition: service_started
+      restate-bootstrap:
+        condition: service_completed_successfully
       rustfs-init:
         condition: service_completed_successfully
     environment:
@@ -357,64 +385,30 @@ services:
       timeout: 2s
       retries: 12
 
-  restate-register:
-    image: curlimages/curl:8.10.1
-    container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate-register
+  restate-bootstrap:
+    image: moa/orchestrator:dev
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate-bootstrap
     restart: "no"
     depends_on:
       restate:
         condition: service_healthy
       moa-orchestrator:
         condition: service_started
+      moa-session-status-migrator:
+        condition: service_started
+      moa-migrate:
+        condition: service_completed_successfully
     environment:
-      MOA_RESTATE_ADMIN_URL: http://restate:9070
-    entrypoint: ["/bin/sh", "-c"]
+      MOA_BOOTSTRAP_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
+    entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        set -eu
-        echo "registering moa-orchestrator with Restate admin..."
-        attempt=1
-        while [ "$$attempt" -le 30 ]; do
-          status=$$(curl -sS -o /tmp/register-response.txt -w "%{http_code}" \
-            -X POST "$${MOA_RESTATE_ADMIN_URL}/deployments" \
-            -H "content-type: application/json" \
-            --data '{"uri":"http://moa-orchestrator:9080"}' || true)
-          if [ "$$status" -ge 200 ] && [ "$$status" -lt 300 ] || [ "$$status" = "409" ]; then
-            echo "registration complete"
-            exit 0
-          fi
-          echo "registration attempt $${attempt} failed with status $${status}; retrying..."
-          attempt=$$((attempt + 1))
-          sleep 2
-        done
-        echo "registration failed"
-        exit 1
-
-  # Seeds the cluster-wide Restate flow-control rule book once the node is healthy.
-  # The `*` rule gives every scope key (the edge uses the tenant UUID) its own
-  # concurrency counter capped at 1000, so no tenant can exhaust cluster capacity.
-  # `rules set` is idempotent, so a re-run just overwrites the same default.
-  restate-rules-bootstrap:
-    image: docker.restate.dev/restatedev/restate-cli:1.7.2
-    container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate-rules-bootstrap
-    restart: "no"
-    depends_on:
-      restate:
-        condition: service_healthy
-    environment:
-      RESTATE_ADMIN_URL: http://restate:9070
-    command:
-      - --connect-timeout
-      - "10000"
-      - --request-timeout
-      - "30000"
-      - rules
-      - set
-      - "*"
-      - --concurrency
-      - "1000"
-      - --description
-      - scope default
+        exec /usr/local/bin/moa-orchestrator bootstrap \
+          --admin-url http://restate:9070 \
+          --ingress-url http://restate:8080 \
+          --database-url "$${MOA_BOOTSTRAP_DATABASE_URL}" \
+          --migration-deployment-uri http://moa-session-status-migrator:9080 \
+          --runtime-deployment-uri http://moa-orchestrator:9080
 
   moa-pii-service:
     build:

@@ -15,7 +15,7 @@ use moa_artifacts::{
     execution_plan::{
         CompletionCheckKind, ExecutionBudgetLimit, ExecutionCondition, ExecutionGoalContract,
         ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, MapTask,
-        PlanAmendment, PlanAmendmentOperation,
+        PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment, PlanAmendmentOperation,
     },
     reference::ArtifactRef,
     validation::{validate_execution_goal_contract, validate_execution_plan_definition},
@@ -299,11 +299,11 @@ pub fn compile(request: CompileExecutionRequest) -> CompileExecutionOutcome {
 #[must_use]
 pub fn validate_amendment(request: ValidateAmendmentRequest) -> AmendmentValidationOutcome {
     let mut report = ExecutionValidationReport::default();
-    if request.amendment.schema_version != 1 {
+    if request.amendment.schema_version != PLAN_AMENDMENT_SCHEMA_VERSION {
         report.error(
             "unsupported_schema_version",
             "amendment.schema_version",
-            "schema_version must equal 1",
+            format!("schema_version must equal {PLAN_AMENDMENT_SCHEMA_VERSION}"),
         );
     }
     if request.amendment.base_plan_revision != request.projection.plan_revision {

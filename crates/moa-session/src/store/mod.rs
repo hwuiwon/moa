@@ -90,6 +90,7 @@ pub use recurrence::{
     RecurrenceExperienceMember, RecurringExperienceCluster, SkillCandidateDecision,
 };
 pub use regression::{RecentSkillPromotion, SkillResolutionSample};
+pub use session_archive::SessionArchiveStoreError;
 pub use session_records::SessionCreateOutcome;
 
 fn local_rustfs_config() -> MoaConfig {

@@ -1,6 +1,6 @@
 //! Restate service for small authorization administration helpers.
 
-use moa_authz::{enqueue, require_authz_with_delegation};
+use moa_authz::enqueue;
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::types::identifiers::TenantId;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::handlers::authz_shim::{AuthzEnforcer, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{AuthzEnforcer, require_identity};
 
 /// Tenant role relation that public API-key authz administration can write.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,15 +133,15 @@ impl Authz for AuthzImpl {
         // authenticated but unauthorized principal probe key existence and
         // cross-tenant ownership through distinguishable pre-authz errors.
         let fga = self.authz.require_fga_client()?;
-        require_authz_with_delegation(
-            &fga,
-            &identity,
+        crate::handlers::authz_shim::journal_context_authz(
+            &ctx,
+            fga,
+            identity,
             ObjectType::Tenant,
             TenantId::from(request.tenant_id()),
             Relation::Admin,
         )
-        .await
-        .map_err(translate_authz_error)?;
+        .await?;
 
         let pool = self.pool.clone();
         Ok(ctx

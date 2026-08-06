@@ -8,7 +8,6 @@ const ENV_FOREGROUND_CONNECTIONS: &str = "MOA_LOADTEST_FOREGROUND_DB_CONNECTIONS
 const ENV_BACKGROUND_CONNECTIONS: &str = "MOA_LOADTEST_BACKGROUND_DB_CONNECTIONS";
 const ENV_COMPOSE_PROJECT: &str = "MOA_LOADTEST_COMPOSE_PROJECT";
 const ENV_STATE_IDENTITY: &str = "MOA_LOADTEST_STATE_IDENTITY";
-const ENV_RESTATE_RULE_PROFILE: &str = "MOA_LOADTEST_RESTATE_RULE_PROFILE";
 const ENV_HARDWARE_ID: &str = "MOA_LOADTEST_HARDWARE_ID";
 
 /// One completed session's summary.
@@ -106,8 +105,6 @@ pub struct ResourceBillReport {
 pub struct CapacitySignals {
     /// Successful answers or execution admissions divided by scheduled arrivals.
     pub success_ratio: f64,
-    /// Requests rejected by shared turn admission.
-    pub turn_rejections: u64,
     /// Arrivals the generator could not dispatch before its bounded wait expired.
     pub arrivals_dropped: u64,
     /// Other terminal turn failures, excluding bounded overload rejections/drops.
@@ -129,8 +126,6 @@ pub struct CapacitySignals {
 /// Failure counts split by kind so gates can budget each class separately.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ErrorTaxonomy {
-    /// New turns rejected by the shared overload admission policy.
-    pub turn_rejections: u64,
     /// Turn start requests that failed outright.
     pub turn_start_failures: u64,
     /// Turns that exceeded the per-turn timeout.
@@ -161,7 +156,6 @@ impl ErrorTaxonomy {
     /// cancellations, and dropped arrivals).
     pub fn failed_turns(&self) -> u64 {
         self.turn_start_failures
-            + self.turn_rejections
             + self.turn_timeouts
             + self.turn_failures
             + self.turn_cancellations
@@ -196,7 +190,7 @@ pub struct WindowReport {
 pub enum LoadLane {
     /// Trusted, unscoped calls sent directly to Restate ingress.
     DirectIngress,
-    /// Production edge authentication, Contacts, tenant scope, and SSE path.
+    /// Production edge authentication, Contacts, and SSE path.
     Edge,
 }
 
@@ -219,8 +213,6 @@ pub struct LoadTestRunManifest {
     pub compose_project: String,
     /// Identity of the persistent state used by the run.
     pub state_identity: String,
-    /// Verified or explicitly declared Restate rule profile.
-    pub restate_rule_profile: String,
     /// Operator-supplied hardware identity, with a portable local fallback.
     pub hardware_id: String,
     /// Concurrent session-pool size.
@@ -290,7 +282,6 @@ impl LoadTestRunManifest {
             direct_turn_event_append: config.session.direct_turn_event_append,
             compose_project: manifest_text(ENV_COMPOSE_PROJECT, &read_env),
             state_identity: manifest_text(ENV_STATE_IDENTITY, &read_env),
-            restate_rule_profile: manifest_text(ENV_RESTATE_RULE_PROFILE, &read_env),
             hardware_id,
             sessions: options.sessions,
             tenants: options.tenants,
@@ -434,7 +425,6 @@ impl LoadTestReport {
         let admission_fleet_live = admission_fleet_live.unwrap_or_default();
         self.capacity_signals = CapacitySignals {
             success_ratio,
-            turn_rejections: self.errors.turn_rejections,
             arrivals_dropped: self.errors.arrivals_dropped,
             terminal_failures,
             corrected_p95_ms: self.turn_latency_corrected_ms.p95,
@@ -481,7 +471,7 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     );
     let _ = writeln!(
         &mut output,
-        "Lane: {:?} | Source: {} ({}) | DB pools: {} foreground + {} background | Event append: {} | Rules: {} | State: {} / {} | Hardware: {}",
+        "Lane: {:?} | Source: {} ({}) | DB pools: {} foreground + {} background | Event append: {} | State: {} / {} | Hardware: {}",
         report.run_manifest.lane,
         report.run_manifest.source_revision,
         report.run_manifest.source_state,
@@ -492,7 +482,6 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
         } else {
             "SessionStore RPC"
         },
-        report.run_manifest.restate_rule_profile,
         report.run_manifest.compose_project,
         report.run_manifest.state_identity,
         report.run_manifest.hardware_id,
@@ -629,8 +618,7 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     );
     let _ = writeln!(
         &mut output,
-        "Errors: rejected {} | start {} | timeout {} | failed {} | cancelled {} | cleanup {} | dropped {} | event-load {} | setup {} | event-errors {} | tool-errors {}",
-        report.errors.turn_rejections,
+        "Errors: start {} | timeout {} | failed {} | cancelled {} | cleanup {} | dropped {} | event-load {} | setup {} | event-errors {} | tool-errors {}",
         report.errors.turn_start_failures,
         report.errors.turn_timeouts,
         report.errors.turn_failures,
@@ -720,7 +708,7 @@ mod tests {
     #[test]
     fn run_manifest_pins_lane_pool_and_campaign_identity() {
         // Pins: capacity JSON records the exact lane, database budgets, source,
-        // rule profile, state identity, and schedule needed to reproduce it.
+        // state identity and schedule needed to reproduce it.
         let values = BTreeMap::from([
             (ENV_SOURCE_REVISION, "abc123"),
             (ENV_SOURCE_STATE, "dirty"),
@@ -728,7 +716,6 @@ mod tests {
             (ENV_BACKGROUND_CONNECTIONS, "1"),
             (ENV_COMPOSE_PROJECT, "capacity-pool20"),
             (ENV_STATE_IDENTITY, "capacity-pool20_moa-restate-data"),
-            (ENV_RESTATE_RULE_PROFILE, "scope:*:concurrency=1000"),
             (ENV_HARDWARE_ID, "runner-a"),
         ]);
 
@@ -745,7 +732,6 @@ mod tests {
         assert_eq!(manifest.source_state, "dirty");
         assert_eq!(manifest.compose_project, "capacity-pool20");
         assert_eq!(manifest.state_identity, "capacity-pool20_moa-restate-data");
-        assert_eq!(manifest.restate_rule_profile, "scope:*:concurrency=1000");
         assert_eq!(manifest.hardware_id, "runner-a");
         assert_eq!(manifest.shape, LoadShape::Ramp);
         assert_eq!(manifest.rate_end_qps, Some(200.0));

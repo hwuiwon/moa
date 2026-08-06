@@ -60,7 +60,7 @@ pub(crate) struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_retries: 3,
+            max_retries: crate::LLM_PROVIDER_MAX_RETRIES,
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(60),
             backoff_factor: 2.0,
@@ -119,9 +119,7 @@ impl RetryPolicy {
                         record_retry_budget_exhausted("transport");
                     }
 
-                    return Err(MoaError::ProviderError(format!(
-                        "provider request failed: {error}"
-                    )));
+                    return Err(crate::core::http::provider_transport_error(error));
                 }
             };
 
@@ -221,6 +219,9 @@ impl RetryPolicy {
 
     fn is_retryable_transport_error(&self, error: &reqwest::Error) -> bool {
         error.is_connect()
+            || error.is_timeout()
+            || error.is_body()
+            || (error.is_request() && !error.is_builder())
     }
 
     fn jitter_seed(&self) -> f64 {

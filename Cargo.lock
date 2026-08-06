@@ -4219,10 +4219,15 @@ name = "moa-migrations"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "chrono",
+ "moa-artifacts",
  "moa-core",
  "moa-db",
+ "moa-execution",
  "refinery",
+ "serde_json",
+ "serde_yaml",
  "sqlx",
  "tokio",
  "tokio-postgres",
@@ -4360,6 +4365,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "uuid",
+ "wiremock",
  "workspace-hack",
 ]
 
@@ -4492,6 +4498,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",

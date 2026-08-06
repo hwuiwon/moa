@@ -3,6 +3,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use moa_artifacts::execution_plan::{
+    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionCancelPolicy, ExecutionGoalContract,
+    ExecutionPlanDefinition, RetryPolicy,
+};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     events::Event,
@@ -15,6 +19,7 @@ use moa_core::{
     types::contact::SessionActorRef,
     types::events_stream::EventRange,
     types::events_stream::EventRecord,
+    types::execution_planning::{ExecutionSourceProvenance, GeneratedPlanPlannerProvenance},
     types::identifiers::SessionId,
     types::identifiers::TenantId,
     types::identifiers::ToolCallId,
@@ -22,22 +27,28 @@ use moa_core::{
     types::tools::SecuredToolOutput,
     types::tools::ToolCallRequest,
 };
-use moa_hands::ToolCatalogPin;
+use moa_execution::{
+    capability::{
+        CapabilitiesListRequest, CapabilitiesListResponse, ExecutionAuthorizationEnvelope,
+        ExecutionCapabilityCatalog, ExecutionEstimate, ExecutionHash,
+    },
+    compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
+    state::LogicalTaskKind,
+    wire::ExecutionActionReviewResolution,
+};
 use moa_orchestrator::objects::tenant::TenantConfig;
+use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
 use moa_orchestrator::services::action_reviews::{
     ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
     ListActionReviewsRequest, RequestActionReview,
-};
-use moa_orchestrator::services::tool_executor::ExecutionTaskToolCallRequest;
-use moa_orchestrator::services::{
-    action_policy::{PrepareActionReviewRequest, PreparedActionReview},
-    tool_executor::ScopedToolCatalogRequest,
 };
 use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde::Serialize;
 use serde_json::json;
+use sqlx::Connection;
+use sqlx::postgres::{PgConnection, PgListener};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -55,8 +66,277 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     coordinator_review_deny_resumes_without_executing_the_action(&fixture).await?;
     superseded_coordinator_review_produces_no_continuation(&fixture).await?;
     pending_worker_review_holds_its_report_until_the_clear_continues_it(&fixture).await?;
-    execution_task_tool_executor_emits_zero_root_tool_events(&fixture).await?;
     claimed_execution_review_exact_replay_resumes_and_conflict_rejects(&fixture).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+async fn recovery_matrix_action_review_decision_restarts_resume_coordinator_and_worker_once()
+-> Result<()> {
+    // Pins: a hard process restart on both sides of the durable review-decision
+    // boundary neither loses nor duplicates a coordinator or worker continuation.
+    let worker_effect = tempfile::NamedTempFile::new()
+        .context("create worker action-review recovery effect probe")?;
+    let fixture =
+        OrchestratorTestFixture::with_script(recovery_action_policy_script(worker_effect.path())?)
+            .await?;
+
+    recovery_matrix_coordinator_review_restarts_once(&fixture).await?;
+    recovery_matrix_worker_review_restarts_once(&fixture, worker_effect.path()).await?;
+    Ok(())
+}
+
+async fn recovery_matrix_coordinator_review_restarts_once(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    let test = fixture.isolated().await;
+    let session_id = test
+        .create_session("recovery-matrix-coordinator-review")
+        .await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before coordinator recovery review")?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+    let (origin_turn_id, _) = run_scripted_turn_with_id(
+        &test,
+        session_id,
+        "Start the recovery-matrix coordinator review.",
+    )
+    .await?;
+    let effect = tempfile::NamedTempFile::new()
+        .context("create coordinator action-review recovery effect probe")?;
+    let effect_marker = format!("coordinator-review-recovery-{}", Uuid::now_v7());
+    let command = format!(
+        "printf '{effect_marker}\\n' | tee -a '{}'",
+        effect.path().display()
+    );
+    let mut barrier = ActionReviewRecoveryBarrier::install(&fixture.postgres_url).await?;
+    let (review_id, _) = create_pending_bash_review(
+        &test,
+        session_id,
+        &command,
+        coordinator_owner_for_turn(session_id, &origin_turn_id),
+    )
+    .await?;
+
+    barrier.wait_for_pending_review(review_id).await?;
+    assert_eq!(
+        list_pending_reviews(test.client(), meta.tenant_id)
+            .await?
+            .iter()
+            .filter(|review| review.id == review_id)
+            .count(),
+        1,
+        "the public review API must expose exactly one pending coordinator review"
+    );
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard restart before coordinator review decision")?;
+
+    barrier.arm_continuation(review_id).await?;
+    let client = test.client().clone();
+    let decision = tokio::spawn(async move {
+        decide_review(
+            &client,
+            meta.tenant_id,
+            review_id,
+            ActionReviewDecisionKind::Cleared,
+            None,
+        )
+        .await
+    });
+    barrier
+        .wait_for_committed_decision_and_blocked_continuation(review_id)
+        .await?;
+    assert_effect_once(effect.path(), &effect_marker)?;
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard restart after coordinator review decision commit")?;
+    barrier
+        .wait_for_committed_decision_and_blocked_continuation(review_id)
+        .await?;
+    assert_effect_once(effect.path(), &effect_marker)?;
+    barrier.release_and_remove().await?;
+    decision
+        .await
+        .context("join coordinator review decision request")??;
+
+    wait_for_events(&test, session_id, |events| {
+        continuation_facts(events, review_id).len() == 1
+    })
+    .await
+    .context("coordinator review recovery should append one continuation")?;
+    let continuation_events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    let facts = continuation_facts(&continuation_events, review_id);
+    let (continuation_turn_id, receipt) = facts
+        .first()
+        .copied()
+        .context("coordinator recovery must expose its continuation through the event API")?;
+    let executed_tool_call_id = receipt
+        .executed_tool_call_id
+        .context("cleared coordinator recovery receipt must name its execution")?;
+    assert_eq!(
+        matching_successful_tool_results(
+            &continuation_events,
+            executed_tool_call_id,
+            &effect_marker,
+        ),
+        1,
+        "coordinator recovery must persist one reviewed tool result: {}",
+        event_summary(&continuation_events)
+    );
+    let outcome = test
+        .client()
+        .session(session_id.to_string())
+        .await_turn_outcome(
+            continuation_turn_id,
+            Duration::from_secs(90),
+            Duration::from_millis(250),
+        )
+        .await?;
+    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
+    let final_events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    assert_eq!(
+        continuation_facts(&final_events, review_id).len(),
+        1,
+        "coordinator recovery must remain exactly once after terminal completion: {}",
+        event_summary(&final_events)
+    );
+    assert_eq!(
+        matching_successful_tool_results(&final_events, executed_tool_call_id, &effect_marker),
+        1,
+        "coordinator reviewed effect result must remain exactly once: {}",
+        event_summary(&final_events)
+    );
+    assert_effect_once(effect.path(), &effect_marker)?;
+    assert!(
+        list_pending_reviews(test.client(), meta.tenant_id)
+            .await?
+            .iter()
+            .all(|review| review.id != review_id),
+        "the public review API must not retain the resolved coordinator review"
+    );
+    Ok(())
+}
+
+async fn recovery_matrix_worker_review_restarts_once(
+    fixture: &OrchestratorTestFixture,
+    effect_path: &std::path::Path,
+) -> Result<()> {
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("recovery-matrix-worker-review").await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before worker recovery review")?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+    let mut barrier = ActionReviewRecoveryBarrier::install(&fixture.postgres_url).await?;
+
+    run_scripted_turn(
+        &test,
+        session_id,
+        "Run the worker-continuation bash command.",
+    )
+    .await?;
+    let pending_events = wait_for_events(&test, session_id, |events| {
+        worker_owned_review(events).is_some()
+    })
+    .await?;
+    let (review_id, worker_id) = worker_owned_review(&pending_events)
+        .context("worker recovery scenario must create a worker-owned review")?;
+    barrier.wait_for_pending_review(review_id).await?;
+    assert_eq!(
+        list_pending_reviews(test.client(), meta.tenant_id)
+            .await?
+            .iter()
+            .filter(|review| review.id == review_id)
+            .count(),
+        1,
+        "the public review API must expose exactly one pending worker review"
+    );
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard restart before worker review decision")?;
+
+    barrier.arm_continuation(review_id).await?;
+    let client = test.client().clone();
+    let decision = tokio::spawn(async move {
+        decide_review(
+            &client,
+            meta.tenant_id,
+            review_id,
+            ActionReviewDecisionKind::Cleared,
+            None,
+        )
+        .await
+    });
+    barrier
+        .wait_for_committed_decision_and_blocked_continuation(review_id)
+        .await?;
+    assert_effect_once(effect_path, WORKER_RECOVERY_EFFECT_MARKER)?;
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard restart after worker review decision commit")?;
+    barrier
+        .wait_for_committed_decision_and_blocked_continuation(review_id)
+        .await?;
+    assert_effect_once(effect_path, WORKER_RECOVERY_EFFECT_MARKER)?;
+    barrier.release_and_remove().await?;
+    decision
+        .await
+        .context("join worker review decision request")??;
+
+    let events = wait_for_events(&test, session_id, |events| {
+        continuation_facts(events, review_id).len() == 1
+            && events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::WorkerNotificationDelivered { worker_id: delivered, .. }
+                        if *delivered == worker_id
+                )
+            })
+    })
+    .await
+    .context("worker review recovery should continue and deliver one terminal report")?;
+    let facts = continuation_facts(&events, review_id);
+    let executed_tool_call_id = facts[0]
+        .1
+        .executed_tool_call_id
+        .context("cleared worker recovery receipt must name its execution")?;
+    assert_eq!(
+        matching_successful_tool_results(
+            &events,
+            executed_tool_call_id,
+            WORKER_RECOVERY_EFFECT_MARKER,
+        ),
+        1,
+        "worker recovery must persist one reviewed tool result: {}",
+        event_summary(&events)
+    );
+    assert_effect_once(effect_path, WORKER_RECOVERY_EFFECT_MARKER)?;
+    assert!(
+        list_pending_reviews(test.client(), meta.tenant_id)
+            .await?
+            .iter()
+            .all(|review| review.id != review_id),
+        "the public review API must not retain the resolved worker review"
+    );
     Ok(())
 }
 
@@ -531,11 +811,12 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
         originating_user_sequence_num,
     )
     .await?;
-    let command = format!("printf claimed-review-replay-{}", Uuid::now_v7());
+    let expected_output = format!("claimed-review-replay-{}", Uuid::now_v7());
+    let command = format!("printf {expected_output}");
     let review_id = Uuid::now_v7();
     let claimed_tool_call_id = Uuid::now_v7();
     let tool_call_id = ToolCallId::new();
-    let contract_revision = activated_contract_revision(&test, session_id, "bash").await?;
+    let contract_revision = activated_contract_revision(&test, "bash").await?;
     let tool_request = ToolCallRequest {
         tool_call_id,
         caller_identity: test
@@ -645,9 +926,44 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
     .fetch_one(&pool)
     .await
     .context("finalization should atomically create the execution resolution outbox")?;
+    let resolution: ExecutionActionReviewResolution = serde_json::from_value(resolution)
+        .context("decode completed execution review resolution")?;
+    let ExecutionActionReviewResolution::Completed { tool_output } = resolution else {
+        anyhow::bail!("reviewed execution-task tool call did not complete: {resolution:?}");
+    };
+    let output: SecuredToolOutput = serde_json::from_value(tool_output)
+        .context("decode reviewed execution-task tool output")?;
     assert_eq!(
-        resolution.get("status").and_then(serde_json::Value::as_str),
-        Some("completed")
+        output.safe_output.to_text(),
+        expected_output,
+        "public ActionReviews/decide must preserve the private execution-task tool output"
+    );
+
+    let events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    let claimed_tool_call_id = ToolCallId(claimed_tool_call_id);
+    assert!(
+        events.iter().all(|record| !matches!(
+            &record.event,
+            Event::ToolCall { tool_id, .. } | Event::ToolResult { tool_id, .. }
+                if *tool_id == tool_call_id || *tool_id == claimed_tool_call_id
+        )),
+        "execution-task review dispatch must emit zero root ToolCall/ToolResult events: {}",
+        event_summary(&events)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ActionReviewDecided { review_id: id, .. } if *id == review_id
+            ))
+            .count(),
+        1,
+        "public ActionReviews/decide must append one durable decision event: {}",
+        event_summary(&events)
     );
     Ok(())
 }
@@ -661,7 +977,67 @@ async fn insert_execution_review_task(
     let run_uid = Uuid::new_v4();
     let task_uid = Uuid::new_v4();
     let planning_context_uid = Uuid::new_v4();
-    let hash = "0".repeat(64);
+    let plan_hash = ExecutionHash::from_bytes([0; 32]);
+    let catalog = ExecutionCapabilityCatalog::build(Vec::new())
+        .context("build empty execution review capability catalog")?;
+    let goal = ExecutionGoalContract {
+        objective: "execute one reviewed tool call".to_string(),
+        requirements: Vec::new(),
+        deliverables: Vec::new(),
+        coverage: Vec::new(),
+        constraints: Vec::new(),
+        completion_checks: Vec::new(),
+    };
+    let plan = CanonicalExecutionPlan {
+        definition: ExecutionPlanDefinition {
+            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_schema: json!({ "type": "object" }),
+            output_schema: json!({ "type": "object" }),
+            nodes: Vec::new(),
+        },
+        plan_hash,
+        catalog_hash: catalog.catalog_hash,
+        estimate: ExecutionEstimate {
+            cost_microusd: 0,
+            tokens: 0,
+            tool_calls: 1,
+            retrieved_bytes: 0,
+            tasks: 1,
+        },
+        report: ExecutionValidationReport::default(),
+    };
+    let authorization = ExecutionAuthorizationEnvelope {
+        capability_refs: Vec::new(),
+        skill_refs: Vec::new(),
+    };
+    let source_provenance = ExecutionSourceProvenance::GeneratedPlan {
+        planner: GeneratedPlanPlannerProvenance {
+            model: "scripted-fixture".to_string(),
+            prompt_version: "action-policy-flow-e2e".to_string(),
+            candidate_hash: plan_hash.to_string(),
+            compiler_report_hash: plan_hash.to_string(),
+            final_plan_hash: plan_hash.to_string(),
+            repair_attempts: 0,
+        },
+    };
+    let goal = serde_json::to_value(goal).context("serialize execution review goal fixture")?;
+    let plan = serde_json::to_value(plan).context("serialize execution review plan fixture")?;
+    let catalog =
+        serde_json::to_value(catalog).context("serialize execution review catalog fixture")?;
+    let authorization = serde_json::to_value(authorization)
+        .context("serialize execution review authorization fixture")?;
+    let source_provenance = serde_json::to_value(source_provenance)
+        .context("serialize execution review source provenance fixture")?;
+    let task_kind = serde_json::to_value(LogicalTaskKind::Output { value: json!({}) })
+        .context("serialize execution review task-kind fixture")?;
+    let retry_policy = serde_json::to_value(RetryPolicy {
+        max_attempts: 1,
+        initial_backoff_ms: 0,
+        max_backoff_ms: 0,
+    })
+    .context("serialize execution review retry-policy fixture")?;
+    let hash = plan_hash.to_string();
     let originating_user_sequence_num = i64::try_from(originating_user_sequence_num)
         .context("execution review origin sequence exceeds PostgreSQL BIGINT")?;
     sqlx::query(
@@ -691,10 +1067,9 @@ async fn insert_execution_review_task(
             source_provenance, source_kind,
             input, status, queued_at
         ) VALUES ($1, $2, $3, $4, $5, $6, 'test-owner',
-                  '{}'::JSONB, '{}'::JSONB, '{}'::JSONB, $6, $6,
-                  '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan"}'::JSONB,
-                  'generated_plan',
+                  $7, $8, $8, $6, $6,
+                  $9, $10, '[]'::JSONB,
+                  $11, 'generated_plan',
                   '{}'::JSONB, 'queued', NOW())
         "#,
     )
@@ -703,7 +1078,12 @@ async fn insert_execution_review_task(
     .bind(session_id.0)
     .bind(originating_user_sequence_num)
     .bind(planning_context_uid)
-    .bind(hash)
+    .bind(&hash)
+    .bind(goal)
+    .bind(plan)
+    .bind(catalog)
+    .bind(authorization)
+    .bind(source_provenance)
     .execute(pool)
     .await
     .context("insert execution review run fixture")?;
@@ -720,12 +1100,14 @@ async fn insert_execution_review_task(
             estimate_cost_microusd, estimate_tokens, estimate_tasks,
             estimate_tool_calls, estimate_retrieved_bytes
         ) VALUES ($1, $2, $3, 'review', 'replay', 1, 'running', '{}'::JSONB,
-                  '{}'::JSONB, '{}'::JSONB, 0, 0, 1, 0, 0)
+                  $4, $5, 0, 0, 1, 0, 0)
         "#,
     )
     .bind(task_uid)
     .bind(run_uid)
     .bind(tenant_id.0)
+    .bind(task_kind)
+    .bind(retry_policy)
     .execute(pool)
     .await
     .context("insert execution review task fixture")?;
@@ -734,63 +1116,6 @@ async fn insert_execution_review_task(
         task_uid,
         generation: 1,
     })
-}
-
-async fn execution_task_tool_executor_emits_zero_root_tool_events(
-    fixture: &OrchestratorTestFixture,
-) -> Result<()> {
-    // Pins: dynamic task execution uses the owning session context without replaying or appending root tool events.
-    let test = fixture.isolated().await;
-    let session_id = test.create_session("execution-task-no-root-events").await?;
-    let tool_call_id = ToolCallId::new();
-    let contract_revision = activated_contract_revision(&test, session_id, "bash").await?;
-    let output: SecuredToolOutput = test
-        .client()
-        .post_call(
-            "/ToolExecutor/execute_execution_task",
-            &ExecutionTaskToolCallRequest {
-                call: ToolCallRequest {
-                    tool_call_id,
-                    caller_identity: test
-                        .client()
-                        .identity()
-                        .context("fixture client identity")?
-                        .clone(),
-                    provider_tool_use_id: None,
-                    tool_name: "bash".to_string(),
-                    expected_tool_contract_revision: contract_revision,
-                    input: json!({"cmd": "printf execution-task-ok"}),
-                    active_canary: None,
-                    session_id,
-                    trusted_sandbox_manifest: None,
-                    worker_id: None,
-                    resource_budget: Default::default(),
-                },
-                origin: Some(ExecutionTaskOrigin {
-                    run_uid: Uuid::new_v4(),
-                    task_uid: Uuid::new_v4(),
-                    generation: 7,
-                }),
-            },
-        )
-        .await
-        .context("execute isolated execution-task tool call")?;
-    assert_eq!(output.safe_output.to_text(), "execution-task-ok");
-
-    let events = test
-        .client()
-        .get_events(session_id, EventRange::all())
-        .await?;
-    assert!(
-        events.iter().all(|record| !matches!(
-            &record.event,
-            Event::ToolCall { tool_id, .. } | Event::ToolResult { tool_id, .. }
-                if *tool_id == tool_call_id
-        )),
-        "execution-task dispatch must emit zero root ToolCall/ToolResult events: {}",
-        event_summary(&events)
-    );
-    Ok(())
 }
 
 #[tokio::test]
@@ -954,7 +1279,7 @@ async fn admin_review_policy_records_pending_review_and_turn_continues(
     assert!(
         matches!(
             stored.status,
-            SessionStatus::Paused | SessionStatus::Completed
+            SessionStatus::Idle | SessionStatus::Completed
         ),
         "admin review should not leave the session running or blocked: {:?}",
         stored.status
@@ -1225,6 +1550,262 @@ fn continuation_facts(
         .collect()
 }
 
+const ACTION_REVIEW_RECOVERY_CHANNEL: &str = "moa_action_review_recovery_service_e2e";
+const WORKER_RECOVERY_EFFECT_MARKER: &str = "worker-review-recovery-effect";
+
+struct ActionReviewRecoveryBarrier {
+    listener: PgListener,
+    lock_connection: PgConnection,
+    pool: sqlx::PgPool,
+    lock_holder_pid: i32,
+    lock_key: i64,
+}
+
+impl ActionReviewRecoveryBarrier {
+    async fn install(database_url: &str) -> Result<Self> {
+        let pool = sqlx::PgPool::connect(database_url)
+            .await
+            .context("connect action-review recovery observer")?;
+        let mut listener = PgListener::connect(database_url)
+            .await
+            .context("connect action-review recovery LISTEN client")?;
+        listener
+            .listen(ACTION_REVIEW_RECOVERY_CHANNEL)
+            .await
+            .context("listen for committed action-review requests")?;
+        sqlx::raw_sql(
+            r#"
+            CREATE OR REPLACE FUNCTION public.notify_action_review_recovery_service_e2e()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                PERFORM pg_notify(
+                    'moa_action_review_recovery_service_e2e',
+                    NEW.id::TEXT
+                );
+                RETURN NEW;
+            END;
+            $$;
+            DROP TRIGGER IF EXISTS notify_action_review_recovery_service_e2e
+                ON public.tenant_action_reviews;
+            CREATE TRIGGER notify_action_review_recovery_service_e2e
+                AFTER INSERT ON public.tenant_action_reviews
+                FOR EACH ROW
+                EXECUTE FUNCTION public.notify_action_review_recovery_service_e2e();
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .context("install committed action-review request signal")?;
+
+        let lock_uuid = Uuid::new_v4();
+        let lock_key = i64::from_be_bytes(
+            lock_uuid.as_bytes()[..8]
+                .try_into()
+                .context("derive unique action-review continuation barrier key")?,
+        );
+        let mut lock_connection = PgConnection::connect(database_url)
+            .await
+            .context("connect action-review continuation barrier")?;
+        let lock_holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut lock_connection)
+            .await
+            .context("read action-review barrier backend pid")?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(lock_key)
+            .execute(&mut lock_connection)
+            .await
+            .context("hold action-review continuation barrier")?;
+        Ok(Self {
+            listener,
+            lock_connection,
+            pool,
+            lock_holder_pid,
+            lock_key,
+        })
+    }
+
+    async fn wait_for_pending_review(&mut self, review_id: Uuid) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let notification = tokio::time::timeout_at(deadline, self.listener.recv())
+                .await
+                .with_context(|| {
+                    format!(
+                        "review {review_id} did not emit its committed request signal within 30s"
+                    )
+                })??;
+            if notification.payload() != review_id.to_string() {
+                continue;
+            }
+            break;
+        }
+
+        let state: (String, bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT status,
+                   owner_registered_at IS NOT NULL,
+                   decided_at IS NOT NULL,
+                   execution_tool_call_id IS NOT NULL
+            FROM public.tenant_action_reviews
+            WHERE id = $1
+            "#,
+        )
+        .bind(review_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("load exact pending action-review recovery row state")?;
+        anyhow::ensure!(
+            state == ("pending".to_string(), true, false, false),
+            "review {review_id} request signal did not expose the exact pending row state: {state:?}"
+        );
+        Ok(())
+    }
+
+    async fn arm_continuation(&self, review_id: Uuid) -> Result<()> {
+        let barrier_ddl = format!(
+            r#"
+            CREATE OR REPLACE FUNCTION public.block_action_review_continuation_service_e2e()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF NEW.event_type = 'ActionReviewContinuationRequested'
+                   AND NEW.payload #>> '{{data,review_id}}' = '{review_id}'
+                THEN
+                    PERFORM pg_advisory_xact_lock({});
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            DROP TRIGGER IF EXISTS block_action_review_continuation_service_e2e
+                ON public.events;
+            CREATE TRIGGER block_action_review_continuation_service_e2e
+                BEFORE INSERT ON public.events
+                FOR EACH ROW
+                EXECUTE FUNCTION public.block_action_review_continuation_service_e2e();
+            "#,
+            self.lock_key
+        );
+        sqlx::raw_sql(&barrier_ddl)
+            .execute(&self.pool)
+            .await
+            .context("arm action-review continuation barrier")?;
+        Ok(())
+    }
+
+    async fn wait_for_committed_decision_and_blocked_continuation(
+        &self,
+        review_id: Uuid,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let state: (String, bool, bool, bool) = sqlx::query_as(
+                r#"
+                SELECT status,
+                       owner_registered_at IS NOT NULL,
+                       decided_at IS NOT NULL,
+                       execution_tool_call_id IS NOT NULL
+                FROM public.tenant_action_reviews
+                WHERE id = $1
+                "#,
+            )
+            .bind(review_id)
+            .fetch_one(&self.pool)
+            .await
+            .context("read committed action-review decision state")?;
+            let waiters: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)
+                FROM pg_locks AS held
+                JOIN pg_locks AS waiting
+                  ON waiting.locktype = held.locktype
+                 AND waiting.database IS NOT DISTINCT FROM held.database
+                 AND waiting.classid IS NOT DISTINCT FROM held.classid
+                 AND waiting.objid IS NOT DISTINCT FROM held.objid
+                 AND waiting.objsubid IS NOT DISTINCT FROM held.objsubid
+                WHERE held.pid = $1
+                  AND held.locktype = 'advisory'
+                  AND held.granted
+                  AND NOT waiting.granted
+                  AND waiting.pid <> held.pid
+                "#,
+            )
+            .bind(self.lock_holder_pid)
+            .fetch_one(&self.pool)
+            .await
+            .context("observe action-review continuation advisory waiter")?;
+            if state == ("cleared".to_string(), true, true, true) && waiters == 1 {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "review {review_id} did not reach committed-cleared state with one blocked continuation; state={state:?}, waiters={waiters}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn release_and_remove(&mut self) -> Result<()> {
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(self.lock_key)
+            .fetch_one(&mut self.lock_connection)
+            .await
+            .context("release action-review continuation barrier")?;
+        anyhow::ensure!(
+            unlocked,
+            "action-review continuation barrier was not held by its owning connection"
+        );
+        sqlx::raw_sql(
+            r#"
+            DROP TRIGGER IF EXISTS block_action_review_continuation_service_e2e
+                ON public.events;
+            DROP FUNCTION IF EXISTS public.block_action_review_continuation_service_e2e();
+            DROP TRIGGER IF EXISTS notify_action_review_recovery_service_e2e
+                ON public.tenant_action_reviews;
+            DROP FUNCTION IF EXISTS public.notify_action_review_recovery_service_e2e();
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("remove action-review recovery barriers")?;
+        Ok(())
+    }
+}
+
+fn matching_successful_tool_results(
+    events: &[EventRecord],
+    tool_call_id: ToolCallId,
+    effect_marker: &str,
+) -> usize {
+    events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::ToolResult {
+                    tool_id,
+                    output,
+                    success: true,
+                    ..
+                } if *tool_id == tool_call_id && output.to_text().contains(effect_marker)
+            )
+        })
+        .count()
+}
+
+fn assert_effect_once(path: &std::path::Path, marker: &str) -> Result<()> {
+    let effects = std::fs::read_to_string(path)
+        .with_context(|| format!("read action-review effect probe {}", path.display()))?;
+    anyhow::ensure!(
+        effects.lines().filter(|line| *line == marker).count() == 1,
+        "action-review effect marker {marker:?} must occur exactly once, got {effects:?}"
+    );
+    Ok(())
+}
+
 async fn run_scripted_turn(
     test: &IsolatedTest<'_>,
     session_id: SessionId,
@@ -1305,7 +1886,7 @@ async fn create_pending_bash_review(
         .identity()
         .context("fixture client identity")?
         .clone();
-    let contract_revision = activated_contract_revision(test, session_id, "bash").await?;
+    let contract_revision = activated_contract_revision(test, "bash").await?;
     let prepared: PreparedActionReview = test
         .client()
         .post_call(
@@ -1367,31 +1948,27 @@ async fn create_pending_bash_review(
     Ok((review_id, tool_call_id))
 }
 
-async fn activated_contract_revision(
-    test: &IsolatedTest<'_>,
-    session_id: SessionId,
-    tool_name: &str,
-) -> Result<String> {
-    let caller_identity = test
+async fn activated_contract_revision(test: &IsolatedTest<'_>, tool_name: &str) -> Result<String> {
+    let tenant_id = test
         .client()
         .identity()
         .context("fixture client identity")?
-        .clone();
-    let catalog: ToolCatalogPin = test
+        .tenant_id;
+    let response: CapabilitiesListResponse = test
         .client()
         .post_call(
-            "/ToolExecutor/activated_tool_catalog",
-            &ScopedToolCatalogRequest {
-                session_id,
-                caller_identity,
-            },
+            "/Execution/list_capabilities",
+            &CapabilitiesListRequest { tenant_id },
         )
         .await
-        .context("load activated tool catalog")?;
-    catalog
-        .contract_revision(tool_name)
-        .map(ToOwned::to_owned)
-        .with_context(|| format!("{tool_name} must exist in the activated tool catalog"))
+        .context("load public execution capability catalog")?;
+    response
+        .catalog
+        .capabilities
+        .iter()
+        .find(|capability| capability.source.model_visible_tool_name() == Some(tool_name))
+        .map(|capability| capability.contract_revision.clone())
+        .with_context(|| format!("{tool_name} must exist in the public execution catalog"))
 }
 
 async fn initialize_tenant(client: &TestApiClient, tenant_id: TenantId) -> Result<()> {
@@ -1492,6 +2069,31 @@ const AUTO_WORKER_DONE: &str = "Auto-mode worker finished its delegated task.";
 const REVIEW_WORKER_DONE: &str = "Admin-review worker finished its delegated task.";
 const CONTINUATION_WORKER_TASK: &str = "execute the worker-continuation bash probe";
 const CONTINUATION_DONE: &str = "Reported the resolved action review.";
+
+fn recovery_action_policy_script(
+    worker_effect_path: &std::path::Path,
+) -> Result<serde_json::Value> {
+    let mut script = action_policy_script();
+    let keyed = script
+        .get_mut("keyed")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("action-policy script must expose keyed responses")?;
+    let worker_response = keyed
+        .iter_mut()
+        .find(|response| {
+            response.get("match").and_then(serde_json::Value::as_str)
+                == Some(CONTINUATION_WORKER_TASK)
+        })
+        .context("action-policy script must include the worker continuation response")?;
+    let command = worker_response
+        .pointer_mut("/completion/tool_calls/0/input/cmd")
+        .context("worker continuation response must contain a bash command")?;
+    *command = json!(format!(
+        "printf '{WORKER_RECOVERY_EFFECT_MARKER}\\n' | tee -a '{}'",
+        worker_effect_path.display()
+    ));
+    Ok(script)
+}
 
 /// Fully keyed script for the delegation-based action-policy scenarios.
 ///

@@ -35,7 +35,6 @@ use restate_sdk::prelude::*;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::services::skill_regression::{
     SkillRegressionExecution, SkillRegressionGate, skill_acceptance_regression_report,
@@ -1237,7 +1236,7 @@ pub async fn reject_learning_candidate_after_authz(
 
 async fn authorize_tenant_operator(
     authz: &AuthzEnforcer,
-    ctx: &impl RequestHeaders,
+    ctx: &Context<'_>,
     tenant_id: TenantId,
 ) -> Result<moa_core::traits::Identity, HandlerError> {
     authz

@@ -45,6 +45,7 @@ pub(crate) fn build_capability_response(
         .iter()
         .map(|(definition, execution)| registered_tool_capability(definition, execution))
         .collect::<moa_execution::Result<Vec<_>>>()?;
+    apply_registered_tool_rollbacks(&mut capabilities, &registered)?;
     let mut diagnostics = connection_refs
         .iter()
         .map(|reference| CapabilityCatalogDiagnostic {
@@ -364,6 +365,7 @@ pub(super) fn registered_tool_capability(
             "input_schema": definition.schema,
             "policy": definition.policy,
             "idempotency_class": definition.idempotency_class,
+            "rollback": definition.rollback,
             "max_output_tokens": definition.max_output_tokens,
             "owner": owner,
         }),
@@ -410,7 +412,76 @@ pub(super) fn registered_tool_capability(
         source,
         policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
+        rollback: None,
     })
+}
+
+fn apply_registered_tool_rollbacks(
+    capabilities: &mut [ExecutionCapability],
+    registered: &HashMap<String, (ToolDefinition, ToolExecution)>,
+) -> moa_execution::Result<()> {
+    for (tool_name, (definition, _)) in registered {
+        let Some(declaration) = definition.rollback.as_ref() else {
+            continue;
+        };
+        if declaration.compensator_tool_name == *tool_name {
+            return Err(moa_execution::Error::InvalidProjection {
+                message: format!("tool {tool_name} cannot declare itself as its exact rollback"),
+            });
+        }
+        let compensator = capabilities
+            .iter()
+            .find(|capability| {
+                capability.source.model_visible_tool_name()
+                    == Some(declaration.compensator_tool_name.as_str())
+            })
+            .ok_or_else(|| moa_execution::Error::InvalidProjection {
+                message: format!(
+                    "tool {tool_name} declares missing rollback tool {}",
+                    declaration.compensator_tool_name
+                ),
+            })?
+            .reference
+            .clone();
+        let forward = capabilities
+            .iter_mut()
+            .find(|capability| {
+                capability.source.model_visible_tool_name() == Some(tool_name.as_str())
+            })
+            .ok_or_else(|| moa_execution::Error::InvalidProjection {
+                message: format!("tool {tool_name} lost its projected execution capability"),
+            })?;
+        forward.rollback = Some(CapabilityRollbackContract {
+            compensator,
+            input_mapping: source_rollback_mapping(declaration),
+        });
+    }
+    Ok(())
+}
+
+fn source_rollback_mapping(declaration: &ToolRollbackDefinition) -> CompensationInputMapping {
+    CompensationInputMapping {
+        bindings: declaration
+            .input_mapping
+            .bindings
+            .iter()
+            .map(|binding| CompensationInputBinding {
+                target_pointer: binding.target_pointer.clone(),
+                source: match &binding.source {
+                    ToolRollbackValueSource::OriginalInput { pointer } => {
+                        CompensationValueSource::OriginalInput {
+                            pointer: pointer.clone(),
+                        }
+                    }
+                    ToolRollbackValueSource::OriginalOutput { pointer } => {
+                        CompensationValueSource::OriginalOutput {
+                            pointer: pointer.clone(),
+                        }
+                    }
+                },
+            })
+            .collect(),
+    }
 }
 
 pub(super) struct ActionCapabilityRequest<'a> {
@@ -468,6 +539,7 @@ pub(super) fn action_capability(
         source,
         policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
+        rollback: None,
     })
 }
 
@@ -567,6 +639,7 @@ pub(super) fn append_skill_action(context: SkillActionContext<'_>) -> moa_execut
         source,
         policy_context,
         estimate: single_tool_estimate(definition.max_output_tokens),
+        rollback: None,
     });
     Ok(())
 }

@@ -62,7 +62,6 @@ use tools::{anthropic_content_blocks, anthropic_message, anthropic_tool_from_sch
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_STREAM_BUFFER: usize = 64;
-const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
 const MIN_CACHEABLE_TOKENS: usize = 1_024;
 #[cfg(test)]
@@ -99,7 +98,7 @@ impl AnthropicProvider {
             default_model: resolved_default_model,
             default_capabilities,
             messages_url: Arc::from(ANTHROPIC_MESSAGES_URL),
-            retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
+            retry_policy: RetryPolicy::default().with_max_retries(crate::LLM_PROVIDER_MAX_RETRIES),
             web_search_enabled: true,
             pacer: RatePacer::new(PacerConfig::disabled()),
             // Direct construction uses the flat per-provider default; the config

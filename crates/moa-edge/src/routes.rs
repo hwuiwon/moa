@@ -2,7 +2,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::connector_credential_proxy::ConnectorCredentialProxy;
-use crate::ingress::{IngressScope, call_path};
+use crate::ingress::call_path;
 use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -308,12 +308,7 @@ async fn handle_proxy(
 
     let (method, path, body) =
         match translate_public_route(&method, &uri, &body, identity.tenant_id) {
-            // Every catch-all route reaching the proxy is a read, status poll, or
-            // lifecycle write; turn-starting message posts take dedicated handlers, so
-            // these stay unscoped and never consume a tenant's concurrency slot.
-            RouteTranslation::Forward { method, path, body } => {
-                (method, call_path(&IngressScope::Unscoped, &path), body)
-            }
+            RouteTranslation::Forward { method, path, body } => (method, call_path(&path), body),
             RouteTranslation::NotFound => {
                 span.record("http.status_code", 404_i64);
                 return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -709,7 +704,7 @@ async fn forward_knowledge_provider_webhook(
     else {
         return (StatusCode::BAD_REQUEST, "bad knowledge webhook body").into_response();
     };
-    let path = call_path(&IngressScope::Unscoped, &path);
+    let path = call_path(&path);
 
     match state
         .proxy
@@ -741,9 +736,7 @@ async fn forward_public_contact_route<const N: usize>(
     ) else {
         return (StatusCode::BAD_REQUEST, "bad contact body").into_response();
     };
-    // Contact verification, session init, promote, and channel change set up sessions;
-    // the turn only starts when a message is posted, so these stay unscoped.
-    let path = call_path(&IngressScope::Unscoped, &path);
+    let path = call_path(&path);
     match state
         .proxy
         .forward_public(method, &path, body, &headers)
@@ -834,7 +827,6 @@ async fn handle_session_message_stream(
         &state,
         "send_message",
         &input.message,
-        input.message.tenant_id,
     )
     .await
     {
@@ -901,7 +893,6 @@ async fn handle_session_attachment(
             session_id,
             contact_token,
         },
-        tenant_id,
     )
     .await
     {
@@ -1004,24 +995,10 @@ fn retry_after_from_terminal_body(body: &str) -> Option<String> {
     Some(millis.div_ceil(1_000).max(1).to_string())
 }
 
-/// Flow-control scope for a `Contacts` ingress call.
-///
-/// `send_message` queues a message on the `Session` VO and starts a turn, so it
-/// consumes the tenant's agent-work concurrency and is enrolled in per-tenant
-/// admission control. Verification, authorization, and progress reads are cheap
-/// and stay unscoped so they never wait behind a tenant's turn concurrency.
-fn contacts_scope(handler: &str, tenant_id: TenantId) -> IngressScope {
-    match handler {
-        "send_message" => IngressScope::Tenant(tenant_id),
-        _ => IngressScope::Unscoped,
-    }
-}
-
 async fn call_contacts_handler<I, O>(
     state: &AppState,
     handler: &str,
     input: &I,
-    tenant_id: TenantId,
 ) -> Result<O, EdgeJsonError>
 where
     I: Serialize + ?Sized,
@@ -1029,10 +1006,7 @@ where
 {
     let body =
         serde_json::to_vec(input).map_err(|error| EdgeJsonError::Serialize(error.to_string()))?;
-    let path = call_path(
-        &contacts_scope(handler, tenant_id),
-        &format!("/Contacts/{handler}"),
-    );
+    let path = call_path(&format!("/Contacts/{handler}"));
     let response = state
         .proxy
         .forward_public(Method::POST, &path, body, &HeaderMap::new())

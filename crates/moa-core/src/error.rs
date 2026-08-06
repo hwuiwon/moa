@@ -10,6 +10,19 @@ use crate::types::{identifiers::SessionAttachmentId, identifiers::SessionId, too
 /// Convenience result type for MOA libraries.
 pub type Result<T> = std::result::Result<T, MoaError>;
 
+/// Provenance carried by errors that cross a retry-owning boundary.
+///
+/// This is deliberately independent from session lifecycle severity: a failure
+/// can be recoverable to a user while still being unsafe for Restate to replay,
+/// or fatal to the current session while being transient infrastructure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureProvenance {
+    /// A later attempt can succeed without changing the request.
+    Transient,
+    /// Repeating the same request cannot safely or usefully recover.
+    Permanent,
+}
+
 /// Common error variants shared across MOA crates.
 #[derive(Debug, Error)]
 pub enum MoaError {
@@ -20,6 +33,14 @@ pub enum MoaError {
     /// A provider returned an error.
     #[error("provider error: {0}")]
     ProviderError(String),
+
+    /// A provider request failed before receiving a response.
+    #[error("provider transport error: {0}")]
+    ProviderTransport(String),
+
+    /// A provider operation exceeded an explicit deadline.
+    #[error("provider timeout: {0}")]
+    ProviderTimeout(String),
 
     /// A required environment variable is not set.
     #[error("missing environment variable: {0}")]
@@ -32,6 +53,13 @@ pub enum MoaError {
     /// Storage access failed.
     #[error("storage error: {0}")]
     StorageError(String),
+
+    /// Storage access failed for a typed transient infrastructure reason.
+    ///
+    /// This remains fatal to the current session lifecycle, but retry-owning
+    /// boundaries such as Restate may safely try the idempotent operation again.
+    #[error("transient storage error: {0}")]
+    StorageUnavailable(String),
 
     /// A referenced blob payload could not be found.
     #[error("blob not found: {0}")]
@@ -57,6 +85,13 @@ pub enum MoaError {
     /// Tool execution failed.
     #[error("tool error: {0}")]
     ToolError(String),
+
+    /// A non-idempotent external effect may have committed and must not be resent.
+    #[error("external effect {operation_id} has unknown outcome; manual reconciliation required")]
+    ExternalEffectUnknownOutcome {
+        /// Stable, non-secret operation identifier used for reconciliation.
+        operation_id: String,
+    },
 
     /// Validation failed.
     #[error("validation error: {0}")]
@@ -170,6 +205,64 @@ impl ToolFailureClass {
 }
 
 impl MoaError {
+    /// Returns the typed failure provenance for retry-owning boundaries.
+    ///
+    /// This does not replace [`MoaError::is_fatal`], which answers the distinct
+    /// question of whether the current product session may be resumed.
+    #[must_use]
+    pub fn failure_provenance(&self) -> FailureProvenance {
+        match self {
+            Self::ProviderTransport(_)
+            | Self::ProviderTimeout(_)
+            | Self::StorageUnavailable(_)
+            | Self::RateLimited { .. } => FailureProvenance::Transient,
+            Self::HttpStatus { status, .. } if matches!(*status, 408 | 425 | 429 | 500..=599) => {
+                FailureProvenance::Transient
+            }
+            Self::Io(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::NotConnected
+                        | io::ErrorKind::NetworkDown
+                        | io::ErrorKind::NetworkUnreachable
+                        | io::ErrorKind::HostUnreachable
+                ) =>
+            {
+                FailureProvenance::Transient
+            }
+            Self::SessionNotFound(_)
+            | Self::ProviderError(_)
+            | Self::MissingEnvironmentVariable(_)
+            | Self::ConfigError(_)
+            | Self::StorageError(_)
+            | Self::BlobNotFound(_)
+            | Self::SessionAttachmentNotFound(_)
+            | Self::SessionAttachmentObjectNotFound(_)
+            | Self::SessionAttachmentSlotConflict(_)
+            | Self::ToolError(_)
+            | Self::ExternalEffectUnknownOutcome { .. }
+            | Self::ValidationError(_)
+            | Self::ProviderQuirk(_)
+            | Self::SerializationError(_)
+            | Self::HttpStatus { .. }
+            | Self::StreamError(_)
+            | Self::PermissionDenied(_)
+            | Self::BudgetExhausted(_)
+            | Self::Cancelled
+            | Self::Unsupported(_)
+            | Self::HomeDirectoryNotFound
+            | Self::Io(_)
+            | Self::SerdeJson(_)
+            | Self::Uuid(_) => FailureProvenance::Permanent,
+        }
+    }
+
     /// Whether this error should terminate the session (`true`) or is
     /// recoverable (the orchestrator pauses the session so the user can
     /// resume, retry, or intervene). Fatal classes are typically
@@ -185,6 +278,7 @@ impl MoaError {
             // "retried" without user action.
             Self::ConfigError(_)
             | Self::StorageError(_)
+            | Self::StorageUnavailable(_)
             | Self::MissingEnvironmentVariable(_)
             | Self::HomeDirectoryNotFound
             | Self::PermissionDenied(_)
@@ -199,18 +293,21 @@ impl MoaError {
             | Self::StreamError(_)
             | Self::HttpStatus { .. }
             | Self::ProviderError(_)
+            | Self::ProviderTransport(_)
+            | Self::ProviderTimeout(_)
             | Self::ToolError(_)
             | Self::SerdeJson(_)
             | Self::Uuid(_) => false,
             // Session/blob lookups and cancellation are neither fatal
             // in the "kill the app" sense nor recoverable within the
             // same session — treat them as fatal so the supervisor
-            // doesn't leave a broken session in `Paused`.
+            // doesn't leave a broken session in `Idle`.
             Self::SessionNotFound(_)
             | Self::BlobNotFound(_)
             | Self::SessionAttachmentNotFound(_)
             | Self::SessionAttachmentObjectNotFound(_)
             | Self::SessionAttachmentSlotConflict(_) => true,
+            Self::ExternalEffectUnknownOutcome { .. } => true,
             Self::Cancelled => true,
         }
     }
@@ -255,7 +352,20 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
             },
         },
         MoaError::ToolError(message) => classify_message_error(message, consecutive_timeouts),
+        MoaError::ExternalEffectUnknownOutcome { operation_id } => ToolFailureClass::Fatal {
+            reason: format!(
+                "external effect {operation_id} has unknown outcome and requires manual reconciliation"
+            ),
+        },
         MoaError::ProviderError(message) => classify_message_error(message, consecutive_timeouts),
+        MoaError::ProviderTransport(message) => ToolFailureClass::Retryable {
+            reason: message.clone(),
+            backoff_hint: Duration::from_secs(1),
+        },
+        MoaError::ProviderTimeout(message) => ToolFailureClass::Retryable {
+            reason: message.clone(),
+            backoff_hint: Duration::ZERO,
+        },
         MoaError::StreamError(message) => classify_message_error(message, consecutive_timeouts),
         MoaError::ValidationError(message) => ToolFailureClass::Fatal {
             reason: format!("tool input failed validation: {message}"),
@@ -271,6 +381,10 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
         },
         MoaError::StorageError(message) => ToolFailureClass::Fatal {
             reason: format!("tool execution could not access storage: {message}"),
+        },
+        MoaError::StorageUnavailable(message) => ToolFailureClass::Retryable {
+            reason: format!("tool execution temporarily could not access storage: {message}"),
+            backoff_hint: Duration::from_secs(1),
         },
         MoaError::BlobNotFound(message) => ToolFailureClass::Fatal {
             reason: format!("tool artifact was not found: {message}"),
@@ -447,6 +561,19 @@ mod tests {
     #[test]
     fn config_error_is_fatal() {
         assert!(MoaError::ConfigError("bad config".into()).is_fatal());
+    }
+
+    #[test]
+    fn transient_storage_provenance_is_independent_from_session_fatality() {
+        // Pins: a database outage remains fatal to the current product turn
+        // while a retry-owning infrastructure boundary may recover it.
+        let error = MoaError::StorageUnavailable("pool timed out".into());
+
+        assert!(error.is_fatal());
+        assert_eq!(
+            error.failure_provenance(),
+            super::FailureProvenance::Transient
+        );
     }
 
     #[test]

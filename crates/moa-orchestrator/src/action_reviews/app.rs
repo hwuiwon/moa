@@ -15,8 +15,11 @@ use uuid::Uuid;
 
 use crate::action_reviews::store::{self, ReviewDecisionRow, ReviewDecisionUpdate};
 use crate::services::action_reviews::{
-    ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest, RequestActionReview,
+    ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
+    ExecutionActionReviewSettlement, RequestActionReview, SettleExecutionActionReviewRequest,
 };
+
+const EXECUTION_OWNER_REVOCATION_ACTOR: &str = "system:execution-owner-terminal";
 
 /// Result of requesting a tenant action review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,7 +186,7 @@ pub(crate) async fn decide_review(
     }
 
     if matches!(decision, ActionReviewDecision::Cleared)
-        && row.owner.execution_origin().is_some()
+        && (row.owner.execution_origin().is_some() || row.owner.compensation_origin().is_some())
         && row.status == ActionReviewStatus::Pending
     {
         let execution_tool_call_id = execution_tool_call_id.ok_or_else(|| {
@@ -240,14 +243,14 @@ pub(crate) async fn decide_review(
             },
         )
         .await?;
-        if let Some(origin) = row.owner.execution_origin()
+        if (row.owner.execution_origin().is_some() || row.owner.compensation_origin().is_some())
             && matches!(decision, ActionReviewDecision::Denied { .. })
         {
             store::insert_execution_review_resolution(
                 &mut tx,
                 request.tenant_id,
                 request.review_id,
-                origin,
+                &row.owner,
                 &moa_execution::wire::ExecutionActionReviewResolution::Denied {
                     reason: deny_reason_for_resolution(&decision),
                 },
@@ -294,9 +297,11 @@ pub(crate) async fn finalize_execution_review(
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
     let storage_partition_id = storage_partition_id(tenant_id);
     let row = store::load_review_for_update(&mut tx, &storage_partition_id, review_id).await?;
-    let origin = row.owner.execution_origin().ok_or_else(|| {
-        TerminalError::new("cleared execution finalization requires execution origin")
-    })?;
+    if row.owner.execution_origin().is_none() && row.owner.compensation_origin().is_none() {
+        return Err(
+            TerminalError::new("cleared execution finalization requires execution owner").into(),
+        );
+    }
     if row.status != ActionReviewStatus::Pending && row.status != ActionReviewStatus::Cleared {
         return Err(TerminalError::new_with_code(
             409,
@@ -336,7 +341,7 @@ pub(crate) async fn finalize_execution_review(
         &mut tx,
         tenant_id,
         review_id,
-        origin,
+        &row.owner,
         &resolution,
         resolution_trace_context.as_ref(),
         row.execution_task_trace_context.as_ref(),
@@ -360,6 +365,63 @@ pub(crate) async fn finalize_execution_review(
         tool_request: None,
         executed_tool_call_id: row.execution_tool_call_id.map(ToolCallId),
     })
+}
+
+/// Atomically revokes an unclaimed execution review or reports that claimed work must be joined.
+pub(crate) async fn settle_execution_owner_review(
+    pool: sqlx::PgPool,
+    request: SettleExecutionActionReviewRequest,
+) -> Result<ExecutionActionReviewSettlement, HandlerError> {
+    if request.owner.execution_origin().is_none() && request.owner.compensation_origin().is_none() {
+        return Err(TerminalError::new(
+            "execution review settlement requires a task or compensation owner",
+        )
+        .into());
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let storage_partition_id = storage_partition_id(request.tenant_id);
+    let row =
+        store::load_review_for_update(&mut tx, &storage_partition_id, request.review_id).await?;
+    if row.owner != request.owner {
+        return Err(TerminalError::new_with_code(
+            409,
+            "execution review settlement owner does not match the durable envelope",
+        )
+        .into());
+    }
+    let settlement = match row.status {
+        ActionReviewStatus::Pending if row.execution_requested_at.is_none() => {
+            store::update_review_decision(
+                &mut tx,
+                ReviewDecisionUpdate {
+                    storage_partition_id,
+                    review_id: request.review_id,
+                    status: ActionReviewStatus::Revoked,
+                    decided_by: EXECUTION_OWNER_REVOCATION_ACTOR.to_string(),
+                    deny_reason: Some(
+                        "execution owner terminated before the reviewed effect was claimed"
+                            .to_string(),
+                    ),
+                    decided_at: Utc::now(),
+                    execution_tool_call_id: None,
+                },
+            )
+            .await?;
+            ExecutionActionReviewSettlement::Revoked
+        }
+        ActionReviewStatus::Revoked => ExecutionActionReviewSettlement::Revoked,
+        ActionReviewStatus::Pending
+        | ActionReviewStatus::Cleared
+        | ActionReviewStatus::Denied
+        | ActionReviewStatus::Timeout => ExecutionActionReviewSettlement::JoinRequired,
+    };
+    tx.commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+    Ok(settlement)
 }
 
 fn storage_partition_id(tenant_id: moa_core::types::identifiers::TenantId) -> StoragePartitionId {
@@ -528,6 +590,20 @@ mod tests {
         assert!(
             error.to_string().contains("action review already timeout"),
             "error should name the terminal timeout status: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_review_transition_rejects_clear_after_owner_revocation() {
+        // Pins: once an execution owner atomically revokes an unclaimed review,
+        // no later admin clear may dispatch the gated external effect.
+        let error =
+            validate_review_transition(ActionReviewStatus::Revoked, ActionReviewStatus::Cleared)
+                .expect_err("revoked review must reject a later clear decision");
+
+        assert!(
+            error.to_string().contains("action review already revoked"),
+            "error should name the durable revocation: {error}"
         );
     }
 

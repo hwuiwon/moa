@@ -33,6 +33,22 @@ struct LockedSession {
     events_archived_at: Option<DateTime<Utc>>,
 }
 
+/// Failure returned by the terminal-session retention write path.
+///
+/// Database failures retain their typed SQLx provenance so the Restate caller
+/// can distinguish transient availability faults from permanent row or query
+/// failures. Domain failures cover deterministic validation and archive
+/// integrity errors that must not be retried indefinitely.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionArchiveStoreError {
+    /// A typed database failure from the retention query or transaction.
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    /// A deterministic session-domain or archive-integrity failure.
+    #[error(transparent)]
+    Domain(#[from] MoaError),
+}
+
 impl PostgresSessionStore {
     /// Lists terminal sessions eligible for archival, oldest first.
     ///
@@ -50,7 +66,8 @@ impl PostgresSessionStore {
         tenant_id: TenantId,
         boundary: DateTime<Utc>,
         limit: i64,
-    ) -> Result<Vec<moa_core::types::identifiers::SessionId>> {
+    ) -> std::result::Result<Vec<moa_core::types::identifiers::SessionId>, SessionArchiveStoreError>
+    {
         let sessions = self.table_name("sessions");
         let rows = sqlx::query(&format!(
             "SELECT id FROM {sessions} \
@@ -66,8 +83,7 @@ impl PostgresSessionStore {
         .bind(boundary)
         .bind(limit)
         .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
         rows.iter()
             .map(|row| {
                 Ok(moa_core::types::identifiers::SessionId(
@@ -91,12 +107,12 @@ impl PostgresSessionStore {
         session_id: moa_core::types::identifiers::SessionId,
         boundary: DateTime<Utc>,
         now: DateTime<Utc>,
-    ) -> Result<ArchiveOutcome> {
+    ) -> std::result::Result<ArchiveOutcome, SessionArchiveStoreError> {
         let sessions = self.table_name("sessions");
         let events = self.table_name("events");
         let archives = self.table_name("session_event_archives");
 
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.pool.begin().await?;
 
         let locked = sqlx::query(&format!(
             "SELECT tenant_id, contact_id, status, \
@@ -105,8 +121,7 @@ impl PostgresSessionStore {
         ))
         .bind(session_id.0)
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?
+        .await?
         .ok_or(MoaError::SessionNotFound(session_id))?;
         let locked = LockedSession {
             tenant_id: locked.col::<Uuid>("tenant_id")?,
@@ -117,18 +132,18 @@ impl PostgresSessionStore {
         };
 
         if locked.events_archived_at.is_some() {
-            tx.rollback().await.map_err(map_sqlx_error)?;
+            tx.rollback().await?;
             return Ok(ArchiveOutcome::AlreadyArchived);
         }
         let status: SessionStatus = from_db("session status", &locked.status)?;
         if !is_terminal_status(&status) {
-            tx.rollback().await.map_err(map_sqlx_error)?;
+            tx.rollback().await?;
             return Ok(ArchiveOutcome::Refused(ArchiveRefusal::NotTerminal {
                 status: locked.status,
             }));
         }
         if locked.terminal_at > boundary {
-            tx.rollback().await.map_err(map_sqlx_error)?;
+            tx.rollback().await?;
             return Ok(ArchiveOutcome::Refused(ArchiveRefusal::WithinRetention {
                 boundary,
                 terminal_at: locked.terminal_at,
@@ -145,8 +160,7 @@ impl PostgresSessionStore {
         )
         .bind(locked.tenant_id)
         .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         let held: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM moa.legal_hold \
@@ -156,10 +170,9 @@ impl PostgresSessionStore {
         .bind(locked.tenant_id)
         .bind(locked.contact_id)
         .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
         if held {
-            tx.rollback().await.map_err(map_sqlx_error)?;
+            tx.rollback().await?;
             return Ok(ArchiveOutcome::Refused(ArchiveRefusal::LegalHold));
         }
 
@@ -170,10 +183,9 @@ impl PostgresSessionStore {
         .bind(locked.tenant_id)
         .bind(locked.contact_id)
         .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
         if fenced {
-            tx.rollback().await.map_err(map_sqlx_error)?;
+            tx.rollback().await?;
             return Ok(ArchiveOutcome::Refused(ArchiveRefusal::DestructionInFlight));
         }
 
@@ -182,10 +194,9 @@ impl PostgresSessionStore {
         ))
         .bind(session_id.0)
         .fetch_all(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
         if rows.is_empty() {
-            tx.rollback().await.map_err(map_sqlx_error)?;
+            tx.rollback().await?;
             return Ok(ArchiveOutcome::Refused(ArchiveRefusal::NoEvents));
         }
 
@@ -230,8 +241,7 @@ impl PostgresSessionStore {
         .bind(digest.as_slice())
         .bind(now)
         .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         // Prove the row returned by Postgres before deleting live history. A
         // mismatch aborts the transaction, so an untrusted archive never
@@ -245,7 +255,8 @@ impl PostgresSessionStore {
                 hex::encode(archive.content_digest),
                 hex::encode(stored_digest),
                 hex::encode(digest)
-            )));
+            ))
+            .into());
         }
 
         // `events` refuses UPDATE and DELETE through `events_append_only_guard`
@@ -255,18 +266,17 @@ impl PostgresSessionStore {
         // for every other writer.
         sqlx::query("SELECT set_config('moa.events_maintenance', 'on', true)")
             .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await?;
         let deleted = sqlx::query(&format!("DELETE FROM {events} WHERE session_id = $1"))
             .bind(session_id.0)
             .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .rows_affected();
         if deleted != event_count as u64 {
             return Err(MoaError::StorageError(format!(
                 "session {session_id} retention deleted {deleted} events but archived {event_count}"
-            )));
+            ))
+            .into());
         }
 
         sqlx::query(&format!(
@@ -275,8 +285,7 @@ impl PostgresSessionStore {
         .bind(session_id.0)
         .bind(now)
         .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         // Models a crash between the delete and the commit: the rows are gone
         // inside this transaction but nothing is durable yet. Everything above
@@ -284,10 +293,10 @@ impl PostgresSessionStore {
         // without its archive becoming durable is history that no longer exists.
         #[cfg(feature = "failpoints")]
         if let Some(error) = crate::failpoints::hit("session_archive_post_delete") {
-            return Err(error);
+            return Err(error.into());
         }
 
-        tx.commit().await.map_err(map_sqlx_error)?;
+        tx.commit().await?;
         Ok(ArchiveOutcome::Archived(Box::new(archive)))
     }
 

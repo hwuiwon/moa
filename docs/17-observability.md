@@ -99,9 +99,8 @@ in-process helper plumbing, not as the hosted observation source of truth.
 Durable execution is observed through `moa.execution_run` and
 `moa.execution_task`, Restate invocation state, compact session events, and
 bounded trace attributes. A plan has no application fan-out ceiling below its
-approved run budget. Restate scoped concurrency, provider concurrency/rate
-pacing, and governed tool or hand capacity queue physical work without changing
-logical coverage.
+approved run budget. Provider concurrency/rate pacing and governed tool or hand
+capacity queue physical work without changing logical coverage.
 
 ### Replay-Safe Trace Correlation
 

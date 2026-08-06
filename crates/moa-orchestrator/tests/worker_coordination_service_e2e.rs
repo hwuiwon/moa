@@ -2,17 +2,11 @@
 //! Session VO (child registry, control-plane signal dedupe, scoped cancellation,
 //! and terminal-result caching) driven against a real Restate ingress + Postgres.
 //!
-//! These tests intentionally exercise the coordination control plane directly
-//! through the `Session` (and `Worker`) virtual-object handlers rather than
-//! through a coordinator turn that emits `spawn_worker`. The clean-e2e harness
-//! runs the orchestrator with the deterministic mock provider
-//! (`MOA_PROVIDERS_OVERRIDE=mock:...`), whose only completion is fixed text — it
-//! never emits a delegation tool call, so a worker is never spawned through the
-//! brain loop. Driving the durable handlers directly lets every assertion land on
-//! durable, deterministic outcomes (the Postgres event log and persisted VO state),
-//! which is exactly what these wiring tests pin. See the module-level report for the
-//! one scenario this constraint forces us to skip (a child still running while the
-//! spawn tool returns).
+//! Most tests intentionally exercise the coordination control plane directly
+//! through the `Session` (and `Worker`) virtual-object handlers. The recovery
+//! matrix scenario instead boots the dedicated scripted-provider/MCP fixture so
+//! three real conversational workers can be held at an exact external-effect
+//! barrier across a hard orchestrator restart.
 
 #![cfg(feature = "integration")]
 
@@ -21,7 +15,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
 use moa_core::{
-    types::contact::SessionActorRef, types::identifiers::AgentSignalId,
+    events::Event, types::action_policy::ActionPolicyEffect, types::contact::SessionActorRef,
+    types::events_stream::EventRange, types::identifiers::AgentSignalId,
     types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
     types::session::CancelScope, types::session::SessionMeta,
     types::worker::commands::ConsumeWorkerChildResultInput,
@@ -33,10 +28,18 @@ use moa_core::{
     types::worker::state::WorkerState, types::worker::state::WorkerStatus,
     types::worker::state::WorkerTerminalResult,
 };
+use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
+use moa_test_support::{
+    FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
+    OrchestratorTestFixture, TestApiClient,
+};
+use moa_wire::turn::{SessionProgress, SessionProgressRequest, TurnOutcomeKind};
 use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::support::restate_runtime::{grant_tenant_operator, test_user_identity, with_identity};
+use crate::support::session_store_service::start_turn_request;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -352,6 +355,300 @@ fn completed_terminal(worker_id: &str, output: &str) -> WorkerTerminalResult {
             tools_invoked: 1,
             error: None,
         },
+    }
+}
+
+const RECOVERY_REQUEST: &str =
+    "Run the RECOVERY-MATRIX fan-in check with three independent workers.";
+const RECOVERY_CLASSIFIER_PROMPT: &str =
+    "You classify one user turn into MOA's public execution decision.";
+const RECOVERY_MCP_SERVER: &str = "fixture-capability";
+const RECOVERY_WORKERS: [(&str, &str, &str); 3] = [
+    (
+        "RECOVERY-WORKER-A: execute the durable A probe.",
+        "recovery_probe_a",
+        "RECOVERY-A-DONE",
+    ),
+    (
+        "RECOVERY-WORKER-B: execute the durable B probe.",
+        "recovery_probe_b",
+        "RECOVERY-B-DONE",
+    ),
+    (
+        "RECOVERY-WORKER-C: execute the durable C probe.",
+        "recovery_probe_c",
+        "RECOVERY-C-DONE",
+    ),
+];
+
+fn recovery_tool_reference(tool_name: &str) -> String {
+    moa_hands::mcp_tool_reference(RECOVERY_MCP_SERVER, tool_name)
+}
+
+fn recovery_script() -> serde_json::Value {
+    let worker_completions = RECOVERY_WORKERS.iter().map(|(_, _, result)| {
+        json!({
+            "match": result,
+            "completion": { "content": format!("Worker retained {result}."), "tool_calls": [] }
+        })
+    });
+    let worker_calls = RECOVERY_WORKERS.iter().map(|(task, tool_name, _)| {
+        json!({
+            "match": task,
+            "completion": {
+                "content": "",
+                "tool_calls": [{
+                    "name": recovery_tool_reference(tool_name),
+                    "id": format!("{tool_name}-call"),
+                    "input": { "worker": tool_name }
+                }]
+            }
+        })
+    });
+    let spawn_calls = RECOVERY_WORKERS
+        .iter()
+        .map(|(task, tool_name, _)| {
+            json!({
+                "name": "spawn_worker",
+                "id": format!("spawn-{tool_name}"),
+                "input": {
+                    "task": task,
+                    "tool_subset": [recovery_tool_reference(tool_name)],
+                    "budget_tokens": 1_200,
+                    "max_turns": 2
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut keyed = worker_completions.chain(worker_calls).collect::<Vec<_>>();
+    keyed.extend([
+        json!({
+            "match": "Spawned worker",
+            "completion": { "content": "All recovery workers were dispatched.", "tool_calls": [] }
+        }),
+        json!({
+            "match": RECOVERY_CLASSIFIER_PROMPT,
+            "completion": {
+                "content": r#"{"label":"execute","strategy":"inline","rationale":"The bounded work should run in parallel conversational workers.","confidence_bps":10000,"missing_inputs":[]}"#,
+                "tool_calls": []
+            }
+        }),
+        json!({
+            "match": RECOVERY_REQUEST,
+            "completion": { "content": "", "tool_calls": spawn_calls }
+        }),
+    ]);
+    json!({
+        "default": { "completion": { "content": "unexpected recovery fallback", "tool_calls": [] } },
+        "keyed": keyed
+    })
+}
+
+fn recovery_capability_options() -> FixtureCapabilityOptions {
+    FixtureCapabilityOptions {
+        tools: RECOVERY_WORKERS
+            .iter()
+            .map(|(_, tool_name, result)| FixtureCapabilityTool {
+                name: (*tool_name).to_string(),
+                description: format!("Block and release the deterministic {tool_name} effect"),
+                input_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["worker"],
+                    "properties": { "worker": { "type": "string" } }
+                }),
+                item_key_pointer: None,
+                idempotent: true,
+                outcomes: vec![FixtureCapabilityOutcome::Success {
+                    output: json!({ "result": result }),
+                }],
+            })
+            .collect(),
+        orchestrator_env: vec![("RUST_LOG".to_string(), "error".to_string())],
+    }
+}
+
+async fn seed_recovery_allow_rules(
+    fixture: &OrchestratorTestFixture,
+    client: &TestApiClient,
+    tenant_id: TenantId,
+) -> Result<()> {
+    fixture
+        .grant_default_tenant_admin(tenant_id)
+        .await
+        .context("grant tenant admin before recovery policy setup")?;
+    for (_, tool_name, _) in RECOVERY_WORKERS {
+        client
+            .post_void(
+                "/ActionPolicy/upsert_rule",
+                &UpsertActionPolicyRuleRequest {
+                    tenant_id,
+                    contact_id: None,
+                    tool_name: recovery_tool_reference(tool_name),
+                    pattern: "*".to_string(),
+                    effect: ActionPolicyEffect::Allow,
+                    reason: Some("deterministic recovery matrix fixture".to_string()),
+                },
+            )
+            .await
+            .with_context(|| format!("allow recovery fixture tool {tool_name}"))?;
+    }
+    Ok(())
+}
+
+async fn fixture_progress(
+    client: &TestApiClient,
+    session_id: SessionId,
+) -> Result<SessionProgress> {
+    client
+        .post_call(
+            &format!("/Session/{session_id}/progress"),
+            &SessionProgressRequest {
+                event_range: EventRange::all(),
+            },
+        )
+        .await
+        .context("read recovery session progress")
+}
+
+async fn await_worker_partition(
+    client: &TestApiClient,
+    session_id: SessionId,
+    completed: usize,
+    running: usize,
+    timeout: Duration,
+) -> Result<SessionProgress> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let progress = fixture_progress(client, session_id).await?;
+        let completed_count = progress
+            .child_progress
+            .iter()
+            .filter(|worker| worker.state == WorkerState::Completed)
+            .count();
+        let running_count = progress
+            .child_progress
+            .iter()
+            .filter(|worker| worker.state == WorkerState::Running)
+            .count();
+        if progress.child_progress.len() == RECOVERY_WORKERS.len()
+            && completed_count == completed
+            && running_count == running
+        {
+            return Ok(progress);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "worker partition did not reach completed={completed}, running={running} within {timeout:?}; last summaries: {:?}",
+                progress.child_progress
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn await_exact_recovery_attempts(
+    controller: &moa_test_support::FixtureCapabilityController,
+    completed_capability: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let attempts = controller.transport_attempts();
+        let counts = RECOVERY_WORKERS
+            .iter()
+            .map(|(_, tool_name, _)| {
+                (
+                    *tool_name,
+                    attempts
+                        .iter()
+                        .filter(|attempt| attempt.capability == *tool_name)
+                        .count(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let exact = counts.iter().all(|(tool_name, count)| {
+            let expected = if *tool_name == completed_capability {
+                1
+            } else {
+                2
+            };
+            *count == expected
+        });
+        let exceeded = counts.iter().any(|(tool_name, count)| {
+            let expected = if *tool_name == completed_capability {
+                1
+            } else {
+                2
+            };
+            *count > expected
+        });
+        if exceeded {
+            bail!("a recovery capability replayed more than once: {counts:?}");
+        }
+        if exact {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("recovery attempts did not reach the exact 1/2/2 partition: {counts:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn await_recovery_terminal_events(
+    client: &TestApiClient,
+    session_id: SessionId,
+    timeout: Duration,
+) -> Result<Vec<moa_core::types::events_stream::EventRecord>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let events = client
+            .get_events(session_id, EventRange::all())
+            .await
+            .context("load durable worker recovery events")?;
+        let completed_changes = events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.event,
+                    Event::WorkerStatusChanged {
+                        to: WorkerState::Completed,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let completed_notifications = events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.event,
+                    Event::WorkerNotificationDelivered {
+                        state: WorkerState::Completed,
+                        ..
+                    }
+                )
+            })
+            .count();
+        if completed_changes > RECOVERY_WORKERS.len()
+            || completed_notifications > RECOVERY_WORKERS.len()
+        {
+            bail!(
+                "worker recovery emitted duplicate terminal events: changes={completed_changes}, notifications={completed_notifications}"
+            );
+        }
+        if completed_changes == RECOVERY_WORKERS.len()
+            && completed_notifications == RECOVERY_WORKERS.len()
+        {
+            return Ok(events);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "worker terminal events did not settle within {timeout:?}: changes={completed_changes}, notifications={completed_notifications}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -699,6 +996,203 @@ async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()>
         count_signal_events(&progress, &control_id_str),
         1,
         "the registered control signal is recorded, proving the event log was observed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the restartable Restate/Postgres/OpenFGA/Valkey fixture"]
+async fn recovery_matrix_three_workers_retain_and_resume_once_service_e2e() -> Result<()> {
+    // Pins: after one of three conversational workers commits its terminal result and two
+    // siblings remain blocked on exact MCP effects, a hard orchestrator restart retains the
+    // completed child and resumes each unfinished child exactly once without duplicating any
+    // upstream effect, tool result, or terminal notification.
+    let fixture = OrchestratorTestFixture::with_execution_fixture(
+        recovery_script(),
+        recovery_capability_options(),
+    )
+    .await
+    .context("boot restartable worker recovery fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("worker-fan-in-recovery").await?;
+    let session = test.client().get_session(session_id).await?;
+    seed_recovery_allow_rules(&fixture, test.client(), session.tenant_id).await?;
+
+    let started = test
+        .client()
+        .session(session_id.to_string())
+        .start_turn(start_turn_request(RECOVERY_REQUEST), None)
+        .await
+        .context("start three-worker recovery turn")?;
+    let turn_id = started
+        .turn_id
+        .context("idle recovery session should start its turn immediately")?;
+    let controller = fixture
+        .fixture_capability()
+        .context("worker recovery fixture omitted its capability controller")?;
+    let calls = controller
+        .wait_for_calls(RECOVERY_WORKERS.len(), Duration::from_secs(90))
+        .await
+        .context("wait for all three workers at their MCP barriers")?;
+    assert_eq!(
+        calls.len(),
+        RECOVERY_WORKERS.len(),
+        "every conversational worker must reach one unique logical effect"
+    );
+    let observed_capabilities = calls
+        .iter()
+        .map(|call| call.capability.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_capabilities = RECOVERY_WORKERS
+        .iter()
+        .map(|(_, tool_name, _)| *tool_name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(observed_capabilities, expected_capabilities);
+
+    let completed_capability = calls[0].capability.clone();
+    controller.release(1);
+    let before_restart =
+        await_worker_partition(test.client(), session_id, 1, 2, Duration::from_secs(90)).await?;
+    let completed_worker_id = before_restart
+        .child_progress
+        .iter()
+        .find(|worker| worker.state == WorkerState::Completed)
+        .map(|worker| worker.worker_id.clone())
+        .context("one worker should be durably completed before restart")?;
+
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard crash orchestrator at the one-completed/two-blocked partition")?;
+
+    let after_restart =
+        await_worker_partition(test.client(), session_id, 1, 2, Duration::from_secs(90)).await?;
+    assert!(
+        after_restart.child_progress.iter().any(|worker| {
+            worker.worker_id == completed_worker_id && worker.state == WorkerState::Completed
+        }),
+        "the exact completed worker must remain completed after the hard restart: {:?}",
+        after_restart.child_progress
+    );
+
+    await_exact_recovery_attempts(controller, &completed_capability, Duration::from_secs(90))
+        .await?;
+    controller.release(2);
+
+    let terminal = await_worker_partition(
+        test.client(),
+        session_id,
+        RECOVERY_WORKERS.len(),
+        0,
+        Duration::from_secs(90),
+    )
+    .await?;
+    assert_eq!(
+        terminal
+            .child_progress
+            .iter()
+            .filter(|worker| worker.state == WorkerState::Completed)
+            .count(),
+        RECOVERY_WORKERS.len()
+    );
+
+    let outcome = test
+        .client()
+        .session(session_id.to_string())
+        .await_turn_outcome(
+            &turn_id,
+            Duration::from_secs(90),
+            Duration::from_millis(100),
+        )
+        .await
+        .context("await retained coordinator turn outcome")?;
+    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
+
+    let events =
+        await_recovery_terminal_events(test.client(), session_id, Duration::from_secs(90)).await?;
+    let spawned = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::WorkerSpawned {
+                worker_id, task, ..
+            } => Some((worker_id.clone(), task.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spawned.len(),
+        RECOVERY_WORKERS.len(),
+        "the coordinator must spawn exactly three workers"
+    );
+    let completed_task = RECOVERY_WORKERS
+        .iter()
+        .find(|(_, tool_name, _)| *tool_name == completed_capability)
+        .map(|(task, _, _)| *task)
+        .context("completed capability must belong to one scripted worker")?;
+    assert!(
+        spawned
+            .iter()
+            .any(|(worker_id, task)| worker_id == &completed_worker_id && *task == completed_task),
+        "the retained completed worker must be the child whose effect was released first"
+    );
+
+    let terminal_changes = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::WorkerStatusChanged {
+                worker_id,
+                to: WorkerState::Completed,
+                ..
+            } => Some(worker_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let terminal_notifications = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::WorkerNotificationDelivered {
+                worker_id,
+                state: WorkerState::Completed,
+                ..
+            } => Some(worker_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_changes.len(),
+        RECOVERY_WORKERS.len(),
+        "each worker must record one completed state transition"
+    );
+    assert_eq!(
+        terminal_changes
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        RECOVERY_WORKERS.len(),
+        "no worker may record duplicate completed transitions"
+    );
+    assert_eq!(
+        terminal_notifications.len(),
+        RECOVERY_WORKERS.len(),
+        "each worker must deliver one terminal notification"
+    );
+    assert_eq!(
+        terminal_notifications
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        RECOVERY_WORKERS.len(),
+        "no worker may deliver a duplicate terminal notification"
+    );
+    assert_eq!(
+        controller.effect_count(),
+        RECOVERY_WORKERS.len(),
+        "restart must not duplicate any logical upstream effect"
+    );
+    assert_eq!(
+        controller.request_count(),
+        RECOVERY_WORKERS.len() + 2,
+        "the completed effect stays at one transport attempt and each blocked effect resumes once"
     );
     Ok(())
 }

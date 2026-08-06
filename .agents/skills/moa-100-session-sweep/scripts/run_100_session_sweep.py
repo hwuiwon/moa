@@ -1080,7 +1080,7 @@ def wait_session(case, session_id, tenant_id, identity_id):
             pending = snap.get("pending_message_count")  # ty:ignore[unresolved-attribute]
             active = snap.get("active_turn_id")  # ty:ignore[unresolved-attribute]
         if case.get("cancel"):
-            if last_status in ("cancelled", "paused", "completed", "failed") and (
+            if last_status in ("cancelled", "idle", "completed", "failed") and (
                 active is None or pending in (None, 0)
             ):
                 if stable_done_at is None:
@@ -1090,7 +1090,7 @@ def wait_session(case, session_id, tenant_id, identity_id):
         else:
             if last_status == "failed":
                 return last_status, last_progress, False
-            if last_status in ("paused", "completed") and (
+            if last_status in ("idle", "completed") and (
                 active is None or pending in (None, 0)
             ):
                 if stable_done_at is None:

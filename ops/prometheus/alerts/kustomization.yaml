@@ -9,3 +9,4 @@ kind: Kustomization
 resources:
   - moa-durability.yaml
   - moa-lineage.yaml
+  - moa-restate.yaml

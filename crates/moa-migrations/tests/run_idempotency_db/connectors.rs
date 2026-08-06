@@ -2251,9 +2251,9 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
             (31, "moa.connector_connections".to_string()),
         ]
     );
-    assert_eq!(purge_count, 133);
-    assert!(purge_definition.contains("catalog_count <> 133"));
-    assert!(purge_definition.contains("exactly 133 tables"));
+    assert_eq!(purge_count, 134);
+    assert!(purge_definition.contains("catalog_count <> 134"));
+    assert!(purge_definition.contains("exactly 134 tables"));
     assert_eq!(visible, (1, 5));
     assert_eq!(neighbour_visible, 0);
     assert_eq!(cross_tenant_fact.0.as_deref(), Some("42501"));

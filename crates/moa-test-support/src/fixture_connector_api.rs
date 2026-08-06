@@ -6,7 +6,7 @@
 //! request recorder retains structured metadata, redacts configured credential
 //! headers before storage, and never logs request or response contents.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
@@ -45,6 +45,10 @@ impl fmt::Debug for FixtureCapturedHeaderValue {
 pub struct FixtureConnectorRequest {
     /// One-based arrival order assigned under the fixture's observation lock.
     pub arrival_order: u64,
+    /// One-based order of the logical upstream effect represented by this request.
+    pub logical_effect_order: u64,
+    /// Whether an earlier transport already applied the same idempotency-keyed effect.
+    pub is_replay: bool,
     /// Exact HTTP method from the request line.
     pub method: String,
     /// Exact request target, including any encoded query string.
@@ -64,6 +68,8 @@ impl fmt::Debug for FixtureConnectorRequest {
         formatter
             .debug_struct("FixtureConnectorRequest")
             .field("arrival_order", &self.arrival_order)
+            .field("logical_effect_order", &self.logical_effect_order)
+            .field("is_replay", &self.is_replay)
             .field("method", &self.method)
             .field("target", &self.target)
             .field("headers", &self.headers)
@@ -72,6 +78,21 @@ impl fmt::Debug for FixtureConnectorRequest {
             .field("json_body", &self.json_body.as_ref().map(|_| "<json>"))
             .finish()
     }
+}
+
+/// One logical upstream connector effect after idempotency-key deduplication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureConnectorEffect {
+    /// One-based order among unique logical effects.
+    pub arrival_order: u64,
+    /// Caller-supplied upstream idempotency key, when present.
+    pub idempotency_key: Option<String>,
+    /// Exact HTTP method of the first transport applying this effect.
+    pub method: String,
+    /// Exact request target of the first transport applying this effect.
+    pub target: String,
+    /// Lowercase SHA-256 digest of the first request body applying this effect.
+    pub body_sha256: String,
 }
 
 /// Body framing used by one scripted fixture response.
@@ -265,6 +286,24 @@ impl FixtureConnectorController {
         lock_unpoisoned(&self.state.mutable).requests.clone()
     }
 
+    /// Returns unique logical effects after upstream idempotency-key deduplication.
+    #[must_use]
+    pub fn effects(&self) -> Vec<FixtureConnectorEffect> {
+        lock_unpoisoned(&self.state.mutable).effects.clone()
+    }
+
+    /// Returns the exact number of HTTP transport arrivals.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        lock_unpoisoned(&self.state.mutable).requests.len()
+    }
+
+    /// Returns the exact number of logical upstream effects.
+    #[must_use]
+    pub fn effect_count(&self) -> usize {
+        lock_unpoisoned(&self.state.mutable).effects.len()
+    }
+
     /// Waits for at least `count` requests and returns the full ordered observation set.
     pub async fn wait_for_requests(
         &self,
@@ -302,7 +341,10 @@ impl FixtureConnectorController {
     pub fn reset(&self) {
         let mut mutable = lock_unpoisoned(&self.state.mutable);
         mutable.requests.clear();
+        mutable.effects.clear();
+        mutable.effect_by_idempotency_key.clear();
         mutable.next_arrival_order = 0;
+        mutable.next_effect_order = 0;
         mutable.response_cursor = 0;
     }
 }
@@ -389,7 +431,10 @@ impl FixtureConnectorState {
                 responses: script.responses,
                 response_cursor: 0,
                 requests: Vec::new(),
+                effects: Vec::new(),
+                effect_by_idempotency_key: HashMap::new(),
                 next_arrival_order: 0,
+                next_effect_order: 0,
             }),
             sensitive_header_names,
             max_request_body_bytes: script.max_request_body_bytes,
@@ -401,6 +446,33 @@ impl FixtureConnectorState {
         let mut mutable = lock_unpoisoned(&self.mutable);
         mutable.next_arrival_order += 1;
         let arrival_order = mutable.next_arrival_order;
+        let idempotency_key = parsed
+            .headers
+            .iter()
+            .find_map(|(name, value)| (name == "idempotency-key").then(|| value.clone()));
+        let body_sha256 = sha256_hex(&parsed.body);
+        let existing_effect_order = idempotency_key
+            .as_ref()
+            .and_then(|key| mutable.effect_by_idempotency_key.get(key).copied());
+        let (logical_effect_order, is_replay) = if let Some(effect_order) = existing_effect_order {
+            (effect_order, true)
+        } else {
+            mutable.next_effect_order += 1;
+            let effect_order = mutable.next_effect_order;
+            mutable.effects.push(FixtureConnectorEffect {
+                arrival_order: effect_order,
+                idempotency_key: idempotency_key.clone(),
+                method: parsed.method.clone(),
+                target: parsed.target.clone(),
+                body_sha256: body_sha256.clone(),
+            });
+            if let Some(key) = &idempotency_key {
+                mutable
+                    .effect_by_idempotency_key
+                    .insert(key.clone(), effect_order);
+            }
+            (effect_order, false)
+        };
         let headers = parsed.headers.into_iter().fold(
             BTreeMap::<String, Vec<_>>::new(),
             |mut captured, (name, value)| {
@@ -413,10 +485,11 @@ impl FixtureConnectorState {
                 captured
             },
         );
-        let body_sha256 = sha256_hex(&parsed.body);
         let json_body = serde_json::from_slice(&parsed.body).ok();
         mutable.requests.push(FixtureConnectorRequest {
             arrival_order,
+            logical_effect_order,
+            is_replay,
             method: parsed.method,
             target: parsed.target,
             headers,
@@ -439,7 +512,10 @@ struct FixtureConnectorMutable {
     responses: Vec<FixtureConnectorResponse>,
     response_cursor: usize,
     requests: Vec<FixtureConnectorRequest>,
+    effects: Vec<FixtureConnectorEffect>,
+    effect_by_idempotency_key: HashMap<String, u64>,
     next_arrival_order: u64,
+    next_effect_order: u64,
 }
 
 struct ParsedRequest {
@@ -876,6 +952,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    // Pins: repeated transport with one upstream idempotency key is one logical effect.
+    #[tokio::test]
+    async fn idempotency_key_retry_records_two_requests_but_one_logical_effect() {
+        let fixture = FixtureConnectorApi::start(FixtureConnectorScript::new(vec![
+            FixtureConnectorResponse::json(serde_json::json!({"attempt": 1})),
+            FixtureConnectorResponse::json(serde_json::json!({"attempt": 2})),
+        ]))
+        .await
+        .expect("fixture connector should bind an ephemeral port");
+        let client = reqwest::Client::new();
+        for _ in 0..2 {
+            client
+                .post(fixture.origin())
+                .header("idempotency-key", "stable-effect")
+                .json(&serde_json::json!({"record": "same"}))
+                .send()
+                .await
+                .expect("idempotent fixture request should complete");
+        }
+
+        assert_eq!(fixture.controller().requests().len(), 2);
+        assert_eq!(fixture.controller().effects().len(), 1);
+        assert!(!fixture.controller().requests()[0].is_replay);
+        assert!(fixture.controller().requests()[1].is_replay);
     }
 
     // Pins: a scripted mid-body close produces a transport failure, not valid JSON.

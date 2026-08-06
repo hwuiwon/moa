@@ -1,13 +1,13 @@
 //! Restate service for tenant security-audit administration.
 
-use moa_authz::{FgaClient, require_authz_with_delegation};
+use moa_authz::FgaClient;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::handlers::authz_shim::{
-    require_configured_fga_client, require_identity, translate_authz_error,
+    journal_context_authz, require_configured_fga_client, require_identity,
 };
 use crate::identity_admin::tenants as tenant_admin;
 
@@ -47,7 +47,7 @@ impl Tenants for TenantsImpl {
         annotate_restate_handler_span("Tenants", "ensure_signing_key");
         let identity = require_identity(&ctx)?;
         let tenant_id = tenant_id.into_inner();
-        require_tenant_admin(self.fga_client.clone(), &identity, tenant_id).await?;
+        require_tenant_admin(self.fga_client.clone(), &ctx, identity, tenant_id).await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -69,7 +69,7 @@ impl Tenants for TenantsImpl {
         annotate_restate_handler_span("Tenants", "rotate_signing_key");
         let identity = require_identity(&ctx)?;
         let tenant_id = tenant_id.into_inner();
-        require_tenant_admin(self.fga_client.clone(), &identity, tenant_id).await?;
+        require_tenant_admin(self.fga_client.clone(), &ctx, identity, tenant_id).await?;
         let pool = self.pool.clone();
 
         Ok(ctx
@@ -85,17 +85,18 @@ impl Tenants for TenantsImpl {
 
 async fn require_tenant_admin(
     fga_client: Option<FgaClient>,
-    identity: &moa_core::traits::Identity,
+    ctx: &Context<'_>,
+    identity: moa_core::traits::Identity,
     tenant_id: Uuid,
 ) -> Result<(), HandlerError> {
     let fga = require_configured_fga_client(fga_client)?;
-    require_authz_with_delegation(
-        &fga,
+    journal_context_authz(
+        ctx,
+        fga,
         identity,
         ObjectType::Tenant,
         tenant_id,
         Relation::Admin,
     )
     .await
-    .map_err(translate_authz_error)
 }

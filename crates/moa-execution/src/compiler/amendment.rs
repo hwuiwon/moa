@@ -54,6 +54,22 @@ pub(super) fn apply_amendment(
                 definition.nodes.push(node.clone());
             }
             PlanAmendmentOperation::ReplacePendingNode { node_id, node } => {
+                if active
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == *node_id)
+                    .is_some_and(|candidate| {
+                        candidate.compensation != node.compensation
+                            && candidate.compensation.is_some()
+                            && node_has_started(node_id, projection)
+                    })
+                {
+                    report.error(
+                        "compensation_locked",
+                        format!("{path}.node.compensation"),
+                        "compensation cannot be changed or removed after forward work starts",
+                    );
+                }
                 if node.id == *node_id
                     || active.nodes.iter().any(|existing| existing.id == node.id)
                     || definition
@@ -93,6 +109,20 @@ pub(super) fn apply_amendment(
                 definition.nodes[position] = node.clone();
             }
             PlanAmendmentOperation::RemovePendingNode { node_id } => {
+                if active
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == *node_id)
+                    .is_some_and(|candidate| {
+                        candidate.compensation.is_some() && node_has_started(node_id, projection)
+                    })
+                {
+                    report.error(
+                        "compensation_locked",
+                        format!("{path}.node_id"),
+                        "compensated work cannot be removed after forward work starts",
+                    );
+                }
                 let waiting_origin = waiting_replan_nodes.contains(node_id.as_str());
                 if !node_is_replaceable(node_id, projection, waiting_origin) {
                     report.error(
@@ -173,6 +203,17 @@ pub(super) fn apply_amendment(
             }
         }
     }
+}
+
+pub(super) fn node_has_started(node_id: &str, projection: &ExecutionProjection) -> bool {
+    projection
+        .node_statuses
+        .get(node_id)
+        .is_some_and(|status| *status != ExecutionNodeStatus::Pending)
+        || projection
+            .tasks
+            .iter()
+            .any(|task| task.node_id == node_id && task.status != ExecutionTaskStatus::Pending)
 }
 
 pub(super) fn validate_budget_narrowing(

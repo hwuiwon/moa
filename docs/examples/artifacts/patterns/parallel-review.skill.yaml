@@ -29,7 +29,8 @@ definition:
             kind:
               kind: output_schema
       plan:
-        schema_version: 1
+        schema_version: 2
+        cancel_policy: retain_effects
         input_schema:
           type: object
         output_schema:
@@ -47,6 +48,7 @@ definition:
               reference:
                 name: orders.lookup
                 version: v1
+            compensation: null
             retry:
               max_attempts: 2
               initial_backoff_ms: 100
@@ -63,6 +65,7 @@ definition:
               reference:
                 name: delivery.lookup
                 version: v1
+            compensation: null
             retry:
               max_attempts: 2
               initial_backoff_ms: 100
@@ -80,6 +83,7 @@ definition:
             operation:
               kind: review
               prompt: Review gathered evidence before issuing a refund.
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -97,6 +101,7 @@ definition:
               reference:
                 name: action://orders.refund
                 version: v1
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0
@@ -111,6 +116,7 @@ definition:
               kind: output
               value:
                 $ref: $.nodes.issue_refund.output
+            compensation: null
             retry:
               max_attempts: 1
               initial_backoff_ms: 0

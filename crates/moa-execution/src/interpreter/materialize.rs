@@ -281,6 +281,12 @@ pub(super) fn logical_task(
     kind: LogicalTaskKind,
     reservation: ExecutionEstimate,
 ) -> Result<LogicalTask> {
+    let compensation =
+        if item_key.is_empty() && matches!(node.operation, ExecutionOperation::Capability { .. }) {
+            node.compensation.clone()
+        } else {
+            None
+        };
     Ok(LogicalTask {
         task_id: ExecutionTaskId::derive(request.run_uid, &node.id, &item_key)?,
         node_id: node.id.clone(),
@@ -290,6 +296,7 @@ pub(super) fn logical_task(
         generation: 1,
         input,
         kind,
+        compensation,
         retry: node.retry.clone(),
         reservation,
     })

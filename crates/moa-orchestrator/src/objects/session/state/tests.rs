@@ -609,63 +609,74 @@ fn a_late_duplicate_reply_cannot_resolve_a_replacement_awakeable() {
     );
     assert!(state.coordinator_input_already_delivered("req-1"));
 
-    // A newer request reuses the id and registers a fresh awakeable.
-    state.register_coordinator_input(pending_input("req-1", 4, "awk-replacement"));
+    // A newer request must not be able to reuse a delivered id and register a
+    // fresh awakeable. Otherwise a late duplicate reply could unblock unrelated
+    // work after replay or recovery.
+    assert!(
+        !state.register_coordinator_input(pending_input("req-1", 4, "awk-replacement")),
+        "a delivered request id must never be re-registered"
+    );
+    assert!(state.pending_coordinator_inputs.is_empty());
     assert!(
         state.coordinator_input_already_delivered("req-1"),
         "history must still record the earlier delivery"
     );
-}
 
-#[test]
-fn ending_a_turn_clears_the_coordinator_inputs_it_raised() {
-    // Pins: a cancelled or failed turn must not leave its pending target
-    // advertised. Otherwise the next plain user message is swallowed as a reply
-    // to work that no longer exists.
-    let mut state = SessionVoState::default();
-    state.register_coordinator_input(pending_input("req-old", 4, "awk-old"));
-    state.register_coordinator_input(pending_input("req-new", 6, "awk-new"));
-    state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
-        turn_id: "turn-1".to_string(),
-        generation: 4,
-        input_request_id: "req-old".to_string(),
-    });
-
-    let cleared = state.clear_coordinator_inputs_before(6);
-
-    assert_eq!(cleared, vec!["awk-old".to_string()]);
-    assert_eq!(state.pending_coordinator_inputs.len(), 1);
+    // Model a stale/corrupt pending entry already present during recovery. The
+    // delivery guard belongs in the take path as well as registration so history
+    // wins before any awakeable can be resolved.
+    state
+        .pending_coordinator_inputs
+        .push(pending_input("req-1", 4, "awk-stale"));
     assert_eq!(
-        state.pending_coordinator_inputs[0].input_request_id, "req-new",
-        "the live generation's request must survive"
-    );
-    assert!(
-        state.pending_user_reply_targets.is_empty(),
-        "clearing must also retract the advertised reply target, or the next \
-         plain user message is swallowed as a reply to dead work"
+        state.take_coordinator_input_awakeable("turn-1", 4, "req-1"),
+        None,
+        "delivery history must be checked before taking an awakeable"
     );
 }
 
 #[test]
-fn clearing_by_waiting_workflow_spares_a_retry_of_the_same_turn() {
-    // Pins: a retried invocation of one logical turn registers its own
-    // awakeable. Clearing by turn id would take the live retry down with the
-    // dead original, stranding the retry on an awakeable no reply can resolve.
+fn coordinator_input_cleanup_requires_every_owner_coordinate() {
+    // Pins: cancellation/timeout cleanup removes only its own registration and
+    // advertised target. A stale invocation cannot clear a newer generation, and
+    // an explicitly addressed late reply resolves no awakeable after cleanup.
     let mut state = SessionVoState::default();
-    let mut original = pending_input("req-a", 4, "awk-original");
-    original.waiting_workflow_id = "workflow-original".to_string();
-    let mut retry = pending_input("req-b", 4, "awk-retry");
-    retry.waiting_workflow_id = "workflow-retry".to_string();
-    state.register_coordinator_input(original);
-    state.register_coordinator_input(retry);
+    let mut old = pending_input("req-old", 4, "awk-old");
+    old.waiting_workflow_id = "workflow-old".to_string();
+    let mut current = pending_input("req-current", 6, "awk-current");
+    current.waiting_workflow_id = "workflow-current".to_string();
+    state.register_coordinator_input(old);
+    state.register_coordinator_input(current);
+    for (generation, input_request_id) in [(4, "req-old"), (6, "req-current")] {
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation,
+            input_request_id: input_request_id.to_string(),
+        });
+    }
 
-    let cleared = state.clear_coordinator_inputs_for_workflow("workflow-original");
+    assert!(!state.clear_coordinator_input("turn-1", 6, "req-current", "workflow-old"));
+    assert!(!state.clear_coordinator_input("turn-1", 4, "req-current", "workflow-current"));
+    assert!(state.clear_coordinator_input("turn-1", 4, "req-old", "workflow-old"));
 
-    assert_eq!(cleared, vec!["awk-original".to_string()]);
     assert_eq!(state.pending_coordinator_inputs.len(), 1);
     assert_eq!(
-        state.pending_coordinator_inputs[0].waiting_workflow_id, "workflow-retry",
-        "the live retry's registration must survive"
+        state.pending_coordinator_inputs[0].input_request_id, "req-current",
+        "the live generation's registration must survive stale cleanup"
+    );
+    assert_eq!(
+        state.pending_user_reply_targets,
+        vec![PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation: 6,
+            input_request_id: "req-current".to_string(),
+        }],
+        "cleanup must retract only the exact advertised target"
+    );
+    assert_eq!(
+        state.take_coordinator_input_awakeable("turn-1", 4, "req-old"),
+        None,
+        "a late reply after cleanup must be a no-op"
     );
 }
 

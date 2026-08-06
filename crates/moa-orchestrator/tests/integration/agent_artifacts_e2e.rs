@@ -34,8 +34,8 @@ use uuid::Uuid;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_tenant_admin, register_deployment, reserve_orchestrator_ports, restate_admin_url,
-    restate_ingress_url, test_user_identity, with_identity,
+    grant_tenant_admin, register_deployment, reserve_orchestrator_ports, restate_ingress_url,
+    restate_test_admin_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, start_turn_request,
@@ -157,7 +157,7 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
     let result = async {
         wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
             .await?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
         activate_refund_skill_fixture(&storage_partition_id).await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
 
@@ -168,7 +168,7 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
         let events =
             wait_for_brain_response_text(&client, ingress, &identity, session_id, final_text)
                 .await?;
-        wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Paused).await?;
+        wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Idle).await?;
         assert_eq!(
             skill_file_read_counts(&events),
             (1, 1),

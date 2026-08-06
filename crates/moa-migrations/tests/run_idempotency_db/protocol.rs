@@ -115,7 +115,7 @@ async fn final_schema_omits_retired_relations_columns_and_indexes_db() {
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
-    // Pins: a pristine database applies the exact contiguous V1..V53 epoch,
+    // Pins: a pristine database applies the exact contiguous V1..V55 epoch,
     // validates as complete, and reports no work on a second public-runner call.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -168,8 +168,8 @@ async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
     let expected_labels = expected_migration_labels();
     assert_eq!(
         expected_labels.len(),
-        53,
-        "the epoch must contain exactly 53 migrations"
+        55,
+        "the epoch must contain exactly 55 migrations"
     );
     assert_eq!(
         first, expected_labels,
@@ -180,8 +180,8 @@ async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        (1..=53).collect::<Vec<_>>(),
-        "refinery history must be exactly contiguous from V1 through V53"
+        (1..=55).collect::<Vec<_>>(),
+        "refinery history must be exactly contiguous from V1 through V55"
     );
     assert!(
         second.is_empty(),
@@ -416,7 +416,7 @@ async fn migration_protocol_parallel_fresh_databases_retry_shared_role_catalog_r
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn migration_protocol_exact_prefix_resumes_db() {
     // Pins: a database with an exact new-epoch prefix resumes at the next
-    // semantic migration and becomes a complete V1..V53 history.
+    // semantic migration and becomes a complete V1..V55 history.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
     let admin = PgPoolOptions::new()
@@ -483,10 +483,10 @@ async fn migration_protocol_exact_prefix_resumes_db() {
         "completed history must not reapply: {second:?}"
     );
     assert!(
-        partial_error.contains("incomplete: found 28 of 53 expected rows"),
+        partial_error.contains("incomplete: found 28 of 55 expected rows"),
         "complete-history validation must distinguish a valid prefix: {partial_error}"
     );
-    assert_eq!(versions, (1..=53).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=55).collect::<Vec<_>>());
 }
 
 #[tokio::test]

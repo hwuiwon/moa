@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Stable execution-planner prompt identifier.
-pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v3";
+pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v4";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
 const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.txt");
@@ -236,10 +236,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execution_planner_prompt_v3_pins_compiler_invariants() {
+    fn execution_planner_prompt_v4_pins_compensation_and_compiler_invariants() {
         // Pins: the current emitted prompt version and its compiler-facing guidance
         // change together so live planner provenance identifies this exact contract.
-        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v3");
+        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v4");
         assert_eq!(
             EXECUTION_PLANNER_PROMPT,
             concat!(
@@ -247,6 +247,9 @@ mod tests {
                 "Preserve the user's objective, scope, definitions, time range, universe, output form, evidence expectations, exclusions, and constraints as individually identifiable goal entries. Use only capabilities, skills, node kinds, and authority in the frozen context. Never invent a capability or permission. Produce an acyclic plan with explicit requirement coverage and completion checks. If the frozen contract cannot support the request, encode the gap in the strict candidate so deterministic compilation rejects it; do not answer the user directly.\n\n",
                 "Compiler invariants:\n",
                 "- Set `goal.objective` to the frozen `objective` byte-for-byte.\n",
+                "- Set `plan.schema_version` to `2` and choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.\n",
+                "- Set every node's `compensation` explicitly. Use `null` unless the node is a direct side-effecting `Capability` whose exact catalog entry advertises the same compensator and bounded input mapping. Never add compensation to reads, agents, maps, reduces, reviews, signals, or outputs, and never invent rollback authority.\n",
+                "- Set `amendment.schema_version` to `2`. An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.\n",
                 "- Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.\n",
                 "- Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.\n",
                 "- Put every goal requirement ID in at least one completion check's `requirement_ids`. If the plan has only one completion check, it must list every requirement ID. For a simple `Agent`-to-`Output` plan, prefer one `OutputSchema` check listing all requirement IDs.\n",

@@ -10,6 +10,11 @@ schema = "public"
 owner = "moa-session"
 
 [[table]]
+name = "deployment_cutover_receipts"
+schema = "public"
+owner = "moa-orchestrator"
+
+[[table]]
 name = "events"
 schema = "public"
 owner = "moa-session"
@@ -427,6 +432,13 @@ name = "execution_planner_call_audit"
 schema = "moa"
 owner = "moa-execution"
 readers = ["moa-orchestrator", "moa-analytics"]
+
+[[table]]
+name = "execution_compensation"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-edge"]
+notes = "Monotonic reverse-order compensation registrations and durable undo outcomes for execution-plan v2."
 
 [[table]]
 name = "execution_compile_audit"

@@ -39,7 +39,11 @@ use moa_execution::{
     state::FailureFingerprintInput,
     wire::PinnedExecutionTemplate,
 };
-use moa_hands::{McpDiscoveredTool, ToolRegistry};
+use moa_hands::{McpDiscoveredTool, ToolExecution, ToolRegistry};
+use moa_test_support::fixture_capability::{
+    REVERSIBLE_FIXTURE_COMPENSATOR_TOOL, REVERSIBLE_FIXTURE_FORWARD_TOOL,
+    reversible_fixture_tool_definitions,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -52,6 +56,55 @@ fn tool_estimate_reserves_serialized_output_bytes_from_token_budget() {
     assert_eq!(
         single_tool_estimate(u32::MAX).retrieved_bytes,
         u64::from(u32::MAX) * 16
+    );
+}
+
+#[test]
+fn production_catalog_resolves_source_owned_fixture_rollback_to_exact_versions() {
+    // Pins: rollback is usable through the real catalog projection; tests do not
+    // synthesize CapabilityRollbackContract after the source declarations load.
+    let (forward, compensator) = reversible_fixture_tool_definitions();
+    let registrations = vec![
+        (
+            forward,
+            ToolExecution::Mcp {
+                server_name: "fixture".to_string(),
+                remote_tool_name: REVERSIBLE_FIXTURE_FORWARD_TOOL.to_string(),
+                schema_hash: "fixture-forward-v1".to_string(),
+            },
+        ),
+        (
+            compensator,
+            ToolExecution::Mcp {
+                server_name: "fixture".to_string(),
+                remote_tool_name: REVERSIBLE_FIXTURE_COMPENSATOR_TOOL.to_string(),
+                schema_hash: "fixture-compensator-v1".to_string(),
+            },
+        ),
+    ];
+    let response = build_capability_response(&registrations, &[], &[])
+        .expect("source-declared reversible fixture pair should project");
+    let forward = response
+        .catalog
+        .capabilities
+        .iter()
+        .find(|capability| capability.reference.name == REVERSIBLE_FIXTURE_FORWARD_TOOL)
+        .expect("forward fixture capability should be catalogued");
+    let compensator = response
+        .catalog
+        .capabilities
+        .iter()
+        .find(|capability| capability.reference.name == REVERSIBLE_FIXTURE_COMPENSATOR_TOOL)
+        .expect("compensator fixture capability should be catalogued");
+    let rollback = forward
+        .rollback
+        .as_ref()
+        .expect("forward source declaration should resolve to an exact rollback");
+    assert_eq!(rollback.compensator, compensator.reference);
+    assert_eq!(rollback.input_mapping.bindings.len(), 1);
+    assert_eq!(
+        rollback.input_mapping.bindings[0].target_pointer,
+        "/effect_id"
     );
 }
 
@@ -174,7 +227,9 @@ fn skill_revision(name: &str, revision_uid: u128) -> StoredArtifactRevision {
                         completion_checks: Vec::new(),
                     },
                     plan: ExecutionPlanDefinition {
-                        schema_version: 1,
+                        schema_version: 2,
+                        cancel_policy:
+                            moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
                         input_schema: json!({"type": "object"}),
                         output_schema: json!({"type": "object"}),
                         nodes: Vec::new(),
@@ -541,7 +596,8 @@ fn accepted_turn_requires_skill_template_provenance_from_planning_snapshot() {
                 completion_checks: Vec::new(),
             },
             plan: ExecutionPlanDefinition {
-                schema_version: 1,
+                schema_version: 2,
+                cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 nodes: Vec::new(),
@@ -616,7 +672,8 @@ fn pinned_execution_template(
                 completion_checks: Vec::new(),
             },
             plan: ExecutionPlanDefinition {
-                schema_version: 1,
+                schema_version: 2,
+                cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 nodes: Vec::new(),
@@ -1045,7 +1102,8 @@ fn execution_external_wait_payload_is_validated_against_node_schema() {
     // Pins: review and signal handlers cannot persist caller-supplied output
     // that the active immutable plan would reject.
     let plan = serde_json::from_value(json!({
-        "schema_version": 1,
+        "schema_version": 2,
+        "cancel_policy": "retain_effects",
         "input_schema": {},
         "output_schema": {},
         "nodes": [{
@@ -1060,6 +1118,7 @@ fn execution_external_wait_payload_is_validated_against_node_schema() {
                 "properties": {"approved": {"type": "boolean"}}
             },
             "operation": {"kind": "review", "prompt": "Approve?"},
+            "compensation": null,
             "retry": {"max_attempts": 1, "initial_backoff_ms": 1, "max_backoff_ms": 1},
             "budget": null
         }]
@@ -1118,6 +1177,7 @@ fn replan_history_detects_duplicate_operations_without_exact_replay() {
             operation: ExecutionOperation::Output {
                 value: json!({"report": true}),
             },
+            compensation: None,
             retry: RetryPolicy {
                 max_attempts: 1,
                 initial_backoff_ms: 0,
@@ -1127,14 +1187,14 @@ fn replan_history_detects_duplicate_operations_without_exact_replay() {
         },
     };
     let first = PlanAmendment {
-        schema_version: 1,
+        schema_version: 2,
         base_plan_revision: 1,
         reason: "first explanation".to_string(),
         evidence: json!({"source": "first"}),
         operations: vec![operation.clone()],
     };
     let proposed = PlanAmendment {
-        schema_version: 1,
+        schema_version: 2,
         base_plan_revision: 2,
         reason: "different explanation".to_string(),
         evidence: json!({"source": "second"}),
@@ -1169,7 +1229,7 @@ fn remove_only_amendment_reaches_no_progress_before_validation_rejection() {
     // Pins: the service can classify structurally invalid remove-only proposals through the
     // shared pure loop policy instead of exposing a compiler-validation error.
     let amendment = PlanAmendment {
-        schema_version: 1,
+        schema_version: 2,
         base_plan_revision: 4,
         reason: "remove failed work".to_string(),
         evidence: json!({}),

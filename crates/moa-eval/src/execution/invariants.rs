@@ -106,13 +106,16 @@ impl ExecutionInvariantSpec {
     pub fn evaluate(&self, snapshot: &ExecutionEvalSnapshot) -> ExecutionInvariantResult {
         match self {
             Self::TerminalStatusIn { statuses } => {
-                let passed = statuses.contains(&snapshot.run.status);
+                let statuses_are_terminal = statuses.iter().all(|status| status.is_terminal());
+                let passed = statuses_are_terminal && statuses.contains(&snapshot.run.status);
                 result(
                     "terminal_status_in",
                     passed,
                     json!({ "statuses": statuses }),
                     json!({ "status": snapshot.run.status }),
-                    if passed {
+                    if !statuses_are_terminal {
+                        "allowed terminal set contains a nonterminal status"
+                    } else if passed {
                         "run status is allowed"
                     } else {
                         "run status is outside the allowed set"

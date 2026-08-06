@@ -114,10 +114,22 @@ impl AnthropicStreamState {
             "ping" => Ok(Vec::new()),
             "error" => {
                 let payload: ErrorEvent = parse_sse_json(event)?;
-                Err(MoaError::ProviderError(format!(
+                let message = format!(
                     "Anthropic stream error ({}): {}",
                     payload.error.kind, payload.error.message
-                )))
+                );
+                match payload.error.kind.as_str() {
+                    "rate_limit_error" => Err(MoaError::RateLimited {
+                        retries: 0,
+                        message,
+                    }),
+                    "overloaded_error" => Err(MoaError::HttpStatus {
+                        status: 529,
+                        retry_after: None,
+                        message,
+                    }),
+                    _ => Err(MoaError::ProviderError(message)),
+                }
             }
             _ => {
                 tracing::debug!(event = %event.event, "ignoring unknown Anthropic SSE event");

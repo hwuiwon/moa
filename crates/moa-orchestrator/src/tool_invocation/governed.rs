@@ -9,10 +9,10 @@ use moa_core::traits::ChannelAdapter;
 use moa_core::{
     events::Event, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionReviewOwner, types::action_policy::CapabilityProvenance,
-    types::action_policy::ExecutionTaskOrigin, types::channel::Channel,
-    types::completion::CompletionRequest, types::completion::ToolCallContent,
-    types::completion::ToolInvocation, types::identifiers::SessionId,
-    types::identifiers::ToolCallId, types::resource::ResourceBudget,
+    types::action_policy::ExecutionCompensationOrigin, types::action_policy::ExecutionTaskOrigin,
+    types::channel::Channel, types::completion::CompletionRequest,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::resource::ResourceBudget,
     types::security::ToolCapabilityId, types::session::SessionMeta,
     types::tools::SecuredToolOutput, types::tools::ToolCallRequest, types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef,
@@ -35,7 +35,10 @@ use crate::services::{
     },
     action_reviews::{ActionReviewsClient, RequestActionReview},
     session_store::RestateSessionStoreClient,
-    tool_executor::{ExecutionTaskToolCallRequest, ScopedToolCatalogRequest, ToolExecutorClient},
+    tool_executor::{
+        ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallRequest,
+        ScopedToolCatalogRequest, ToolExecutorClient,
+    },
 };
 use crate::turn::util::{
     blocked_canary_tool_output, denied_tool_output, disallowed_tool_output, tool_input_leaks_canary,
@@ -94,6 +97,15 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
         /// Task generation fenced by the execution workflow.
         generation: u64,
     },
+    /// Tool call belongs to one persisted execution compensation.
+    ExecutionCompensation {
+        /// Owning execution run identifier.
+        run_uid: uuid::Uuid,
+        /// Stable compensation identifier within the run.
+        compensation_id: uuid::Uuid,
+        /// Compensation generation fenced by the execution workflow.
+        generation: u64,
+    },
 }
 
 impl GovernedInvocationOrigin<'_> {
@@ -127,6 +139,18 @@ impl GovernedInvocationOrigin<'_> {
                 origin: ExecutionTaskOrigin {
                     run_uid,
                     task_uid,
+                    generation,
+                },
+            },
+            Self::ExecutionCompensation {
+                run_uid,
+                compensation_id,
+                generation,
+            } => ActionReviewOwner::ExecutionCompensation {
+                session_id,
+                origin: ExecutionCompensationOrigin {
+                    run_uid,
+                    compensation_id,
                     generation,
                 },
             },
@@ -238,6 +262,34 @@ pub(crate) enum GovernedInvocationOutcome {
         tool_id: ToolCallId,
         /// Delegation invocation copied from the provider tool call.
         invocation: ToolInvocation,
+    },
+    /// A non-idempotent external effect may have committed and cannot be resent.
+    UnknownOutcome {
+        /// Stable tool-call id for durable reconciliation.
+        tool_id: ToolCallId,
+        /// Invocation whose external effect is ambiguous.
+        invocation: ToolInvocation,
+        /// Stable diagnostic safe for durable failure state.
+        message: String,
+    },
+    /// The execution owner was fenced or stale before the external effect began.
+    NotDispatched {
+        /// Stable tool-call id for durable owner settlement.
+        tool_id: ToolCallId,
+        /// Invocation that was definitively not sent to its backend.
+        invocation: ToolInvocation,
+        /// Closed atomic-admission rejection reason.
+        reason: moa_execution::wire::ExecutionToolDispatchRejection,
+    },
+}
+
+enum GovernedDispatchOutcome {
+    Completed(Box<SecuredToolOutput>),
+    UnknownOutcome {
+        message: String,
+    },
+    NotDispatched {
+        reason: moa_execution::wire::ExecutionToolDispatchRejection,
     },
 }
 
@@ -522,6 +574,7 @@ async fn execute_allowed_tool(
     if !matches!(
         request.origin,
         GovernedInvocationOrigin::ExecutionTask { .. }
+            | GovernedInvocationOrigin::ExecutionCompensation { .. }
     ) {
         turn_progress::maybe_emit(
             ctx,
@@ -535,7 +588,7 @@ async fn execute_allowed_tool(
     }
     let dispatch_started = Instant::now();
     let tool_request = tool_call_request(&request, &invocation, expected_tool_contract_revision);
-    let output = match request.origin {
+    let dispatch = match request.origin {
         GovernedInvocationOrigin::ExecutionTask {
             run_uid,
             task_uid,
@@ -544,9 +597,9 @@ async fn execute_allowed_tool(
             .in_scope(|| {
                 crate::restate_identity::replay_safe_request(
                     ctx.service_client::<ToolExecutorClient>()
-                        .execute_execution_task(Json::from(ExecutionTaskToolCallRequest {
+                        .execute_execution(Json::from(ExecutionToolCallRequest {
                             call: tool_request,
-                            origin: Some(ExecutionTaskOrigin {
+                            origin: ExecutionToolCallOrigin::Task(ExecutionTaskOrigin {
                                 run_uid,
                                 task_uid,
                                 generation,
@@ -557,7 +610,33 @@ async fn execute_allowed_tool(
             .call()
             .instrument(span)
             .await?
-            .into_inner(),
+            .into_inner()
+            .into(),
+        GovernedInvocationOrigin::ExecutionCompensation {
+            run_uid,
+            compensation_id,
+            generation,
+        } => span
+            .in_scope(|| {
+                crate::restate_identity::replay_safe_request(
+                    ctx.service_client::<ToolExecutorClient>()
+                        .execute_execution(Json::from(ExecutionToolCallRequest {
+                            call: tool_request,
+                            origin: ExecutionToolCallOrigin::Compensation(
+                                ExecutionCompensationOrigin {
+                                    run_uid,
+                                    compensation_id,
+                                    generation,
+                                },
+                            ),
+                        })),
+                )
+            })
+            .call()
+            .instrument(span)
+            .await?
+            .into_inner()
+            .into(),
         GovernedInvocationOrigin::RootTurn { .. } | GovernedInvocationOrigin::Worker { .. } => span
             .in_scope(|| {
                 crate::restate_identity::replay_safe_request(
@@ -568,9 +647,27 @@ async fn execute_allowed_tool(
             .call()
             .instrument(span)
             .await?
-            .into_inner(),
+            .into_inner()
+            .into(),
     };
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
+    let output = match dispatch {
+        GovernedDispatchOutcome::Completed(output) => *output,
+        GovernedDispatchOutcome::UnknownOutcome { message } => {
+            return Ok(GovernedInvocationOutcome::UnknownOutcome {
+                tool_id: request.tool_id,
+                invocation,
+                message,
+            });
+        }
+        GovernedDispatchOutcome::NotDispatched { reason } => {
+            return Ok(GovernedInvocationOutcome::NotDispatched {
+                tool_id: request.tool_id,
+                invocation,
+                reason,
+            });
+        }
+    };
 
     Ok(GovernedInvocationOutcome::Completed(Box::new(
         GovernedInvocationResult {
@@ -581,6 +678,24 @@ async fn execute_allowed_tool(
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
         },
     )))
+}
+
+impl From<ExecutionToolCallOutcome> for GovernedDispatchOutcome {
+    fn from(outcome: ExecutionToolCallOutcome) -> Self {
+        match outcome {
+            ExecutionToolCallOutcome::Completed { output } => Self::Completed(output),
+            ExecutionToolCallOutcome::UnknownOutcome { message } => {
+                Self::UnknownOutcome { message }
+            }
+            ExecutionToolCallOutcome::NotDispatched { reason } => Self::NotDispatched { reason },
+        }
+    }
+}
+
+impl From<SecuredToolOutput> for GovernedDispatchOutcome {
+    fn from(output: SecuredToolOutput) -> Self {
+        Self::Completed(Box::new(output))
+    }
 }
 
 /// Records a successful segment tool use through the session-store service.
@@ -639,7 +754,8 @@ fn prepare_action_review_request(
 ) -> PrepareActionReviewRequest {
     let default_provenance = match request.origin {
         GovernedInvocationOrigin::RootTurn { .. }
-        | GovernedInvocationOrigin::ExecutionTask { .. } => CapabilityProvenance::default(),
+        | GovernedInvocationOrigin::ExecutionTask { .. }
+        | GovernedInvocationOrigin::ExecutionCompensation { .. } => CapabilityProvenance::default(),
         GovernedInvocationOrigin::Worker {
             worker_id, turn_id, ..
         } => CapabilityProvenance {
@@ -683,7 +799,8 @@ fn tool_call_request(
         trusted_sandbox_manifest: request.trusted_sandbox_manifest.cloned(),
         worker_id: match request.origin {
             GovernedInvocationOrigin::RootTurn { .. }
-            | GovernedInvocationOrigin::ExecutionTask { .. } => None,
+            | GovernedInvocationOrigin::ExecutionTask { .. }
+            | GovernedInvocationOrigin::ExecutionCompensation { .. } => None,
             GovernedInvocationOrigin::Worker { worker_id, .. } => Some(worker_id.to_string()),
         },
         resource_budget: request.resource_budget,
@@ -809,7 +926,11 @@ pub(crate) async fn append_cached_tool_result(
 }
 
 fn owns_root_session_tool_events(origin: GovernedInvocationOrigin<'_>) -> bool {
-    !matches!(origin, GovernedInvocationOrigin::ExecutionTask { .. })
+    !matches!(
+        origin,
+        GovernedInvocationOrigin::ExecutionTask { .. }
+            | GovernedInvocationOrigin::ExecutionCompensation { .. }
+    )
 }
 
 async fn append_session_event(
@@ -872,14 +993,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ActionReviewOwner, GovernedInvocationDisposition, GovernedInvocationEventPlan,
-        GovernedInvocationOrigin, GovernedInvocationRequest, TOOL_CATALOG_PIN_METADATA_KEY,
-        ToolCatalogDrift, ToolCatalogPin, bounded_review_refusal, catalog_drift_output,
-        completed_result, completion_tool_catalog_pin, owns_root_session_tool_events,
-        pending_review_output, prepare_action_review_request, tool_call_request,
-        tool_contract_drift,
+        ActionReviewOwner, GovernedDispatchOutcome, GovernedInvocationDisposition,
+        GovernedInvocationEventPlan, GovernedInvocationOrigin, GovernedInvocationRequest,
+        TOOL_CATALOG_PIN_METADATA_KEY, ToolCatalogDrift, ToolCatalogPin, bounded_review_refusal,
+        catalog_drift_output, completed_result, completion_tool_catalog_pin,
+        owns_root_session_tool_events, pending_review_output, prepare_action_review_request,
+        tool_call_request, tool_contract_drift,
     };
     use crate::delegation::storage_user_id;
+    use crate::services::tool_executor::ExecutionToolCallOutcome;
 
     static TEST_IDENTITY: LazyLock<Identity> = LazyLock::new(|| Identity {
         identity_type: IdentityType::Operator,
@@ -1148,11 +1270,33 @@ mod tests {
                 },
             }
         );
+        let compensation = GovernedInvocationOrigin::ExecutionCompensation {
+            run_uid: Uuid::from_u128(50),
+            compensation_id: Uuid::from_u128(52),
+            generation: 7,
+        }
+        .action_review_owner(session_id);
+        assert_eq!(
+            compensation,
+            ActionReviewOwner::ExecutionCompensation {
+                session_id,
+                origin: moa_core::types::action_policy::ExecutionCompensationOrigin {
+                    run_uid: Uuid::from_u128(50),
+                    compensation_id: Uuid::from_u128(52),
+                    generation: 7,
+                },
+            }
+        );
+        assert_eq!(compensation.execution_origin(), None);
         assert!(root.is_conversational());
         assert!(worker.is_conversational());
         assert!(
             !execution.is_conversational(),
             "an execution task must never route a conversational callback"
+        );
+        assert!(
+            !compensation.is_conversational(),
+            "an execution compensation must never route a conversational callback"
         );
     }
 
@@ -1243,6 +1387,36 @@ mod tests {
                 generation: 2,
             })
         );
+    }
+
+    #[test]
+    fn execution_unknown_outcome_stays_distinct_from_completed_output() {
+        // Pins: the governed execution boundary routes explicit ambiguity as
+        // control data rather than synthesizing a normal classified tool output.
+        let dispatch = GovernedDispatchOutcome::from(ExecutionToolCallOutcome::UnknownOutcome {
+            message: "manual reconciliation required".to_string(),
+        });
+
+        assert!(matches!(
+            dispatch,
+            GovernedDispatchOutcome::UnknownOutcome { .. }
+        ));
+    }
+
+    #[test]
+    fn execution_not_dispatched_stays_distinct_from_unknown_and_completed() {
+        // Pins: a stale/fenced origin is definitive non-execution and remains
+        // owner-visible control data across the governed invocation boundary.
+        let reason = moa_execution::wire::ExecutionToolDispatchRejection::StaleGeneration;
+        let dispatch =
+            GovernedDispatchOutcome::from(ExecutionToolCallOutcome::NotDispatched { reason });
+
+        assert!(matches!(
+            dispatch,
+            GovernedDispatchOutcome::NotDispatched {
+                reason: moa_execution::wire::ExecutionToolDispatchRejection::StaleGeneration
+            }
+        ));
     }
 
     #[test]

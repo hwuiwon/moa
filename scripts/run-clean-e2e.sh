@@ -240,14 +240,14 @@ run_without_provider_keys() {
 
 run_without_external_orchestrator() {
   echo
-  echo ">> env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL -u MOA_RESTATE_DEPLOYMENT_URI $*"
+  echo ">> env -u MOA_RESTATE_INGRESS_URL -u RESTATE_ADMIN_URL -u MOA_RESTATE_DEPLOYMENT_URI $*"
   local start=$SECONDS
   local status=0
   begin_timing_phase "env -u external orchestrator $*" "env -u external orchestrator $*" "${start}"
   set +e
   env \
     -u MOA_RESTATE_INGRESS_URL \
-    -u MOA_RESTATE_ADMIN_URL \
+    -u RESTATE_ADMIN_URL \
     -u MOA_RESTATE_DEPLOYMENT_URI \
     "$@"
   status=$?
@@ -601,6 +601,10 @@ ORCH_LOG="${TMP_ROOT}/orchestrator.log"
 TIMING_DIR="${REPO_ROOT}/target/e2e"
 TIMING_REPORT="${TIMING_DIR}/clean-e2e-${RUN_SAFE_ID}-timings.md"
 TIMING_LATEST_REPORT="${TIMING_DIR}/clean-e2e-latest-timings.md"
+RESTATE_SERVICE_JUNIT="${REPO_ROOT}/target/nextest/restate-service-e2e/junit.xml"
+RESTATE_SERVICE_JUNIT_REPORT="${TIMING_DIR}/clean-e2e-${RUN_SAFE_ID}-restate-service-junit.xml"
+RESTATE_RECOVERY_JUNIT="${REPO_ROOT}/target/nextest/restate-recovery-pr/junit.xml"
+RESTATE_RECOVERY_JUNIT_REPORT="${TIMING_DIR}/clean-e2e-${RUN_SAFE_ID}-restate-recovery-junit.xml"
 DB_NAME="moa_e2e_${RUN_SAFE_ID}"
 DB_URL="postgres://moa_owner:dev@127.0.0.1:10040/${DB_NAME}"
 RESTATE_PID=""
@@ -623,6 +627,17 @@ cleanup() {
     status=130
   fi
 
+  if [[ -f "${RESTATE_SERVICE_JUNIT}" ]]; then
+    mkdir -p "${TIMING_DIR}"
+    cp "${RESTATE_SERVICE_JUNIT}" "${RESTATE_SERVICE_JUNIT_REPORT}" 2>/dev/null || true
+    echo "clean E2E Restate service JUnit: ${RESTATE_SERVICE_JUNIT_REPORT}"
+  fi
+  if [[ -f "${RESTATE_RECOVERY_JUNIT}" ]]; then
+    mkdir -p "${TIMING_DIR}"
+    cp "${RESTATE_RECOVERY_JUNIT}" "${RESTATE_RECOVERY_JUNIT_REPORT}" 2>/dev/null || true
+    echo "clean E2E Restate recovery JUnit: ${RESTATE_RECOVERY_JUNIT_REPORT}"
+  fi
+
   write_timing_report "${status}" || true
 
   if [[ -n "${ORCH_PID}" ]] && kill -0 "${ORCH_PID}" 2>/dev/null; then
@@ -643,7 +658,7 @@ cleanup() {
   fi
   if [[ "${STARTED_COMPOSE}" -eq 1 ]]; then
     if ! truthy "${MOA_CLEAN_E2E_KEEP_COMPOSE:-}"; then
-      docker compose down >/dev/null 2>&1 || true
+      docker compose --profile pii down >/dev/null 2>&1 || true
     fi
   fi
 
@@ -652,6 +667,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "${TMP_ROOT}" "${RESTATE_DIR}"
+rm -f "${RESTATE_SERVICE_JUNIT}"
+rm -f "${RESTATE_RECOVERY_JUNIT}"
 
 if [[ -z "$(docker compose ps -q 2>/dev/null)" ]]; then
   STARTED_COMPOSE=1
@@ -680,9 +697,7 @@ export MOA_FIXTURE_OPENFGA_PRESHARED_KEY="${MOA_AUTHZ_OPENFGA_PRESHARED_KEY}"
 
 echo
 echo ">> starting ephemeral restate-server"
-# Fresh data dir every run, so the v1.7 fresh-cluster vqueues limitation
-# never applies here.
-RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true restate-server \
+restate-server \
   --node-name "e2e-${RUN_SHORT_ID}" \
   --base-dir "${RESTATE_DIR}" \
   --bind-ip 127.0.0.1 \
@@ -696,7 +711,7 @@ run_phase "wait for ephemeral restate-server ports" wait_for_restate_ports "${RE
 
 export MOA_DATABASE_URL="${DB_URL}"
 export MOA_RESTATE_INGRESS_URL="${RESTATE_INGRESS_URL}"
-export MOA_RESTATE_ADMIN_URL="${RESTATE_ADMIN_URL}"
+export RESTATE_ADMIN_URL
 export MOA_RESTATE_DEPLOYMENT_HOST="127.0.0.1"
 export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
 export MOA_RUNTIME_CACHE_BACKEND="redis"
@@ -726,7 +741,7 @@ if [[ "${LIVE}" -eq 1 ]]; then
   run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only --no-tests fail
 
   # Deterministic Behavior Lab lane. These binaries resolve the Restate stack
-  # from MOA_RESTATE_INGRESS_URL/MOA_RESTATE_ADMIN_URL and spawn their own
+  # from MOA_RESTATE_INGRESS_URL/RESTATE_ADMIN_URL and spawn their own
   # orchestrator on reserved ports, so they run here — with the ephemeral
   # server's URLs still exported and before the shared orchestrator claims the
   # deployment — rather than in the self-contained fixture arm below. Provider
@@ -751,6 +766,11 @@ if [[ "${LIVE}" -eq 1 ]]; then
     exit 1
   fi
   export MOA_ORCHESTRATOR_BIN
+
+  # Recovery-matrix cases own dedicated scripted Restate/orchestrator fixtures.
+  # Keep them out of the shared Restate lane and run all bounded recovery proofs
+  # serially with external-orchestrator discovery disabled.
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-recovery-pr --run-ignored ignored-only --no-tests fail
 
   run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only --no-tests fail
 

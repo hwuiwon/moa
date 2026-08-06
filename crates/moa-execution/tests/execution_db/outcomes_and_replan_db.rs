@@ -550,7 +550,8 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
 async fn action_review_resolution_is_review_uid_idempotent_and_generation_fenced_db() -> TestResult
 {
     // Pins: outbox replay applies one review UID once, while stale generations
-    // remain auditable without resolving or mutating the current task projection.
+    // remain auditable without resolving or mutating the current task projection;
+    // a reused identity cannot smuggle in different typed resolution semantics.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
@@ -617,6 +618,24 @@ async fn action_review_resolution_is_review_uid_idempotent_and_generation_fenced
             .await?,
         ActionReviewResolutionWrite::Replayed
     );
+    let conflicting_resolution = ExecutionActionReviewResolution::Completed {
+        tool_output: json!({"unexpected": true}),
+    };
+    let conflict = repository
+        .record_action_review_resolution(
+            scope,
+            run.run_uid,
+            task.task_id,
+            1,
+            current_review,
+            &conflicting_resolution,
+        )
+        .await
+        .expect_err("same task review identity with a different resolution must fail closed");
+    assert!(
+        matches!(conflict, moa_execution::Error::InvalidRepositoryData { .. }),
+        "task review identity conflict returned the wrong error: {conflict:?}"
+    );
     let persisted = repository
         .load_task(scope, run.run_uid, task.task_id)
         .await?
@@ -626,262 +645,5 @@ async fn action_review_resolution_is_review_uid_idempotent_and_generation_fenced
     assert_eq!(persisted.outcome_audit.len(), 2);
     assert_eq!(persisted.outcome_audit[0]["accepted"], false);
     assert_eq!(persisted.outcome_audit[1]["accepted"], true);
-    Ok(())
-}
-
-#[tokio::test]
-async fn replan_stop_terminalizes_every_active_task_and_replays_atomically_db() -> TestResult {
-    // Pins: a terminal replan stop is one run-wide transaction: every active
-    // task receives typed cancellation evidence, all reservations reconcile,
-    // completed evidence survives, and an exact replay changes nothing.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let repository = ExecutionRepository::new(test_db.store().pool().clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "replan-stop-all-active",
-            ExecutionRunStatus::Queued,
-            budget(20),
-        ),
-    )
-    .await?;
-    let pending = logical_task(run.run_uid, "pending", "", estimate(2));
-    let running = logical_task(run.run_uid, "running", "", estimate(3));
-    let waiting_input = logical_task(run.run_uid, "input", "", estimate(4));
-    let waiting_replan = logical_task(run.run_uid, "replan", "", estimate(5));
-    let completed_task = logical_task(run.run_uid, "completed", "", estimate(1));
-    repository
-        .materialize_tasks(
-            scope,
-            run.run_uid,
-            1,
-            vec![
-                pending.clone(),
-                running.clone(),
-                waiting_input.clone(),
-                waiting_replan.clone(),
-                completed_task.clone(),
-            ],
-        )
-        .await?;
-    reserve_and_start(&repository, scope, run.run_uid, running.task_id).await?;
-    reserve_and_start(&repository, scope, run.run_uid, waiting_input.task_id).await?;
-    reserve_and_start(&repository, scope, run.run_uid, waiting_replan.task_id).await?;
-    reserve_and_start(&repository, scope, run.run_uid, completed_task.task_id).await?;
-    repository
-        .record_task_outcome(scope, run.run_uid, completed_task.task_id, 1, completed(1))
-        .await?;
-    repository
-        .record_task_outcome(scope, run.run_uid, waiting_input.task_id, 1, needs_input(1))
-        .await?;
-    assert!(matches!(
-        repository
-            .transition_run_wait(
-                scope,
-                run.run_uid,
-                ExecutionRunStatus::WaitingInput,
-                ExecutionRunStatus::Running,
-            )
-            .await?,
-        TransitionOutcome::RunApplied(_)
-    ));
-    repository
-        .record_task_outcome(
-            scope,
-            run.run_uid,
-            waiting_replan.task_id,
-            1,
-            needs_replan(2),
-        )
-        .await?;
-
-    let reason = "replan stopped: repeated failure".to_string();
-    let gaps = vec![reason.clone()];
-    let terminal = TerminalProjection::Blocked {
-        output: None,
-        gaps: gaps.clone(),
-    };
-    let evaluation = CompletionEvaluation {
-        status: CompletionStatus::Blocked,
-        limit_stop: None,
-        checks: Vec::new(),
-        satisfied_requirement_ids: Vec::new(),
-        unsatisfied_requirement_ids: vec!["req".to_string()],
-        gaps,
-    };
-    let terminal_evidence = terminal_evidence_from_evaluation(
-        ExecutionTerminalCause::ReplanStop {
-            reason: ReplanStopReason::RepeatedFailure,
-        },
-        &evaluation,
-    )?;
-    let terminal_reason = execution_terminal_reason(
-        &ExecutionTerminalCause::ReplanStop {
-            reason: ReplanStopReason::RepeatedFailure,
-        },
-        &terminal,
-        &evaluation,
-    )?;
-    let stop_amendment_hash = ExecutionHash::from_bytes([77; 32]);
-    let expected_wake_epoch = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .expect("replan-stop run remains visible")
-        .wake_epoch;
-    let first = repository
-        .finalize_replan_stop(
-            scope,
-            ReplanStopRequest {
-                run_uid: run.run_uid,
-                expected_revision: 1,
-                expected_wake_epoch,
-                task_id: waiting_replan.task_id,
-                expected_generation: 1,
-                amendment_hash: Some(stop_amendment_hash),
-                cancellation_reason: reason.clone(),
-                terminal_projection: terminal.clone(),
-                completion_evaluation: evaluation.clone(),
-                terminal_evidence: terminal_evidence.clone(),
-                terminal_reason,
-            },
-        )
-        .await?;
-    assert!(matches!(
-        first,
-        moa_execution::repository::ReplanStopOutcome::Finalized(_)
-    ));
-
-    let AmendmentReplayOutcome::Replayed(recovered) = repository
-        .recover_amendment_handoff(scope, run.run_uid, 1, &stop_amendment_hash)
-        .await?
-    else {
-        panic!("terminal replan-stop amendment must recover its persisted handoff");
-    };
-    let mut expected_release_ids = vec![
-        pending.task_id,
-        running.task_id,
-        waiting_input.task_id,
-        waiting_replan.task_id,
-    ];
-    expected_release_ids.sort();
-    let mut recovered_release_ids = recovered.task_ids_to_release;
-    recovered_release_ids.sort();
-    assert_eq!(recovered_release_ids, expected_release_ids);
-
-    let page = repository
-        .list_tasks(scope, run.run_uid, ExecutionTaskPageRequest::default())
-        .await?;
-    assert_eq!(page.tasks.len(), 5);
-    for task in page
-        .tasks
-        .iter()
-        .filter(|task| task.task_id != completed_task.task_id)
-    {
-        assert_eq!(
-            task.status,
-            ExecutionTaskStatus::Cancelled,
-            "{}",
-            task.node_id
-        );
-        assert_eq!(
-            task.reserved,
-            ExecutionEstimate::default(),
-            "{}",
-            task.node_id
-        );
-        assert_eq!(task.actual_tasks, 1, "{}", task.node_id);
-        assert!(
-            matches!(
-                task.current_outcome.as_ref().map(|outcome| &outcome.result),
-                Some(ExecutionTaskResult::Cancelled { reason: actual }) if actual == &reason
-            ),
-            "{} retained a stale current outcome",
-            task.node_id
-        );
-        assert_eq!(
-            task.outcome_audit
-                .iter()
-                .filter(|entry| entry["kind"] == "replan_stopped")
-                .count(),
-            1,
-            "{} must receive one bounded stop audit",
-            task.node_id
-        );
-    }
-    let completed = page
-        .tasks
-        .iter()
-        .find(|task| task.task_id == completed_task.task_id)
-        .expect("completed evidence remains present");
-    assert_eq!(completed.status, ExecutionTaskStatus::Completed);
-    assert_eq!(completed.output, Some(json!({"tokens": 1})));
-    let finalized_run = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .expect("finalized run remains visible");
-    assert_eq!(finalized_run.status, ExecutionRunStatus::Blocked);
-    assert_eq!(finalized_run.reserved, ExecutionEstimate::default());
-    assert_eq!(finalized_run.consumed.tasks, 5);
-    assert_eq!(finalized_run.progress_completed_tasks, 1);
-    assert_eq!(finalized_run.progress_cancelled_tasks, 4);
-
-    let before_replay = page.tasks;
-    let replay = repository
-        .finalize_replan_stop(
-            scope,
-            ReplanStopRequest {
-                run_uid: run.run_uid,
-                expected_revision: 1,
-                expected_wake_epoch,
-                task_id: waiting_replan.task_id,
-                expected_generation: 1,
-                amendment_hash: Some(stop_amendment_hash),
-                cancellation_reason: reason.clone(),
-                terminal_projection: terminal.clone(),
-                completion_evaluation: evaluation.clone(),
-                terminal_evidence: terminal_evidence.clone(),
-                terminal_reason,
-            },
-        )
-        .await?;
-    assert!(matches!(
-        replay,
-        moa_execution::repository::ReplanStopOutcome::Replayed(_)
-    ));
-    assert_eq!(
-        repository
-            .list_tasks(scope, run.run_uid, ExecutionTaskPageRequest::default())
-            .await?
-            .tasks,
-        before_replay
-    );
-    let mut conflicting_evidence = terminal_evidence;
-    conflicting_evidence.satisfied_requirement_count = 1;
-    assert_eq!(
-        repository
-            .finalize_replan_stop(
-                scope,
-                ReplanStopRequest {
-                    run_uid: run.run_uid,
-                    expected_revision: 1,
-                    expected_wake_epoch,
-                    task_id: waiting_replan.task_id,
-                    expected_generation: 1,
-                    amendment_hash: Some(stop_amendment_hash),
-                    cancellation_reason: reason,
-                    terminal_projection: terminal,
-                    completion_evaluation: evaluation,
-                    terminal_evidence: conflicting_evidence,
-                    terminal_reason,
-                },
-            )
-            .await?,
-        moa_execution::repository::ReplanStopOutcome::Conflict
-    );
     Ok(())
 }

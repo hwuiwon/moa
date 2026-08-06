@@ -4,10 +4,8 @@ use moa_core::traits::IdentityType;
 use moa_core::{types::identifiers::TenantId, types::session::CheckpointHandle};
 use moa_memory_vector::PromotionReport;
 use moa_orchestrator::ctx::RequestHeaders;
-use moa_orchestrator::handlers::authz_shim::AuthzEnforcer;
 use moa_orchestrator::services::admin_maintenance::{
-    authorize_platform_maintenance, platform_maintenance_identity, promotion_response_from_report,
-    promotion_update_response,
+    platform_maintenance_identity, promotion_response_from_report, promotion_update_response,
 };
 use moa_wire::admin::CheckpointRollbackResponse;
 use restate_sdk::prelude::{HandlerError, HeaderMap};
@@ -62,8 +60,8 @@ fn promotion_update_response_marks_steady_state() {
     assert_eq!(response.dual_read_hours, None);
 }
 
-#[tokio::test]
-async fn tenant_scoped_identities_cannot_authorize_checkpoint_maintenance() {
+#[test]
+fn tenant_scoped_identities_cannot_authorize_checkpoint_maintenance() {
     // Pins: global checkpoint create/list/rollback/cleanup fail closed before tenant-admin authz.
     let cases = [
         ("checkpoint_create", IdentityType::Operator, None),
@@ -79,8 +77,7 @@ async fn tenant_scoped_identities_cannot_authorize_checkpoint_maintenance() {
     for (operation, identity_type, api_key_id) in cases {
         let headers = headers(identity_type, api_key_id);
 
-        let error = authorize_platform_maintenance(&AuthzEnforcer::new(None), &headers)
-            .await
+        let error = platform_maintenance_identity(&headers)
             .expect_err("tenant-scoped checkpoint maintenance should be forbidden");
 
         assert_eq!(

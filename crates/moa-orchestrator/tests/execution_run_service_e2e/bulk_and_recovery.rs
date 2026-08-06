@@ -315,7 +315,7 @@ async fn run_bulk_scenario(
         await_execution_terminal_with_timeout(test.client(), &run_request, BULK_TIMEOUT).await?;
     assert_eq!(
         await_session_settled(test.client(), session_id).await?,
-        SessionStatus::Paused
+        SessionStatus::Idle
     );
     let tasks = list_all_tasks(test.client(), run_request.clone()).await?;
     let attempts = controller.transport_attempts();
@@ -546,6 +546,7 @@ fn map_tool() -> FixtureCapabilityTool {
         description: "Count AI mentions for one company-like map item".to_string(),
         input_schema: map_input_schema(),
         item_key_pointer: Some("/company".to_string()),
+        idempotent: true,
         outcomes: vec![FixtureCapabilityOutcome::SuccessWithInput {
             output: json!({
                 "ai_mentions": 1,
@@ -570,6 +571,7 @@ fn reducer_tool() -> FixtureCapabilityTool {
             }
         }),
         item_key_pointer: None,
+        idempotent: true,
         outcomes: vec![FixtureCapabilityOutcome::Success {
             output: final_report(),
         }],
@@ -621,7 +623,8 @@ fn bulk_candidate(
             ],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 1,
+            schema_version: 2,
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: report_schema.clone(),
             nodes: vec![
@@ -652,6 +655,7 @@ fn bulk_candidate(
                             reference: map_reference,
                         },
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -670,6 +674,7 @@ fn bulk_candidate(
                         },
                         batch_size: COMPANY_COUNT as u32,
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -683,6 +688,7 @@ fn bulk_candidate(
                     operation: ExecutionOperation::Output {
                         value: json!({"$ref": format!("$.nodes.{REDUCE_NODE_ID}.output")}),
                     },
+                    compensation: None,
                     retry: no_retry(),
                     budget: None,
                 },
@@ -710,6 +716,7 @@ fn fixture_capability_reference(tool: &FixtureCapabilityTool) -> Result<Capabili
             "input_schema": tool.input_schema,
             "policy": policy,
             "idempotency_class": IdempotencyClass::Idempotent,
+            "rollback": null,
             "max_output_tokens": ToolBudgetConfig::default().for_tool(&qualified),
             "owner": {"kind": "mcp", "server": FIXTURE_MCP_SERVER_NAME},
         }),

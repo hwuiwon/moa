@@ -126,6 +126,7 @@ impl SandboxToolDescriptor {
             schema: (self.schema)(),
             policy: self.policy.clone(),
             idempotency_class: self.idempotency_class,
+            rollback: None,
             max_output_tokens,
         }
     }

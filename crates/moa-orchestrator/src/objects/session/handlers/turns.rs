@@ -243,7 +243,7 @@ impl SessionImpl {
                         let completed_status = if !state.active_execution_runs.is_empty() {
                             SessionStatus::Running
                         } else {
-                            SessionStatus::Paused
+                            SessionStatus::Idle
                         };
                         state.set_status(completed_status, now)
                     }
@@ -285,13 +285,22 @@ impl SessionImpl {
         let session_id = parse_session_key(ctx.key())?;
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
 
-        state.register_coordinator_input(CoordinatorPendingInput {
+        // Delivery history is the terminal fence for this request identity. A
+        // replay after the awakeable was resolved must not advertise the target
+        // again or emit a new question for work that has already continued.
+        if state.coordinator_input_already_delivered(&request.input_request_id) {
+            return Ok(());
+        }
+
+        if !state.register_coordinator_input(CoordinatorPendingInput {
             turn_id: request.turn_id.clone(),
             generation: request.generation,
             input_request_id: request.input_request_id.clone(),
             awakeable_id: request.awakeable_id,
             waiting_workflow_id: request.waiting_workflow_id,
-        });
+        }) {
+            return Ok(());
+        }
         // Advertising the pending target is what lets an unaddressed plain reply be
         // routed here instead of starting an ordinary turn behind the blocked one.
         state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
@@ -309,6 +318,25 @@ impl SessionImpl {
         )
         .await?;
         state.persist(&ctx);
+        Ok(())
+    }
+
+    pub(super) async fn handle_clear_coordinator_input(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<ClearCoordinatorInputRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "clear_coordinator_input");
+        let request = request.into_inner();
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        if state.clear_coordinator_input(
+            &request.turn_id,
+            request.generation,
+            &request.input_request_id,
+            &request.waiting_workflow_id,
+        ) {
+            state.persist(&ctx);
+        }
         Ok(())
     }
 

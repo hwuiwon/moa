@@ -135,6 +135,7 @@ pub async fn route_execution(
     let started = Instant::now();
     let stream = match provider.complete(request).await {
         Ok(stream) => stream,
+        Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
         Err(_) => {
             return Ok(classifier_fallback(
                 &input,
@@ -149,6 +150,7 @@ pub async fn route_execution(
     };
     let response = match stream.collect().await {
         Ok(response) => response,
+        Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
         Err(_) => {
             return Ok(classifier_fallback(
                 &input,
@@ -530,6 +532,8 @@ mod tests {
         Response(CompletionResponse),
         ProviderError,
         StreamError,
+        CancelledProvider,
+        CancelledStream,
     }
 
     struct ScriptedRouteProvider {
@@ -589,6 +593,12 @@ mod tests {
                             "scripted stream failure".to_string(),
                         ))
                     });
+                    Ok(CompletionStream::new(receiver, completion))
+                }
+                ProviderBehavior::CancelledProvider => Err(MoaError::Cancelled),
+                ProviderBehavior::CancelledStream => {
+                    let (_sender, receiver) = mpsc::channel(1);
+                    let completion = tokio::spawn(async { Err(MoaError::Cancelled) });
                     Ok(CompletionStream::new(receiver, completion))
                 }
             }
@@ -826,6 +836,24 @@ mod tests {
                 }
             ));
             assert_eq!(result.provenance.classifier_outcome, expected_outcome);
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_routing_preserves_cancellation_from_provider_and_stream_offline() {
+        // Pins: workflow cancellation remains a typed terminal outcome instead of being
+        // normalized into the router's execute-inline availability fallback.
+        let model = classifier_model();
+        for behavior in [
+            ProviderBehavior::CancelledProvider,
+            ProviderBehavior::CancelledStream,
+        ] {
+            let provider = ScriptedRouteProvider::new(behavior);
+            let error = route_execution(&provider, routing_input("cancel this turn", &model))
+                .await
+                .expect_err("cancellation must escape routing");
+            assert!(matches!(error, MoaError::Cancelled));
+            assert_eq!(provider.call_count(), 1);
         }
     }
 
