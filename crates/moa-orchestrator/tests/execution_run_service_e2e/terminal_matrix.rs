@@ -1869,7 +1869,6 @@ fn terminal_blueprint() -> Result<RunBlueprint> {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_object_schema(),
             output_schema: output_schema.clone(),
@@ -2076,7 +2075,6 @@ fn output_candidate(
     GeneratedExecutionCandidate {
         goal: single_requirement_goal(objective),
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
@@ -2106,7 +2104,6 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
     GeneratedExecutionCandidate {
         goal: replan_goal(objective),
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
@@ -2169,7 +2166,6 @@ fn useful_amendment_candidate(base_plan_revision: u64) -> GeneratedAmendmentCand
     let schema = answer_schema();
     GeneratedAmendmentCandidate {
         amendment: PlanAmendment {
-            schema_version: 2,
             base_plan_revision,
             reason: "replace unsupported research with deterministic output".to_string(),
             evidence: json!({"shape": "unsupported"}),

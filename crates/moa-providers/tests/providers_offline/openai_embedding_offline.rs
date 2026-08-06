@@ -92,8 +92,8 @@ async fn openai_embedding_offline_rejects_wrong_response_dimension() {
         .expect_err("wrong vector width should fail");
 
     assert!(
-        matches!(&error, MoaError::ProviderError(message) if message.contains("dimension mismatch")),
-        "expected dimension mismatch provider error, got {error:?}"
+        matches!(&error, MoaError::ProviderQuirk(message) if message.contains("dimension mismatch")),
+        "expected dimension mismatch provider quirk, got {error:?}"
     );
 }
 

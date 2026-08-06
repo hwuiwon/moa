@@ -163,7 +163,6 @@ async fn duplicate_amendment_stops_replan_service_e2e() -> Result<()> {
     let agent_b = agent_node("agent_b", "DUPLICATE_AMENDMENT_AGENT_B");
     let first = replacement_amendment(1, "agent_a", agent_b, "first semantic replacement");
     let repeated = PlanAmendment {
-        schema_version: 2,
         base_plan_revision: 2,
         reason: "same operations at a later revision".to_string(),
         evidence: json!({"planner_observation": "changed prose cannot evade loop identity"}),
@@ -326,7 +325,6 @@ async fn remove_only_amendment_is_no_progress_service_e2e() -> Result<()> {
     // Pins: a remove-only patch cannot claim progress on an unresolved requirement.
     let agent_a = agent_node("agent_a", "REMOVE_ONLY_AGENT_A");
     let remove_only = PlanAmendment {
-        schema_version: 2,
         base_plan_revision: 1,
         reason: "remove-only amendment has no unresolved work".to_string(),
         evidence: json!({"kind": "remove_only"}),
@@ -1816,7 +1814,6 @@ fn useful_replan_contract(
             ],
         },
         ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
@@ -1895,7 +1892,6 @@ fn replacement_amendment(
     let old_terminal_id = terminal_output_node_id(old_node_id);
     let replacement_terminal = terminal_output_node(&replacement.id);
     PlanAmendment {
-        schema_version: 2,
         base_plan_revision,
         reason: reason.to_string(),
         evidence: json!({"replacement": replacement.id}),
@@ -2070,7 +2066,6 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
         output_schema,
     } = spec;
     ExecutionPlanDefinition {
-        schema_version: 2,
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
         input_schema: empty_input_schema(),
         output_schema: output_schema.clone(),
@@ -2140,7 +2135,6 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
             ],
         },
         ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({
                 "type": "object",
@@ -2243,7 +2237,6 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
             ],
         },
         ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: report_schema.clone(),
@@ -2347,7 +2340,6 @@ fn injected_content_contract(
             )],
         },
         ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),

@@ -717,7 +717,6 @@ execution_plan:
         kind:
           kind: output_schema
   plan:
-    schema_version: 2
     cancel_policy: retain_effects
     input_schema:
       type: object

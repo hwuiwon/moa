@@ -502,7 +502,6 @@ fn compensated_plan(
         budget: None,
     });
     ExecutionPlanDefinition {
-        schema_version: 2,
         cancel_policy,
         input_schema: json!({
             "type": "object",

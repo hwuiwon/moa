@@ -7,11 +7,14 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use moa_core::types::security::SensitivityClass;
+use moa_crypto::LocalKmsProvider;
 use moa_memory_graph::{EdgeLabel, GraphWalkScoring, NodeLabel};
 use moa_memory_ingest::{
-    DeterministicEntityMergeVerifier, Error, ScriptedFactExtractor, TurnChunk, extract_facts,
-    ingest_turn_direct_with_ctx,
+    ClassifiedFact, DeterministicEntityMergeVerifier, EmbeddedFact, Error, ExtractedFact,
+    ExtractedFactScopeHint, IngestDecision, IngestRuntime, ScriptedFactExtractor, SlowPathIngestor,
+    TurnChunk, extract_facts, fact_hash, fact_uid_from_hash, ingest_turn_direct_with_ctx,
 };
+use moa_memory_types::{FactCategory, FactEdgeLabel};
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -285,6 +288,78 @@ async fn duplicate_direct_ingest_attempt_skips_without_duplicate_durable_rows() 
         durable_ingest_counts(test_db.store().pool(), storage_partition_id).await,
         after_first,
         "duplicate direct ingestion must not add graph, vector, or dedup rows"
+    );
+}
+
+#[tokio::test]
+async fn staged_apply_replay_restores_original_mixed_outcomes_db_memory() {
+    // Pins: if Restate retries the upsert stage after Postgres committed but the
+    // response was ambiguous, every fact reports its original terminal outcome
+    // without repeating graph writes or confidence reinforcement.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+    let storage_partition_id = Uuid::now_v7();
+    let old_uid = create_fact(
+        pool,
+        storage_partition_id,
+        "API runs_on_port 3000",
+        fixed_time() - Duration::days(1),
+    )
+    .await;
+    let turn = turn(storage_partition_id, "staged apply fixture", 56);
+    let decisions = vec![
+        IngestDecision::SkipDuplicate {
+            fact_uid: old_uid,
+            fact: embedded_fact("API", "runs_on_port", "3000"),
+        },
+        IngestDecision::Supersede {
+            old_uid,
+            fact: embedded_fact("API", "runs_on_port", "8080"),
+        },
+        IngestDecision::Insert {
+            fact: embedded_fact("Worker", "uses", "queue"),
+        },
+    ];
+    let runtime = Arc::new(
+        IngestRuntime::new(pool.clone(), Arc::new(LocalKmsProvider::new()))
+            .expect("default staged ingestion runtime should build"),
+    );
+    let ingestor = SlowPathIngestor::new(runtime);
+
+    let first = ingestor
+        .apply(&turn, &decisions)
+        .await
+        .expect("first staged apply should commit mixed outcomes");
+    assert_eq!(first.inserted, 1);
+    assert_eq!(first.superseded, 1);
+    assert_eq!(first.reinforced, 1);
+    assert_eq!(first.skipped, 0);
+    assert_eq!(first.failed, 0);
+    assert_eq!(
+        dedup_apply_outcomes(pool, storage_partition_id).await,
+        vec!["inserted", "reinforced", "superseded"]
+    );
+    let after_first = durable_ingest_counts(pool, storage_partition_id).await;
+    let confidence_after_first = node_confidence(pool, storage_partition_id, old_uid).await;
+
+    let replay = ingestor
+        .apply(&turn, &decisions)
+        .await
+        .expect("replayed staged apply should restore its committed report");
+
+    assert_eq!(replay, first);
+    assert_eq!(
+        durable_ingest_counts(pool, storage_partition_id).await,
+        after_first,
+        "staged replay must not add graph, vector, or dedup rows"
+    );
+    assert_eq!(
+        node_confidence(pool, storage_partition_id, old_uid).await,
+        confidence_after_first,
+        "staged replay must not reinforce the survivor twice"
     );
 }
 
@@ -1009,6 +1084,51 @@ fn fact_uid_with_subject(rows: &[moa_memory_graph::NodeIndexRow], subject: &str)
         })
         .map(|row| row.uid)
         .expect("fact with expected subject should exist")
+}
+
+fn embedded_fact(subject: &str, predicate: &str, object: &str) -> EmbeddedFact {
+    let mut fact = ExtractedFact {
+        uid: Uuid::nil(),
+        subject: subject.to_string(),
+        predicate: predicate.to_string(),
+        object: object.to_string(),
+        summary: format!("{subject} {predicate} {object}"),
+        source_chunk: 0,
+        scope_hint: ExtractedFactScopeHint::Contact,
+        confidence: Some(0.9),
+        event_time: None,
+        category: FactCategory::Other,
+        edge_label: FactEdgeLabel::RelatesTo,
+        functional: false,
+    };
+    let hash = fact_hash(&fact).expect("fixture fact should hash");
+    fact.uid = fact_uid_from_hash(&hash);
+    EmbeddedFact {
+        classified: ClassifiedFact {
+            fact,
+            pii_class: SensitivityClass::None,
+            pii_spans: Vec::new(),
+        },
+        embedding: None,
+        embedding_model: None,
+        embedding_model_version: None,
+    }
+}
+
+async fn dedup_apply_outcomes(pool: &PgPool, storage_partition_id: Uuid) -> Vec<String> {
+    let mut conn = support::user_scoped_conn(pool, storage_partition_id).await;
+    let outcomes = sqlx::query_scalar::<_, String>(
+        "SELECT apply_outcome FROM moa.ingest_dedup \
+         WHERE storage_partition_id = $1 ORDER BY apply_outcome",
+    )
+    .bind(storage_partition_id.to_string())
+    .fetch_all(conn.as_mut())
+    .await
+    .expect("read persisted ingestion apply outcomes");
+    conn.commit()
+        .await
+        .expect("commit persisted ingestion outcome read");
+    outcomes
 }
 
 async fn durable_ingest_counts(pool: &PgPool, storage_partition_id: Uuid) -> IngestCounts {

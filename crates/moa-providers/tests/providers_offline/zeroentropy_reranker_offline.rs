@@ -138,8 +138,8 @@ async fn zeroentropy_reranker_offline_missing_total_tokens_rejects_success_respo
         .await
         .expect_err("response without total_tokens should fail");
 
-    let MoaError::ProviderError(message) = error else {
-        panic!("expected response-decode ProviderError, got {error:?}");
+    let MoaError::ProviderQuirk(message) = error else {
+        panic!("expected response-decode ProviderQuirk, got {error:?}");
     };
     assert!(
         message.starts_with("error decoding response body for url"),

@@ -33,7 +33,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
     .expect("valid strict candidate should plan");
 
     assert!(matches!(
-        result.kind,
+        &result.kind,
         moa_brain::execution_planning::ExecutionPlanningResultKind::Ready(_)
     ));
     assert_eq!(
@@ -99,17 +99,14 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
 }
 
 #[tokio::test]
-async fn execution_planning_terminal_provider_outputs_never_repair() {
-    // Pins: no trustworthy immutable goal means schema, size, and provider failures are terminal.
+async fn execution_planning_oversized_and_provider_failures_never_repair() {
+    // Pins: size and provider failures remain terminal and do not consume the semantic repair
+    // budget.
     // A provider/transport failure resolves to the distinct ProviderFailure kind (its raw string
     // must never reach a user), while planner-authored rejections stay Unsupported.
     let objective = "Prepare a durable report";
     let cases =
         [
-            (
-                ScriptedProvider::new(MockLlmProvider.capabilities()).push_text("{}"),
-                moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
-            ),
             (
                 ScriptedProvider::new(MockLlmProvider.capabilities()).push_text("x".repeat(
                     moa_brain::execution_planning::EXECUTION_PLANNER_CANDIDATE_MAX_BYTES + 1,
@@ -152,6 +149,114 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         assert_eq!(requests.len(), 1);
         assert_initial_execution_planner_request(&requests[0]);
     }
+}
+
+#[tokio::test]
+async fn execution_planning_schema_rejection_regenerates_once_without_replaying_raw_output() {
+    // Pins: one malformed initial response consumes the sole repair attempt, regenerates from the
+    // frozen context, and never places the raw provider output in the replacement request.
+    let objective = "Prepare a durable report";
+    let raw = "PRIVATE_INVALID_INITIAL_RESPONSE";
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_text(raw)
+        .push_text(execution_planning_candidate(objective, 1));
+
+    let result = moa_brain::execution_planning::plan_execution(
+        &provider,
+        execution_planning_request(objective),
+    )
+    .await
+    .expect("one schema regeneration should admit a valid replacement");
+
+    assert!(matches!(
+        &result.kind,
+        moa_brain::execution_planning::ExecutionPlanningResultKind::Ready(_)
+    ));
+    let moa_brain::execution_planning::ExecutionPlanningResultKind::Ready(admitted) = &result.kind
+    else {
+        panic!("schema-regenerated initial plan should be ready");
+    };
+    assert!(matches!(
+        &admitted.source_provenance,
+        moa_core::types::execution_planning::ExecutionSourceProvenance::GeneratedPlan {
+            planner: moa_core::types::execution_planning::GeneratedPlanPlannerProvenance {
+                repair_attempts: 1,
+                ..
+            }
+        }
+    ));
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::Accepted,
+        ]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    requests
+        .iter()
+        .for_each(assert_initial_execution_planner_request);
+    assert_schema_regeneration_request(&requests[1], raw, "candidate");
+    assert!(
+        !serde_json::to_string(&result.audits)
+            .expect("schema-repair audits should serialize")
+            .contains(raw),
+        "raw provider output must not be persisted in planning audits"
+    );
+}
+
+#[tokio::test]
+async fn execution_planning_second_schema_rejection_is_terminal_without_third_call() {
+    // Pins: a malformed schema-regeneration response is terminal and cannot recursively invoke
+    // the paid planner.
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_text("FIRST_INVALID_INITIAL_RESPONSE")
+        .push_text("SECOND_INVALID_INITIAL_RESPONSE");
+
+    let result = moa_brain::execution_planning::plan_execution(
+        &provider,
+        execution_planning_request("Prepare a durable report"),
+    )
+    .await
+    .expect("second schema rejection should remain typed");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionPlanningResultKind::Unsupported { .. }
+    ));
+    assert_eq!(provider.recorded_requests().len(), 2);
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn execution_planning_schema_rejection_is_terminal_when_repairs_are_disabled() {
+    // Pins: an explicit zero repair budget makes the first strict-schema rejection terminal.
+    let mut request = execution_planning_request("Prepare a durable report");
+    request.config.planner_repair_attempts = 0;
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_text("INVALID_INITIAL_RESPONSE")
+        .push_text(execution_planning_candidate(&request.objective, 1));
+
+    let result = moa_brain::execution_planning::plan_execution(&provider, request)
+        .await
+        .expect("disabled schema repair should remain typed");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionPlanningResultKind::Unsupported { .. }
+    ));
+    assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected]
+    );
 }
 
 #[tokio::test]
@@ -251,6 +356,13 @@ async fn execution_planner_requests_always_carry_a_non_system_message() {
     .expect("initial repair planner request builds");
     assert_cacheable_system_then_non_system(&repair);
 
+    let schema_repair =
+        moa_brain::execution_planning::request::initial_schema_repair_completion_request(
+            &execution_planning_request(objective),
+        )
+        .expect("initial schema-repair planner request builds");
+    assert_cacheable_system_then_non_system(&schema_repair);
+
     let amendment = moa_brain::execution_planning::request::amendment_completion_request(
         &execution_amendment_planning_request(),
         None,
@@ -264,6 +376,13 @@ async fn execution_planner_requests_always_carry_a_non_system_message() {
     )
     .expect("amendment repair planner request builds");
     assert_cacheable_system_then_non_system(&amendment_repair);
+
+    let amendment_schema_repair =
+        moa_brain::execution_planning::request::amendment_schema_repair_completion_request(
+            &execution_amendment_planning_request(),
+        )
+        .expect("amendment schema-repair planner request builds");
+    assert_cacheable_system_then_non_system(&amendment_schema_repair);
 }
 
 #[tokio::test]
@@ -332,6 +451,106 @@ async fn execution_planning_amendment_invokes_once_with_persisted_evidence() {
     assert!(prompt.contains("completed-value"));
     assert!(prompt.contains("shape changed"));
     assert!(prompt.contains("base_plan_revision\\\":7"));
+    let amendment_message = &provider.recorded_requests()[0].messages[1].content;
+    let amendment_json = amendment_message
+        .strip_prefix("<frozen_amendment_context>")
+        .and_then(|payload| payload.split_once("</frozen_amendment_context>"))
+        .map(|(payload, _)| payload)
+        .expect("amendment prompt should contain its frozen JSON context");
+    let amendment_context: serde_json::Value = serde_json::from_str(amendment_json)
+        .expect("frozen amendment context should be valid JSON");
+    assert!(amendment_context.get("schema_version").is_none());
+}
+
+#[tokio::test]
+async fn execution_planning_amendment_schema_rejection_regenerates_once_without_raw_output() {
+    // Pins: amendment schema regeneration uses the persisted frozen evidence, consumes the sole
+    // repair attempt, and never places malformed provider output in the replacement request.
+    let raw = "PRIVATE_INVALID_AMENDMENT_RESPONSE";
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_text(raw)
+        .push_text(execution_amendment_candidate(7, true));
+
+    let result = moa_brain::execution_planning::plan_amendment(
+        &provider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("one amendment schema regeneration should admit a valid replacement");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionAmendmentPlanningResultKind::Ready { .. }
+    ));
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::Accepted,
+        ]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_schema_regeneration_request(&requests[1], raw, "amendment");
+    assert_accepted_planner_report_matches_compile(&result.audits);
+    assert!(
+        !serde_json::to_string(&result.audits)
+            .expect("amendment schema-repair audits should serialize")
+            .contains(raw),
+        "raw amendment output must not be persisted in planning audits"
+    );
+}
+
+#[tokio::test]
+async fn execution_planning_second_amendment_schema_rejection_stops_without_third_call() {
+    // Pins: a malformed amendment schema-regeneration response is terminal and cannot recurse.
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_text("FIRST_INVALID_AMENDMENT_RESPONSE")
+        .push_text("SECOND_INVALID_AMENDMENT_RESPONSE");
+
+    let result = moa_brain::execution_planning::plan_amendment(
+        &provider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("second amendment schema rejection should remain typed");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionAmendmentPlanningResultKind::Unsupported { .. }
+    ));
+    assert_eq!(provider.recorded_requests().len(), 2);
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn execution_planning_amendment_schema_rejection_is_terminal_when_repairs_are_disabled() {
+    // Pins: an explicit zero repair budget terminalizes the first amendment schema rejection.
+    let mut request = execution_amendment_planning_request();
+    request.config.planner_repair_attempts = 0;
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_text("INVALID_AMENDMENT_RESPONSE")
+        .push_text(execution_amendment_candidate(7, true));
+
+    let result = moa_brain::execution_planning::plan_amendment(&provider, request)
+        .await
+        .expect("disabled amendment schema repair should remain typed");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionAmendmentPlanningResultKind::Unsupported { .. }
+    ));
+    assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![moa_core::types::execution_planning::ExecutionPlannerOutcome::SchemaRejected]
+    );
 }
 
 #[tokio::test]
@@ -569,7 +788,6 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
             }]
         },
         "plan": {
-            "schema_version": 2,
             "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
@@ -753,7 +971,6 @@ fn execution_amendment_candidate(base_plan_revision: u64, valid: bool) -> String
     };
     json!({
         "amendment": {
-            "schema_version": 2,
             "base_plan_revision": base_plan_revision,
             "reason": "replace unsupported output",
             "evidence": {"shape": "changed"},
@@ -825,6 +1042,42 @@ fn assert_accepted_planner_report_matches_compile(
     });
 }
 
+fn assert_schema_regeneration_request(
+    request: &moa_core::types::completion::CompletionRequest,
+    raw_response: &str,
+    subject: &str,
+) {
+    assert_eq!(request.messages.len(), 2);
+    assert_eq!(
+        request.messages[0].role,
+        moa_core::types::context::MessageRole::System
+    );
+    assert_eq!(
+        request.messages[1].role,
+        moa_core::types::context::MessageRole::User
+    );
+    assert!(request.messages[0].content.contains("<response_schema>"));
+    assert!(
+        request.messages[1]
+            .content
+            .contains("prior response failed strict schema validation")
+    );
+    assert!(request.messages[1].content.contains(subject));
+    assert!(
+        request
+            .messages
+            .iter()
+            .all(|message| !message.content.contains(raw_response)),
+        "schema regeneration must not replay raw provider output"
+    );
+    assert!(request.tools.is_empty());
+    assert!(request.response_format.is_none());
+    assert_eq!(
+        request.native_web_search,
+        moa_core::types::completion::NativeWebSearchPolicy::Disabled
+    );
+}
+
 fn assert_initial_execution_planner_request(
     request: &moa_core::types::completion::CompletionRequest,
 ) {
@@ -849,6 +1102,19 @@ fn assert_initial_execution_planner_request(
         system_message.role,
         moa_core::types::context::MessageRole::System
     );
+    let user_message = request
+        .messages
+        .get(1)
+        .expect("planner request must include one dynamic user message");
+    let frozen_json = user_message
+        .content
+        .strip_prefix("<frozen_planning_context>")
+        .and_then(|payload| payload.split_once("</frozen_planning_context>"))
+        .map(|(payload, _)| payload)
+        .expect("planner user message should contain its frozen JSON context");
+    let frozen_context: serde_json::Value =
+        serde_json::from_str(frozen_json).expect("frozen planning context should be valid JSON");
+    assert!(frozen_context.get("schema_version").is_none());
     let schema_start = system_message
         .content
         .find("<response_schema>")

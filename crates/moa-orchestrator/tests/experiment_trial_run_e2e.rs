@@ -299,6 +299,8 @@ fn spawn_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
@@ -340,6 +342,8 @@ fn spawn_orchestrator_without_provider_override(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", database_url)
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
@@ -375,6 +379,8 @@ fn spawn_orchestrator_no_provider_override_with_fga(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
@@ -1700,7 +1706,6 @@ definition:
             kind:
               kind: output_schema
       plan:
-        schema_version: 2
         cancel_policy: retain_effects
         input_schema:
           type: object
@@ -1945,6 +1950,8 @@ async fn experiment_plan_to_trial_to_score_live() -> Result<()> {
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())

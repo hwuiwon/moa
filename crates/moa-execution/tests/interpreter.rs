@@ -394,11 +394,8 @@ fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
 
     let mut drifted = request(run_uid, plan.clone(), BTreeMap::new(), vec![]);
     drifted.catalog.capabilities[0].estimate.tokens = 12;
-    drifted.catalog.catalog_hash = catalog_hash(
-        drifted.catalog.schema_version,
-        &drifted.catalog.capabilities,
-    )
-    .expect("drifted catalog should hash");
+    drifted.catalog.catalog_hash =
+        catalog_hash(&drifted.catalog.capabilities).expect("drifted catalog should hash");
     let error = schedule(drifted).expect_err("catalog content drift must be rejected");
     assert_eq!(
         error.to_string(),
@@ -410,22 +407,16 @@ fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
         "type": "object",
         "required": ["customer_id"]
     });
-    invalid_input.catalog.catalog_hash = catalog_hash(
-        invalid_input.catalog.schema_version,
-        &invalid_input.catalog.capabilities,
-    )
-    .expect("catalog should hash");
+    invalid_input.catalog.catalog_hash =
+        catalog_hash(&invalid_input.catalog.capabilities).expect("catalog should hash");
     invalid_input.plan.catalog_hash = invalid_input.catalog.catalog_hash;
     let error = schedule(invalid_input).expect_err("resolved capability input must validate");
     assert!(matches!(error, moa_execution::Error::Schema { .. }));
 
     let mut invalid_task_count = request(run_uid, plan, BTreeMap::new(), vec![]);
     invalid_task_count.catalog.capabilities[0].estimate.tasks = 2;
-    invalid_task_count.catalog.catalog_hash = catalog_hash(
-        invalid_task_count.catalog.schema_version,
-        &invalid_task_count.catalog.capabilities,
-    )
-    .expect("catalog should hash");
+    invalid_task_count.catalog.catalog_hash =
+        catalog_hash(&invalid_task_count.catalog.capabilities).expect("catalog should hash");
     invalid_task_count.plan.catalog_hash = invalid_task_count.catalog.catalog_hash;
     let error = schedule(invalid_task_count)
         .expect_err("catalog capability estimates must reserve one task");
@@ -903,7 +894,6 @@ fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     let catalog = catalog();
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
@@ -1018,9 +1008,8 @@ fn catalog() -> ExecutionCapabilityCatalog {
         rollback: None,
     };
     let catalog_hash =
-        catalog_hash(1, std::slice::from_ref(&capability)).expect("catalog fixture should hash");
+        catalog_hash(std::slice::from_ref(&capability)).expect("catalog fixture should hash");
     ExecutionCapabilityCatalog {
-        schema_version: 1,
         capabilities: vec![capability],
         catalog_hash,
     }

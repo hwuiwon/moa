@@ -188,7 +188,6 @@ fn execution_candidate(objective: &str) -> String {
             }]
         },
         "plan": {
-            "schema_version": 2,
             "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },

@@ -63,8 +63,6 @@ impl SimulatorDecision {
 /// One structured response emitted by the certified simulator policy.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SimulatorResponse {
-    /// Exact response protocol version.
-    pub schema_version: u32,
     /// Simulator outcome signal.
     pub decision: SimulatorDecision,
     /// Next user-visible message for `continue`; canonicalized empty for terminal decisions.
@@ -81,16 +79,6 @@ pub enum SimulatorResponseError {
     NotStructured {
         /// Parser detail.
         detail: String,
-    },
-    /// The response used another protocol version.
-    #[error(
-        "simulator response schema version {actual} does not match required version {expected}"
-    )]
-    WrongSchemaVersion {
-        /// Required version.
-        expected: u32,
-        /// Returned version.
-        actual: u32,
     },
     /// A continuing response omitted its target-visible message.
     #[error("continuing simulator response must include a nonblank message")]
@@ -115,20 +103,14 @@ pub enum SimulatorResponseError {
 ///
 /// # Errors
 ///
-/// Returns [`SimulatorResponseError`] for malformed JSON, protocol drift, or an
-/// invalid decision payload.
+/// Returns [`SimulatorResponseError`] for malformed JSON or an invalid decision
+/// payload.
 pub fn parse_simulator_response(raw: &str) -> Result<SimulatorResponse, SimulatorResponseError> {
     let mut response: SimulatorResponse = serde_json::from_str(raw.trim()).map_err(|error| {
         SimulatorResponseError::NotStructured {
             detail: error.to_string(),
         }
     })?;
-    if response.schema_version != SIMULATOR_PROTOCOL_VERSION {
-        return Err(SimulatorResponseError::WrongSchemaVersion {
-            expected: SIMULATOR_PROTOCOL_VERSION,
-            actual: response.schema_version,
-        });
-    }
     response.message = response.message.trim().to_string();
     response.reason = response.reason.trim().to_string();
     if response.message.len() > MAX_SIMULATOR_MESSAGE_LEN {
@@ -162,9 +144,8 @@ pub fn simulator_response_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["schema_version", "decision", "message", "reason"],
+        "required": ["decision", "message", "reason"],
         "properties": {
-            "schema_version": { "const": SIMULATOR_PROTOCOL_VERSION },
             "decision": {
                 "enum": ["continue", "goal_satisfied", "transfer", "out_of_scope"]
             },
@@ -256,11 +237,20 @@ mod tests {
     fn structured_terminal_decision_canonicalizes_unused_message_offline() {
         // Pins: stopping is a typed decision, and text returned alongside it can
         // never be mistaken for a normal user message sent to the target.
-        let raw = r#"{"schema_version":1,"decision":"goal_satisfied","message":"DONE","reason":"goal met"}"#;
+        let raw = r#"{"decision":"goal_satisfied","message":"DONE","reason":"goal met"}"#;
         let response = parse_simulator_response(raw).expect("terminal response should parse");
         assert_eq!(response.decision, SimulatorDecision::GoalSatisfied);
         assert!(response.message.is_empty());
         assert_eq!(response.reason, "goal met");
+    }
+
+    #[test]
+    fn provider_schema_does_not_require_model_owned_version_offline() {
+        // Pins: the simulator model returns only behavioral data; the server
+        // owns protocol identity and certification metadata.
+        let schema = simulator_response_schema();
+        assert_eq!(schema["required"], json!(["decision", "message", "reason"]));
+        assert!(schema["properties"].get("schema_version").is_none());
     }
 
     #[test]

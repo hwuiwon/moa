@@ -4,9 +4,9 @@ Preserve the user's objective, scope, definitions, time range, universe, output 
 
 Compiler invariants:
 - Set `goal.objective` to the frozen `objective` byte-for-byte.
-- Set `plan.schema_version` to `2` and choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.
+- Choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.
 - Set every node's `compensation` explicitly. Use `null` unless the node is a direct side-effecting `Capability` whose exact catalog entry advertises the same compensator and bounded input mapping. Never add compensation to reads, agents, maps, reduces, reviews, signals, or outputs, and never invent rollback authority.
-- Set `amendment.schema_version` to `2`. An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.
+- An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.
 - Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.
 - Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.
 - Put every goal requirement ID in at least one completion check's `requirement_ids`. If the plan has only one completion check, it must list every requirement ID. For a simple `Agent`-to-`Output` plan, prefer one `OutputSchema` check listing all requirement IDs.

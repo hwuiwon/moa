@@ -97,7 +97,6 @@ pub struct ExecutionRouteClassifierOutput {
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct FrozenRoutingInput<'a> {
-    schema_version: u8,
     objective: &'a str,
     attachment_count: usize,
     recent_target_digest: &'a str,
@@ -271,7 +270,6 @@ pub async fn route_execution(
 
 fn classifier_request(input: &ExecutionRoutingInput<'_>) -> Result<CompletionRequest> {
     let frozen = FrozenRoutingInput {
-        schema_version: 2,
         objective: input.objective,
         attachment_count: input.attachment_count,
         recent_target_digest: input.recent_target_digest,
@@ -702,6 +700,9 @@ mod tests {
         assert_eq!(request.messages.len(), 2);
         assert!(!request.messages[1].content.contains("escalation"));
         assert!(!request.messages[1].content.contains("durable_upgrade"));
+        let frozen_input: serde_json::Value = serde_json::from_str(&request.messages[1].content)
+            .expect("frozen routing input should be valid JSON");
+        assert!(frozen_input.get("schema_version").is_none());
         let response_format = request
             .response_format
             .as_ref()

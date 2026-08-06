@@ -138,8 +138,8 @@ deliverables can produce `partial`, `blocked`, or `unsupported`, never a false
 `completed`. Final synthesis receives the contract, check results, aggregate
 outputs, citations, and explicit gaps.
 
-An `ExecutionPlanDefinition` is schema version 2 and carries an explicit
-`cancel_policy`, `input_schema`, `output_schema`, and `nodes`. Each node carries
+An `ExecutionPlanDefinition` carries an explicit `cancel_policy`,
+`input_schema`, `output_schema`, and `nodes`. Each node carries
 `id`, `depends_on`, optional `when`, `input`, `output_schema`, one `operation`,
 an explicit optional compensation contract, retry policy, optional budget, and
 the goal requirement IDs it serves. The dependency graph is acyclic, and
@@ -179,7 +179,8 @@ returns `ExecutionTaskOutcome { schema_version, usage, result }`; cumulative
 `usage` is common to every result. The flattened result is
 `Completed { output, citations }`, `NeedsInput { question, audience }`,
 `NeedsReplan { reason, evidence }`, `Cancelled { reason }`, or
-`Failed { class, message }`. `NeedsReplan` requests a hard-v2 compiler-validated amendment that may add only downstream work,
+`Failed { class, message }`. `NeedsReplan` requests a compiler-validated
+amendment that may add only downstream work,
 replace or remove pending work, narrow a map, switch to a registered capability,
 or add review/signal input. It cannot alter running or completed tasks, create a
 cycle or recursive map, reuse a task identity with new meaning, exceed remaining
@@ -221,7 +222,9 @@ bytes. Nonterminal cumulative outcomes charge only their nonnegative usage
 delta and retain the remaining reservation; terminal outcomes release it and
 consume one logical task.
 
-`ExecutionConfig` provides one planner repair attempt,
+`ExecutionConfig` provides one planner repair attempt. It either regenerates from
+the frozen context after a strict response-schema rejection or repairs one parsed
+compiler-rejected candidate; malformed raw provider output is never replayed.
 `repeated_failure_limit = 3`, and tenant-independent defaults of
 `max_tasks = 10_000`, `max_tokens = 10_000_000`,
 `max_tool_calls = 100_000`, `max_retrieved_bytes = 10_000_000_000`, and

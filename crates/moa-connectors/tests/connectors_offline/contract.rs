@@ -96,6 +96,24 @@ fn compiled_operation_hash_ignores_json_map_insertion_order_offline() {
 }
 
 #[test]
+fn compiled_operation_contract_serializes_without_local_version_offline() {
+    // Pins: the persisted compiled contract contains only its semantic action,
+    // authentication, and operation fields; evolution belongs to its owner boundary.
+    let compiled =
+        CompiledOperationContract::compile(&definition(), &action(json!({"type": "object"})))
+            .expect("valid HTTP action should compile");
+    let serialized = serde_json::to_value(compiled).expect("compiled contract should serialize");
+    let mut serialized_fields = serialized
+        .as_object()
+        .expect("compiled contract should serialize as an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    serialized_fields.sort_unstable();
+    assert_eq!(serialized_fields, vec!["action_id", "auth", "operation"]);
+}
+
+#[test]
 fn installed_binding_rejects_identity_hash_and_policy_drift_offline() {
     // Pins: a binding cannot weaken the platform-fixed admin-review floor or
     // drift from the immutable compiled HTTP payload.

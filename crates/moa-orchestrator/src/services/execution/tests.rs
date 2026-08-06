@@ -227,7 +227,6 @@ fn skill_revision(name: &str, revision_uid: u128) -> StoredArtifactRevision {
                         completion_checks: Vec::new(),
                     },
                     plan: ExecutionPlanDefinition {
-                        schema_version: 2,
                         cancel_policy:
                             moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
                         input_schema: json!({"type": "object"}),
@@ -596,7 +595,6 @@ fn accepted_turn_requires_skill_template_provenance_from_planning_snapshot() {
                 completion_checks: Vec::new(),
             },
             plan: ExecutionPlanDefinition {
-                schema_version: 2,
                 cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
@@ -672,7 +670,6 @@ fn pinned_execution_template(
                 completion_checks: Vec::new(),
             },
             plan: ExecutionPlanDefinition {
-                schema_version: 2,
                 cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
@@ -1102,7 +1099,6 @@ fn execution_external_wait_payload_is_validated_against_node_schema() {
     // Pins: review and signal handlers cannot persist caller-supplied output
     // that the active immutable plan would reject.
     let plan = serde_json::from_value(json!({
-        "schema_version": 2,
         "cancel_policy": "retain_effects",
         "input_schema": {},
         "output_schema": {},
@@ -1187,14 +1183,12 @@ fn replan_history_detects_duplicate_operations_without_exact_replay() {
         },
     };
     let first = PlanAmendment {
-        schema_version: 2,
         base_plan_revision: 1,
         reason: "first explanation".to_string(),
         evidence: json!({"source": "first"}),
         operations: vec![operation.clone()],
     };
     let proposed = PlanAmendment {
-        schema_version: 2,
         base_plan_revision: 2,
         reason: "different explanation".to_string(),
         evidence: json!({"source": "second"}),
@@ -1229,7 +1223,6 @@ fn remove_only_amendment_reaches_no_progress_before_validation_rejection() {
     // Pins: the service can classify structurally invalid remove-only proposals through the
     // shared pure loop policy instead of exposing a compiler-validation error.
     let amendment = PlanAmendment {
-        schema_version: 2,
         base_plan_revision: 4,
         reason: "remove failed work".to_string(),
         evidence: json!({}),

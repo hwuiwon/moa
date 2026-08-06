@@ -16,10 +16,9 @@ use crate::agent::{
 };
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::execution_plan::{
-    CapabilityReference, CompensationValueSource, CompletionCheckKind,
-    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionCondition, ExecutionGoalContract,
-    ExecutionGoalTemplate, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
-    ExecutionReducer, ExecutionTaskOutcome, MapTask, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment,
+    CapabilityReference, CompensationValueSource, CompletionCheckKind, ExecutionCondition,
+    ExecutionGoalContract, ExecutionGoalTemplate, ExecutionNode, ExecutionOperation,
+    ExecutionPlanDefinition, ExecutionReducer, ExecutionTaskOutcome, MapTask, PlanAmendment,
     PlanAmendmentOperation,
 };
 use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
@@ -252,12 +251,6 @@ pub fn validate_execution_task_outcome(outcome: &ExecutionTaskOutcome) -> Valida
 #[must_use]
 pub fn validate_plan_amendment(amendment: &PlanAmendment) -> ValidationReport {
     let mut report = ValidationReport::default();
-    if amendment.schema_version != PLAN_AMENDMENT_SCHEMA_VERSION {
-        report.push_error(
-            "plan_amendment.schema_version",
-            format!("schema_version must equal {PLAN_AMENDMENT_SCHEMA_VERSION}"),
-        );
-    }
     for (index, operation) in amendment.operations.iter().enumerate() {
         let root = format!("plan_amendment.operations[{index}]");
         match operation {
@@ -933,12 +926,6 @@ fn validate_execution_plan_at(
     definition: &ExecutionPlanDefinition,
     report: &mut ValidationReport,
 ) {
-    if definition.schema_version != EXECUTION_PLAN_SCHEMA_VERSION {
-        report.push_error(
-            format!("{root}.schema_version"),
-            format!("schema_version must equal {EXECUTION_PLAN_SCHEMA_VERSION}"),
-        );
-    }
     validate_json_schema(
         &format!("{root}.input_schema"),
         &definition.input_schema,

@@ -7,12 +7,11 @@ use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompensationInputBinding, CompensationInputMapping,
     CompensationValueSource, CompletionCheck, CompletionCheckKind, CoverageRequirement,
-    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionBudgetLimit, ExecutionCancelPolicy,
-    ExecutionCompensation, ExecutionCondition, ExecutionDeliverable, ExecutionGoalContract,
-    ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer,
-    ExecutionReference, ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult,
-    ExecutionUsage, MapTask, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment, PlanAmendmentOperation,
-    RetryPolicy,
+    ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCompensation, ExecutionCondition,
+    ExecutionDeliverable, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
+    ExecutionPlanDefinition, ExecutionReducer, ExecutionReference, ExecutionRequirement,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask, PlanAmendment,
+    PlanAmendmentOperation, RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_config::ExecutionConfig;
@@ -248,7 +247,7 @@ fn compile_rejects_an_unpinned_capability_contract() {
     // revision later checked by policy evaluation and ToolExecutor dispatch.
     let mut request = valid_request();
     request.catalog.capabilities[0].contract_revision.clear();
-    request.catalog.catalog_hash = catalog_hash(1, &request.catalog.capabilities)
+    request.catalog.catalog_hash = catalog_hash(&request.catalog.capabilities)
         .expect("rehash catalog with missing contract revision");
 
     let outcome = compile(request);
@@ -266,7 +265,7 @@ fn compile_rejects_external_schema_refs_unsorted_catalog_and_budget_excess() {
     request.plan.input_schema = json!({ "$ref": "https://example.com/schema.json" });
     request.catalog.capabilities.push(capability("aaa.first"));
     request.catalog.catalog_hash =
-        catalog_hash(1, &request.catalog.capabilities).expect("rehash unsorted catalog");
+        catalog_hash(&request.catalog.capabilities).expect("rehash unsorted catalog");
 
     let outcome = compile(request);
     assert!(outcome.compiled.is_none());
@@ -365,7 +364,7 @@ fn compile_rejects_every_reference_outside_catalog_or_authorization() {
     let mut outside_catalog = valid_request();
     outside_catalog.catalog.capabilities.clear();
     outside_catalog.catalog.catalog_hash =
-        catalog_hash(1, &[]).expect("hash empty capability catalog");
+        catalog_hash(&[]).expect("hash empty capability catalog");
     let outcome = compile(outside_catalog);
     assert!(outcome.compiled.is_none());
     assert!(
@@ -778,8 +777,7 @@ fn compile_rejects_installed_connector_policy_context_drift_after_deserializatio
     let mut capability = installed_connector_capability(7, installed_connector_tool_name());
     capability.policy_context.minimum_effect = ActionPolicyEffect::Allow;
     let catalog = ExecutionCapabilityCatalog {
-        schema_version: 1,
-        catalog_hash: catalog_hash(1, std::slice::from_ref(&capability))
+        catalog_hash: catalog_hash(std::slice::from_ref(&capability))
             .expect("hash intentionally drifted wire catalog"),
         capabilities: vec![capability],
     };
@@ -1147,7 +1145,6 @@ fn amendment_rejects_unknown_reference_path_before_persistence() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 4,
             reason: "Replace the pending terminal projection".to_string(),
             evidence: json!({}),
@@ -1208,7 +1205,6 @@ fn amendment_replaces_only_pending_work_with_a_distinct_identity() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 4,
             reason: "Replace pending terminal projection".to_string(),
             evidence: json!({ "reason": "new shape" }),
@@ -1255,7 +1251,6 @@ fn amendment_cannot_remove_compensation_after_forward_work_starts() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 3,
             reason: "Attempt to discard rollback after dispatch".to_string(),
             evidence: json!({}),
@@ -1302,7 +1297,6 @@ fn amendment_validation_retains_remaining_estimate_without_completed_work() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 4,
             reason: "Replace only unfinished output work".to_string(),
             evidence: json!({}),
@@ -1421,8 +1415,8 @@ fn amendment_rejects_references_unused_by_the_active_plan() {
         .capability_refs
         .push(added_capability.reference.clone());
     request.catalog.capabilities.push(added_capability.clone());
-    request.catalog.catalog_hash = catalog_hash(1, &request.catalog.capabilities)
-        .expect("hash catalog with unused capability");
+    request.catalog.catalog_hash =
+        catalog_hash(&request.catalog.capabilities).expect("hash catalog with unused capability");
     let added_skill =
         ArtifactRef::from_str("skill://unused-skill").expect("parse unused skill reference");
     request.authorization.skill_refs.push(added_skill.clone());
@@ -1445,7 +1439,6 @@ fn amendment_rejects_references_unused_by_the_active_plan() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 3,
             reason: "Try a newly authorized capability".to_string(),
             evidence: json!({}),
@@ -1565,7 +1558,6 @@ fn amendment_rejects_removed_or_increased_pending_node_budget() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 5,
             reason: "Replace pending work within its budget".to_string(),
             evidence: json!({}),
@@ -1719,7 +1711,6 @@ fn waiting_replan_amendment_removes_origin_and_replaces_every_pending_dependent(
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 7,
             reason: "Replace unsupported lookup".to_string(),
             evidence: json!({ "failure": "unsupported" }),
@@ -1825,7 +1816,6 @@ fn map_replacement_accepts_literal_subset_and_rejects_scope_broadening() {
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 2,
             reason: "Narrow failed map scope".to_string(),
             evidence: json!({}),
@@ -1886,7 +1876,7 @@ fn map_replacement_accepts_literal_subset_and_rejects_scope_broadening() {
 
 fn valid_request() -> CompileExecutionRequest {
     let capability = capability("orders.lookup");
-    let catalog_hash = catalog_hash(1, std::slice::from_ref(&capability)).expect("hash catalog");
+    let catalog_hash = catalog_hash(std::slice::from_ref(&capability)).expect("hash catalog");
     let reference = capability.reference.clone();
     CompileExecutionRequest {
         goal: ExecutionGoalContract {
@@ -1907,7 +1897,6 @@ fn valid_request() -> CompileExecutionRequest {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({
                 "type": "object",
@@ -1948,7 +1937,6 @@ fn valid_request() -> CompileExecutionRequest {
         },
         run_input: json!({ "order_id": "ord-1" }),
         catalog: ExecutionCapabilityCatalog {
-            schema_version: 1,
             capabilities: vec![capability],
             catalog_hash,
         },
@@ -2020,11 +2008,8 @@ fn compensated_request() -> CompileExecutionRequest {
 }
 
 fn rehash_catalog(request: &mut CompileExecutionRequest) {
-    request.catalog.catalog_hash = catalog_hash(
-        request.catalog.schema_version,
-        &request.catalog.capabilities,
-    )
-    .expect("rehash modified catalog fixture");
+    request.catalog.catalog_hash =
+        catalog_hash(&request.catalog.capabilities).expect("rehash modified catalog fixture");
 }
 
 fn assert_issue_code(outcome: CompileExecutionOutcome, code: &str) {
@@ -2086,7 +2071,6 @@ fn amendment_validation_for_output(
         goal: compiled.goal,
         active_plan: compiled.plan,
         amendment: PlanAmendment {
-            schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
             base_plan_revision: 9,
             reason: "Validate task-backed amendment immutability".to_string(),
             evidence: json!({}),

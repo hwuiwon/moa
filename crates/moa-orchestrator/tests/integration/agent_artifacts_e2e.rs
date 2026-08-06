@@ -93,6 +93,8 @@ fn spawn_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())

@@ -526,7 +526,6 @@ definition:
         constraints: []
         completion_checks: []
       plan:
-        schema_version: 2
         cancel_policy: retain_effects
         input_schema: { type: object }
         output_schema: { type: object }
@@ -616,7 +615,6 @@ definition:
         constraints: []
         completion_checks: []
       plan:
-        schema_version: 2
         cancel_policy: retain_effects
         input_schema: { type: object }
         output_schema: { type: object }
@@ -691,7 +689,6 @@ definition:
         constraints: []
         completion_checks: []
       plan:
-        schema_version: 2
         cancel_policy: retain_effects
         input_schema: { type: object }
         output_schema: { type: object }

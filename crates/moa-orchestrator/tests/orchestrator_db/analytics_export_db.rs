@@ -17,6 +17,11 @@ use moa_analytics_export::{
     AnalyticsExporter, DimExecutionRunRow, DimExecutionTaskRow, DimSessionRow, EventRawRow,
     ToolCallFactRow, TurnFactRow,
 };
+use moa_artifacts::execution_plan::{ExecutionCancelPolicy, ExecutionPlanDefinition};
+use moa_execution::{
+    capability::{ExecutionEstimate, ExecutionHash},
+    compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
+};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -216,7 +221,26 @@ async fn seed_execution_analytics_fixture(
     };
     let planning_context_uid = Uuid::now_v7();
     let planning_hash = "1".repeat(64);
-    let plan_hash = "2".repeat(64);
+    let plan_hash = ExecutionHash::from_bytes([0x22; 32]);
+    let plan_hash_text = plan_hash.to_string();
+    let plan = serde_json::to_value(CanonicalExecutionPlan {
+        definition: ExecutionPlanDefinition {
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_schema: json!({ "type": "object" }),
+            output_schema: json!({ "type": "object" }),
+            nodes: Vec::new(),
+        },
+        plan_hash,
+        catalog_hash: plan_hash,
+        estimate: ExecutionEstimate {
+            cost_microusd: 0,
+            tokens: 0,
+            tasks: 1,
+            tool_calls: 0,
+            retrieved_bytes: 0,
+        },
+        report: ExecutionValidationReport::default(),
+    })?;
 
     sqlx::query(
         "INSERT INTO moa.execution_planning_context \
@@ -241,7 +265,7 @@ async fn seed_execution_analytics_fixture(
          VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
                  '{\"requirements\":[{\"id\":\"r1\"},{\"id\":\"r2\"}], \
                    \"completion_checks\":[{\"id\":\"c1\"},{\"id\":\"c2\"}]}'::JSONB, \
-                 '{}'::JSONB, '{}'::JSONB, $6, $6, '{}'::JSONB, '{}'::JSONB, \
+                 $8, $8, $6, $6, '{}'::JSONB, '{}'::JSONB, \
                  jsonb_build_object( \
                     'kind', 'skill_template', \
                     'skill_template_ref', 'skill://billing-flow', \
@@ -253,8 +277,9 @@ async fn seed_execution_analytics_fixture(
     .bind(session)
     .bind(planning_context_uid)
     .bind(&planning_hash)
-    .bind(&plan_hash)
+    .bind(&plan_hash_text)
     .bind(fixture.skill_template_revision_uid)
+    .bind(plan)
     .execute(pool)
     .await?;
 

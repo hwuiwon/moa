@@ -162,13 +162,6 @@ pub(super) fn validate_catalog(
     catalog: &ExecutionCapabilityCatalog,
     report: &mut ExecutionValidationReport,
 ) {
-    if catalog.schema_version != 1 {
-        report.error(
-            "unsupported_catalog_version",
-            "catalog.schema_version",
-            "catalog schema_version must equal 1",
-        );
-    }
     validate_sorted_unique(
         catalog
             .capabilities
@@ -221,11 +214,11 @@ pub(super) fn validate_catalog(
             report,
         );
     }
-    match catalog_hash(catalog.schema_version, &catalog.capabilities) {
+    match catalog_hash(&catalog.capabilities) {
         Ok(hash) if hash != catalog.catalog_hash => report.error(
             "catalog_hash_mismatch",
             "catalog.catalog_hash",
-            "catalog_hash does not match canonical { schema_version, capabilities } JSON",
+            "catalog_hash does not match canonical capabilities JSON",
         ),
         Ok(_) => {}
         Err(error) => append_error(report, "catalog_hash_failed", "catalog.catalog_hash", error),

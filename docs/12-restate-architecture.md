@@ -352,7 +352,7 @@ new work.
 Task-local agents may use declared instruction-only skills and governed
 capabilities for a bounded number of turns. They return only `Completed`,
 `NeedsInput`, `NeedsReplan`, or `Failed`. `NeedsInput` parks the exact run/task.
-`NeedsReplan` asks the planner for a hard-v2 structured amendment using the immutable
+`NeedsReplan` asks the planner for a structured amendment using the immutable
 goal, active plan, completed outputs, evidence, remaining budget, and current
 catalog. The compiler rejects changes to running/completed work, cycles,
 recursive maps, task-identity reuse with new semantics, excess budget, and
@@ -452,7 +452,7 @@ MOA supports both:
 | Restate invocation cancellation | Operator hard-stops a stuck invocation through Restate admin APIs. |
 
 `Execution/cancel` is the product cancellation path for a run. It fences new
-task reservations and settles active tasks before applying the schema-v2 plan's
+task reservations and settles active tasks before applying the plan's
 explicit `retain_effects` or `compensate_committed` policy. Only after retained
 effects or reverse-order compensation reaches a durable settled state does the
 run publish terminal session delivery; all evidence is preserved.

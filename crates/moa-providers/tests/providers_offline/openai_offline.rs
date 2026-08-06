@@ -218,8 +218,8 @@ async fn openai_offline_streaming_disconnect_mid_response_surfaces_typed_error_w
 
     assert_eq!(partial, CompletionContent::Text("Hel".to_string()));
     assert!(
-        matches!(error, MoaError::ProviderError(_)),
-        "expected ProviderError, got {error:?}"
+        matches!(error, MoaError::ProviderQuirk(_)),
+        "expected ProviderQuirk, got {error:?}"
     );
 }
 

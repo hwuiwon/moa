@@ -174,9 +174,19 @@ binary(/^mock_loadtest_service_e2e$/)
 [profile.provider-e2e]
 inherits = "default"
 test-threads = 1
+# The coordinator provider binary also contains deterministic crash/recovery
+# fixtures. Those fixtures own a dedicated Restate instance and run in the
+# restate-recovery lane, so they cannot share the external Restate configured
+# for provider E2E. The paid 20x5 execution evaluation has a separate budget
+# authorization contract and must never be swept into the ordinary provider
+# lane merely because its binary name ends in `_provider_e2e`.
 default-filter = '''
-binary(/_provider_e2e$/)
-  | binary(/^(provider_matrix_live|query_rewrite_live)$/)
+(
+  binary(/_provider_e2e$/)
+    | binary(/^(provider_matrix_live|query_rewrite_live)$/)
+)
+  - (binary(/^coordinator_worker_behavior_provider_e2e$/) & test(/^recovery_matrix_/))
+  - binary(/^execution_eval_provider_e2e$/)
 '''
 
 [profile.eval-recorded]

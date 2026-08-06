@@ -238,6 +238,9 @@ fn runtime_parts(
         waiting_reasons: Vec::new(),
         wake_epoch: 1,
         processed_wake_epoch: 1,
+        next_compensation_sequence: 1,
+        pending_terminal: None,
+        manual_repair_required: false,
         idempotency_key: Some("execution-eval-fixture".to_string()),
         cancellation_reason: None,
         created_at: now,
@@ -361,6 +364,7 @@ fn task_record(run_uid: Uuid, item_key: &str, status: ExecutionTaskStatus) -> Ex
         kind: LogicalTaskKind::Capability {
             reference: capability_ref(),
         },
+        compensation_contract: None,
         retry: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -422,7 +426,6 @@ fn goal() -> ExecutionGoalContract {
 fn canonical_plan(catalog_hash: ExecutionHash) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),

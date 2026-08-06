@@ -2019,8 +2019,8 @@ mod tests {
         CapabilityReference, CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit,
         ExecutionCancelPolicy, ExecutionFailureClass, ExecutionGoalContract, ExecutionNode,
         ExecutionOperation, ExecutionPlanDefinition, ExecutionRequirement, ExecutionTaskOutcome,
-        ExecutionTaskResult, ExecutionUsage, GeneratedAmendmentCandidate,
-        PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+        ExecutionTaskResult, ExecutionUsage, GeneratedAmendmentCandidate, PlanAmendment,
+        PlanAmendmentOperation, RetryPolicy,
     };
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
@@ -2440,7 +2440,6 @@ mod tests {
 
     fn replan_plan() -> ExecutionPlanDefinition {
         ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
@@ -2575,7 +2574,6 @@ mod tests {
 
     fn replan_amendment_value() -> serde_json::Value {
         json!({
-            "schema_version": PLAN_AMENDMENT_SCHEMA_VERSION,
             "base_plan_revision": 1,
             "reason": "replace stale output",
             "evidence": {"shape": "changed"},
@@ -2718,7 +2716,6 @@ mod tests {
             goal: compiled.goal,
             active_plan: compiled.plan,
             amendment: PlanAmendment {
-                schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
                 base_plan_revision: 1,
                 reason: "Use the retained live capability".to_string(),
                 evidence: json!({"availability": "narrowed"}),

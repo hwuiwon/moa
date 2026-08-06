@@ -593,7 +593,6 @@ fn request(
 fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),

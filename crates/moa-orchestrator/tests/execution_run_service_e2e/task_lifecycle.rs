@@ -1599,7 +1599,6 @@ fn lifecycle_plan_with_output_schema(
     output_schema: Value,
 ) -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
-        schema_version: 2,
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),

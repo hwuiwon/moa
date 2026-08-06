@@ -90,7 +90,6 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({

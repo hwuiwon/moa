@@ -771,7 +771,7 @@ pub struct GeneratedPlanPlannerProvenance {
     pub compiler_report_hash: String,
     /// Committed active plan hash.
     pub final_plan_hash: String,
-    /// Zero or one compiler-repair calls.
+    /// Zero or one schema-regeneration or compiler-repair calls.
     pub repair_attempts: u8,
 }
 

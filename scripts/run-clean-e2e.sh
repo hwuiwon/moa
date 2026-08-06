@@ -786,6 +786,7 @@ if [[ "${LIVE}" -eq 1 ]]; then
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"
   ORCH_SCIM_PORT="${MOA_CLEAN_E2E_ORCH_SCIM_PORT:-19182}"
+  ORCH_CREDENTIAL_PORT="${MOA_CLEAN_E2E_ORCH_CREDENTIAL_PORT:-19183}"
   export MOA_RESTATE_DEPLOYMENT_URI="http://127.0.0.1:${ORCH_PORT}"
 
   echo
@@ -803,6 +804,7 @@ if [[ "${LIVE}" -eq 1 ]]; then
       --port "${ORCH_PORT}" \
       --health-port "${ORCH_HEALTH_PORT}" \
       --scim-port "${ORCH_SCIM_PORT}" \
+      --credential-port "${ORCH_CREDENTIAL_PORT}" \
       >"${ORCH_LOG}" 2>&1 &
   ORCH_PID=$!
   run_phase "wait for shared orchestrator" wait_for_http "http://127.0.0.1:${ORCH_HEALTH_PORT}/_health/live" "shared orchestrator"

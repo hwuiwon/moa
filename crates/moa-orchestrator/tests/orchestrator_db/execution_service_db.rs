@@ -217,7 +217,6 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
     };
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
@@ -467,7 +466,26 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
     let run_uid = Uuid::new_v4();
     let session_id = Uuid::new_v4();
     let planning_context_uid = Uuid::new_v4();
-    let hash = "0".repeat(64);
+    let plan_hash = ExecutionHash::from_bytes([0; 32]);
+    let hash = plan_hash.to_string();
+    let plan = serde_json::to_value(CanonicalExecutionPlan {
+        definition: ExecutionPlanDefinition {
+            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_schema: json!({ "type": "object" }),
+            output_schema: json!({ "type": "object" }),
+            nodes: Vec::new(),
+        },
+        plan_hash,
+        catalog_hash: plan_hash,
+        estimate: ExecutionEstimate {
+            cost_microusd: 0,
+            tokens: 0,
+            tasks: 0,
+            tool_calls: 0,
+            retrieved_bytes: 0,
+        },
+        report: ExecutionValidationReport::default(),
+    })?;
     sqlx::query(
         r#"
         INSERT INTO moa.execution_planning_context (
@@ -491,7 +509,7 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
             source_provenance, source_kind, input, status
-        ) VALUES ($1, $2, NULL, 0, $3, $4, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
+        ) VALUES ($1, $2, NULL, 0, $3, $4, 'owner', '{}'::JSONB, $5, $5,
                   $4, $4, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
                   '{"kind":"generated_plan"}'::JSONB,
                   'generated_plan', '{}'::JSONB, 'queued')
@@ -501,6 +519,7 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
     .bind(tenant_id)
     .bind(planning_context_uid)
     .bind(&hash)
+    .bind(&plan)
     .execute(pool)
     .await
     .expect_err("parent session is mandatory");
@@ -520,7 +539,7 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             capability_catalog, authorization_envelope, pinned_instruction_skills,
             source_provenance, source_kind,
             input, status, queued_at
-        ) VALUES ($1, $2, $3, 0, $4, $5, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
+        ) VALUES ($1, $2, $3, 0, $4, $5, 'owner', '{}'::JSONB, $6, $6,
                   $5, $5, '{"schema_version":1}'::JSONB,
                   '{"capability_refs":[],"skill_refs":[]}'::JSONB, '[]'::JSONB,
                   '{"kind":"generated_plan"}'::JSONB,
@@ -532,6 +551,7 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
     .bind(session_id)
     .bind(planning_context_uid)
     .bind(hash)
+    .bind(plan)
     .execute(pool)
     .await?;
     let immutable = sqlx::query(

@@ -96,14 +96,14 @@ VALUES (
     NULL,
     NULL,
     'artifact-release',
-    decode('431821acccbf2fbeae626343d60915638e7372834d19aed7b39b3a5db32b170f', 'hex'),
+    decode('8b19318ec320a8b938d675b1b2ac1d480f9a62e0ac118ca9d9e39c4aa4ff4f20', 'hex'),
     '{
       "domain":"artifact-release",
       "model":"gpt-5.4",
       "provider":"openai",
       "decoding":{"temperature_milli":200,"max_output_tokens":512,"seeded":true},
       "system_prompt":"You are the simulated user in a Behavior Lab trial. Follow only the supplied persona, profile, scenario, and data-bundle context. Never call tools or claim to have changed external state. Return one structured simulator-turn response. Set message to the next user turn only for continue; set it to an empty string for terminal decisions.",
-      "protocol":{"id":"moa.behavior_lab.simulator_turn","version":1,"schema_hash":"7865a9b6629d915365f3c51d83b56f0a39e8fbcb918889fefa9365e3a9527fae"},
+      "protocol":{"id":"moa.behavior_lab.simulator_turn","version":1,"schema_hash":"668dd1cf1eb091957e045df811e31be7a987bae08886321abffd50445af7ca63"},
       "context_contract_hash":"4dc4b941df22f89c62f8bfb3c88964ebe1e6be18068d10b4fa140ea634f1a30c",
       "calibration_cohort":{"cohort_id":"platform-release-synthetic-v1","independent_units":100,"content_hash":"5151515151515151515151515151515151515151515151515151515151515151","consent_basis":"authorized_internal_dogfood","deidentification":"synthetic_surrogate"},
       "validity":{"valid_from":"2025-01-01T00:00:00Z","valid_until":"2035-01-01T00:00:00Z"}

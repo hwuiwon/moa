@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use moa_artifacts::execution_plan::{ExecutionCancelPolicy, ExecutionPlanDefinition};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::{
     action_policy::{
@@ -13,7 +14,11 @@ use moa_core::types::{
     identifiers::{TenantId, ToolCallId},
     tools::ToolCallRequest,
 };
-use moa_execution::wire::ExecutionActionReviewResolution;
+use moa_execution::{
+    capability::{ExecutionEstimate, ExecutionHash},
+    compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
+    wire::ExecutionActionReviewResolution,
+};
 use moa_orchestrator::services::{
     action_reviews::{
         ExecutionActionReviewSettlement, SettleExecutionActionReviewRequest,
@@ -809,7 +814,27 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
     let task_uid = Uuid::new_v4();
     let session_id = Uuid::new_v4();
     let planning_context_uid = Uuid::new_v4();
-    let hash = "0".repeat(64);
+    let plan_hash = ExecutionHash::from_bytes([0; 32]);
+    let hash = plan_hash.to_string();
+    let plan = serde_json::to_value(CanonicalExecutionPlan {
+        definition: ExecutionPlanDefinition {
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_schema: serde_json::json!({ "type": "object" }),
+            output_schema: serde_json::json!({ "type": "object" }),
+            nodes: Vec::new(),
+        },
+        plan_hash,
+        catalog_hash: plan_hash,
+        estimate: ExecutionEstimate {
+            cost_microusd: 0,
+            tokens: 0,
+            tasks: 1,
+            tool_calls: 0,
+            retrieved_bytes: 0,
+        },
+        report: ExecutionValidationReport::default(),
+    })
+    .expect("execution plan fixture should serialize");
     sqlx::query(
         r#"
         INSERT INTO moa.execution_planning_context (
@@ -835,8 +860,8 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
             capability_catalog, authorization_envelope, pinned_instruction_skills,
             source_provenance, source_kind,
             input, status, queued_at
-        ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner', '{}'::JSONB, '{}'::JSONB,
-                  '{}'::JSONB, $5, $5, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
+        ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner', '{}'::JSONB, $6,
+                  $6, $5, $5, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
                   '{"kind":"generated_plan"}'::JSONB,
                   'generated_plan', '{}'::JSONB, 'queued', NOW())
         "#,
@@ -846,6 +871,7 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
     .bind(session_id)
     .bind(planning_context_uid)
     .bind(hash)
+    .bind(plan)
     .execute(pool)
     .await
     .expect("execution run should insert");

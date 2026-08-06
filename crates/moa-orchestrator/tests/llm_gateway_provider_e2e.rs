@@ -35,6 +35,8 @@ fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
         .env("RUST_LOG", "info")
@@ -65,12 +67,21 @@ fn configured_env(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn truthy_env(key: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, local Restate/Postgres, and a provider API key"]
 async fn session_turn_round_trip_reaches_private_llm_gateway() -> Result<()> {
     // Pins: a public Session turn reaches the ingress-private LLMGateway through
     // Restate service-to-service invocation and persists real provider usage.
-    if std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() != Ok("1") {
+    if !truthy_env("MOA_RUN_LIVE_PROVIDER_TESTS") {
         return Ok(());
     }
     let model = live_model().context(

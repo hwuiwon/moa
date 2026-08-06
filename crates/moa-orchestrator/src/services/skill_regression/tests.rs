@@ -355,7 +355,6 @@ fn output_only_template() -> ExecutionPlanTemplate {
             }]
         },
         "plan": {
-            "schema_version": 2,
             "cancel_policy": "retain_effects",
             "input_schema": {
                 "type": "object",
@@ -437,7 +436,6 @@ fn governed_capability_template(
             }]
         },
         "plan": {
-            "schema_version": 2,
             "cancel_policy": "retain_effects",
             "input_schema": {
                 "type": "object",

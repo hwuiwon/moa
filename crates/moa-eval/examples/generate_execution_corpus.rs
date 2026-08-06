@@ -472,7 +472,6 @@ fn contract_case(index: usize) -> ExecutionContractCase {
             ],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({
                 "type": "object",

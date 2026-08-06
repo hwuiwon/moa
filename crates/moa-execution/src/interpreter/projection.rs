@@ -4,10 +4,7 @@ use super::*;
 
 pub(super) fn validate_projection(request: &ScheduleRequest) -> Result<()> {
     validate_scheduler_catalog(&request.catalog)?;
-    let canonical_catalog_hash = catalog_hash(
-        request.catalog.schema_version,
-        &request.catalog.capabilities,
-    )?;
+    let canonical_catalog_hash = catalog_hash(&request.catalog.capabilities)?;
     if canonical_catalog_hash != request.plan.catalog_hash
         || request.catalog.catalog_hash != canonical_catalog_hash
     {
@@ -106,11 +103,6 @@ pub(super) fn validate_projection(request: &ScheduleRequest) -> Result<()> {
 }
 
 pub(super) fn validate_scheduler_catalog(catalog: &ExecutionCapabilityCatalog) -> Result<()> {
-    if catalog.schema_version != 1 {
-        return Err(Error::InvalidProjection {
-            message: "scheduler capability catalog schema_version must equal 1".to_string(),
-        });
-    }
     let mut previous = None;
     for capability in &catalog.capabilities {
         if capability.estimate.tasks != 1 {

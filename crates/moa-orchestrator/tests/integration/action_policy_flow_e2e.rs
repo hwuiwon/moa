@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use moa_artifacts::execution_plan::{
-    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionCancelPolicy, ExecutionGoalContract,
-    ExecutionPlanDefinition, RetryPolicy,
+    ExecutionCancelPolicy, ExecutionGoalContract, ExecutionPlanDefinition, RetryPolicy,
 };
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
@@ -990,7 +989,6 @@ async fn insert_execution_review_task(
     };
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),

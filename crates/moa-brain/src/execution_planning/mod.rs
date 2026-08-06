@@ -204,28 +204,48 @@ async fn plan_generated(
     )
     .await?;
     let mut audits = vec![initial_call.audit.clone()];
+    let (parsed, repair_attempts) = match initial_call.parsed {
+        ParsedProviderCall::SchemaRejected(_) if request.config.planner_repair_attempts > 0 => {
+            let repair_request = request::initial_schema_repair_completion_request(&request)
+                .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+            let repair_call = call_initial_provider(
+                provider,
+                &request,
+                repair_request,
+                ExecutionPlannerCallKind::InitialRepair,
+                1,
+            )
+            .await?;
+            audits.push(repair_call.audit.clone());
+            (repair_call.parsed, 1)
+        }
+        parsed => (parsed, 0),
+    };
     let ParsedProviderCall::Candidate {
         candidate,
         candidate_json,
         candidate_hash,
         model,
-    } = initial_call.parsed
+    } = parsed
     else {
-        return Ok(terminal_provider_result(initial_call.parsed, audits));
+        return Ok(terminal_provider_result(parsed, audits));
     };
 
     let first = compile_candidate(
         &request,
         &candidate,
         ExecutionCompileSource::GeneratedPlan,
-        &generated_operation_key(&request, 0),
+        &generated_operation_key(&request, repair_attempts),
     )?;
-    replace_planner_audit_after_compile(&mut audits[0], &first, &candidate_json)?;
+    let active_planner_audit = audits.last_mut().ok_or_else(|| {
+        MoaError::ValidationError("active planner audit was not recorded".to_string())
+    })?;
+    replace_planner_audit_after_compile(active_planner_audit, &first, &candidate_json)?;
     audits.push(compile_audit(
         &request,
         &first,
         ExecutionCompileSource::GeneratedPlan,
-        generated_operation_key(&request, 0),
+        generated_operation_key(&request, repair_attempts),
     ));
     if first.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_generated(
@@ -234,12 +254,13 @@ async fn plan_generated(
             candidate_hash,
             model,
             first,
-            0,
+            repair_attempts,
             audits,
         );
     }
     if !should_attempt_repair(first.classification, &first.outcome.report)
         || request.config.planner_repair_attempts == 0
+        || repair_attempts > 0
     {
         return Ok(classified_terminal(first.classification, audits));
     }
@@ -339,6 +360,8 @@ enum ParsedProviderCall {
         candidate_hash: String,
         model: String,
     },
+    /// Strict response-schema rejection whose raw response must not be persisted or replayed.
+    SchemaRejected(String),
     /// Planner-authored terminal verdict whose message is safe to surface.
     Unsupported(String),
     /// Provider/transport failure whose raw message must not reach a user.
@@ -414,7 +437,7 @@ async fn call_initial_provider(
     }
     let candidate = match serde_json::from_str::<GeneratedExecutionCandidate>(&raw) {
         Ok(candidate) => candidate,
-        Err(_) => {
+        Err(error) => {
             let raw_hash =
                 execution_planning_hash("moa.execution.planner-response", raw.as_bytes());
             let report = bounded_audit_report(
@@ -422,13 +445,15 @@ async fn call_initial_provider(
                 vec![ExecutionAuditViolation {
                     code: "invalid_generated_execution_candidate".to_string(),
                     path: "/".to_string(),
-                    message: "provider response does not match GeneratedExecutionCandidate"
-                        .to_string(),
+                    message: json_parse_failure_message(
+                        "provider response does not match GeneratedExecutionCandidate",
+                        &error,
+                    ),
                 }],
             )
             .map_err(contract_error)?;
             return Ok(ProviderCall {
-                parsed: ParsedProviderCall::Unsupported(
+                parsed: ParsedProviderCall::SchemaRejected(
                     "planner response failed the strict response schema".to_string(),
                 ),
                 audit: planner_audit(
@@ -515,7 +540,6 @@ fn compile_candidate(
 ) -> Result<CandidateCompile> {
     let preimage = InitialCompileCandidate {
         kind: "initial",
-        schema_version: 1,
         source,
         goal: &candidate.goal,
         plan: &candidate.plan,
@@ -567,7 +591,6 @@ fn compile_candidate(
 #[derive(Serialize)]
 struct InitialCompileCandidate<'a> {
     kind: &'static str,
-    schema_version: u8,
     source: ExecutionCompileSource,
     goal: &'a ExecutionGoalContract,
     plan: &'a moa_artifacts::execution_plan::ExecutionPlanDefinition,
@@ -816,6 +839,7 @@ fn terminal_provider_result(
     audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionPlanningResult {
     match parsed {
+        ParsedProviderCall::SchemaRejected(message) => unsupported(message, audits),
         ParsedProviderCall::Unsupported(message) => unsupported(message, audits),
         ParsedProviderCall::ProviderFailure(message) => provider_failure(message, audits),
         ParsedProviderCall::Candidate { .. } => unsupported("invalid planner state", audits),
@@ -886,6 +910,15 @@ fn duration_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+fn json_parse_failure_message(prefix: &str, error: &serde_json::Error) -> String {
+    format!(
+        "{prefix}: {:?} at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    )
+}
+
 fn contract_error(
     error: moa_core::types::execution_planning::ExecutionPlanningContractError,
 ) -> MoaError {
@@ -919,22 +952,43 @@ pub async fn plan_amendment(
     )
     .await?;
     let mut audits = vec![first_call.audit.clone()];
+    let (parsed, repair_attempts) = match first_call.parsed {
+        ParsedAmendmentCall::SchemaRejected(_) if request.config.planner_repair_attempts > 0 => {
+            let completion = request::amendment_schema_repair_completion_request(&request)
+                .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+            let repair_call = call_amendment_provider(
+                provider,
+                &request,
+                completion,
+                ExecutionPlannerCallKind::AmendmentRepair,
+                1,
+            )
+            .await?;
+            audits.push(repair_call.audit.clone());
+            (repair_call.parsed, 1)
+        }
+        parsed => (parsed, 0),
+    };
     let ParsedAmendmentCall::Candidate {
         candidate,
         candidate_json,
         candidate_hash,
-    } = first_call.parsed
+    } = parsed
     else {
-        return Ok(amendment_terminal_provider(first_call.parsed, audits));
+        return Ok(amendment_terminal_provider(parsed, audits));
     };
     let first = compile_amendment_candidate(&request, &candidate)?;
-    replace_amendment_planner_audit_after_compile(&mut audits[0], &first, &candidate_json)?;
+    let active_planner_audit = audits.last_mut().ok_or_else(|| {
+        MoaError::ValidationError("active amendment planner audit was not recorded".to_string())
+    })?;
+    replace_amendment_planner_audit_after_compile(active_planner_audit, &first, &candidate_json)?;
     audits.push(amendment_compile_audit(&request, &first));
     if first.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_amendment(candidate, candidate_hash, first, audits);
     }
     if !should_attempt_repair(first.classification, &first.outcome.report)
         || request.config.planner_repair_attempts == 0
+        || repair_attempts > 0
     {
         return Ok(amendment_classified_terminal(first.classification, audits));
     }
@@ -985,6 +1039,8 @@ enum ParsedAmendmentCall {
         candidate_json: String,
         candidate_hash: String,
     },
+    /// Strict response-schema rejection whose raw response must not be persisted or replayed.
+    SchemaRejected(String),
     /// Planner-authored terminal verdict whose message is safe to surface.
     Unsupported(String),
     /// Provider/transport failure whose raw message must not reach a user.
@@ -1060,19 +1116,21 @@ async fn call_amendment_provider(
     }
     let candidate = match serde_json::from_str::<GeneratedAmendmentCandidate>(&raw) {
         Ok(candidate) => candidate,
-        Err(_) => {
+        Err(error) => {
             let report = bounded_audit_report(
                 false,
                 vec![ExecutionAuditViolation {
                     code: "invalid_generated_amendment_candidate".to_string(),
                     path: "/".to_string(),
-                    message: "provider response does not match GeneratedAmendmentCandidate"
-                        .to_string(),
+                    message: json_parse_failure_message(
+                        "provider response does not match GeneratedAmendmentCandidate",
+                        &error,
+                    ),
                 }],
             )
             .map_err(contract_error)?;
             return Ok(AmendmentProviderCall {
-                parsed: ParsedAmendmentCall::Unsupported(
+                parsed: ParsedAmendmentCall::SchemaRejected(
                     "amendment response failed the strict response schema".to_string(),
                 ),
                 audit: amendment_planner_audit(
@@ -1154,7 +1212,6 @@ fn compile_amendment_candidate(
     #[derive(Serialize)]
     struct AmendmentCompileCandidate<'a> {
         kind: &'static str,
-        schema_version: u8,
         source: &'static str,
         goal: &'a ExecutionGoalContract,
         base_plan_hash: String,
@@ -1162,7 +1219,6 @@ fn compile_amendment_candidate(
     }
     let preimage = AmendmentCompileCandidate {
         kind: "amendment",
-        schema_version: 1,
         source: "amendment",
         goal: &request.evidence.goal,
         base_plan_hash: request.evidence.active_plan.plan_hash.to_string(),
@@ -1324,6 +1380,7 @@ fn amendment_terminal_provider(
     audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionAmendmentPlanningResult {
     match parsed {
+        ParsedAmendmentCall::SchemaRejected(message) => amendment_unsupported(message, audits),
         ParsedAmendmentCall::Unsupported(message) => amendment_unsupported(message, audits),
         ParsedAmendmentCall::ProviderFailure(message) => {
             amendment_provider_failure(message, audits)

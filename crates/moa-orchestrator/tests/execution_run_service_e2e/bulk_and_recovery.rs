@@ -623,7 +623,6 @@ fn bulk_candidate(
             ],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: report_schema.clone(),

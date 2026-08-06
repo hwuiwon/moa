@@ -127,7 +127,6 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({
@@ -341,7 +340,6 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
@@ -697,7 +695,6 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),

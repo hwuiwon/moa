@@ -121,11 +121,9 @@ pub struct ExecutionAuthorizationEnvelope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionCapabilityCatalog {
-    /// Capability-catalog schema version, which must be `1`.
-    pub schema_version: u32,
     /// Sorted, duplicate-free governed capabilities.
     pub capabilities: Vec<ExecutionCapability>,
-    /// Canonical hash of `{ schema_version, capabilities }`.
+    /// Canonical hash of the capabilities.
     pub catalog_hash: ExecutionHash,
 }
 
@@ -156,9 +154,8 @@ impl ExecutionCapabilityCatalog {
             .into_iter()
             .map(|(_, capability)| capability)
             .collect::<Vec<_>>();
-        let catalog_hash = catalog_hash(1, &capabilities)?;
+        let catalog_hash = catalog_hash(&capabilities)?;
         Ok(Self {
-            schema_version: 1,
             capabilities,
             catalog_hash,
         })
@@ -685,23 +682,8 @@ impl ExecutionEstimate {
 }
 
 /// Computes the canonical catalog hash, excluding the `catalog_hash` field.
-pub fn catalog_hash(
-    schema_version: u32,
-    capabilities: &[ExecutionCapability],
-) -> Result<ExecutionHash> {
-    #[derive(Serialize)]
-    struct CatalogHashInput<'a> {
-        schema_version: u32,
-        capabilities: &'a [ExecutionCapability],
-    }
-
-    hash_serializable(
-        CATALOG_HASH_DOMAIN,
-        &CatalogHashInput {
-            schema_version,
-            capabilities,
-        },
-    )
+pub fn catalog_hash(capabilities: &[ExecutionCapability]) -> Result<ExecutionHash> {
+    hash_serializable(CATALOG_HASH_DOMAIN, capabilities)
 }
 
 /// Computes the canonical hash of one execution-plan DAG.
@@ -729,14 +711,12 @@ pub fn amendment_hash(amendment: &PlanAmendment) -> Result<ExecutionHash> {
 pub fn amendment_operations_fingerprint(amendment: &PlanAmendment) -> Result<ExecutionHash> {
     #[derive(Serialize)]
     struct AmendmentOperationsHashInput<'a> {
-        schema_version: u32,
         operations: &'a [PlanAmendmentOperation],
     }
 
     hash_serializable(
         AMENDMENT_OPERATIONS_HASH_DOMAIN,
         &AmendmentOperationsHashInput {
-            schema_version: amendment.schema_version,
             operations: &amendment.operations,
         },
     )
@@ -862,13 +842,13 @@ mod tests {
         ])
         .expect("catalog should build");
 
-        assert_eq!(catalog.schema_version, 1);
         assert_eq!(catalog.capabilities[0].reference.name, "alpha");
         assert_eq!(catalog.capabilities[1].reference.name, "zeta");
+        let encoded = serde_json::to_value(&catalog).expect("catalog should serialize");
+        assert!(encoded.get("schema_version").is_none());
         assert_eq!(
             catalog.catalog_hash,
-            catalog_hash(catalog.schema_version, &catalog.capabilities)
-                .expect("catalog hash should recompute")
+            catalog_hash(&catalog.capabilities).expect("catalog hash should recompute")
         );
         assert!(
             catalog

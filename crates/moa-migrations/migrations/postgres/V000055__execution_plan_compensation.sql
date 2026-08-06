@@ -1,7 +1,6 @@
--- Durable execution-plan v2 compensation state. The Rust migration runner
--- rewrites every inactive v1 run before this v2-only schema is installed.
+-- Durable execution-plan compensation state.
 
-CREATE OR REPLACE FUNCTION moa.execution_plan_definition_is_v2(candidate JSONB)
+CREATE OR REPLACE FUNCTION moa.execution_plan_definition_is_valid(candidate JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 IMMUTABLE
@@ -9,8 +8,10 @@ AS $$
 DECLARE
     node JSONB;
 BEGIN
-    IF jsonb_typeof(candidate) <> 'object'
-       OR candidate ->> 'schema_version' <> '2'
+    IF NOT moa.execution_json_object_has_exact_keys(
+           candidate,
+           ARRAY['cancel_policy', 'input_schema', 'output_schema', 'nodes']
+       )
        OR candidate ->> 'cancel_policy' NOT IN (
            'retain_effects', 'compensate_committed'
        )
@@ -18,7 +19,13 @@ BEGIN
         RETURN FALSE;
     END IF;
     FOR node IN SELECT value FROM jsonb_array_elements(candidate -> 'nodes') LOOP
-        IF jsonb_typeof(node) <> 'object' OR NOT node ? 'compensation' THEN
+        IF NOT moa.execution_json_object_has_exact_keys(
+            node,
+            ARRAY[
+                'id', 'requirement_ids', 'depends_on', 'when', 'input',
+                'output_schema', 'operation', 'compensation', 'retry', 'budget'
+            ]
+        ) THEN
             RETURN FALSE;
         END IF;
     END LOOP;
@@ -28,18 +35,21 @@ EXCEPTION
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION moa.execution_plan_snapshot_is_v2(candidate JSONB)
+CREATE OR REPLACE FUNCTION moa.execution_plan_snapshot_is_valid(candidate JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql
 IMMUTABLE
 AS $$
-    SELECT jsonb_typeof(candidate) = 'object'
-       AND moa.execution_plan_definition_is_v2(candidate -> 'definition')
+    SELECT moa.execution_json_object_has_exact_keys(
+               candidate,
+               ARRAY['definition', 'plan_hash', 'catalog_hash', 'estimate', 'report']
+           )
+       AND moa.execution_plan_definition_is_valid(candidate -> 'definition')
        AND jsonb_typeof(candidate -> 'plan_hash') = 'string'
        AND candidate ->> 'plan_hash' ~ '^[0-9a-f]{64}$'
 $$;
 
-CREATE OR REPLACE FUNCTION moa.skill_execution_template_is_v2(candidate JSONB)
+CREATE OR REPLACE FUNCTION moa.skill_execution_template_is_valid(candidate JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 IMMUTABLE
@@ -52,7 +62,7 @@ BEGIN
         RETURN TRUE;
     END IF;
     plan := candidate #> '{definition,spec,execution_plan,plan}';
-    RETURN moa.execution_plan_definition_is_v2(plan);
+    RETURN moa.execution_plan_definition_is_valid(plan);
 EXCEPTION
     WHEN OTHERS THEN RETURN FALSE;
 END;
@@ -120,10 +130,10 @@ ALTER TABLE moa.execution_run
     ADD COLUMN pending_terminal_cause JSONB,
     ADD COLUMN pending_terminal_output JSONB,
     ADD COLUMN manual_repair_required BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD CONSTRAINT execution_run_initial_plan_v2_check
-        CHECK (moa.execution_plan_snapshot_is_v2(initial_plan)),
-    ADD CONSTRAINT execution_run_active_plan_v2_check
-        CHECK (moa.execution_plan_snapshot_is_v2(active_plan)),
+    ADD CONSTRAINT execution_run_initial_plan_check
+        CHECK (moa.execution_plan_snapshot_is_valid(initial_plan)),
+    ADD CONSTRAINT execution_run_active_plan_check
+        CHECK (moa.execution_plan_snapshot_is_valid(active_plan)),
     ADD CONSTRAINT execution_run_pending_terminal_check CHECK (
         (
             pending_terminal_status IS NULL
@@ -181,8 +191,8 @@ CREATE INDEX execution_run_nonterminal_idx
     );
 
 ALTER TABLE moa.artifact_revision
-    ADD CONSTRAINT artifact_revision_skill_execution_template_v2_check
-        CHECK (moa.skill_execution_template_is_v2(definition));
+    ADD CONSTRAINT artifact_revision_skill_execution_template_check
+        CHECK (moa.skill_execution_template_is_valid(definition));
 
 ALTER TABLE public.tenant_action_reviews
     DROP CONSTRAINT tenant_action_reviews_status_check,

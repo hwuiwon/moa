@@ -13,6 +13,8 @@ pub struct OrchestratorPorts {
     pub health: u16,
     /// SCIM endpoint port passed to `moa-orchestrator --scim-port`.
     pub scim: u16,
+    /// Connector credential ingress port passed to `moa-orchestrator --credential-port`.
+    pub credential: u16,
 }
 
 /// Reserves a unique set of localhost ports for one orchestrator test process.
@@ -21,6 +23,7 @@ pub fn reserve_orchestrator_ports() -> Result<OrchestratorPorts> {
         restate: reserve_port().context("reserve Restate handler port")?,
         health: reserve_port().context("reserve health probe port")?,
         scim: reserve_port().context("reserve SCIM endpoint port")?,
+        credential: reserve_port().context("reserve connector credential port")?,
     })
 }
 

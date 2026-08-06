@@ -480,7 +480,7 @@ The plan is an acyclic graph with exactly `Capability`, `Agent`, `Map`,
 or agent and cannot nest another map. Agent tasks can use declared
 instruction-only skills and capabilities with bounded turns and budgets. They
 cannot mutate the graph. Unexpected conditions return typed `NeedsInput` or
-`NeedsReplan`; every hard-v2 amendment is compiled, authorization-narrowing, budgeted,
+`NeedsReplan`; every amendment is compiled, authorization-narrowing, budgeted,
 persisted in `plan_history`, and applied only to pending or downstream work.
 Repeated hashes, recurring failure fingerprints, no progress, deadline, or
 resource exhaustion terminate with exact partial/blocked coverage instead of an

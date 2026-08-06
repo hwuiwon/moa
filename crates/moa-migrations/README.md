@@ -10,7 +10,7 @@ URL; runtime startup validates that the complete history is already present.
 
 `migrations/postgres/` is a flat, append-only sequence with exactly one regular
 file for every version from `V000001` through the current maximum, currently
-`V000055`. Filenames
+`V000056`. Filenames
 must match `V<six digits>__<lowercase_snake_case>.sql`.
 
 `V000001__contiguous_history_epoch.sql` marks the current fresh-install-only
@@ -27,8 +27,8 @@ or translation path:
 The 2026-08-03 hard-reset epoch removes the retired per-user token-vault tables
 from the migrations that originally created them. V29 remains a no-op marker so
 the sequence stays contiguous, typed connector origins are V53, the one-way
-session `paused` to `idle` lifecycle cutover is V54, and durable execution-plan
-compensation is V55. Any database
+session `paused` to `idle` lifecycle cutover is V54, durable execution-plan
+compensation is V55, and replay-stable ingestion apply outcomes are V56. Any database
 that applied an earlier checksum for the rewritten files must be rebuilt; the
 runner intentionally rejects that divergence before DDL.
 
@@ -49,17 +49,6 @@ values, and writes `session_status_idle_v54` to
 receipt with the runtime database credential before the hard reader can start.
 Do not emulate the admission stop by setting an admission limit to zero: zero
 means unlimited in the runtime admission model.
-
-V55 is also a coordinated one-way cutover. Stop new durable-plan admission and
-drain or cancel every active v1 execution run before invoking the migration
-command. While holding the central migration lock, the Rust runner rejects
-active or malformed v1 state, rewrites only inactive run snapshots and plan
-history to v2, and recomputes the domain-separated plan, amendment, active, and
-confirmation hashes before refinery installs v2-only constraints. Immutable
-skill artifact revisions carrying a v1 execution template are rejected with
-their revision IDs; replace or reset those revisions rather than mutating their
-source bytes, canonical digest, or activation evidence. There is no v1 reader,
-alias, or dual-read deployment window.
 
 ## Ownership and focused fragments
 

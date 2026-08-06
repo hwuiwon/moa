@@ -2,12 +2,11 @@ use moa_artifacts::document::ArtifactDocument;
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompensationInputBinding, CompensationInputMapping,
     CompensationValueSource, CompletionCheck, CompletionCheckKind, CoverageRequirement,
-    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionCancelPolicy, ExecutionCompensation,
-    ExecutionCondition, ExecutionConstraint, ExecutionDeliverable, ExecutionGoalContract,
-    ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer,
-    ExecutionReference, ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult,
-    ExecutionUsage, InputAudience, MapTask, PLAN_AMENDMENT_SCHEMA_VERSION, PlanAmendment,
-    PlanAmendmentOperation, RetryPolicy,
+    ExecutionCancelPolicy, ExecutionCompensation, ExecutionCondition, ExecutionConstraint,
+    ExecutionDeliverable, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
+    ExecutionPlanDefinition, ExecutionReducer, ExecutionReference, ExecutionRequirement,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, InputAudience, MapTask,
+    PlanAmendment, PlanAmendmentOperation, RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::validation::{
@@ -215,7 +214,6 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
                             "completion_checks": []
                         },
                         "plan": {
-                            "schema_version": 2,
                             "cancel_policy": "retain_effects",
                             "input_schema": { "type": "object" },
                             "output_schema": { "type": "object" },
@@ -304,21 +302,15 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
 }
 
 #[test]
-fn execution_plan_rejects_schema_and_unstable_or_duplicate_ids() {
-    // Pins: only hard-v2 plans, nodes, and requirement mappings have stable identities.
+fn execution_plan_rejects_invalid_schema_and_unstable_or_duplicate_ids() {
+    // Pins: plans, nodes, and requirement mappings have valid schemas and stable identities.
     let mut plan = valid_plan();
-    plan.schema_version = 1;
     plan.input_schema = json!([]);
     plan.nodes[0].id = "Bad.ID".to_string();
     plan.nodes[0].requirement_ids = vec!["req_one".to_string(), "req_one".to_string()];
     plan.nodes[1].id = "Bad.ID".to_string();
 
     let report = validate_execution_plan_definition(&plan);
-    assert_error(
-        &report,
-        "execution_plan.schema_version",
-        "schema_version must equal 2",
-    );
     assert_error(
         &report,
         "execution_plan.input_schema",
@@ -337,31 +329,15 @@ fn execution_plan_rejects_schema_and_unstable_or_duplicate_ids() {
 }
 
 #[test]
-fn execution_plan_v2_round_trips_and_v1_is_rejected() {
-    // Pins: persisted execution plans admit only the hard-v2 cancellation/compensation schema.
+fn execution_plan_round_trips_without_a_nested_version() {
+    // Pins: persisted execution plans use the current canonical shape without nested metadata.
     let plan = valid_plan();
-    let encoded = serde_json::to_value(&plan).expect("serialize v2 plan");
-    assert_eq!(encoded["schema_version"], json!(2));
+    let encoded = serde_json::to_value(&plan).expect("serialize plan");
+    assert!(encoded.get("schema_version").is_none());
     assert_eq!(encoded["cancel_policy"], json!("retain_effects"));
     assert_eq!(
-        serde_json::from_value::<ExecutionPlanDefinition>(encoded)
-            .expect("deserialize exact v2 plan"),
+        serde_json::from_value::<ExecutionPlanDefinition>(encoded).expect("deserialize exact plan"),
         plan
-    );
-
-    let mut persisted_v1 = serde_json::to_value(valid_plan()).expect("serialize plan fixture");
-    persisted_v1["schema_version"] = json!(1);
-    assert!(
-        serde_json::from_value::<ExecutionPlanDefinition>(persisted_v1).is_err(),
-        "v1 persisted JSON must fail at the hard reader boundary"
-    );
-
-    let mut v1 = valid_plan();
-    v1.schema_version = 1;
-    assert_error(
-        &validate_execution_plan_definition(&v1),
-        "execution_plan.schema_version",
-        "schema_version must equal 2",
     );
 }
 
@@ -876,10 +852,10 @@ fn execution_plan_rejects_invalid_map_pointers_and_duplicate_static_keys() {
 }
 
 #[test]
-fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() {
+fn outcome_and_amendment_envelopes_reject_graph_replacement() {
     // Pins: task outcomes and amendments cannot carry undeclared graph, budget, or authorization controls.
     let outcome = ExecutionTaskOutcome {
-        schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
+        schema_version: 2,
         usage: ExecutionUsage {
             cost_microusd: 1,
             tokens: 2,
@@ -909,27 +885,19 @@ fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() 
     );
 
     let valid_amendment = PlanAmendment {
-        schema_version: PLAN_AMENDMENT_SCHEMA_VERSION,
         base_plan_revision: 3,
         reason: "Need another source.".to_string(),
         evidence: json!({ "missing": "source" }),
         operations: vec![],
     };
-    let encoded = serde_json::to_value(&valid_amendment).expect("serialize v2 amendment");
+    let encoded = serde_json::to_value(&valid_amendment).expect("serialize amendment");
+    assert!(encoded.get("schema_version").is_none());
     assert_eq!(
-        serde_json::from_value::<PlanAmendment>(encoded.clone())
-            .expect("deserialize exact v2 amendment"),
+        serde_json::from_value::<PlanAmendment>(encoded).expect("deserialize exact amendment"),
         valid_amendment
-    );
-    let mut persisted_v1 = encoded;
-    persisted_v1["schema_version"] = json!(1);
-    assert!(
-        serde_json::from_value::<PlanAmendment>(persisted_v1).is_err(),
-        "v1 persisted amendment JSON must fail at the hard reader boundary"
     );
 
     let amendment = PlanAmendment {
-        schema_version: 1,
         base_plan_revision: 3,
         reason: "Need another source.".to_string(),
         evidence: json!({ "missing": "source" }),
@@ -940,18 +908,12 @@ fn outcome_and_amendment_envelopes_are_versioned_and_reject_graph_replacement() 
     let report = validate_plan_amendment(&amendment);
     assert_error(
         &report,
-        "plan_amendment.schema_version",
-        "schema_version must equal 2",
-    );
-    assert_error(
-        &report,
         "plan_amendment.operations[0].node_id",
         "pending node id must match [a-z][a-z0-9_-]{0,63}",
     );
 
     for forbidden in ["plan", "nodes", "budget", "authorization"] {
         let mut value = json!({
-            "schema_version": 2,
             "base_plan_revision": 3,
             "reason": "Need another source.",
             "evidence": {},
@@ -1083,7 +1045,6 @@ fn task_outcome_variants_round_trip_without_extra_envelope_fields() {
 
 fn valid_plan() -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
-        schema_version: 2,
         cancel_policy: ExecutionCancelPolicy::RetainEffects,
         input_schema: json!({ "type": "object" }),
         output_schema: json!({ "type": "object" }),

@@ -418,7 +418,10 @@ async fn recovery_matrix_same_session_messages_stay_fifo_while_another_session_p
         vec![FIRST_RESULT, SECOND_RESULT]
     );
     assert_eq!(controller.effect_count(), 1);
-    assert_eq!(controller.request_count(), 1);
+    assert!(controller.transport_attempts().iter().all(|attempt| {
+        attempt.invocation_id == blocked_calls[0].invocation_id
+            && attempt.logical_arrival_order == 1
+    }));
     Ok(())
 }
 
@@ -1081,7 +1084,6 @@ fn execution_candidate(objective: &str) -> String {
             }]
         },
         "plan": {
-            "schema_version": 2,
             "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },

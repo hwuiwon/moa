@@ -28,6 +28,8 @@ fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", postgres_url)
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())

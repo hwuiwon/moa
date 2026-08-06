@@ -7,10 +7,12 @@
 mod connectors;
 #[path = "run_idempotency_db/execution_and_security_catalog.rs"]
 mod execution_and_security_catalog;
-#[path = "run_idempotency_db/execution_plan_v2.rs"]
-mod execution_plan_v2;
+#[path = "run_idempotency_db/execution_compensation.rs"]
+mod execution_compensation;
 #[path = "run_idempotency_db/hand_leases.rs"]
 mod hand_leases;
+#[path = "run_idempotency_db/ingest_replay.rs"]
+mod ingest_replay;
 #[path = "run_idempotency_db/knowledge.rs"]
 mod knowledge;
 #[path = "run_idempotency_db/learning_and_lineage.rs"]

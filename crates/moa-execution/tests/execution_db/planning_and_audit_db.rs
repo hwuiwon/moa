@@ -675,7 +675,6 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     ));
 
     let amendment = PlanAmendment {
-        schema_version: moa_artifacts::execution_plan::PLAN_AMENDMENT_SCHEMA_VERSION,
         base_plan_revision: 1,
         reason: "switch source".to_string(),
         evidence: json!({ "source": "unavailable" }),

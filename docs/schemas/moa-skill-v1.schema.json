@@ -223,18 +223,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema_version",
         "cancel_policy",
         "input_schema",
         "output_schema",
         "nodes"
       ],
       "properties": {
-        "schema_version": {
-          "type": "integer",
-          "format": "uint32",
-          "const": 2
-        },
         "cancel_policy": { "$ref": "#/$defs/ExecutionCancelPolicy" },
         "input_schema": {},
         "output_schema": {},

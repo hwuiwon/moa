@@ -247,9 +247,15 @@ async fn live_openai_structured_output_returns_direct_response() {
     .expect("OpenAI structured output request should finish within 10 seconds")
     .expect("OpenAI structured output request should succeed");
 
+    let payload: serde_json::Value = serde_json::from_str(&response.text)
+        .expect("strict structured response must be valid JSON");
+    let answer = payload
+        .get("answer")
+        .and_then(serde_json::Value::as_str)
+        .expect("strict structured response must contain a string answer");
     assert!(
-        response.text.to_ascii_lowercase().contains("four"),
-        "unexpected structured response text: {:?}",
+        looks_like_four_answer(answer),
+        "unexpected structured answer in response: {:?}",
         response.text
     );
     assert!(

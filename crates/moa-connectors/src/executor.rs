@@ -206,7 +206,6 @@ impl ConnectorInvocationCoordinator {
     ) -> Result<OperationContractHash> {
         #[derive(Serialize)]
         struct HashInput<'a> {
-            schema_version: u32,
             tenant_id: TenantId,
             tool_call_id: String,
             action: &'a InstalledConnectorActionPin,
@@ -214,7 +213,6 @@ impl ConnectorInvocationCoordinator {
         }
         let invocation = &authorized.invocation;
         let payload = HashInput {
-            schema_version: 1,
             tenant_id: invocation.tenant_id(),
             tool_call_id: invocation.tool_call_id.to_string(),
             action: &invocation.action,
@@ -793,7 +791,6 @@ impl ConnectorUnknownOutcomeReason {
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorInvocationCompletionTicket {
-    schema_version: u32,
     tenant_id: TenantId,
     invocation_id: ConnectorInvocationId,
     connection_id: ConnectorConnectionId,
@@ -814,7 +811,6 @@ impl ConnectorInvocationCompletionTicket {
         request_hash: OperationContractHash,
     ) -> Self {
         Self {
-            schema_version: 1,
             tenant_id,
             invocation_id,
             connection_id,
@@ -885,11 +881,6 @@ impl ConnectorInvocationCompletionService {
     }
 
     async fn validate_ticket(&self, ticket: &ConnectorInvocationCompletionTicket) -> Result<()> {
-        if ticket.schema_version != 1 {
-            return Err(crate::Error::ActionPinMismatch {
-                field: "completion_ticket_schema_version",
-            });
-        }
         let record = self
             .repository
             .load_invocation(ticket.tenant_id, ticket.invocation_id)

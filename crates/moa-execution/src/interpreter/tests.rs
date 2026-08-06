@@ -21,7 +21,6 @@ fn map_execution_task_validates_the_item_output_schema() {
     let catalog = ExecutionCapabilityCatalog::build(Vec::new()).expect("build empty catalog");
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: serde_json::json!({}),
             output_schema: serde_json::json!({}),
@@ -136,7 +135,6 @@ fn empty_map_is_reported_as_first_materialization_without_a_logical_task() {
         },
         plan: CanonicalExecutionPlan {
             definition: ExecutionPlanDefinition {
-                schema_version: 2,
                 cancel_policy: ExecutionCancelPolicy::RetainEffects,
                 input_schema: serde_json::json!({}),
                 output_schema: serde_json::json!({}),
@@ -231,7 +229,6 @@ fn only_direct_capability_task_materializes_compensation_contract() {
         },
         plan: CanonicalExecutionPlan {
             definition: ExecutionPlanDefinition {
-                schema_version: 2,
                 cancel_policy: ExecutionCancelPolicy::CompensateCommitted,
                 input_schema: serde_json::json!({}),
                 output_schema: serde_json::json!({}),

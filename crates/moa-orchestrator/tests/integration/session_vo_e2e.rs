@@ -37,6 +37,8 @@ fn spawn_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
@@ -62,6 +64,15 @@ fn configured_env(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn truthy_env(key: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn live_model() -> Option<&'static str> {
     if configured_env("MOA_ANTHROPIC_API_KEY") {
         return Some("claude-sonnet-4-6");
@@ -77,12 +88,15 @@ fn live_model() -> Option<&'static str> {
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, local Restate/Postgres, and a provider API key"]
 async fn session_vo_round_trip_through_restate() -> Result<()> {
-    let _guard = RESTATE_E2E_LOCK.lock().await;
-    let Some(model) = live_model() else {
+    if !truthy_env("MOA_RUN_LIVE_PROVIDER_TESTS") {
         return Ok(());
-    };
+    }
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    let model = live_model().context(
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY",
+    )?;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;

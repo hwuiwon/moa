@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Stable execution-planner prompt identifier.
-pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v4";
+pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v5";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
 const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.txt");
@@ -83,7 +83,6 @@ pub struct ExecutionAmendmentPlanningRequest {
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct FrozenInitialPrompt<'a> {
-    schema_version: u8,
     objective: &'a str,
     catalog: &'a moa_execution::ExecutionCapabilityCatalog,
     authorization: &'a moa_execution::ExecutionAuthorizationEnvelope,
@@ -97,7 +96,17 @@ struct FrozenInitialPrompt<'a> {
 pub fn initial_completion_request(
     request: &ExecutionPlanningRequest,
 ) -> Result<CompletionRequest, serde_json::Error> {
-    build_initial_request(request, None)
+    build_initial_request(request, InitialRepair::None)
+}
+
+/// Constructs the sole schema-regeneration request after an invalid initial response.
+///
+/// The malformed response is deliberately omitted so raw provider output never becomes
+/// part of a second request or a persisted audit surface.
+pub fn initial_schema_repair_completion_request(
+    request: &ExecutionPlanningRequest,
+) -> Result<CompletionRequest, serde_json::Error> {
+    build_initial_request(request, InitialRepair::Schema)
 }
 
 /// Constructs the sole permitted initial-plan repair request from frozen first-call inputs.
@@ -109,12 +118,22 @@ pub fn initial_repair_completion_request(
 ) -> Result<CompletionRequest, serde_json::Error> {
     build_initial_request(
         request,
-        Some((
+        InitialRepair::Compiler {
             original_candidate_json,
             immutable_goal_json,
             compiler_report_json,
-        )),
+        },
     )
+}
+
+enum InitialRepair<'a> {
+    None,
+    Schema,
+    Compiler {
+        original_candidate_json: &'a str,
+        immutable_goal_json: &'a str,
+        compiler_report_json: &'a str,
+    },
 }
 
 /// Builds one initial or repair planner request sharing the same cacheable system prompt.
@@ -125,10 +144,9 @@ pub fn initial_repair_completion_request(
 /// system and one user turn.
 fn build_initial_request(
     request: &ExecutionPlanningRequest,
-    repair: Option<(&str, &str, &str)>,
+    repair: InitialRepair<'_>,
 ) -> Result<CompletionRequest, serde_json::Error> {
     let frozen = FrozenInitialPrompt {
-        schema_version: 1,
         objective: &request.objective,
         catalog: &request.context.catalog,
         authorization: &request.context.authorization,
@@ -141,10 +159,20 @@ fn build_initial_request(
         "<frozen_planning_context>{}</frozen_planning_context>",
         serde_json::to_string(&frozen)?
     );
-    if let Some((original_candidate_json, immutable_goal_json, compiler_report_json)) = repair {
-        user_payload.push_str(&format!(
-            "\nRepair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
-        ));
+    match repair {
+        InitialRepair::None => {}
+        InitialRepair::Schema => user_payload.push_str(
+            "\nThe prior response failed strict schema validation. Regenerate the candidate exactly once from the frozen context and canonical response schema. Return only the replacement JSON object. Do not quote or reproduce the prior response.",
+        ),
+        InitialRepair::Compiler {
+            original_candidate_json,
+            immutable_goal_json,
+            compiler_report_json,
+        } => {
+            user_payload.push_str(&format!(
+                "\nRepair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
+            ));
+        }
     }
     planner_request::<GeneratedExecutionCandidate>(
         request.planner_model.clone(),
@@ -158,9 +186,35 @@ pub fn amendment_completion_request(
     request: &ExecutionAmendmentPlanningRequest,
     repair: Option<(&str, &str)>,
 ) -> Result<CompletionRequest, serde_json::Error> {
+    let repair = match repair {
+        Some((candidate, report)) => AmendmentRepair::Compiler { candidate, report },
+        None => AmendmentRepair::None,
+    };
+    build_amendment_request(request, repair)
+}
+
+/// Constructs the sole schema-regeneration request after an invalid amendment response.
+///
+/// The malformed response is deliberately omitted so raw provider output never becomes
+/// part of a second request or a persisted audit surface.
+pub fn amendment_schema_repair_completion_request(
+    request: &ExecutionAmendmentPlanningRequest,
+) -> Result<CompletionRequest, serde_json::Error> {
+    build_amendment_request(request, AmendmentRepair::Schema)
+}
+
+enum AmendmentRepair<'a> {
+    None,
+    Schema,
+    Compiler { candidate: &'a str, report: &'a str },
+}
+
+fn build_amendment_request(
+    request: &ExecutionAmendmentPlanningRequest,
+    repair: AmendmentRepair<'_>,
+) -> Result<CompletionRequest, serde_json::Error> {
     #[derive(Serialize)]
     struct FrozenAmendmentPrompt<'a> {
-        schema_version: u8,
         run_uid: uuid::Uuid,
         base_plan_revision: u64,
         goal: &'a moa_artifacts::execution_plan::ExecutionGoalContract,
@@ -170,7 +224,6 @@ pub fn amendment_completion_request(
         remaining_budget: &'a moa_artifacts::execution_plan::ExecutionBudgetLimit,
     }
     let frozen = FrozenAmendmentPrompt {
-        schema_version: 1,
         run_uid: request.run_uid,
         base_plan_revision: request.base_plan_revision,
         goal: &request.evidence.goal,
@@ -186,10 +239,16 @@ pub fn amendment_completion_request(
         "<frozen_amendment_context>{}</frozen_amendment_context>",
         serde_json::to_string(&frozen)?
     );
-    if let Some((candidate, report)) = repair {
-        user_payload.push_str(&format!(
-            "\nRepair exactly once without new discovery.\n<original_amendment>{candidate}</original_amendment>\n<compiler_report>{report}</compiler_report>"
-        ));
+    match repair {
+        AmendmentRepair::None => {}
+        AmendmentRepair::Schema => user_payload.push_str(
+            "\nThe prior response failed strict schema validation. Regenerate the amendment exactly once from the frozen context and canonical response schema. Return only the replacement JSON object. Do not quote or reproduce the prior response.",
+        ),
+        AmendmentRepair::Compiler { candidate, report } => {
+            user_payload.push_str(&format!(
+                "\nRepair exactly once without new discovery.\n<original_amendment>{candidate}</original_amendment>\n<compiler_report>{report}</compiler_report>"
+            ));
+        }
     }
     planner_request::<GeneratedAmendmentCandidate>(
         request.planner_model.clone(),
@@ -236,10 +295,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execution_planner_prompt_v4_pins_compensation_and_compiler_invariants() {
+    fn execution_planner_prompt_v5_pins_compensation_and_compiler_invariants() {
         // Pins: the current emitted prompt version and its compiler-facing guidance
         // change together so live planner provenance identifies this exact contract.
-        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v4");
+        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v5");
         assert_eq!(
             EXECUTION_PLANNER_PROMPT,
             concat!(
@@ -247,9 +306,9 @@ mod tests {
                 "Preserve the user's objective, scope, definitions, time range, universe, output form, evidence expectations, exclusions, and constraints as individually identifiable goal entries. Use only capabilities, skills, node kinds, and authority in the frozen context. Never invent a capability or permission. Produce an acyclic plan with explicit requirement coverage and completion checks. If the frozen contract cannot support the request, encode the gap in the strict candidate so deterministic compilation rejects it; do not answer the user directly.\n\n",
                 "Compiler invariants:\n",
                 "- Set `goal.objective` to the frozen `objective` byte-for-byte.\n",
-                "- Set `plan.schema_version` to `2` and choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.\n",
+                "- Choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.\n",
                 "- Set every node's `compensation` explicitly. Use `null` unless the node is a direct side-effecting `Capability` whose exact catalog entry advertises the same compensator and bounded input mapping. Never add compensation to reads, agents, maps, reduces, reviews, signals, or outputs, and never invent rollback authority.\n",
-                "- Set `amendment.schema_version` to `2`. An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.\n",
+                "- An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.\n",
                 "- Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.\n",
                 "- Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.\n",
                 "- Put every goal requirement ID in at least one completion check's `requirement_ids`. If the plan has only one completion check, it must list every requirement ID. For a simple `Agent`-to-`Output` plan, prefer one `OutputSchema` check listing all requirement IDs.\n",

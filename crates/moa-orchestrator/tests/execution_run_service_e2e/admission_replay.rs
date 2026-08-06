@@ -353,7 +353,6 @@ fn template_skill_source() -> String {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: io_schema.clone(),
             output_schema: io_schema.clone(),

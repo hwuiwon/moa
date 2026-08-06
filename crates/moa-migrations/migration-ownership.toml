@@ -169,6 +169,7 @@ name = "ingest_dedup"
 schema = "moa"
 owner = "moa-memory/ingest"
 readers = ["moa-memory/graph"]
+notes = "Same-turn fact identity and original apply outcome for replay-stable durable ingestion reports."
 
 [[table]]
 name = "ingest_dlq"
@@ -438,7 +439,7 @@ name = "execution_compensation"
 schema = "moa"
 owner = "moa-execution"
 readers = ["moa-orchestrator", "moa-edge"]
-notes = "Monotonic reverse-order compensation registrations and durable undo outcomes for execution-plan v2."
+notes = "Monotonic reverse-order compensation registrations and durable undo outcomes for execution plans."
 
 [[table]]
 name = "execution_compile_audit"

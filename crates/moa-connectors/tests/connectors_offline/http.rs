@@ -412,7 +412,8 @@ impl OutboundHostResolver for UnusedResolver {
 async fn http_runtime_pins_transport_and_requires_post_security_completion_offline() {
     // Pins: untrusted fields cannot change the reviewed transport, the secret is
     // injected only into a redacted fixed header, and replay after a lost journal
-    // acknowledgement uses the exact same upstream idempotency key.
+    // acknowledgement uses the exact same upstream idempotency key. The journaled
+    // completion ticket contains only semantic completion-authority fields.
     let fixture_secret = "fixture-secret-never-visible";
     let fixture = FixtureConnectorApi::start(
         FixtureConnectorScript::new(vec![FixtureConnectorResponse::json(json!({
@@ -502,6 +503,27 @@ async fn http_runtime_pins_transport_and_requires_post_security_completion_offli
 
     let (output, ticket) = replay_result.into_parts();
     assert_eq!(output, json!({"accepted": true}));
+    let serialized_ticket = serde_json::to_value(&ticket)
+        .expect("secret-free completion ticket should serialize for journaling");
+    let mut serialized_ticket_fields = serialized_ticket
+        .as_object()
+        .expect("completion ticket should serialize as an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    serialized_ticket_fields.sort_unstable();
+    assert_eq!(
+        serialized_ticket_fields,
+        vec![
+            "binding_id",
+            "connection_generation",
+            "connection_id",
+            "invocation_id",
+            "request_hash",
+            "tenant_id",
+            "tool_call_id",
+        ]
+    );
     ConnectorInvocationCompletionService::new(repository.clone())
         .finalize_succeeded(
             &ticket,
@@ -627,11 +649,12 @@ async fn response_redirect_content_type_and_stream_limit_fail_closed_offline() {
         let fixture = FixtureConnectorApi::start(FixtureConnectorScript::new(vec![response]))
             .await
             .expect("response-policy fixture should start");
-        let (runtime, repository, _, invocation, prepared) = runtime_fixture(
-            fixture.origin(),
-            Arc::new(StaticVault::with_secret("response-policy-secret")),
-            loopback_policy(),
-        );
+        let (runtime, repository, _, invocation, prepared) =
+            runtime_fixture_without_upstream_idempotency(
+                fixture.origin(),
+                Arc::new(StaticVault::with_secret("response-policy-secret")),
+                loopback_policy(),
+            );
         let error = runtime
             .invoke(invocation, prepared)
             .await
@@ -685,11 +708,12 @@ async fn request_body_and_total_timeout_limits_preserve_send_boundary_offline() 
     ]))
     .await
     .expect("preheader timeout fixture should start");
-    let (runtime, repository, _, invocation, prepared) = runtime_fixture(
-        before_headers.origin(),
-        Arc::new(StaticVault::with_secret("preheader-timeout-secret")),
-        loopback_policy(),
-    );
+    let (runtime, repository, _, invocation, prepared) =
+        runtime_fixture_without_upstream_idempotency(
+            before_headers.origin(),
+            Arc::new(StaticVault::with_secret("preheader-timeout-secret")),
+            loopback_policy(),
+        );
     let error = runtime
         .invoke(invocation, prepared)
         .await

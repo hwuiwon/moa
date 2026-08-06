@@ -2,9 +2,9 @@
 
 pub(crate) use chrono::{Duration, Utc};
 pub(crate) use moa_artifacts::execution_plan::{
-    EXECUTION_PLAN_SCHEMA_VERSION, ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCitation,
-    ExecutionFailureClass, ExecutionGoalContract, ExecutionTaskOutcome, ExecutionTaskResult,
-    ExecutionUsage, PlanAmendment, RetryPolicy,
+    ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCitation, ExecutionFailureClass,
+    ExecutionGoalContract, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
+    PlanAmendment, RetryPolicy,
 };
 pub(crate) use moa_core::canonical_json::canonical_json_bytes;
 pub(crate) use moa_core::events::ExecutionTaskResultsRef;
@@ -438,7 +438,6 @@ pub(crate) fn new_run(
 pub(crate) fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: moa_artifacts::execution_plan::ExecutionPlanDefinition {
-            schema_version: EXECUTION_PLAN_SCHEMA_VERSION,
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),

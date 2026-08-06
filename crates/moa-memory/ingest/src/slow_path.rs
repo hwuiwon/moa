@@ -117,9 +117,12 @@ impl SlowPathIngestor {
             &kms,
             &vector_factory,
             entity_resolver.as_ref(),
-            self.runtime.entity_blocking_embedder(),
             turn,
             decisions,
+            ApplyOptions {
+                entity_blocking_embedder: self.runtime.entity_blocking_embedder(),
+                dedup_reporting: DedupReporting::OriginalOutcome,
+            },
         )
         .await
     }
@@ -223,9 +226,12 @@ async fn ingest_turn_direct_with_pool_and_pii(
         &kms,
         &vector_factory,
         entity_resolver.as_ref(),
-        entity_blocking_embedder,
         &turn,
         &decisions,
+        ApplyOptions {
+            entity_blocking_embedder,
+            dedup_reporting: DedupReporting::ReplayAsSkipped,
+        },
     )
     .await?;
     direct_claim.release().await?;
@@ -277,9 +283,12 @@ pub async fn ingest_turn_direct_with_ctx(
         &ctx.kms,
         &vector_factory,
         ctx.entity_resolver.as_ref(),
-        entity_blocking_embedder,
         &turn,
         &decisions,
+        ApplyOptions {
+            entity_blocking_embedder,
+            dedup_reporting: DedupReporting::ReplayAsSkipped,
+        },
     )
     .await?;
     direct_claim.release().await?;
@@ -611,24 +620,26 @@ async fn apply_decisions(
     kms: &Arc<dyn KeyManagementProvider>,
     vector_factory: &VectorStoreFactory,
     entity_resolver: &EntityResolver,
-    entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     turn: &SessionTurn,
     decisions: &[IngestDecision],
+    options: ApplyOptions,
 ) -> Result<IngestApplyReport, HandlerError> {
     let mut report = IngestApplyReport::default();
     // Embed every distinct entity name for the whole turn's facts in one provider
     // call up front, so per-fact entity resolution reuses the precomputed vectors
     // instead of issuing one batch-size-one embed per subject and object.
     let entity_embeddings =
-        precompute_entity_embeddings(entity_blocking_embedder.as_deref(), decisions).await?;
+        precompute_entity_embeddings(options.entity_blocking_embedder.as_deref(), decisions)
+            .await?;
     let mut deps = ApplyDecisionDeps {
         pool,
         kms,
         vector_factory,
         vector_cache: ConfiguredVectorStoreCache::default(),
         entity_resolver,
-        entity_blocking_embedder,
+        entity_blocking_embedder: options.entity_blocking_embedder,
         entity_embeddings,
+        dedup_reporting: options.dedup_reporting,
     };
 
     let mut drain_scopes: HashMap<String, RlsContext> = HashMap::new();
@@ -718,6 +729,17 @@ struct ApplyDecisionDeps<'a> {
     entity_resolver: &'a EntityResolver,
     /// Precomputed embeddings keyed by normalized entity name for this turn's facts.
     entity_embeddings: HashMap<String, Vec<f32>>,
+    dedup_reporting: DedupReporting,
+}
+
+struct ApplyOptions {
+    entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
+    dedup_reporting: DedupReporting,
+}
+
+struct ApplyCallContext<'a> {
+    entity_embeddings: &'a HashMap<String, Vec<f32>>,
+    dedup_reporting: DedupReporting,
 }
 
 async fn apply_one_decision(
@@ -729,7 +751,15 @@ async fn apply_one_decision(
     // Re-observation confirms the survivor instead of dropping the fact, and
     // skips the entity/vector setup below that only insert paths need.
     if let IngestDecision::SkipDuplicate { fact_uid, fact } = decision {
-        return reinforce_duplicate(deps.pool, scope, turn, fact, *fact_uid).await;
+        return reinforce_duplicate(
+            deps.pool,
+            scope,
+            turn,
+            fact,
+            *fact_uid,
+            deps.dedup_reporting,
+        )
+        .await;
     }
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
@@ -771,7 +801,10 @@ async fn apply_one_decision(
         resolver,
         turn,
         decision,
-        &deps.entity_embeddings,
+        ApplyCallContext {
+            entity_embeddings: &deps.entity_embeddings,
+            dedup_reporting: deps.dedup_reporting,
+        },
     )
     .await
 }
@@ -783,20 +816,27 @@ async fn apply_one_decision_with_graph(
     entity_resolver: &EntityResolver,
     turn: &SessionTurn,
     decision: &IngestDecision,
-    entity_embeddings: &HashMap<String, Vec<f32>>,
+    apply_context: ApplyCallContext<'_>,
 ) -> Result<ApplyOutcome, HandlerError> {
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
     };
     let hash = fact_hash(&fact.classified.fact).map_err(HandlerError::from)?;
-    if dedup_fact_uid(pool, scope, turn, &hash).await?.is_some() {
-        return Ok(ApplyOutcome::Skipped);
+    if let Some(outcome) = dedup_apply_outcome(pool, scope, turn, &hash).await? {
+        return Ok(apply_context.dedup_reporting.report(outcome));
     }
 
     // Entity resolution reads run before the transaction and yield node-create
     // intents; the actual writes join the fact's transaction below.
-    let entities =
-        resolve_fact_entities(pool, scope, entity_resolver, turn, fact, entity_embeddings).await?;
+    let entities = resolve_fact_entities(
+        pool,
+        scope,
+        entity_resolver,
+        turn,
+        fact,
+        apply_context.entity_embeddings,
+    )
+    .await?;
     let fact_uid = scoped_fact_uid(&turn.tenant_id, &turn.session_id, turn.turn_seq, &hash);
 
     // Apply the entity nodes, the fact node, both entity edges, and the dedup row
@@ -834,7 +874,7 @@ async fn apply_one_decision_with_graph(
     };
     write_fact_entity_edges_in_conn(store, conn.as_mut(), turn, scope, uid, fact, &entities)
         .await?;
-    insert_dedup_in_conn(conn.as_mut(), scope, turn, &hash, uid).await?;
+    insert_dedup_in_conn(conn.as_mut(), scope, turn, &hash, uid, outcome).await?;
     conn.commit().await.map_err(HandlerError::from)?;
     Ok(outcome)
 }
@@ -1272,20 +1312,20 @@ async fn storage_partition_degraded(
     Ok(degraded)
 }
 
-async fn dedup_fact_uid(
+async fn dedup_apply_outcome(
     pool: &PgPool,
     scope: &RlsContext,
     turn: &SessionTurn,
     hash: &[u8],
-) -> Result<Option<uuid::Uuid>, HandlerError> {
+) -> Result<Option<ApplyOutcome>, HandlerError> {
     let mut conn = ScopedConn::begin(pool, scope)
         .await
         .map_err(HandlerError::from)?;
     let turn_seq = turn_seq_i64(turn)?;
     let user_id = scope_user_id(scope);
-    let uid = sqlx::query_scalar::<_, uuid::Uuid>(
+    let outcome = sqlx::query_scalar::<_, String>(
         r#"
-        SELECT fact_uid
+        SELECT apply_outcome
         FROM moa.ingest_dedup
         WHERE storage_partition_id = $1
           AND session_id = $2
@@ -1305,7 +1345,7 @@ async fn dedup_fact_uid(
     .await
     .map_err(HandlerError::from)?;
     conn.commit().await.map_err(HandlerError::from)?;
-    Ok(uid)
+    outcome.as_deref().map(ApplyOutcome::from_db).transpose()
 }
 
 async fn insert_dedup_in_conn(
@@ -1314,14 +1354,16 @@ async fn insert_dedup_in_conn(
     turn: &SessionTurn,
     hash: &[u8],
     fact_uid: uuid::Uuid,
+    outcome: ApplyOutcome,
 ) -> Result<(), HandlerError> {
     let turn_seq = turn_seq_i64(turn)?;
     let user_id = scope_user_id(scope);
     sqlx::query(
         r#"
         INSERT INTO moa.ingest_dedup
-            (storage_partition_id, user_id, session_id, turn_seq, fact_hash, fact_uid)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (storage_partition_id, user_id, session_id, turn_seq, fact_hash, fact_uid,
+             apply_outcome)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (storage_partition_id, session_id, turn_seq, fact_hash) DO NOTHING
         "#,
     )
@@ -1331,6 +1373,7 @@ async fn insert_dedup_in_conn(
     .bind(turn_seq)
     .bind(hash)
     .bind(fact_uid)
+    .bind(outcome.as_db())
     .execute(conn)
     .await
     .map_err(HandlerError::from)?;
@@ -1386,6 +1429,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyOutcome {
     Inserted,
     Superseded,
@@ -1393,21 +1437,60 @@ enum ApplyOutcome {
     Skipped,
 }
 
+impl ApplyOutcome {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Inserted => "inserted",
+            Self::Superseded => "superseded",
+            Self::Reinforced => "reinforced",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, HandlerError> {
+        match value {
+            "inserted" => Ok(Self::Inserted),
+            "superseded" => Ok(Self::Superseded),
+            "reinforced" => Ok(Self::Reinforced),
+            "skipped" => Ok(Self::Skipped),
+            _ => Err(
+                TerminalError::new(format!("unknown ingest dedup apply outcome {value:?}")).into(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DedupReporting {
+    OriginalOutcome,
+    ReplayAsSkipped,
+}
+
+impl DedupReporting {
+    fn report(self, original: ApplyOutcome) -> ApplyOutcome {
+        match self {
+            Self::OriginalOutcome => original,
+            Self::ReplayAsSkipped => ApplyOutcome::Skipped,
+        }
+    }
+}
+
 /// Confirms a re-observed fact by reinforcing the surviving node.
 ///
 /// The same-turn `ingest_dedup` row committed with the boost makes
 /// reinforcement idempotent under Restate replays: a retried turn takes the
-/// `dedup_fact_uid` early return instead of boosting twice.
+/// stored-outcome early return instead of boosting twice.
 async fn reinforce_duplicate(
     pool: &PgPool,
     scope: &RlsContext,
     turn: &SessionTurn,
     fact: &EmbeddedFact,
     existing_uid: uuid::Uuid,
+    dedup_reporting: DedupReporting,
 ) -> Result<ApplyOutcome, HandlerError> {
     let hash = fact_hash(&fact.classified.fact).map_err(HandlerError::from)?;
-    if dedup_fact_uid(pool, scope, turn, &hash).await?.is_some() {
-        return Ok(ApplyOutcome::Skipped);
+    if let Some(outcome) = dedup_apply_outcome(pool, scope, turn, &hash).await? {
+        return Ok(dedup_reporting.report(outcome));
     }
     let mut conn = ScopedConn::begin_as_app(pool, scope, true)
         .await
@@ -1422,15 +1505,16 @@ async fn reinforce_duplicate(
     )
     .await
     .map_err(HandlerError::from)?;
-    insert_dedup_in_conn(conn.as_mut(), scope, turn, &hash, existing_uid).await?;
-    conn.commit().await.map_err(HandlerError::from)?;
     // A closed survivor means the duplicate verdict raced a supersession;
     // report a skip rather than reviving stale confidence.
-    Ok(if reinforced {
+    let outcome = if reinforced {
         ApplyOutcome::Reinforced
     } else {
         ApplyOutcome::Skipped
-    })
+    };
+    insert_dedup_in_conn(conn.as_mut(), scope, turn, &hash, existing_uid, outcome).await?;
+    conn.commit().await.map_err(HandlerError::from)?;
+    Ok(outcome)
 }
 
 #[cfg(test)]

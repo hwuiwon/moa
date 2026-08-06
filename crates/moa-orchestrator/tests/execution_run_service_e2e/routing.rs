@@ -1298,7 +1298,6 @@ fn research_candidate(
     GeneratedExecutionCandidate {
         goal: goal_contract(objective),
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
@@ -1400,7 +1399,6 @@ fn template_skill_source() -> String {
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: template_io_schema(),
             output_schema: template_io_schema(),

@@ -19,6 +19,7 @@ use moa_artifacts::execution_plan::{
     CompletionCheck, CompletionCheckKind, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
     ExecutionPlanDefinition, ExecutionRequirement, GeneratedExecutionCandidate, RetryPolicy,
 };
+use moa_brain::execution_planning::EXECUTION_PLANNER_PROMPT_VERSION;
 use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::traits::Identity;
 use moa_core::{
@@ -116,16 +117,30 @@ struct GeneratedPlanHashEvidence {
     planner_report_hash: String,
     compiler_report_hash: String,
     final_plan_hash: String,
+    repair_attempts: u8,
 }
 
 #[derive(Serialize)]
 struct SupplementaryInitialCompileCandidate<'a> {
     kind: &'static str,
-    schema_version: u8,
     source: ExecutionCompileSource,
     goal: &'a moa_artifacts::execution_plan::ExecutionGoalContract,
     plan: &'a moa_artifacts::execution_plan::ExecutionPlanDefinition,
     run_input: &'a Value,
+}
+
+fn supplementary_compile_candidate_hash(candidate: &GeneratedExecutionCandidate) -> Result<String> {
+    let preimage = SupplementaryInitialCompileCandidate {
+        kind: "initial",
+        source: ExecutionCompileSource::GeneratedPlan,
+        goal: &candidate.goal,
+        plan: &candidate.plan,
+        run_input: &candidate.run_input,
+    };
+    Ok(execution_planning_hash(
+        "moa.execution.compile-candidate",
+        &canonical_json_bytes(&preimage).context("canonicalize supplementary compiler preimage")?,
+    ))
 }
 
 fn spawn_orchestrator(
@@ -143,6 +158,8 @@ fn spawn_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
@@ -927,7 +944,7 @@ live_case_test!(
     case_act_parallel_four
 );
 
-const AMBIGUOUS_MODE_SELECTION_PROMPT: &str = concat!(
+const REASONING_ONLY_SELECTION_PROMPT: &str = concat!(
     "A production total sometimes appears inconsistent. Deeply investigate whether 19 + 23 ",
     "equals 42, explain why the check is bounded, and recommend one next check. ",
     "Answer from reasoning only; do not call tools, delegate, or start durable work."
@@ -1102,6 +1119,33 @@ impl SupplementaryLiveHarness {
             if let Some(started) = started {
                 return Ok((started, events));
             }
+            let terminal_schema_response = events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::BrainResponse { text, .. }
+                        if text == "planner response failed the strict response schema"
+                )
+            });
+            if terminal_schema_response {
+                let audits = supplementary_planning_audits(self)
+                    .await
+                    .context("load planning audits after terminal schema rejection")?;
+                if audits.iter().rev().any(|audit| {
+                    matches!(
+                        &audit.payload,
+                        ExecutionPlanningAuditPayload::PlannerCall {
+                            outcome: ExecutionPlannerOutcome::SchemaRejected,
+                            ..
+                        }
+                    )
+                }) {
+                    bail!(
+                        "supplementary planner response failed strict schema validation; planning audits: {audits:#?}; log follows:\n{}\n{}",
+                        read_log(&self.orchestrator_log),
+                        describe_events(&events)
+                    );
+                }
+            }
             if Instant::now() >= deadline {
                 let audits = supplementary_planning_audits(self)
                     .await
@@ -1274,6 +1318,8 @@ fn spawn_supplementary_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
+        .arg("--credential-port")
+        .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", test_database_url())
         .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
@@ -1319,7 +1365,7 @@ fn assert_audit_scope(
     Ok(())
 }
 
-async fn assert_ambiguous_mode_selection(
+async fn assert_reasoning_only_selection(
     harness: &SupplementaryLiveHarness,
     events: &[EventRecord],
 ) -> Result<()> {
@@ -1327,23 +1373,27 @@ async fn assert_ambiguous_mode_selection(
     assert_eq!(
         audits.len(),
         1,
-        "ambiguous bounded investigation must emit exactly one route audit\n{}",
+        "reasoning-only request must emit exactly one route audit\n{}",
         describe_events(events)
     );
     let originating_sequence = audits[0]
         .originating_sequence
         .expect("route audit must retain its user-message origin");
     assert_audit_scope(&audits[0], harness, originating_sequence)
-        .expect("ambiguous route audit must retain its exact scope");
-    assert!(matches!(
-        &audits[0].payload,
-        ExecutionPlanningAuditPayload::Route {
-            stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteKind::Execute,
-            strategy: Some(ExecutionStrategy::Inline),
-            ..
-        }
-    ));
+        .expect("reasoning-only route audit must retain its exact scope");
+    ensure!(
+        matches!(
+            &audits[0].payload,
+            ExecutionPlanningAuditPayload::Route {
+                stage: ExecutionRouteStage::Initial,
+                decision: ExecutionRouteKind::Respond,
+                strategy: None,
+                ..
+            }
+        ),
+        "reasoning-only route audit drifted: {:#?}",
+        audits[0].payload
+    );
 
     let responses = events
         .iter()
@@ -1352,7 +1402,7 @@ async fn assert_ambiguous_mode_selection(
     assert_eq!(
         responses.len(),
         1,
-        "ambiguous mode-selection case should produce one bounded response\n{}",
+        "reasoning-only case should produce one bounded response\n{}",
         describe_events(events)
     );
     assert_eq!(
@@ -1361,7 +1411,7 @@ async fn assert_ambiguous_mode_selection(
             .filter(|record| matches!(record.event, Event::ExecutionRunStarted(_)))
             .count(),
         0,
-        "ambiguous difficulty must not admit an ExecutionRun\n{}",
+        "reasoning-only work must not admit an ExecutionRun\n{}",
         describe_events(events)
     );
     assert_eq!(
@@ -1384,6 +1434,14 @@ async fn assert_ambiguous_mode_selection(
 }
 
 fn empty_compiler_report_hash(report_json: &str, label: &str) -> Result<String> {
+    compiler_report_hash(report_json, label, true)
+}
+
+fn rejected_compiler_report_hash(report_json: &str, label: &str) -> Result<String> {
+    compiler_report_hash(report_json, label, false)
+}
+
+fn compiler_report_hash(report_json: &str, label: &str, expect_empty: bool) -> Result<String> {
     let report: ExecutionAuditReport = serde_json::from_str(report_json)
         .with_context(|| format!("{label} must deserialize as a strict audit report"))?;
     let ExecutionAuditReport::Compiler {
@@ -1394,8 +1452,15 @@ fn empty_compiler_report_hash(report_json: &str, label: &str) -> Result<String> 
     else {
         bail!("{label} must be a compiler report");
     };
-    ensure!(violations.is_empty(), "{label} retained violations");
-    ensure!(omitted_violations == 0, "{label} omitted violations");
+    if expect_empty {
+        ensure!(violations.is_empty(), "{label} retained violations");
+        ensure!(omitted_violations == 0, "{label} omitted violations");
+    } else {
+        ensure!(
+            !violations.is_empty() || omitted_violations > 0,
+            "{label} must retain compiler rejection evidence"
+        );
+    }
     ensure!(
         full_report_hash.len() == 64,
         "{label} hash must be BLAKE3 hex"
@@ -1420,10 +1485,6 @@ fn validate_generated_candidate_quality(
     ensure!(
         candidate.goal.objective == objective,
         "generated objective drifted"
-    );
-    ensure!(
-        candidate.plan.schema_version == 1,
-        "generated plan schema drifted"
     );
     ensure!(
         candidate.run_input == json!({}),
@@ -1609,6 +1670,7 @@ fn validate_generated_plan_hash_chain(
                 candidate_hash,
                 compiler_report_hash,
                 final_plan_hash,
+                repair_attempts,
                 ..
             },
     } = provenance
@@ -1627,6 +1689,10 @@ fn validate_generated_plan_hash_chain(
         final_plan_hash == &evidence.final_plan_hash,
         "persisted provenance final plan hash must equal the accepted compiler plan hash"
     );
+    ensure!(
+        repair_attempts == &evidence.repair_attempts,
+        "persisted provenance repair count must equal the accepted planner path"
+    );
     Ok(())
 }
 
@@ -1641,6 +1707,7 @@ fn generated_plan_hash_chain_rejects_cross_surface_drift() {
         planner_report_hash: "b".repeat(64),
         compiler_report_hash: "b".repeat(64),
         final_plan_hash: "c".repeat(64),
+        repair_attempts: 0,
     };
     let provenance = ExecutionSourceProvenance::GeneratedPlan {
         planner: GeneratedPlanPlannerProvenance {
@@ -1682,8 +1749,8 @@ async fn assert_generated_plan_audits_and_authorization(
 ) -> Result<GeneratedPlanAuditEvidence> {
     let audits = supplementary_planning_audits(harness).await?;
     ensure!(
-        audits.len() == 3,
-        "accepted generated plan must emit route, planner, and compiler audits\n{}",
+        matches!(audits.len(), 3..=5),
+        "accepted generated plan must emit one exact direct, schema-repair, or compiler-repair audit path\n{}",
         describe_events(events)
     );
     let originating_sequence = audits[0]
@@ -1705,11 +1772,153 @@ async fn assert_generated_plan_audits_and_authorization(
         "generated-plan route audit drifted"
     );
 
+    let (planner_index, compile_index, repair_attempts, immutable_repair_goal) = match audits.len()
+    {
+        3 => (1, 2, 0, None),
+        4 => {
+            match &audits[1].payload {
+                ExecutionPlanningAuditPayload::PlannerCall {
+                    call_kind: ExecutionPlannerCallKind::InitialPlan,
+                    call_ordinal: 0,
+                    run_uid: None,
+                    plan_revision: None,
+                    outcome: ExecutionPlannerOutcome::SchemaRejected,
+                    provider_model,
+                    prompt_version,
+                    candidate_hash: Some(raw_hash),
+                    candidate_json: None,
+                    compiler_report: Some(report),
+                    duration_micros,
+                    ..
+                } => {
+                    ensure!(
+                        !provider_model.trim().is_empty(),
+                        "planner model must be set"
+                    );
+                    ensure!(
+                        prompt_version == EXECUTION_PLANNER_PROMPT_VERSION,
+                        "planner prompt version drifted"
+                    );
+                    ensure!(
+                        raw_hash.len() == 64,
+                        "rejected raw response hash must be BLAKE3 hex"
+                    );
+                    ensure!(
+                        !report.is_empty(),
+                        "schema rejection must retain a bounded report"
+                    );
+                    ensure!(
+                        *duration_micros > 0,
+                        "rejected planner duration must be positive"
+                    );
+                }
+                other => bail!("unexpected initial schema-rejection audit: {other:#?}"),
+            }
+            (2, 3, 1, None)
+        }
+        5 => {
+            let (initial_candidate_json, initial_candidate_hash, initial_report) = match &audits[1]
+                .payload
+            {
+                ExecutionPlanningAuditPayload::PlannerCall {
+                    call_kind: ExecutionPlannerCallKind::InitialPlan,
+                    call_ordinal: 0,
+                    run_uid: None,
+                    plan_revision: None,
+                    outcome: ExecutionPlannerOutcome::CompilerRejected,
+                    provider_model,
+                    prompt_version,
+                    candidate_hash: Some(candidate_hash),
+                    candidate_json: Some(candidate_json),
+                    compiler_report: Some(compiler_report),
+                    duration_micros,
+                    ..
+                } => {
+                    ensure!(
+                        !provider_model.trim().is_empty(),
+                        "initial rejected planner model must be set"
+                    );
+                    ensure!(
+                        prompt_version == EXECUTION_PLANNER_PROMPT_VERSION,
+                        "initial rejected planner prompt version drifted"
+                    );
+                    ensure!(
+                        *duration_micros > 0,
+                        "initial rejected planner duration must be positive"
+                    );
+                    (candidate_json, candidate_hash, compiler_report)
+                }
+                other => bail!("unexpected initial compiler-rejected planner audit: {other:#?}"),
+            };
+            let initial_candidate: GeneratedExecutionCandidate =
+                serde_json::from_str(initial_candidate_json)
+                    .context("deserialize initial compiler-rejected candidate")?;
+            ensure!(
+                initial_candidate_hash
+                    == &execution_planning_hash(
+                        "moa.execution.planner-candidate",
+                        initial_candidate_json.as_bytes(),
+                    ),
+                "initial rejected planner candidate hash drifted"
+            );
+            let initial_compile_hash = supplementary_compile_candidate_hash(&initial_candidate)?;
+            let initial_compile_report = match &audits[2].payload {
+                ExecutionPlanningAuditPayload::Compile {
+                    source: ExecutionCompileSource::GeneratedPlan,
+                    operation_key,
+                    run_uid: None,
+                    plan_revision: None,
+                    outcome: ExecutionCompileOutcome::Rejected,
+                    candidate_hash,
+                    final_plan_hash: None,
+                    validation_report,
+                    duration_micros,
+                    ..
+                } => {
+                    ensure!(
+                        operation_key
+                            == &format!(
+                                "session:{}:{}:generated:0",
+                                harness.session.session_id, originating_sequence,
+                            ),
+                        "initial rejected compile operation key drifted"
+                    );
+                    ensure!(
+                        candidate_hash == &initial_compile_hash,
+                        "initial rejected compiler candidate hash drifted"
+                    );
+                    ensure!(
+                        *duration_micros > 0,
+                        "initial rejected compiler duration must be positive"
+                    );
+                    validation_report
+                }
+                other => bail!("unexpected initial rejected compiler audit: {other:#?}"),
+            };
+            ensure!(
+                initial_compile_report == initial_report,
+                "initial rejected planner and compiler reports must be byte-identical"
+            );
+            ensure!(
+                rejected_compiler_report_hash(
+                    initial_report,
+                    "initial rejected planner compiler report",
+                )? == rejected_compiler_report_hash(
+                    initial_compile_report,
+                    "initial rejected compile validation report",
+                )?,
+                "initial rejected planner and compiler report hashes must match"
+            );
+            (3, 4, 1, Some(initial_candidate.goal))
+        }
+        _ => unreachable!("audit count was validated above"),
+    };
+
     let (planner_candidate_json, planner_report, planner_candidate_hash, planner_duration_micros) =
-        match &audits[1].payload {
+        match &audits[planner_index].payload {
             ExecutionPlanningAuditPayload::PlannerCall {
-                call_kind: ExecutionPlannerCallKind::InitialPlan,
-                call_ordinal: 0,
+                call_kind,
+                call_ordinal,
                 run_uid: None,
                 plan_revision: None,
                 outcome: ExecutionPlannerOutcome::Accepted,
@@ -1722,11 +1931,20 @@ async fn assert_generated_plan_audits_and_authorization(
                 ..
             } => {
                 ensure!(
+                    (*call_kind, *call_ordinal)
+                        == if repair_attempts == 0 {
+                            (ExecutionPlannerCallKind::InitialPlan, 0)
+                        } else {
+                            (ExecutionPlannerCallKind::InitialRepair, 1)
+                        },
+                    "accepted planner call identity drifted"
+                );
+                ensure!(
                     !provider_model.trim().is_empty(),
                     "planner model must be set"
                 );
                 ensure!(
-                    prompt_version == "execution-planner-v4",
+                    prompt_version == EXECUTION_PLANNER_PROMPT_VERSION,
                     "planner prompt version drifted"
                 );
                 (
@@ -1750,7 +1968,7 @@ async fn assert_generated_plan_audits_and_authorization(
         empty_compiler_report_hash(planner_report, "planner compiler report")?;
 
     let (compile_candidate_hash, compile_report, final_plan_hash, compile_duration_micros) =
-        match &audits[2].payload {
+        match &audits[compile_index].payload {
             ExecutionPlanningAuditPayload::Compile {
                 source: ExecutionCompileSource::GeneratedPlan,
                 operation_key,
@@ -1766,8 +1984,8 @@ async fn assert_generated_plan_audits_and_authorization(
                 ensure!(
                     operation_key
                         == &format!(
-                            "session:{}:{}:generated:0",
-                            harness.session.session_id, originating_sequence
+                            "session:{}:{}:generated:{repair_attempts}",
+                            harness.session.session_id, originating_sequence,
                         ),
                     "generated compile operation key drifted"
                 );
@@ -1801,24 +2019,18 @@ async fn assert_generated_plan_audits_and_authorization(
 
     let candidate: GeneratedExecutionCandidate = serde_json::from_str(planner_candidate_json)
         .context("deserialize canonical generated execution candidate")?;
+    if let Some(immutable_goal) = immutable_repair_goal {
+        ensure!(
+            candidate.goal == immutable_goal,
+            "compiler repair must preserve the complete immutable goal contract"
+        );
+    }
     validate_generated_candidate_quality(&candidate, GENERATED_PLAN_QUALITY_PROMPT)?;
     let expected_planner_candidate_hash = execution_planning_hash(
         "moa.execution.planner-candidate",
         planner_candidate_json.as_bytes(),
     );
-    let compile_preimage = SupplementaryInitialCompileCandidate {
-        kind: "initial",
-        schema_version: 1,
-        source: ExecutionCompileSource::GeneratedPlan,
-        goal: &candidate.goal,
-        plan: &candidate.plan,
-        run_input: &candidate.run_input,
-    };
-    let expected_compiler_candidate_hash = execution_planning_hash(
-        "moa.execution.compile-candidate",
-        &canonical_json_bytes(&compile_preimage)
-            .context("canonicalize supplementary compiler preimage")?,
-    );
+    let expected_compiler_candidate_hash = supplementary_compile_candidate_hash(&candidate)?;
 
     let planning_context: ExecutionPlanningContextResponse = harness
         .execution_call(
@@ -1892,6 +2104,7 @@ async fn assert_generated_plan_audits_and_authorization(
             planner_report_hash,
             compiler_report_hash: compile_report_hash,
             final_plan_hash: final_plan_hash.clone(),
+            repair_attempts,
         },
     })
 }
@@ -2675,7 +2888,6 @@ fn recovery_matrix_execution_candidate(
             }],
         },
         plan: ExecutionPlanDefinition {
-            schema_version: 2,
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: output_schema.clone(),
@@ -3059,11 +3271,11 @@ async fn recovery_matrix_execution_task_llm_cancel_crash_restart_fences_budget_s
 
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, local Restate/Postgres, and a supported provider API key"]
-async fn coordinator_ambiguous_selection_pins_execute_inline_route_provider_e2e() -> Result<()> {
-    // Pins: difficult but bounded work remains Execute/Inline with its typed reason and no planning.
-    let harness = SupplementaryLiveHarness::start("ambiguous-mode-selection").await?;
+async fn coordinator_reasoning_only_selection_pins_respond_route_provider_e2e() -> Result<()> {
+    // Pins: direct reasoning-only work remains Respond with its typed reason and no planning.
+    let harness = SupplementaryLiveHarness::start("reasoning-only-selection").await?;
     let turn_id = harness
-        .start_turn(AMBIGUOUS_MODE_SELECTION_PROMPT, 3)
+        .start_turn(REASONING_ONLY_SELECTION_PROMPT, 3)
         .await?;
     wait_for_status(
         &harness.client,
@@ -3074,9 +3286,9 @@ async fn coordinator_ambiguous_selection_pins_execute_inline_route_provider_e2e(
         Duration::from_secs(120),
     )
     .await
-    .with_context(|| format!("ambiguous mode-selection turn {turn_id} should complete"))?;
+    .with_context(|| format!("reasoning-only selection turn {turn_id} should complete"))?;
     let events = harness.events().await?;
-    assert_ambiguous_mode_selection(&harness, &events).await?;
+    assert_reasoning_only_selection(&harness, &events).await?;
     Ok(())
 }
 

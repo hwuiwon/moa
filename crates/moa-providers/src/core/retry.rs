@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{error::MoaError, error::Result};
 use opentelemetry::KeyValue;
 use reqwest::{
-    RequestBuilder, Response, StatusCode,
+    Method, RequestBuilder, Response, StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
 use serde_json::Value;
@@ -96,11 +96,23 @@ impl RetryPolicy {
             // the logical call. A retry therefore cannot exceed the credential's
             // request-per-minute quota.
             pacer.acquire(model, 1, 0).await?;
-            let response = match build_request().send().await {
+            let request = build_request();
+            let ambiguous_retry_is_safe = request
+                .try_clone()
+                .and_then(|builder| builder.build().ok())
+                .is_some_and(|request| {
+                    let method = request.method();
+                    method == Method::GET
+                        || method == Method::HEAD
+                        || method == Method::OPTIONS
+                        || method == Method::TRACE
+                });
+            let response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    let retry_eligible =
-                        self.is_retryable_transport_error(&error) && attempt < self.max_retries;
+                    let retry_eligible = self
+                        .is_retryable_transport_error(&error, ambiguous_retry_is_safe)
+                        && attempt < self.max_retries;
                     if retry_eligible && guard.allow_retry().await {
                         let delay = self.delay_for_attempt(attempt);
                         tracing::warn!(
@@ -217,11 +229,16 @@ impl RetryPolicy {
         )
     }
 
-    fn is_retryable_transport_error(&self, error: &reqwest::Error) -> bool {
+    fn is_retryable_transport_error(
+        &self,
+        error: &reqwest::Error,
+        ambiguous_retry_is_safe: bool,
+    ) -> bool {
         error.is_connect()
-            || error.is_timeout()
-            || error.is_body()
-            || (error.is_request() && !error.is_builder())
+            || (ambiguous_retry_is_safe
+                && (error.is_timeout()
+                    || error.is_body()
+                    || (error.is_request() && !error.is_builder())))
     }
 
     fn jitter_seed(&self) -> f64 {

@@ -519,8 +519,6 @@ const fn decode_hex_nibble(byte: u8) -> u8 {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledOperationContract {
-    /// Contract schema version, currently exactly one.
-    pub schema_version: u32,
     /// Stable action identifier from the connector definition.
     pub action_id: String,
     /// Complete secret-free connection authentication contract.
@@ -576,7 +574,6 @@ impl CompiledOperationContract {
         let mut auth = definition.auth.clone();
         auth.sort_by_key(auth_requirement_sort_key);
         Ok(Self {
-            schema_version: 1,
             action_id: action.id.clone(),
             auth,
             operation: action.contract.clone(),
@@ -585,11 +582,6 @@ impl CompiledOperationContract {
 
     /// Serializes the contract with deterministic recursive JSON object-key ordering.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        if self.schema_version != 1 {
-            return Err(Error::InvalidContract {
-                message: "compiled operation contract schema_version must be 1".to_string(),
-            });
-        }
         canonical_json_bytes(self).map_err(Error::from)
     }
 
