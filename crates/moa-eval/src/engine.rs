@@ -845,10 +845,10 @@ mod tests {
     use moa_core::{
         error::MoaError, traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::StopReason, types::completion::TokenUsage,
-        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
-        types::resource::DeadlineGuard, types::resource::ResourceAmounts,
-        types::resource::ResourceBudget,
+        types::completion::SharedCompletionRequest, types::completion::StopReason,
+        types::completion::TokenUsage, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::resource::DeadlineGuard,
+        types::resource::ResourceAmounts, types::resource::ResourceBudget,
     };
     use tempfile::tempdir;
 
@@ -895,6 +895,20 @@ mod tests {
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
+
+        fn response() -> CompletionStream {
+            CompletionStream::from_response(CompletionResponse {
+                text: "hello from eval".to_string(),
+                content: vec![moa_core::types::completion::CompletionContent::Text(
+                    "hello from eval".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: moa_core::types::identifiers::ModelId::new("mock-model"),
+                usage: token_usage(42, 7),
+                duration_ms: 3,
+                thought_signature: None,
+            })
+        }
     }
 
     #[async_trait]
@@ -929,22 +943,28 @@ mod tests {
             _request: CompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CompletionStream::from_response(CompletionResponse {
-                text: "hello from eval".to_string(),
-                content: vec![moa_core::types::completion::CompletionContent::Text(
-                    "hello from eval".to_string(),
-                )],
-                stop_reason: StopReason::EndTurn,
-                model: moa_core::types::identifiers::ModelId::new("mock-model"),
-                usage: token_usage(42, 7),
-                duration_ms: 3,
-                thought_signature: None,
-            }))
+            Ok(Self::response())
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Self::response())
         }
     }
 
     struct PendingProvider {
         stopped: Arc<AtomicUsize>,
+    }
+
+    impl PendingProvider {
+        async fn pending(&self) -> moa_core::error::Result<CompletionStream> {
+            let _sentinel = CompletionDropSentinel(Arc::clone(&self.stopped));
+            std::future::pending::<()>().await;
+            unreachable!("the case deadline must drop the pending provider future")
+        }
     }
 
     #[async_trait]
@@ -961,9 +981,14 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
-            let _sentinel = CompletionDropSentinel(Arc::clone(&self.stopped));
-            std::future::pending::<()>().await;
-            unreachable!("the case deadline must drop the pending provider future")
+            self.pending().await
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            self.pending().await
         }
     }
 

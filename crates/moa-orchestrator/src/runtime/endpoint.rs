@@ -370,8 +370,8 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                     credential_vault.clone(),
                     config.as_ref(),
                     runtime_cache.clone(),
-                )
-                .with_connector_connections(runtime_deps.connector_connections.clone()),
+                    Arc::new(runtime_deps.connector_connections.clone()),
+                ),
                 authz.clone(),
             )
             .serve(),

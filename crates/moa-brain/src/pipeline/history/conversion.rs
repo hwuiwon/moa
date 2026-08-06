@@ -577,7 +577,7 @@ fn replayable_tool_content_blocks(
             output
                 .content
                 .iter()
-                .map(replayable_tool_content_block)
+                .flat_map(replayable_tool_content_blocks_for_block)
                 .collect(),
         );
     }
@@ -585,10 +585,15 @@ fn replayable_tool_content_blocks(
     Some(vec![wrapped_tool_text_block(replayable_text)])
 }
 
-fn replayable_tool_content_block(content: &ToolContent) -> ToolContent {
+fn replayable_tool_content_blocks_for_block(content: &ToolContent) -> Vec<ToolContent> {
     match content {
-        ToolContent::Text { text } => wrapped_tool_text_block(text),
-        ToolContent::Json { data } => wrapped_tool_text_block(&data.to_string()),
+        ToolContent::Text { text } => vec![wrapped_tool_text_block(text)],
+        ToolContent::Json { data } => vec![wrapped_tool_text_block(&data.to_string())],
+        ToolContent::Process { output } => output
+            .rendered_blocks()
+            .iter()
+            .map(|block| wrapped_tool_text_block(block))
+            .collect(),
     }
 }
 
@@ -602,6 +607,11 @@ fn tool_content_char_len(content: &ToolContent) -> usize {
     match content {
         ToolContent::Text { text } => text.chars().count(),
         ToolContent::Json { data } => data.to_string().chars().count(),
+        ToolContent::Process { output } => output
+            .rendered_blocks()
+            .iter()
+            .map(|block| block.chars().count())
+            .sum(),
     }
 }
 
@@ -822,6 +832,9 @@ mod tests {
                 assert!(body.chars().count() <= ToolOutputConfig::default().max_replay_chars);
             }
             ToolContent::Json { .. } => panic!("oversized replay should collapse to a text block"),
+            ToolContent::Process { .. } => {
+                panic!("oversized replay should collapse to a text block")
+            }
         }
     }
 

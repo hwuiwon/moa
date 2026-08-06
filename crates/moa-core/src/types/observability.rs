@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    channel::Channel, completion::CompletionRequest, contact::ContactId, contact::SessionActorRef,
-    context::MessageRole, context::estimate_text_tokens, context::sum_message_tokens,
-    identifiers::ModelId, identifiers::SessionId, identifiers::TenantId, session::SessionMeta,
+    channel::Channel, completion::CompletionRequestView, contact::ContactId,
+    contact::SessionActorRef, context::MessageRole, context::estimate_text_tokens,
+    context::sum_message_tokens, identifiers::ModelId, identifiers::SessionId,
+    identifiers::TenantId, session::SessionMeta,
 };
 
 /// Durable summary of one provider request's cache plan and observed cache usage.
@@ -92,8 +93,8 @@ impl Default for CacheReport {
 
 impl CacheReport {
     /// Builds a cache report from one completion request and its provider response metrics.
-    pub fn from_request(
-        request: &CompletionRequest,
+    pub fn from_request<R: CompletionRequestView + ?Sized>(
+        request: &R,
         provider: impl Into<String>,
         model: impl Into<ModelId>,
         stable_prefix_reused: bool,
@@ -103,13 +104,13 @@ impl CacheReport {
     ) -> Self {
         let stable_message_count = stable_prefix_message_count(request);
         let tool_tokens_estimate = request
-            .tools
+            .tools()
             .iter()
             .map(|tool| estimate_text_tokens(&tool.to_string()))
             .sum::<usize>();
         let stable_message_tokens_estimate =
-            sum_message_tokens(&request.messages[..stable_message_count]);
-        let total_message_tokens_estimate = sum_message_tokens(&request.messages);
+            sum_message_tokens(&request.messages()[..stable_message_count]);
+        let total_message_tokens_estimate = sum_message_tokens(request.messages());
         let stable_total_tokens_estimate = tool_tokens_estimate + stable_message_tokens_estimate;
         let total_tokens_estimate = tool_tokens_estimate + total_message_tokens_estimate;
         let dynamic_tokens_estimate =
@@ -126,17 +127,17 @@ impl CacheReport {
         };
         let frozen_history_end = frozen_history_end(request);
         let frozen_history_tokens_estimate = frozen_history_end
-            .map(|end| tool_tokens_estimate + sum_message_tokens(&request.messages[..end]))
+            .map(|end| tool_tokens_estimate + sum_message_tokens(&request.messages()[..end]))
             .unwrap_or(0);
         let frozen_history_fingerprint = frozen_history_end
-            .map(|end| fingerprint_json(&(&request.tools, &request.messages[..end])))
+            .map(|end| fingerprint_json(&(request.tools(), &request.messages()[..end])))
             .unwrap_or(0);
 
         Self {
             provider: provider.into(),
             model: model.into(),
-            message_count: request.messages.len(),
-            tool_count: request.tools.len(),
+            message_count: request.messages().len(),
+            tool_count: request.tools().len(),
             tool_tokens_estimate,
             stable_message_tokens_estimate,
             stable_total_tokens_estimate,
@@ -158,24 +159,24 @@ impl CacheReport {
 }
 
 /// Returns a stable fingerprint for the cacheable prefix of a completion request.
-pub fn stable_prefix_fingerprint(request: &CompletionRequest) -> u64 {
+pub fn stable_prefix_fingerprint<R: CompletionRequestView + ?Sized>(request: &R) -> u64 {
     let stable_message_count = stable_prefix_message_count(request);
-    fingerprint_json(&(&request.tools, &request.messages[..stable_message_count]))
+    fingerprint_json(&(request.tools(), &request.messages()[..stable_message_count]))
 }
 
 /// Returns the frozen-history end index carried in request metadata, clamped
 /// to the message list, when the context pipeline provided one.
-fn frozen_history_end(request: &CompletionRequest) -> Option<usize> {
+fn frozen_history_end<R: CompletionRequestView + ?Sized>(request: &R) -> Option<usize> {
     request
-        .metadata
+        .metadata()
         .get(super::completion::STABLE_HISTORY_END_METADATA_KEY)
         .and_then(Value::as_u64)
-        .map(|end| (end as usize).min(request.messages.len()))
+        .map(|end| (end as usize).min(request.messages().len()))
 }
 
 /// Returns a stable fingerprint for the full completion request payload.
-pub fn full_request_fingerprint(request: &CompletionRequest) -> u64 {
-    fingerprint_json(&(&request.tools, &request.messages))
+pub fn full_request_fingerprint<R: CompletionRequestView + ?Sized>(request: &R) -> u64 {
+    fingerprint_json(&(request.tools(), request.messages()))
 }
 
 fn fingerprint_json<T>(value: &T) -> u64
@@ -196,16 +197,16 @@ where
     hasher.finish()
 }
 
-fn stable_prefix_byte_len(request: &CompletionRequest) -> usize {
+fn stable_prefix_byte_len<R: CompletionRequestView + ?Sized>(request: &R) -> usize {
     let stable_message_count = stable_prefix_message_count(request);
-    serde_json::to_vec(&(&request.tools, &request.messages[..stable_message_count]))
+    serde_json::to_vec(&(request.tools(), &request.messages()[..stable_message_count]))
         .map(|bytes| bytes.len())
         .unwrap_or_default()
 }
 
-fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
+fn stable_prefix_message_count<R: CompletionRequestView + ?Sized>(request: &R) -> usize {
     request
-        .messages
+        .messages()
         .iter()
         .take_while(|message| message.role == MessageRole::System)
         .count()
@@ -255,9 +256,8 @@ impl TraceContext {
 
     /// Returns a clone of the trace context with an explicit environment override.
     #[must_use]
-    pub fn with_environment(mut self, environment: Option<String>) -> Self {
+    pub fn with_environment(mut self, environment: Option<&str>) -> Self {
         self.environment = environment
-            .as_deref()
             .map(normalize_environment)
             .filter(|value| !value.is_empty());
         self
@@ -348,6 +348,21 @@ mod tests {
         let ctx = TraceContext::from_session_meta(&meta, Some("Fix OAuth bug"));
         assert_eq!(ctx.trace_name.as_deref(), Some("Fix OAuth bug"));
         assert_eq!(ctx.tenant_id, TenantId::from(uuid::Uuid::from_u128(2)));
+    }
+
+    #[test]
+    fn trace_context_environment_is_normalized_and_empty_filtered() {
+        let meta = SessionMeta::default();
+        let environment = String::from("Production/US East");
+        let normalized = TraceContext::from_session_meta(&meta, None)
+            .with_environment(Some(environment.as_str()));
+        assert_eq!(
+            normalized.environment.as_deref(),
+            Some("production-us-east")
+        );
+
+        let empty = TraceContext::from_session_meta(&meta, None).with_environment(Some(""));
+        assert_eq!(empty.environment, None);
     }
 
     #[test]

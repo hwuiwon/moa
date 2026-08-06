@@ -111,6 +111,7 @@ pub(super) fn openai_tool_result_output(message: &ContextMessage) -> FunctionCal
                         text: match block {
                             ToolContent::Text { text } => text.clone(),
                             ToolContent::Json { data } => data.to_string(),
+                            ToolContent::Process { output } => output.to_text(),
                         },
                     })
                 })

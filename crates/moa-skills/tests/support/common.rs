@@ -32,6 +32,7 @@ use moa_core::{
     types::completion::CompletionRequest,
     types::completion::CompletionResponse,
     types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest,
     types::completion::StopReason,
     types::completion::TokenUsage,
     types::contact::SessionActorRef,
@@ -621,6 +622,18 @@ impl TestProvider {
             responses: Mutex::new(responses),
         }
     }
+
+    fn next_response(&self) -> moa_core::error::Result<CompletionStream> {
+        let text = self
+            .responses
+            .lock()
+            .map_err(|error| MoaError::ProviderError(format!("test provider poisoned: {error}")))?
+            .pop_front()
+            .ok_or_else(|| {
+                MoaError::ProviderError("skill test provider ran out of responses".to_string())
+            })?;
+        Ok(text_completion_stream(text))
+    }
 }
 
 #[async_trait]
@@ -654,15 +667,14 @@ impl LLMProvider for TestProvider {
         &self,
         _request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        let text = self
-            .responses
-            .lock()
-            .map_err(|error| MoaError::ProviderError(format!("test provider poisoned: {error}")))?
-            .pop_front()
-            .ok_or_else(|| {
-                MoaError::ProviderError("skill test provider ran out of responses".to_string())
-            })?;
-        Ok(text_completion_stream(text))
+        self.next_response()
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.next_response()
     }
 }
 
@@ -702,6 +714,29 @@ struct RaceMutatingProvider {
     calls: Arc<AtomicUsize>,
 }
 
+impl RaceMutatingProvider {
+    async fn next_response(&self) -> moa_core::error::Result<CompletionStream> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            // A rival pass advances the draft revision while this model call runs.
+            if let Some(mut candidate) = self
+                .store
+                .get_learning_candidate(&self.tenant_id, self.candidate_id)
+                .await?
+            {
+                if let Some(object) = candidate.payload.as_object_mut() {
+                    object.insert(
+                        "draft_artifact_revision_uid".to_string(),
+                        Value::String(Uuid::now_v7().to_string()),
+                    );
+                }
+                candidate.updated_at = moa_test_support::fixtures::pg_now();
+                self.store.append_learning_candidate(&candidate).await?;
+            }
+        }
+        Ok(text_completion_stream(self.response.clone()))
+    }
+}
+
 #[async_trait]
 impl LLMProvider for RaceMutatingProvider {
     fn name(&self) -> &str {
@@ -733,24 +768,14 @@ impl LLMProvider for RaceMutatingProvider {
         &self,
         _request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            // A rival pass advances the draft revision while this model call runs.
-            if let Some(mut candidate) = self
-                .store
-                .get_learning_candidate(&self.tenant_id, self.candidate_id)
-                .await?
-            {
-                if let Some(object) = candidate.payload.as_object_mut() {
-                    object.insert(
-                        "draft_artifact_revision_uid".to_string(),
-                        Value::String(Uuid::now_v7().to_string()),
-                    );
-                }
-                candidate.updated_at = moa_test_support::fixtures::pg_now();
-                self.store.append_learning_candidate(&candidate).await?;
-            }
-        }
-        Ok(text_completion_stream(self.response.clone()))
+        self.next_response().await
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.next_response().await
     }
 }
 

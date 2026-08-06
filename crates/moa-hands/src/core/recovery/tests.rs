@@ -305,14 +305,16 @@ async fn recovery_retries_retryable_failures_up_to_three_attempts() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let secured = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -351,14 +353,16 @@ async fn recovery_reprovisions_and_succeeds_after_transient_sandbox_death() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let secured_2 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -392,14 +396,16 @@ async fn recovery_returns_fatal_failures_immediately() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let secured_3 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -436,14 +442,16 @@ async fn recovery_propagates_budget_exhaustion_from_hand_execution() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let error = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("budget exhaustion must escape recovery unchanged");
 
@@ -478,14 +486,16 @@ async fn recovery_propagates_budget_exhaustion_from_health_check() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let error = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("budget exhaustion must escape recovery unchanged");
 
@@ -528,14 +538,16 @@ async fn recovery_caps_reprovision_attempts_per_session() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let secured_4 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -569,14 +581,16 @@ async fn recovery_does_not_retry_non_idempotent_execution_failure() {
     let router = router_with_provider(provider.clone()).await;
 
     let secured_5 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -613,14 +627,16 @@ async fn recovery_does_not_reprovision_non_idempotent_execution_failure() {
     let router = router_with_provider(provider.clone()).await;
 
     let secured_6 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -656,14 +672,16 @@ async fn recovery_reprovisions_non_idempotent_before_execution() {
     let router = router_with_provider(provider.clone()).await;
 
     let secured_7 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("recovery path should return a tool output");
 
@@ -723,14 +741,16 @@ async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
     .await;
 
     let secured_8 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("fallback route should return a tool output");
 
@@ -796,14 +816,16 @@ async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
     .await;
 
     let secured_9 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("idempotent fallback route should return a tool output");
 
@@ -864,14 +886,16 @@ async fn recovery_does_not_fallback_after_non_idempotent_execution_failure() {
     .await;
 
     let secured_10 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("non-idempotent failure should return a tool output");
 
@@ -936,14 +960,16 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
     let session = session();
 
     let secured_11 = router
-        .execute_authorized_with_recovery(
-            &session,
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("first call should use fallback");
 
@@ -951,14 +977,16 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
 
     let first_output = secured_11.safe_output;
     let secured_12 = router
-        .execute_authorized_with_recovery(
-            &session,
-            &identity(),
-            None,
-            &bash_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &bash_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: crate::core::ToolCallScope::unbounded(),
+        })
         .await
         .expect("second call should prefer the proven fallback");
     let _second_hand_id = secured_12.hand_id.clone();

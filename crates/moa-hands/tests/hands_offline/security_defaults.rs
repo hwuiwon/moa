@@ -390,31 +390,37 @@ async fn local_route_with_opt_in_registers_local_hands() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": "allowed local opt-in" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("opted-in local file_write should execute");
     let secured = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
                 input: json!({ "path": "notes.txt" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("opted-in local file_read should execute");
     let output = secured.safe_output;
@@ -454,17 +460,20 @@ async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
                 moa_hands::local_development_sandbox_policy(),
             );
             let error = router
-                .execute_authorized(
-                    &session(),
-                    &identity(),
-                    &ToolInvocation {
+                .execute_authorized(moa_hands::AuthorizedToolCall {
+                    session: &session(),
+                    caller_identity: &identity(),
+                    worker_id: None,
+                    invocation: &ToolInvocation {
                         id: None,
                         name: "secret_error".to_string(),
                         input,
                     },
-                    ToolCallId::new(),
-                    None,
-                )
+                    tool_call_id: ToolCallId::new(),
+                    active_canary: None,
+                    catalog: None,
+                    scope: moa_hands::ToolCallScope::unbounded(),
+                })
                 .await
                 .expect_err("test tool should fail with a secret-bearing error");
 
@@ -520,17 +529,20 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
                 .await
                 .expect("local opt-in should allow router construction");
             let secured_2 = router
-                .execute_authorized(
-                    &session(),
-                    &identity(),
-                    &ToolInvocation {
+                .execute_authorized(moa_hands::AuthorizedToolCall {
+                    session: &session(),
+                    caller_identity: &identity(),
+                    worker_id: None,
+                    invocation: &ToolInvocation {
                         id: None,
                         name: "bash".to_string(),
                         input,
                     },
-                    ToolCallId::new(),
-                    None,
-                )
+                    tool_call_id: ToolCallId::new(),
+                    active_canary: None,
+                    catalog: None,
+                    scope: moa_hands::ToolCallScope::unbounded(),
+                })
                 .await
                 .expect("failing bash command should still return a ToolOutput");
             let output = secured_2.safe_output;
@@ -854,18 +866,20 @@ async fn sandbox_provision_spans_carry_policy_identity_and_no_policy_contents() 
             .await
             .expect("local router builds");
         let _ = router
-            .execute_authorized_with_recovery(
-                &session(),
-                &identity(),
-                None,
-                &ToolInvocation {
+            .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+                session: &session(),
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "file_search".to_string(),
                     input: json!({ "pattern": "*.rs" }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await;
     })
     .await;

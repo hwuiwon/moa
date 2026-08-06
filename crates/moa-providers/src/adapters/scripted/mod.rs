@@ -10,8 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::CompletionRequest, types::completion::CompletionRequestView,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::context::MessageRole,
     types::model::ModelCapabilities,
@@ -455,22 +456,30 @@ impl ScriptedProvider {
     }
 }
 
-#[async_trait]
-impl LLMProvider for ScriptedProvider {
-    fn name(&self) -> &str {
-        "scripted"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        self.capabilities.clone()
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+impl ScriptedProvider {
+    async fn complete_request<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+        effective_model: Option<&moa_core::types::identifiers::ModelId>,
+    ) -> Result<CompletionStream> {
+        let mut recorded_request = CompletionRequest {
+            model: request.model().cloned(),
+            messages: request.messages().to_vec(),
+            tools: request.tools().to_vec(),
+            max_output_tokens: request.max_output_tokens(),
+            temperature: request.temperature(),
+            response_format: request.response_format().cloned(),
+            native_web_search: request.native_web_search(),
+            metadata: request.metadata().clone(),
+        };
+        if let Some(model) = effective_model {
+            recorded_request.model = Some(model.clone());
+        }
         // Resolve the keyed match before recording moves the request; keyed lookup is pure so it
         // stays correct under concurrent callers.
-        let keyed_response = self.match_keyed(&request);
+        let keyed_response = self.match_keyed(&recorded_request);
         if let Some(journal) = &self.request_journal {
-            journal.append(&request).await?;
+            journal.append(&recorded_request).await?;
         }
         self.recorded_requests
             .lock()
@@ -479,7 +488,7 @@ impl LLMProvider for ScriptedProvider {
                     "scripted provider request log poisoned: {error}"
                 ))
             })?
-            .push(request);
+            .push(recorded_request);
         let response = match keyed_response {
             Some(response) => response,
             None => {
@@ -556,7 +565,9 @@ impl LLMProvider for ScriptedProvider {
             text,
             content: response.content,
             stop_reason: response.stop_reason,
-            model: self.capabilities.model_id.clone(),
+            model: effective_model
+                .cloned()
+                .unwrap_or_else(|| self.capabilities.model_id.clone()),
             usage: TokenUsage {
                 input_tokens_uncached: response
                     .input_tokens
@@ -612,6 +623,26 @@ impl LLMProvider for ScriptedProvider {
             Ok(completion_response)
         });
         Ok(CompletionStream::new(rx, completion))
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ScriptedProvider {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.capabilities.clone()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let effective_model = request.model.as_ref();
+        self.complete_request(&request, effective_model).await
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.complete_request(&request, request.model()).await
     }
 }
 

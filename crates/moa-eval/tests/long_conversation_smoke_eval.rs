@@ -18,8 +18,9 @@ use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, types::action_policy::ActionRuleScope,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::CompletionRequest, types::completion::CompletionRequestView,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::identifiers::ToolCallId,
     types::model::ModelCapabilities,
@@ -1377,21 +1378,12 @@ struct CompactionAwareRecordedProvider {
     recorded: RecordedScriptedProvider,
 }
 
-#[async_trait]
-impl LLMProvider for CompactionAwareRecordedProvider {
-    fn name(&self) -> &str {
-        "recorded"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        self.recorded.capabilities()
-    }
-
-    async fn complete(
+impl CompactionAwareRecordedProvider {
+    fn complete_view<R: CompletionRequestView + ?Sized>(
         &self,
-        request: CompletionRequest,
+        request: &R,
     ) -> moa_core::error::Result<CompletionStream> {
-        if is_compaction_request(&request) {
+        if is_compaction_request(request) {
             return Ok(CompletionStream::from_response(CompletionResponse {
                 text: "Compaction checkpoint preserved the file-not-found and zero-match errors."
                     .to_string(),
@@ -1413,15 +1405,40 @@ impl LLMProvider for CompactionAwareRecordedProvider {
         }
 
         self.recorded
-            .complete_recorded(&request)
+            .complete_recorded(request)
             .map_err(|error| MoaError::ProviderError(error.to_string()))
     }
 }
 
-fn is_compaction_request(request: &CompletionRequest) -> bool {
-    request.tools.is_empty()
-        && request.max_output_tokens == Some(700)
-        && request.messages.iter().any(|message| {
+#[async_trait]
+impl LLMProvider for CompactionAwareRecordedProvider {
+    fn name(&self) -> &str {
+        "recorded"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.recorded.capabilities()
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_view(&request)
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_view(&request)
+    }
+}
+
+fn is_compaction_request<R: CompletionRequestView + ?Sized>(request: &R) -> bool {
+    request.tools().is_empty()
+        && request.max_output_tokens() == Some(700)
+        && request.messages().iter().any(|message| {
             message
                 .content
                 .contains("New events to fold into the checkpoint")

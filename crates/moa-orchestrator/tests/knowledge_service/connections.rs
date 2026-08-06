@@ -20,8 +20,8 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
     let caller = KnowledgeCaller::authorized(&identity, Uuid::now_v7().to_string());
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(
             moa_knowledge::domain::LinkedProviderKind::Merge,
@@ -30,8 +30,8 @@ async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
+        Arc::new(FakeKnowledgeConnectorConnections::default()),
+    );
 
     service
         .exchange_public_token(
@@ -139,15 +139,15 @@ async fn list_connections_batches_closed_provider_credential_statuses_once() {
         .insert_connection(superseded)
         .expect("insert superseded connection");
 
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository,
         Arc::new(StaticKnowledgeProviders::new()),
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
+        Arc::new(FakeKnowledgeConnectorConnections::default()),
+    );
     let listed = service
         .list_connections(
             KnowledgeConnectionListRequest {
@@ -195,8 +195,8 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
     let broken_like = Arc::new(FakeLinkedIntegrationProvider::with_integrations_error(
         "catalog endpoint returned 500",
     ));
-    let service = KnowledgeService::new(
-        Arc::new(InMemoryKnowledgeRepository::default()),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(Arc::new(InMemoryKnowledgeRepository::default())),
         Arc::new(InMemoryKnowledgeRepository::default()),
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -209,8 +209,8 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
+        Arc::new(FakeKnowledgeConnectorConnections::default()),
+    );
 
     let all = service
         .list_integrations(KnowledgeIntegrationListRequest {
@@ -294,8 +294,8 @@ async fn exchange_stores_merge_credential_only_in_vault() {
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
     let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(
             moa_knowledge::domain::LinkedProviderKind::Merge,
@@ -304,8 +304,8 @@ async fn exchange_stores_merge_credential_only_in_vault() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(connector_connections);
+        connector_connections,
+    );
     let information_barrier =
         InformationBarrierId::parse("finance-restricted").expect("valid barrier");
 
@@ -394,7 +394,7 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
     let replacement_barrier =
         InformationBarrierId::parse("legal-restricted").expect("valid replacement barrier");
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
-    let service = KnowledgeService::from_postgres_pool(
+    let service = KnowledgeService::from_postgres_pool_with_connector_connections(
         pool.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(
             moa_knowledge::domain::LinkedProviderKind::Merge,
@@ -403,8 +403,8 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connections(postgres_connector_service(pool.clone()));
+        Arc::new(postgres_connector_service(pool.clone())),
+    );
 
     let exchange = service
         .exchange_public_token(
@@ -472,8 +472,8 @@ async fn disconnect_connection_revokes_vault_credential_and_deletes_parent() {
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
     let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(
             moa_knowledge::domain::LinkedProviderKind::Merge,
@@ -482,8 +482,8 @@ async fn disconnect_connection_revokes_vault_credential_and_deletes_parent() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(connector_connections.clone());
+        connector_connections.clone(),
+    );
     let exchange = service
         .exchange_public_token(
             KnowledgeExchangeTokenRequest {
@@ -571,8 +571,8 @@ async fn disconnect_transport_loss_is_unknown_and_replay_never_resends() {
     ));
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
     let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(
             moa_knowledge::domain::LinkedProviderKind::Merge,
@@ -581,8 +581,8 @@ async fn disconnect_transport_loss_is_unknown_and_replay_never_resends() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(connector_connections.clone());
+        connector_connections.clone(),
+    );
     let exchange = service
         .exchange_public_token(
             KnowledgeExchangeTokenRequest {
@@ -646,8 +646,8 @@ async fn disconnect_nango_connection_deletes_parent_without_vault_revocation() {
         .insert_connection(connection)
         .expect("fixture connection should be inserted");
     let connector_connections = Arc::new(FakeKnowledgeConnectorConnections::default());
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(
             moa_knowledge::domain::LinkedProviderKind::Nango,
@@ -656,8 +656,8 @@ async fn disconnect_nango_connection_deletes_parent_without_vault_revocation() {
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(connector_connections.clone());
+        connector_connections.clone(),
+    );
 
     let response = service
         .disconnect_connection(

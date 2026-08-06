@@ -3,8 +3,9 @@
 use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
 use moa_core::{
-    truncation::truncate_head_tail, types::session::SessionMeta, types::tools::ToolContent,
-    types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::ToolOutputArtifact,
+    truncation::truncate_head_tail, types::session::SessionMeta,
+    types::tools::ToolArtifactByteRange, types::tools::ToolContent, types::tools::ToolDefinition,
+    types::tools::ToolOutput, types::tools::ToolOutputArtifact,
 };
 use serde_json::json;
 
@@ -14,7 +15,7 @@ impl ToolRouter {
     /// Overrides the router's replay truncation settings used for head/tail shaping.
     #[must_use]
     pub fn with_tool_output_config(mut self, tool_output: ToolOutputConfig) -> Self {
-        self.tool_output = tool_output;
+        self.bindings.set_tool_output(tool_output);
         self
     }
 
@@ -24,7 +25,7 @@ impl ToolRouter {
         let mut registry = (*self.registry()).clone();
         registry.apply_budgets(&tool_budgets);
         self.publish_registry(registry);
-        self.tool_budgets = tool_budgets;
+        self.bindings.set_tool_budgets(tool_budgets);
         self
     }
 
@@ -84,7 +85,7 @@ impl ToolRouter {
                 let (truncated_text, _) = truncate_head_tail(
                     &rendered,
                     available_chars.max(1),
-                    self.tool_output.head_ratio,
+                    self.bindings.tool_output().head_ratio,
                 );
                 final_output.content = vec![ToolContent::Text {
                     text: append_footer(&truncated_text, &footer),
@@ -116,7 +117,7 @@ impl ToolRouter {
             return None;
         }
 
-        let session_store = self.session_store.as_ref()?;
+        let session_store = self.bindings.session_store()?;
 
         let combined = match session_store
             .store_text_artifact(session.id, rendered)
@@ -133,47 +134,17 @@ impl ToolRouter {
                 return None;
             }
         };
-        let stdout = match output.process_stdout() {
-            Some(stdout) if !stdout.is_empty() => {
-                match session_store.store_text_artifact(session.id, stdout).await {
-                    Ok(claim_check) => Some(claim_check),
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = %session.id,
-                            tool_name = %tool_definition.name,
-                            error = %error,
-                            "failed to persist tool stdout artifact; continuing with combined artifact only"
-                        );
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
-        let stderr = match output.process_stderr() {
-            Some(stderr) if !stderr.is_empty() => {
-                match session_store.store_text_artifact(session.id, stderr).await {
-                    Ok(claim_check) => Some(claim_check),
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = %session.id,
-                            tool_name = %tool_definition.name,
-                            error = %error,
-                            "failed to persist tool stderr artifact; continuing with combined artifact only"
-                        );
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
+        let (stdout_range, stderr_range) =
+            process_stream_ranges(rendered, output.process_stdout(), output.process_stderr());
 
         let artifact = ToolOutputArtifact {
             combined,
             estimated_tokens: original_output_tokens,
             line_count: count_lines(rendered),
-            stdout,
-            stderr,
+            stdout_range,
+            stderr_range,
+            stdout: None,
+            stderr: None,
         };
         let inline_preview_tokens =
             inline_artifact_preview_budget(tool_definition.max_output_tokens);
@@ -190,7 +161,7 @@ impl ToolRouter {
                 truncate_head_tail(
                     rendered,
                     preview_budget_chars.max(1),
-                    self.tool_output.head_ratio,
+                    self.bindings.tool_output().head_ratio,
                 )
                 .0
             });
@@ -232,19 +203,33 @@ impl ToolRouter {
         let stdout = output.process_stdout().unwrap_or_default();
         let stderr = output.process_stderr().unwrap_or_default();
 
-        let stdout_budget = self.tool_budgets.bash_stdout;
-        let stderr_budget = self.tool_budgets.bash_stderr;
-        let (stdout, stdout_truncated) =
-            truncate_text_for_budget(stdout, stdout_budget, self.tool_output.head_ratio);
-        let (stderr, stderr_truncated) =
-            truncate_text_for_budget(stderr, stderr_budget, self.tool_output.head_ratio);
+        let stdout_budget = self.bindings.tool_budgets().bash_stdout;
+        let stderr_budget = self.bindings.tool_budgets().bash_stderr;
+        let (stdout, stdout_truncated) = truncate_text_for_budget(
+            stdout,
+            stdout_budget,
+            self.bindings.tool_output().head_ratio,
+        );
+        let (stderr, stderr_truncated) = truncate_text_for_budget(
+            stderr,
+            stderr_budget,
+            self.bindings.tool_output().head_ratio,
+        );
 
         if !stdout_truncated && !stderr_truncated {
             return (output, false);
         }
 
         (
-            ToolOutput::from_process(stdout, stderr, exit_code, output.duration),
+            ToolOutput::from_process_with_source_truncation(
+                stdout,
+                stderr,
+                exit_code,
+                output.duration,
+                stdout_truncated,
+                stderr_truncated,
+                output.original_output_tokens,
+            ),
             true,
         )
     }
@@ -266,8 +251,11 @@ impl ToolRouter {
             .saturating_mul(4)
             .saturating_sub(footer.chars().count() as u32) as usize;
         let available_chars = available_chars.max(1);
-        let (truncated_text, _) =
-            truncate_head_tail(&rendered, available_chars, self.tool_output.head_ratio);
+        let (truncated_text, _) = truncate_head_tail(
+            &rendered,
+            available_chars,
+            self.bindings.tool_output().head_ratio,
+        );
 
         (
             ToolOutput {
@@ -293,6 +281,46 @@ fn estimate_tokens(text: &str) -> u32 {
 
 fn count_lines(text: &str) -> usize {
     text.lines().count()
+}
+
+fn process_stream_ranges(
+    rendered: &str,
+    stdout: Option<&str>,
+    stderr: Option<&str>,
+) -> (Option<ToolArtifactByteRange>, Option<ToolArtifactByteRange>) {
+    let stdout_range = visible_stream_range(rendered, stdout, 0);
+    let search_start = stdout_range.as_ref().map_or(0, |range| range.end);
+    let stderr_range = stderr.and_then(|stream| {
+        let stream = stream.trim_end();
+        if stream.is_empty() {
+            return None;
+        }
+
+        let marker = "stderr:\n";
+        let marker_start = rendered.get(search_start..)?.find(marker)? + search_start;
+        let start = marker_start.checked_add(marker.len())?;
+        let end = start.checked_add(stream.len())?;
+        (rendered.get(start..end) == Some(stream)).then_some(ToolArtifactByteRange { start, end })
+    });
+    (stdout_range, stderr_range)
+}
+
+fn visible_stream_range(
+    rendered: &str,
+    stream: Option<&str>,
+    search_start: usize,
+) -> Option<ToolArtifactByteRange> {
+    let stream = stream?.trim_end();
+    if stream.is_empty() {
+        return None;
+    }
+
+    let start = rendered.get(search_start..)?.find(stream)? + search_start;
+    let end = start.checked_add(stream.len())?;
+    rendered
+        .get(start..end)
+        .is_some()
+        .then_some(ToolArtifactByteRange { start, end })
 }
 
 fn inline_artifact_preview_budget(tool_budget_tokens: u32) -> u32 {
@@ -356,12 +384,7 @@ const JSON_PREVIEW_HEADER: &str = "[json preview: null/empty fields dropped, lon
 /// Returns `None` for non-JSON outputs or when even the tersest form does not
 /// fit, in which case the caller falls back to head/tail truncation.
 fn json_compact_preview(output: &ToolOutput, budget_chars: usize) -> Option<String> {
-    let value = output.structured.as_ref().or_else(|| {
-        output.content.iter().find_map(|content| match content {
-            ToolContent::Json { data } => Some(data),
-            _ => None,
-        })
-    })?;
+    let value = output.structured_payload()?;
 
     for max_array_items in [16usize, 4, 1] {
         let compacted = compact_json_value(value, max_array_items);
@@ -467,5 +490,38 @@ mod tests {
         // Pins: plain-text outputs keep the head/tail fallback.
         let output = ToolOutput::text("x".repeat(50_000), Duration::default());
         assert!(json_compact_preview(&output, 4_000).is_none());
+    }
+
+    #[test]
+    fn process_stream_ranges_reference_one_utf8_combined_blob() {
+        // Pins: stdout and stderr remain independently readable from the one
+        // persisted combined payload, including multibyte UTF-8 text.
+        let output = ToolOutput::from_process(
+            "α\nβ\n".to_string(),
+            "警告\n".to_string(),
+            0,
+            Duration::default(),
+        );
+        let rendered = output.to_text();
+        let (stdout, stderr) = super::process_stream_ranges(
+            &rendered,
+            output.process_stdout(),
+            output.process_stderr(),
+        );
+
+        assert_eq!(
+            stdout
+                .expect("stdout range")
+                .slice(&rendered)
+                .expect("stdout slice"),
+            "α\nβ"
+        );
+        assert_eq!(
+            stderr
+                .expect("stderr range")
+                .slice(&rendered)
+                .expect("stderr slice"),
+            "警告"
+        );
     }
 }

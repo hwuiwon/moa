@@ -12,8 +12,9 @@ use moa_core::{
     error::Result, events::Event, events::EventType, traits::LLMProvider, traits::SessionStore,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
     types::action_policy::ActionRuleScope, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
     types::completion::ToolCallContent, types::completion::ToolInvocation,
     types::contact::SessionActorRef, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::UserId,
@@ -32,6 +33,22 @@ fn approximate_tokens(text: &str) -> u32 {
 }
 
 struct MockLlmProvider;
+
+impl MockLlmProvider {
+    fn response() -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
+            text: "Hi there".to_string(),
+            content: vec![moa_core::types::completion::CompletionContent::Text(
+                "Hi there".to_string(),
+            )],
+            stop_reason: StopReason::EndTurn,
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+            usage: token_usage(32, 8),
+            duration_ms: 25,
+            thought_signature: None,
+        })
+    }
+}
 
 #[async_trait]
 impl LLMProvider for MockLlmProvider {
@@ -61,17 +78,14 @@ impl LLMProvider for MockLlmProvider {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: "Hi there".to_string(),
-            content: vec![moa_core::types::completion::CompletionContent::Text(
-                "Hi there".to_string(),
-            )],
-            stop_reason: StopReason::EndTurn,
-            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
-            usage: token_usage(32, 8),
-            duration_ms: 25,
-            thought_signature: None,
-        }))
+        Ok(Self::response())
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        Ok(Self::response())
     }
 }
 
@@ -88,6 +102,20 @@ impl CapturingTextLlmProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    fn response(&self) -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
+            text: self.text.clone(),
+            content: vec![moa_core::types::completion::CompletionContent::Text(
+                self.text.clone(),
+            )],
+            stop_reason: StopReason::EndTurn,
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+            usage: token_usage(32, 8),
+            duration_ms: 25,
+            thought_signature: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -102,24 +130,25 @@ impl LLMProvider for CapturingTextLlmProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
         self.requests.lock().await.push(request);
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: self.text.clone(),
-            content: vec![moa_core::types::completion::CompletionContent::Text(
-                self.text.clone(),
-            )],
-            stop_reason: StopReason::EndTurn,
-            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
-            usage: token_usage(32, 8),
-            duration_ms: 25,
-            thought_signature: None,
-        }))
+        Ok(self.response())
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.requests
+            .lock()
+            .await
+            .push(CompletionRequest::from_view(&request));
+        Ok(self.response())
     }
 }
 
 #[derive(Clone)]
 struct PartialUsageToolLlmProvider {
     usage: TokenUsage,
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 impl PartialUsageToolLlmProvider {
@@ -129,21 +158,9 @@ impl PartialUsageToolLlmProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
-}
 
-#[async_trait]
-impl LLMProvider for PartialUsageToolLlmProvider {
-    fn name(&self) -> &str {
-        "partial-usage-tool"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        MockLlmProvider.capabilities()
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.requests.lock().await.push(request);
-        Ok(CompletionStream::from_response(CompletionResponse {
+    fn response(&self) -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
             text: String::new(),
             content: vec![CompletionContent::ToolCall(ToolCallContent {
                 invocation: ToolInvocation {
@@ -158,34 +175,41 @@ impl LLMProvider for PartialUsageToolLlmProvider {
             usage: self.usage,
             duration_ms: 10,
             thought_signature: None,
-        }))
+        })
+    }
+}
+
+#[async_trait]
+impl LLMProvider for PartialUsageToolLlmProvider {
+    fn name(&self) -> &str {
+        "partial-usage-tool"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        self.requests.lock().await.push(());
+        Ok(self.response())
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.requests.lock().await.push(());
+        Ok(self.response())
     }
 }
 
 #[derive(Clone, Default)]
 struct SubMicroToolLoopLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
-#[async_trait]
-impl LLMProvider for SubMicroToolLoopLlmProvider {
-    fn name(&self) -> &str {
-        "sub-micro-tool-loop"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        let mut capabilities = MockLlmProvider.capabilities();
-        capabilities.pricing = TokenPricing {
-            input_per_mtok: 0.000_001,
-            output_per_mtok: 0.000_001,
-            cached_input_per_mtok: Some(0.000_001),
-            cache_write_5m_per_mtok: Some(0.000_001),
-            cache_write_1h_per_mtok: None,
-        };
-        capabilities
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+impl SubMicroToolLoopLlmProvider {
+    async fn complete_response(&self) -> Result<CompletionStream> {
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -217,8 +241,38 @@ impl LLMProvider for SubMicroToolLoopLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[async_trait]
+impl LLMProvider for SubMicroToolLoopLlmProvider {
+    fn name(&self) -> &str {
+        "sub-micro-tool-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        let mut capabilities = MockLlmProvider.capabilities();
+        capabilities.pricing = TokenPricing {
+            input_per_mtok: 0.000_001,
+            output_per_mtok: 0.000_001,
+            cached_input_per_mtok: Some(0.000_001),
+            cache_write_5m_per_mtok: Some(0.000_001),
+            cache_write_1h_per_mtok: None,
+        };
+        capabilities
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_response().await
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete_response().await
     }
 }
 
@@ -247,7 +301,24 @@ impl LLMProvider for CappedOutputLlmProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
         self.requests.lock().await.push(request);
-        Ok(CompletionStream::from_response(CompletionResponse {
+        Ok(Self::response())
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.requests
+            .lock()
+            .await
+            .push(CompletionRequest::from_view(&request));
+        Ok(Self::response())
+    }
+}
+
+impl CappedOutputLlmProvider {
+    fn response() -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
             text: "bounded response".to_string(),
             content: vec![CompletionContent::Text("bounded response".to_string())],
             stop_reason: StopReason::EndTurn,
@@ -255,13 +326,13 @@ impl LLMProvider for CappedOutputLlmProvider {
             usage: token_usage(3, 2),
             duration_ms: 10,
             thought_signature: None,
-        }))
+        })
     }
 }
 
 #[derive(Default)]
 struct ToolLoopLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -329,8 +400,15 @@ impl LLMProvider for ToolLoopLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 
@@ -338,7 +416,7 @@ struct PolicyBlockedToolLlmProvider {
     tool_id: &'static str,
     expected_error_fragment: &'static str,
     final_text: &'static str,
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 impl PolicyBlockedToolLlmProvider {
@@ -408,14 +486,21 @@ impl LLMProvider for PolicyBlockedToolLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 
 #[derive(Default)]
 struct LargeToolOutputLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -486,14 +571,21 @@ impl LLMProvider for LargeToolOutputLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 
 #[derive(Default)]
 struct OpenAiToolLoopLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -568,14 +660,21 @@ impl LLMProvider for OpenAiToolLoopLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 
 #[derive(Default)]
 struct OpenAiFailedReadLoopLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -655,14 +754,21 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 
 #[derive(Default)]
 struct CanaryLeakLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -722,8 +828,15 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 
@@ -799,22 +912,20 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
         requests.push(request);
         Ok(CompletionStream::from_response(response))
     }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete(CompletionRequest::from_view(&request)).await
+    }
 }
 
 struct ProviderToolResultTurnLlm;
 
-#[async_trait]
-impl LLMProvider for ProviderToolResultTurnLlm {
-    fn name(&self) -> &str {
-        "mock-provider-tool-result-turn"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        MockLlmProvider.capabilities()
-    }
-
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(CompletionStream::from_response(CompletionResponse {
+impl ProviderToolResultTurnLlm {
+    fn response() -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
             text: "Fresh answer from web search".to_string(),
             content: vec![
                 CompletionContent::ProviderToolResult {
@@ -828,7 +939,29 @@ impl LLMProvider for ProviderToolResultTurnLlm {
             usage: token_usage(8, 5),
             duration_ms: 6,
             thought_signature: None,
-        }))
+        })
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ProviderToolResultTurnLlm {
+    fn name(&self) -> &str {
+        "mock-provider-tool-result-turn"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        Ok(Self::response())
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        Ok(Self::response())
     }
 }
 

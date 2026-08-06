@@ -106,7 +106,6 @@ impl Memory for MemoryImpl {
         let operation_id = format!("memory.search:{}", ctx.invocation_id());
 
         let pool = self.pool.clone();
-        let kms = self.kms.clone();
         let retrieval_engine = Arc::clone(&self.retrieval_engine);
         Ok(ctx
             .run(|| async move {
@@ -119,8 +118,7 @@ impl Memory for MemoryImpl {
                     },
                     MemoryServiceDeps {
                         pool: &pool,
-                        kms: &kms,
-                        retrieval_engine: &retrieval_engine,
+                        retrieval_engine: retrieval_engine.as_ref(),
                     },
                 )
                 .await
@@ -161,9 +159,9 @@ impl Memory for MemoryImpl {
                     },
                     MemoryServiceDeps {
                         pool: &pool,
-                        kms: &kms,
-                        retrieval_engine: &retrieval_engine,
+                        retrieval_engine: retrieval_engine.as_ref(),
                     },
+                    kms,
                 )
                 .await
                 .map(Json::from)
@@ -211,7 +209,6 @@ impl Memory for MemoryImpl {
         let operation_id = format!("memory.retrieve_debug:{}", ctx.invocation_id());
 
         let pool = self.pool.clone();
-        let kms = self.kms.clone();
         let retrieval_engine = Arc::clone(&self.retrieval_engine);
         let response = ctx
             .run(|| async move {
@@ -224,8 +221,7 @@ impl Memory for MemoryImpl {
                     },
                     MemoryServiceDeps {
                         pool: &pool,
-                        kms: &kms,
-                        retrieval_engine: &retrieval_engine,
+                        retrieval_engine: retrieval_engine.as_ref(),
                     },
                 )
                 .await

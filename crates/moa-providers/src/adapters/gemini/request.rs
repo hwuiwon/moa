@@ -42,26 +42,26 @@ struct GeminiRequestBuildOptions<'a> {
     include_tools: bool,
 }
 
-pub(super) fn build_request_body(
-    request: &CompletionRequest,
+pub(super) fn build_request_body<R: CompletionRequestView + ?Sized>(
+    request: &R,
     model: &str,
     default_reasoning_effort: &str,
     native_tools: &[ProviderNativeTool],
 ) -> Result<Value> {
     let parts = build_request_parts(
-        &request.messages,
-        &request.tools,
+        request.messages(),
+        request.tools(),
         GeminiRequestBuildOptions {
             model,
-            max_output_tokens: request.max_output_tokens,
-            temperature: request.temperature,
-            response_format: request.response_format.as_ref(),
+            max_output_tokens: request.max_output_tokens(),
+            temperature: request.temperature(),
+            response_format: request.response_format(),
             default_reasoning_effort,
             native_tools,
             include_tools: true,
         },
     )?;
-    build_request_body_from_parts(parts, build_safety_settings(&request.metadata)?)
+    build_request_body_from_parts(parts, build_safety_settings(request.metadata())?)
 }
 
 fn build_request_parts(

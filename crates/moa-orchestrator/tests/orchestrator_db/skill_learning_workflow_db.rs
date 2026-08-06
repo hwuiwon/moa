@@ -16,7 +16,8 @@ use moa_core::{
     types::action_policy::ActionRuleScope, types::channel::Attachment, types::channel::Channel,
     types::completion::CompletionContent, types::completion::CompletionRequest,
     types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::StopReason, types::completion::TokenUsage, types::contact::SessionActorRef,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
+    types::completion::TokenUsage, types::contact::SessionActorRef,
     types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
     types::experience::LearningProposalKind, types::experience::LearningRiskClass,
@@ -754,6 +755,13 @@ impl LLMProvider for NeverCalledProvider {
     ) -> moa_core::error::Result<CompletionStream> {
         panic!("learning must make zero provider calls when evidence is refused");
     }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        panic!("learning must make zero provider calls when evidence is refused");
+    }
 }
 
 fn never_called_router() -> Arc<ModelRouter> {
@@ -926,6 +934,36 @@ struct TestProvider {
     responses: Mutex<VecDeque<String>>,
 }
 
+impl TestProvider {
+    async fn complete_response(&self) -> moa_core::error::Result<CompletionStream> {
+        let text = self
+            .responses
+            .lock()
+            .map_err(|error| MoaError::ProviderError(format!("test provider poisoned: {error}")))?
+            .pop_front()
+            .ok_or_else(|| {
+                MoaError::ProviderError(
+                    "skill-learning test provider ran out of responses".to_string(),
+                )
+            })?;
+        let output_tokens = text.chars().count().div_ceil(4);
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: text.clone(),
+            content: vec![CompletionContent::Text(text)],
+            stop_reason: StopReason::EndTurn,
+            model: ModelId::new("scripted-skill-model"),
+            usage: TokenUsage {
+                input_tokens_uncached: 32,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens,
+            },
+            duration_ms: 1,
+            thought_signature: None,
+        }))
+    }
+}
+
 #[async_trait]
 impl LLMProvider for TestProvider {
     fn name(&self) -> &str {
@@ -957,31 +995,14 @@ impl LLMProvider for TestProvider {
         &self,
         _request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        let text = self
-            .responses
-            .lock()
-            .map_err(|error| MoaError::ProviderError(format!("test provider poisoned: {error}")))?
-            .pop_front()
-            .ok_or_else(|| {
-                MoaError::ProviderError(
-                    "skill-learning test provider ran out of responses".to_string(),
-                )
-            })?;
-        let output_tokens = text.chars().count().div_ceil(4);
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: text.clone(),
-            content: vec![CompletionContent::Text(text)],
-            stop_reason: StopReason::EndTurn,
-            model: ModelId::new("scripted-skill-model"),
-            usage: TokenUsage {
-                input_tokens_uncached: 32,
-                input_tokens_cache_write: 0,
-                input_tokens_cache_read: 0,
-                output_tokens,
-            },
-            duration_ms: 1,
-            thought_signature: None,
-        }))
+        self.complete_response().await
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_response().await
     }
 }
 

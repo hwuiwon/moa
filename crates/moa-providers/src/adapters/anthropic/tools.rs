@@ -159,6 +159,10 @@ pub(super) fn anthropic_content_blocks(blocks: &[ToolContent]) -> Value {
                 "type": "text",
                 "text": data.to_string(),
             }),
+            ToolContent::Process { output } => json!({
+                "type": "text",
+                "text": output.to_text(),
+            }),
         })
         .collect::<Vec<_>>();
 

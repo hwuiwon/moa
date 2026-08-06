@@ -13,6 +13,17 @@ fn provider_record_acl() -> ProviderRecordAcl {
     }
 }
 
+fn repository_capabilities(
+    repository: Arc<InMemoryKnowledgeRepository>,
+) -> KnowledgeRepositoryCapabilities {
+    KnowledgeRepositoryCapabilities::new(
+        repository.clone(),
+        repository.clone(),
+        repository.clone(),
+        repository,
+    )
+}
+
 fn fixture_service(
     repository: Arc<InMemoryKnowledgeRepository>,
     provider: Arc<dyn LinkedIntegrationProvider>,
@@ -21,15 +32,15 @@ fn fixture_service(
     let providers = StaticKnowledgeProviders::new()
         .with_provider(linked_provider(PROVIDER), provider.clone())
         .with_provider(linked_provider("nango"), provider);
-    KnowledgeService::new(
-        repository.clone(),
+    KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository,
         Arc::new(providers),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         max_preview_chars,
+        Arc::new(FakeKnowledgeConnectorConnections::default()),
     )
-    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()))
 }
 
 fn fixture_webhook_service(
@@ -38,7 +49,7 @@ fn fixture_webhook_service(
     max_preview_chars: usize,
 ) -> KnowledgeService {
     KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository,
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -48,7 +59,6 @@ fn fixture_webhook_service(
         fake_ingestion_runner(),
         max_preview_chars,
     )
-    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()))
 }
 
 /// Mirrors the service's provider-completion classification for fake providers.

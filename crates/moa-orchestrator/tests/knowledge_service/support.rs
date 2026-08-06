@@ -90,8 +90,9 @@ use moa_orchestrator::services::knowledge::webhook_verifier::{
     KnowledgeWebhookVerifier, ParserWebhookVerifier,
 };
 use moa_orchestrator::services::knowledge::{
-    KnowledgeCaller, KnowledgeConnectorConnections, KnowledgeCredentialStore, KnowledgeService,
-    KnowledgeServiceError, StagedKnowledgeCredential, StaticKnowledgeProviders,
+    KnowledgeCaller, KnowledgeConnectorConnections, KnowledgeCredentialStore,
+    KnowledgeRepositoryCapabilities, KnowledgeService, KnowledgeServiceError,
+    StagedKnowledgeCredential, StaticKnowledgeProviders,
 };
 use moa_orchestrator::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestionRequest, KnowledgeSyncIngestionSteps, KnowledgeSyncPageApplication,

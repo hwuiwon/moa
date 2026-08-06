@@ -32,8 +32,7 @@ pub(super) struct MemoryRequestProvenance {
 /// Shared storage dependencies for memory service reads.
 pub(super) struct MemoryServiceDeps<'a> {
     pub(super) pool: &'a sqlx::PgPool,
-    pub(super) kms: &'a Arc<dyn KeyManagementProvider>,
-    pub(super) retrieval_engine: &'a Arc<MemoryRetrievalEngine>,
+    pub(super) retrieval_engine: &'a MemoryRetrievalEngine,
 }
 
 /// Runs graph-memory search and maps ranked hits into the public response.
@@ -69,17 +68,12 @@ pub(super) async fn show_inner(
     request: MemoryShowRequest,
     provenance: MemoryRequestProvenance,
     deps: MemoryServiceDeps<'_>,
+    kms: Arc<dyn KeyManagementProvider>,
 ) -> Result<MemoryShowResponse, HandlerError> {
     let clearances = session_clearances(&provenance.session)?;
     let policy = resolved_policy(deps.pool, &provenance.session).await?;
     let scope = policy.traversal_scope();
-    let graph = graph_store(
-        deps.pool,
-        deps.kms,
-        &scope,
-        &clearances,
-        policy.source_acl(),
-    );
+    let graph = graph_store(deps.pool, kms, &scope, &clearances, policy.source_acl());
     let node = graph
         .get_node(request.uid)
         .await
@@ -216,7 +210,7 @@ pub(super) async fn search_hits_for_tool(
 /// agentic tool, applying the same RLS scope the injection path uses.
 pub(super) async fn neighbors_for_tool(
     pool: &sqlx::PgPool,
-    kms: &Arc<dyn KeyManagementProvider>,
+    kms: Arc<dyn KeyManagementProvider>,
     policy: &MemoryAdmissionPolicy,
     seed: Uuid,
     hops: u8,
@@ -228,7 +222,7 @@ pub(super) async fn neighbors_for_tool(
     }
     let graph = graph_store_with_pool(
         pool.clone(),
-        kms.clone(),
+        kms,
         &policy.traversal_scope(),
         &clearances,
         policy.source_acl(),
@@ -251,12 +245,12 @@ pub(super) async fn neighbors_for_tool(
 
 fn graph_store(
     pool: &sqlx::PgPool,
-    kms: &Arc<dyn KeyManagementProvider>,
+    kms: Arc<dyn KeyManagementProvider>,
     scope: &MemoryScope,
     clearances: &InformationBarrierClearances,
     source_acl: &SourceAclContext,
 ) -> PostgresGraphStore {
-    graph_store_with_pool(pool.clone(), kms.clone(), scope, clearances, source_acl)
+    graph_store_with_pool(pool.clone(), kms, scope, clearances, source_acl)
 }
 
 fn graph_store_with_pool(

@@ -164,16 +164,19 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
             .expect("router with a configured MCP server");
 
     let secured = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &invoke(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 &moa_hands::mcp_tool_reference("third-party", "lookup"),
                 json!({}),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("MCP tool call should return a classified envelope");
 
@@ -232,17 +235,19 @@ async fn recovery_created_error_output_is_classified_offline() {
     // propagates the error to its caller, while this is the path that converts a
     // failure into output the model reads — which is what has to be classified.
     let secured = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &invoke(
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 "memory_remember",
                 json!({ "items": [{ "text": "remember this" }] }),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("a failed tool still returns a classified envelope");
 
@@ -267,16 +272,19 @@ async fn builtin_tool_output_is_classified_at_its_source_offline() {
         .with_memory_tool_executor(Arc::new(InjectingMemoryToolExecutor));
 
     let secured = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &invoke(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 "memory_remember",
                 json!({ "items": [{ "text": "remember this" }] }),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("built-in memory tool should return a classified envelope");
 
@@ -306,27 +314,33 @@ async fn hand_file_read_output_is_classified_at_its_source_offline() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &invoke(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 "file_write",
                 json!({ "path": "notes.txt", "content": CONFIRMED_PAYLOAD }),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("write the planted file");
 
     let secured = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &invoke("file_read", json!({ "path": "notes.txt" })),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke("file_read", json!({ "path": "notes.txt" })),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("read the planted file");
 
@@ -360,16 +374,19 @@ async fn process_stdout_is_classified_at_its_source_offline() {
         .expect("local router");
 
     let secured = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &invoke(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 "bash",
                 json!({ "cmd": format!("printf '%s' '{CONFIRMED_PAYLOAD}'") }),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("run the planted command");
 
@@ -402,10 +419,11 @@ async fn classification_precedes_the_output_budget_offline() {
         .expect("local router");
 
     let secured = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &invoke(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 "bash",
                 json!({
                     "cmd": format!(
@@ -414,9 +432,11 @@ async fn classification_precedes_the_output_budget_offline() {
                     )
                 }),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("run the oversized planted command");
 
@@ -450,10 +470,11 @@ async fn byte_identical_carriers_collapse_instead_of_escalating_offline() {
         .expect("local router");
 
     let secured = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &invoke(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &invoke(
                 "bash",
                 json!({
                     "cmd": format!(
@@ -462,9 +483,11 @@ async fn byte_identical_carriers_collapse_instead_of_escalating_offline() {
                     )
                 }),
             ),
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("run the duplicated-carrier command");
 

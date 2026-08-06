@@ -311,17 +311,20 @@ async fn daytona_router_reuses_and_isolates() {
 
     let handle_one_id = {
         let secured = router
-            .execute_authorized(
-                &session_one,
-                &identity(),
-                &ToolInvocation {
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session_one,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
                     input: json!({ "path": file_one, "content": content_one }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await
             .expect("first router write should provision a hand");
         let hand_id = secured.hand_id.clone();
@@ -337,17 +340,20 @@ async fn daytona_router_reuses_and_isolates() {
     let mut handle_two: Option<HandHandle> = None;
     let test_result = AssertUnwindSafe(async {
         let secured_2 = router
-            .execute_authorized(
-                &session_one,
-                &identity(),
-                &ToolInvocation {
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session_one,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "file_read".to_string(),
                     input: json!({ "path": file_one }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await?;
         let same_hand_id = secured_2.hand_id.clone();
         let read = secured_2.safe_output;
@@ -363,17 +369,20 @@ async fn daytona_router_reuses_and_isolates() {
         )
         .await?;
         let secured_3 = router
-            .execute_authorized(
-                &session_one,
-                &identity(),
-                &ToolInvocation {
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session_one,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "file_read".to_string(),
                     input: json!({ "path": file_one }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await?;
         let resumed_hand_id = secured_3.hand_id.clone();
         let resumed_read = secured_3.safe_output;
@@ -381,17 +390,20 @@ async fn daytona_router_reuses_and_isolates() {
         assert_eq!(resumed_read.to_text(), content_one);
 
         let secured_4 = router
-            .execute_authorized(
-                &session_two,
-                &identity(),
-                &ToolInvocation {
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session_two,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
                     input: json!({ "path": file_two, "content": content_two }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await?;
 
         let hand_two_id = secured_4.hand_id.clone();
@@ -406,17 +418,20 @@ async fn daytona_router_reuses_and_isolates() {
         handle_two = Some(HandHandle::daytona(hand_two_id.clone()));
 
         let secured_5 = router
-            .execute_authorized(
-                &session_two,
-                &identity(),
-                &ToolInvocation {
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session_two,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "bash".to_string(),
                     input: json!({ "cmd": "sh -lc 'printf router-bash'", "timeout_secs": 60 }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await?;
 
         let bash = secured_5.safe_output;

@@ -24,7 +24,7 @@ use async_openai::types::responses::{
 use futures_util::StreamExt;
 use moa_core::{
     error::MoaError, error::Result, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionRequestView, types::completion::CompletionResponse,
     types::completion::JsonResponseFormat, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::context::ContextMessage, types::context::MessageRole,

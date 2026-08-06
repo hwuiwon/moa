@@ -7,8 +7,9 @@ use moa_core::{
     error::MoaError, traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::CompletionStream, types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
-    types::completion::StopReason, types::completion::TokenUsage, types::identifiers::SessionId,
-    types::model::TokenPricing, types::model::ToolCallFormat,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
+    types::completion::TokenUsage, types::identifiers::SessionId, types::model::TokenPricing,
+    types::model::ToolCallFormat,
 };
 use moa_orchestrator::services::llm_gateway::{
     LLMGatewayImpl, compute_cost_cents, should_defer_brain_response,
@@ -104,6 +105,15 @@ impl LLMProvider for MockProvider {
             MockOutcome::Success(response) => Ok(CompletionStream::from_response(response.clone())),
             MockOutcome::Error(message) => Err(MoaError::ProviderError(message.clone())),
         }
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        // This test double records owned gateway requests, so the DTO conversion
+        // is the explicit assertion boundary rather than a provider-side copy.
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

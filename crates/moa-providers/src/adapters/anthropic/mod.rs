@@ -15,8 +15,9 @@ use futures_util::{Stream, pin_mut};
 use moa_config::{MoaConfig, ProviderStreamTimeoutConfig};
 use moa_core::{
     error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::JsonResponseFormat,
+    types::completion::CompletionRequest, types::completion::CompletionRequestView,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::JsonResponseFormat, types::completion::SharedCompletionRequest,
     types::completion::StopReason, types::completion::TokenUsage,
     types::completion::ToolInvocation, types::context::ContextMessage, types::context::MessageRole,
     types::context::estimate_text_tokens, types::identifiers::ModelId,
@@ -190,20 +191,13 @@ impl AnthropicProvider {
     }
 }
 
-#[async_trait::async_trait]
-impl LLMProvider for AnthropicProvider {
-    fn name(&self) -> &str {
-        "anthropic"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        self.default_capabilities.clone()
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        let requested_model = request
-            .model
-            .as_ref()
+impl AnthropicProvider {
+    async fn complete_request<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+        requested_model_override: Option<&ModelId>,
+    ) -> Result<CompletionStream> {
+        let requested_model = requested_model_override
             .map(ModelId::as_str)
             .unwrap_or(self.default_model.as_str())
             .to_string();
@@ -220,21 +214,21 @@ impl LLMProvider for AnthropicProvider {
         let model_capabilities = capabilities_for_model(&resolved_model)?;
         let max_output_tokens = Some(
             request
-                .max_output_tokens
+                .max_output_tokens()
                 .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
                 .min(model_capabilities.max_output),
         );
         let span_recorder = LLMSpanRecorder::new(
             "anthropic",
             resolved_model.clone(),
-            &request,
+            request,
             max_output_tokens,
             model_capabilities.pricing.clone(),
         );
         span_recorder.set_phase("build_request");
         let span = span_recorder.span().clone();
         let request_body = match build_request_body(
-            &request,
+            request,
             &resolved_model,
             &model_capabilities,
             self.web_search_enabled,
@@ -305,5 +299,25 @@ impl LLMProvider for AnthropicProvider {
         );
 
         Ok(CompletionStream::new(rx, completion_task))
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for AnthropicProvider {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.default_capabilities.clone()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let requested_model = request.model.as_ref();
+        self.complete_request(&request, requested_model).await
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.complete_request(&request, request.model()).await
     }
 }

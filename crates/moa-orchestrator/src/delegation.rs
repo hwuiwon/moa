@@ -850,8 +850,7 @@ mod tests {
         assert!(!spawn.is_error);
         assert_eq!(
             spawn
-                .structured
-                .as_ref()
+                .structured_payload()
                 .and_then(|value| value.get("worker_id"))
                 .and_then(serde_json::Value::as_str),
             Some("child-1")
@@ -878,8 +877,7 @@ mod tests {
 
         assert!(!wait.is_error);
         assert_eq!(
-            wait.structured
-                .as_ref()
+            wait.structured_payload()
                 .and_then(|value| value.get("result"))
                 .and_then(|value| value.get("tokens_used"))
                 .and_then(serde_json::Value::as_u64),
@@ -917,8 +915,7 @@ mod tests {
         // The structured payload serialized to the model carries the summary.
         let tool = wait_output(output);
         assert_eq!(
-            tool.structured
-                .as_ref()
+            tool.structured_payload()
                 .and_then(|value| value.get("progress"))
                 .and_then(|value| value.get("worker_id"))
                 .and_then(Value::as_str),
@@ -990,8 +987,7 @@ mod tests {
 
         let tool = list_output(output);
         let summaries = tool
-            .structured
-            .as_ref()
+            .structured_payload()
             .and_then(|value| value.get("child_progress"))
             .and_then(Value::as_array)
             .expect("child_progress array present in structured output");

@@ -40,7 +40,7 @@ impl KnowledgeEventRepository for PostgresKnowledgeRepository {
         .bind(&event.provider_event_id)
         .bind(&event.event_type)
         .bind(&event.status)
-        .bind(redact_provider_metadata(event.payload.clone()))
+        .bind(redact_provider_metadata(event.payload))
         .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;

@@ -10,14 +10,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_brain::{
-    BrainTurnRequest, GraphMemoryPipelineOptions,
+    BrainTurnRequest, DigestStageInput, GraphMemoryPipelineStages, GraphMemoryStageInput,
+    HistoryStageInput, QueryRewriteStageInput, RuntimeStageInput, SkillInjectionStageInput,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_config::{MoaConfig, SecurityProfile};
 use moa_core::{
     error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::contact::ContactId, types::contact::ContactRef,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::context::ContextMessage, types::context::MessageRole,
     types::context::estimate_text_tokens, types::events_stream::EventRange,
@@ -248,18 +250,31 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
         let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &config,
             store.clone(),
-            GraphMemoryPipelineOptions {
-                graph_pool: store.pool().clone(),
-                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
-                shared_graph_memory_retriever: None,
-                retrieval_embedder: None,
-                shared_skill_injector: None,
-                segment_store: Some(store.clone()),
-                compaction_llm_provider: Some(provider.clone()),
-                query_rewrite_llm_provider: Some(provider.clone()),
-                identity_prompt_override: None,
-                tool_schemas: Vec::new(),
-                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            GraphMemoryPipelineStages {
+                history: HistoryStageInput {
+                    compaction_llm_provider: Some(provider.clone()),
+                },
+                graph_memory: GraphMemoryStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
+                    retrieval_embedder: None,
+                    lineage: Arc::new(moa_core::traits::NullLineageHandle),
+                },
+                skill_injection: SkillInjectionStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    segment_store: Some(store.clone()),
+                    embedder: None,
+                },
+                query_rewrite: QueryRewriteStageInput {
+                    llm_provider: Some(provider.clone()),
+                },
+                runtime: RuntimeStageInput {
+                    identity_prompt_override: None,
+                    tool_schemas: Vec::new(),
+                },
+                digest: DigestStageInput {
+                    graph_pool: store.pool().clone(),
+                },
             },
         );
 
@@ -396,6 +411,12 @@ impl LLMProvider for AuditedProvider {
 
         Ok(CompletionStream::from_response(response))
     }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        // The audit helpers intentionally consume the concrete request DTO;
+        // materialize only at this test-only inspection boundary.
+        self.complete(CompletionRequest::from_view(&request)).await
+    }
 }
 
 fn is_query_rewrite_request(request: &CompletionRequest) -> bool {
@@ -452,18 +473,31 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &sonnet_config,
             store.clone(),
-            GraphMemoryPipelineOptions {
-                graph_pool: store.pool().clone(),
-                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
-                shared_graph_memory_retriever: None,
-                retrieval_embedder: None,
-                shared_skill_injector: None,
-                segment_store: Some(store.clone()),
-                compaction_llm_provider: Some(sonnet_provider.clone()),
-                query_rewrite_llm_provider: Some(sonnet_provider.clone()),
-                identity_prompt_override: None,
-                tool_schemas: tool_router.tool_schemas(),
-                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            GraphMemoryPipelineStages {
+                history: HistoryStageInput {
+                    compaction_llm_provider: Some(sonnet_provider.clone()),
+                },
+                graph_memory: GraphMemoryStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
+                    retrieval_embedder: None,
+                    lineage: Arc::new(moa_core::traits::NullLineageHandle),
+                },
+                skill_injection: SkillInjectionStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    segment_store: Some(store.clone()),
+                    embedder: None,
+                },
+                query_rewrite: QueryRewriteStageInput {
+                    llm_provider: Some(sonnet_provider.clone()),
+                },
+                runtime: RuntimeStageInput {
+                    identity_prompt_override: None,
+                    tool_schemas: tool_router.tool_schemas(),
+                },
+                digest: DigestStageInput {
+                    graph_pool: store.pool().clone(),
+                },
             },
         );
 
@@ -516,18 +550,31 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &sonnet_config,
             store.clone(),
-            GraphMemoryPipelineOptions {
-                graph_pool: store.pool().clone(),
-                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
-                shared_graph_memory_retriever: None,
-                retrieval_embedder: None,
-                shared_skill_injector: None,
-                segment_store: Some(store.clone()),
-                compaction_llm_provider: Some(cross_session_provider.clone()),
-                query_rewrite_llm_provider: Some(cross_session_provider.clone()),
-                identity_prompt_override: None,
-                tool_schemas: tool_router.tool_schemas(),
-                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            GraphMemoryPipelineStages {
+                history: HistoryStageInput {
+                    compaction_llm_provider: Some(cross_session_provider.clone()),
+                },
+                graph_memory: GraphMemoryStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
+                    retrieval_embedder: None,
+                    lineage: Arc::new(moa_core::traits::NullLineageHandle),
+                },
+                skill_injection: SkillInjectionStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    segment_store: Some(store.clone()),
+                    embedder: None,
+                },
+                query_rewrite: QueryRewriteStageInput {
+                    llm_provider: Some(cross_session_provider.clone()),
+                },
+                runtime: RuntimeStageInput {
+                    identity_prompt_override: None,
+                    tool_schemas: tool_router.tool_schemas(),
+                },
+                digest: DigestStageInput {
+                    graph_pool: store.pool().clone(),
+                },
             },
         );
     let session_b = create_session(
@@ -564,18 +611,31 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &cold_config,
             store.clone(),
-            GraphMemoryPipelineOptions {
-                graph_pool: store.pool().clone(),
-                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
-                shared_graph_memory_retriever: None,
-                retrieval_embedder: None,
-                shared_skill_injector: None,
-                segment_store: Some(store.clone()),
-                compaction_llm_provider: Some(cold_session_provider.clone()),
-                query_rewrite_llm_provider: Some(cold_session_provider.clone()),
-                identity_prompt_override: None,
-                tool_schemas: tool_router.tool_schemas(),
-                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            GraphMemoryPipelineStages {
+                history: HistoryStageInput {
+                    compaction_llm_provider: Some(cold_session_provider.clone()),
+                },
+                graph_memory: GraphMemoryStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
+                    retrieval_embedder: None,
+                    lineage: Arc::new(moa_core::traits::NullLineageHandle),
+                },
+                skill_injection: SkillInjectionStageInput::Local {
+                    graph_pool: store.pool().clone(),
+                    segment_store: Some(store.clone()),
+                    embedder: None,
+                },
+                query_rewrite: QueryRewriteStageInput {
+                    llm_provider: Some(cold_session_provider.clone()),
+                },
+                runtime: RuntimeStageInput {
+                    identity_prompt_override: None,
+                    tool_schemas: tool_router.tool_schemas(),
+                },
+                digest: DigestStageInput {
+                    graph_pool: store.pool().clone(),
+                },
             },
         );
     let session_c = create_session(
@@ -618,18 +678,31 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     let opus_pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &opus_config,
         store.clone(),
-        GraphMemoryPipelineOptions {
-            graph_pool: store.pool().clone(),
-            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
-            shared_graph_memory_retriever: None,
-            retrieval_embedder: None,
-            shared_skill_injector: None,
-            segment_store: Some(store.clone()),
-            compaction_llm_provider: Some(opus_provider.clone()),
-            query_rewrite_llm_provider: Some(opus_provider.clone()),
-            identity_prompt_override: None,
-            tool_schemas: tool_router.tool_schemas(),
-            lineage: Arc::new(moa_core::traits::NullLineageHandle),
+        GraphMemoryPipelineStages {
+            history: HistoryStageInput {
+                compaction_llm_provider: Some(opus_provider.clone()),
+            },
+            graph_memory: GraphMemoryStageInput::Local {
+                graph_pool: store.pool().clone(),
+                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
+                retrieval_embedder: None,
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            },
+            skill_injection: SkillInjectionStageInput::Local {
+                graph_pool: store.pool().clone(),
+                segment_store: Some(store.clone()),
+                embedder: None,
+            },
+            query_rewrite: QueryRewriteStageInput {
+                llm_provider: Some(opus_provider.clone()),
+            },
+            runtime: RuntimeStageInput {
+                identity_prompt_override: None,
+                tool_schemas: tool_router.tool_schemas(),
+            },
+            digest: DigestStageInput {
+                graph_pool: store.pool().clone(),
+            },
         },
     );
     run_turn(
@@ -941,6 +1014,7 @@ fn serialized_tool_content(content: &ToolContent) -> String {
     match content {
         ToolContent::Text { text } => format!("text:{text}"),
         ToolContent::Json { data } => format!("json:{data}"),
+        ToolContent::Process { output } => format!("process:{}", output.to_text()),
     }
 }
 

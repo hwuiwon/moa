@@ -79,6 +79,7 @@ fn function_response_payload(message: &ContextMessage) -> Value {
         Some(blocks) if blocks.len() == 1 => match &blocks[0] {
             ToolContent::Text { text } => json!({ "result": text }),
             ToolContent::Json { data } => json!({ "result": data }),
+            ToolContent::Process { output } => json!({ "result": output.to_text() }),
         },
         Some(blocks) if !blocks.is_empty() => json!({
             "result": {
@@ -94,6 +95,7 @@ fn tool_content_value(content: &ToolContent) -> Value {
     match content {
         ToolContent::Text { text } => json!({ "text": text }),
         ToolContent::Json { data } => data.clone(),
+        ToolContent::Process { output } => json!({ "text": output.to_text() }),
     }
 }
 

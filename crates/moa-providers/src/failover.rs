@@ -19,7 +19,8 @@ use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionStream,
-    types::identifiers::ModelId, types::model::ModelCapabilities,
+    types::completion::SharedCompletionRequest, types::identifiers::ModelId,
+    types::model::ModelCapabilities,
 };
 
 /// Buffer size for the failover forwarding stream.
@@ -80,9 +81,9 @@ impl FailoverLLMProvider {
     async fn try_candidate(
         &self,
         candidate: &FailoverCandidate,
-        request: CompletionRequest,
+        request: SharedCompletionRequest,
     ) -> CandidateOutcome {
-        let mut stream = match candidate.provider.complete(request).await {
+        let mut stream = match candidate.provider.complete_shared(request).await {
             Ok(stream) => stream,
             // A rate-class failure before the stream was even created is the
             // cleanest failover signal (paused provider / exhausted budget /
@@ -120,15 +121,29 @@ impl LLMProvider for FailoverLLMProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_shared_request(SharedCompletionRequest::new(request))
+            .await
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.complete_shared_request(request).await
+    }
+}
+
+impl FailoverLLMProvider {
+    async fn complete_shared_request(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
         let last_index = self.chain.len() - 1;
         let mut last_error: Option<MoaError> = None;
 
         for index in 0..self.chain.len() {
             let candidate = &self.chain[index];
-            let mut candidate_request = request.clone();
-            if let Some(model) = &candidate.model {
-                candidate_request.model = Some(model.clone());
-            }
+            let candidate_request = candidate.model.as_ref().map_or_else(
+                || request.clone(),
+                |model| request.with_model_override(Some(model)),
+            );
 
             match self.try_candidate(candidate, candidate_request).await {
                 CandidateOutcome::Streaming(stream) => return Ok(stream),
@@ -235,8 +250,8 @@ mod tests {
     use moa_core::{
         error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
         types::completion::CompletionRequest, types::completion::CompletionResponse,
-        types::completion::CompletionStream, types::completion::StopReason,
-        types::completion::TokenUsage, types::identifiers::ModelId,
+        types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
     use tokio::sync::mpsc;
@@ -250,6 +265,8 @@ mod tests {
         model: &'static str,
         behavior: Behavior,
         calls: Arc<AtomicUsize>,
+        owned_calls: Arc<AtomicUsize>,
+        shared_request_address: Arc<AtomicUsize>,
     }
 
     enum Behavior {
@@ -266,11 +283,36 @@ mod tests {
                 model,
                 behavior,
                 calls: Arc::new(AtomicUsize::new(0)),
+                owned_calls: Arc::new(AtomicUsize::new(0)),
+                shared_request_address: Arc::new(AtomicUsize::new(0)),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn owned_calls(&self) -> usize {
+            self.owned_calls.load(Ordering::SeqCst)
+        }
+
+        fn shared_request_address(&self) -> usize {
+            self.shared_request_address.load(Ordering::SeqCst)
+        }
+
+        fn response(&self, selected_model: Option<&ModelId>) -> Result<CompletionStream> {
+            let served_model = selected_model
+                .cloned()
+                .unwrap_or_else(|| ModelId::new(self.model));
+            Ok(CompletionStream::from_response(CompletionResponse {
+                text: "served".to_string(),
+                content: vec![CompletionContent::Text("served".to_string())],
+                stop_reason: StopReason::EndTurn,
+                model: served_model,
+                usage: TokenUsage::default(),
+                duration_ms: 1,
+                thought_signature: None,
+            }))
         }
     }
 
@@ -302,26 +344,26 @@ mod tests {
         }
 
         async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+            self.owned_calls.fetch_add(1, Ordering::SeqCst);
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.behavior {
                 Behavior::Fail(make_error) => Err(make_error()),
-                Behavior::Serve => {
-                    // Attribute the response to the model the request selected, so
-                    // tests can assert the real serving model.
-                    let served_model = request
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| ModelId::new(self.model));
-                    Ok(CompletionStream::from_response(CompletionResponse {
-                        text: "served".to_string(),
-                        content: vec![CompletionContent::Text("served".to_string())],
-                        stop_reason: StopReason::EndTurn,
-                        model: served_model,
-                        usage: TokenUsage::default(),
-                        duration_ms: 1,
-                        thought_signature: None,
-                    }))
-                }
+                Behavior::Serve => self.response(request.model.as_ref()),
+            }
+        }
+
+        async fn complete_shared(
+            &self,
+            request: SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
+            self.shared_request_address.store(
+                std::ptr::from_ref(request.request()) as usize,
+                Ordering::SeqCst,
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.behavior {
+                Behavior::Fail(make_error) => Err(make_error()),
+                Behavior::Serve => self.response(request.model()),
             }
         }
     }
@@ -398,6 +440,13 @@ mod tests {
         assert_eq!(response.model, ModelId::new("gpt-5.4"));
         assert_eq!(primary.calls(), 1);
         assert_eq!(fallback.calls(), 1);
+        assert_eq!(primary.owned_calls(), 0);
+        assert_eq!(fallback.owned_calls(), 0);
+        assert_eq!(
+            primary.shared_request_address(),
+            fallback.shared_request_address(),
+            "failover candidates must observe one shared request allocation"
+        );
     }
 
     #[tokio::test]

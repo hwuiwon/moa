@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::brain_bridge::TurnRequestPreparer;
+use crate::brain_bridge::{TurnPipelineStageFactory, TurnRequestPreparer};
 use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::credential_ingress::{
     ConnectorCredentialIngress, CredentialIngressCoordinator,
@@ -276,12 +276,13 @@ impl RuntimeDeps {
         let turn_request_preparer = Arc::new(TurnRequestPreparer::new(
             session_store.clone(),
             config.clone(),
-            pool.clone(),
-            kms.provider(),
             providers.clone(),
             connector_runtime.catalogs.clone(),
-            graph_memory_retriever.clone(),
-            skill_injector.clone(),
+            TurnPipelineStageFactory::new(
+                pool.clone(),
+                graph_memory_retriever.clone(),
+                skill_injector.clone(),
+            ),
             lineage.handle.clone(),
         ));
         let channel_adapters = build_channel_adapters(config.as_ref(), runtime_cache.clone())?;

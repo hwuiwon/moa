@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::{
     events::Event, traits::LLMProvider, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::CompletionRequest, types::completion::CompletionRequestView,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::context::MessageRole, types::identifiers::ModelId,
     types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
@@ -463,6 +464,59 @@ impl ToolThenFinalProvider {
             .expect("seen user messages lock")
             .clone()
     }
+
+    fn complete_view<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+    ) -> moa_core::error::Result<CompletionStream> {
+        let latest_user = latest_user_message(request).unwrap_or_default();
+        let request_index = {
+            let mut seen = self
+                .seen_user_messages
+                .lock()
+                .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?;
+            seen.push(latest_user);
+            seen.len()
+        };
+        let response = if request_index == 1 {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("tool-scripted-action".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({ "cmd": "printf 'scripted tool ok'" }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: self.capabilities().model_id,
+                usage: token_usage(12, 4),
+                duration_ms: 1,
+                thought_signature: None,
+            }
+        } else {
+            assert!(
+                request.messages().iter().any(|message| {
+                    message.role == MessageRole::Tool
+                        && message.content.contains("scripted tool ok")
+                }),
+                "second request did not include tool output"
+            );
+            CompletionResponse {
+                text: "Tool completed with scripted final fragment.".to_string(),
+                content: vec![CompletionContent::Text(
+                    "Tool completed with scripted final fragment.".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: self.capabilities().model_id,
+                usage: token_usage(18, 8),
+                duration_ms: 1,
+                thought_signature: None,
+            }
+        };
+        Ok(CompletionStream::from_response(response))
+    }
 }
 
 #[async_trait]
@@ -496,53 +550,14 @@ impl LLMProvider for ToolThenFinalProvider {
         &self,
         request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        let latest_user = latest_user_message(&request).unwrap_or_default();
-        let request_index = {
-            let mut seen = self
-                .seen_user_messages
-                .lock()
-                .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?;
-            seen.push(latest_user);
-            seen.len()
-        };
-        let response = if request_index == 1 {
-            CompletionResponse {
-                text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolCallContent {
-                    invocation: ToolInvocation {
-                        id: Some("tool-scripted-action".to_string()),
-                        name: "bash".to_string(),
-                        input: json!({ "cmd": "printf 'scripted tool ok'" }),
-                    },
-                    provider_metadata: None,
-                })],
-                stop_reason: StopReason::ToolUse,
-                model: self.capabilities().model_id,
-                usage: token_usage(12, 4),
-                duration_ms: 1,
-                thought_signature: None,
-            }
-        } else {
-            assert!(
-                request.messages.iter().any(|message| {
-                    message.role == MessageRole::Tool
-                        && message.content.contains("scripted tool ok")
-                }),
-                "second request did not include tool output: {request:?}"
-            );
-            CompletionResponse {
-                text: "Tool completed with scripted final fragment.".to_string(),
-                content: vec![CompletionContent::Text(
-                    "Tool completed with scripted final fragment.".to_string(),
-                )],
-                stop_reason: StopReason::EndTurn,
-                model: self.capabilities().model_id,
-                usage: token_usage(18, 8),
-                duration_ms: 1,
-                thought_signature: None,
-            }
-        };
-        Ok(CompletionStream::from_response(response))
+        self.complete_view(&request)
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_view(&request)
     }
 }
 
@@ -557,6 +572,28 @@ impl ClarifyingDisputeProvider {
             .lock()
             .expect("seen user messages lock")
             .clone()
+    }
+
+    fn complete_view<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+    ) -> moa_core::error::Result<CompletionStream> {
+        let latest_user = latest_user_message(request).unwrap_or_default();
+        self.seen_user_messages
+            .lock()
+            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
+            .push(latest_user);
+
+        let text = "Please confirm the merchant's legal name, date, amount, and whether your card was present before I draft a dispute.";
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: text.to_string(),
+            content: vec![CompletionContent::Text(text.to_string())],
+            stop_reason: StopReason::EndTurn,
+            model: self.capabilities().model_id,
+            usage: token_usage(16, 12),
+            duration_ms: 1,
+            thought_signature: None,
+        }))
     }
 }
 
@@ -591,22 +628,14 @@ impl LLMProvider for ClarifyingDisputeProvider {
         &self,
         request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        let latest_user = latest_user_message(&request).unwrap_or_default();
-        self.seen_user_messages
-            .lock()
-            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
-            .push(latest_user);
+        self.complete_view(&request)
+    }
 
-        let text = "Please confirm the merchant's legal name, date, amount, and whether your card was present before I draft a dispute.";
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: text.to_string(),
-            content: vec![CompletionContent::Text(text.to_string())],
-            stop_reason: StopReason::EndTurn,
-            model: self.capabilities().model_id,
-            usage: token_usage(16, 12),
-            duration_ms: 1,
-            thought_signature: None,
-        }))
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_view(&request)
     }
 }
 
@@ -621,6 +650,34 @@ impl ResponsivenessClarificationProvider {
             .lock()
             .expect("seen user messages lock")
             .clone()
+    }
+
+    fn complete_view<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+    ) -> moa_core::error::Result<CompletionStream> {
+        let latest_user = latest_user_message(request).unwrap_or_default();
+        if latest_user != "fix this" {
+            return Err(moa_core::error::MoaError::ProviderError(format!(
+                "unexpected responsiveness fixture user message: {latest_user}"
+            )));
+        }
+        self.seen_user_messages
+            .lock()
+            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
+            .push(latest_user);
+
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: RESPONSIVENESS_CLARIFICATION.to_string(),
+            content: vec![CompletionContent::Text(
+                RESPONSIVENESS_CLARIFICATION.to_string(),
+            )],
+            stop_reason: StopReason::EndTurn,
+            model: self.capabilities().model_id,
+            usage: token_usage(12, 12),
+            duration_ms: 1,
+            thought_signature: None,
+        }))
     }
 }
 
@@ -655,34 +712,20 @@ impl LLMProvider for ResponsivenessClarificationProvider {
         &self,
         request: CompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        let latest_user = latest_user_message(&request).unwrap_or_default();
-        if latest_user != "fix this" {
-            return Err(moa_core::error::MoaError::ProviderError(format!(
-                "unexpected responsiveness fixture user message: {latest_user}"
-            )));
-        }
-        self.seen_user_messages
-            .lock()
-            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
-            .push(latest_user);
+        self.complete_view(&request)
+    }
 
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: RESPONSIVENESS_CLARIFICATION.to_string(),
-            content: vec![CompletionContent::Text(
-                RESPONSIVENESS_CLARIFICATION.to_string(),
-            )],
-            stop_reason: StopReason::EndTurn,
-            model: self.capabilities().model_id,
-            usage: token_usage(12, 12),
-            duration_ms: 1,
-            thought_signature: None,
-        }))
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_view(&request)
     }
 }
 
-fn latest_user_message(request: &CompletionRequest) -> Option<String> {
+fn latest_user_message<R: CompletionRequestView + ?Sized>(request: &R) -> Option<String> {
     request
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| {

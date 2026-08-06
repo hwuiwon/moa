@@ -14,8 +14,8 @@ use moa_core::{
     traits::LLMProvider,
     types::{
         completion::{
-            CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, StopReason,
-            TokenUsage,
+            CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+            SharedCompletionRequest, StopReason, TokenUsage,
         },
         execution_planning::{
             DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
@@ -232,22 +232,8 @@ impl ScriptedRoutingProvider {
     fn call_count(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)
     }
-}
 
-#[async_trait]
-impl LLMProvider for ScriptedRoutingProvider {
-    fn name(&self) -> &str {
-        "execution-routing-corpus"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities::default()
-    }
-
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
+    fn complete_fixture(&self) -> moa_core::error::Result<CompletionStream> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         match &self.fixture {
             ExecutionRoutingClassifierFixture::Response { output, usage, .. } => {
@@ -288,6 +274,31 @@ impl LLMProvider for ScriptedRoutingProvider {
                 ))
             }
         }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ScriptedRoutingProvider {
+    fn name(&self) -> &str {
+        "execution-routing-corpus"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_fixture()
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete_fixture()
     }
 }
 

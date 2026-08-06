@@ -13,8 +13,10 @@ use moa_config::MoaConfig;
 use moa_core::traits::{EmbeddingProvider, LLMProvider};
 use moa_core::types::provider::ProviderId;
 use moa_core::{
-    error::MoaError, types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::context::ContextMessage, types::context::estimate_text_tokens,
+    error::MoaError,
+    types::completion::{CompletionRequest, CompletionResponse},
+    types::context::ContextMessage,
+    types::context::estimate_text_tokens,
     types::identifiers::ModelId,
 };
 use moa_crypto::LocalKmsProvider;
@@ -2308,7 +2310,8 @@ mod tests {
 
     use moa_core::{
         types::completion::CompletionContent, types::completion::CompletionStream,
-        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::completion::SharedCompletionRequest, types::completion::StopReason,
+        types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
@@ -2838,6 +2841,21 @@ mod tests {
         usage: TokenUsage,
     }
 
+    impl FixedCompletionProvider {
+        async fn complete_response(&self) -> moa_core::error::Result<CompletionStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CompletionStream::from_response(CompletionResponse {
+                text: self.text.clone(),
+                content: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                model: ModelId::new("claude-sonnet-4-6"),
+                usage: self.usage,
+                duration_ms: 9,
+                thought_signature: None,
+            }))
+        }
+    }
+
     #[async_trait]
     impl LLMProvider for FixedCompletionProvider {
         fn name(&self) -> &str {
@@ -2869,16 +2887,14 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CompletionStream::from_response(CompletionResponse {
-                text: self.text.clone(),
-                content: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                model: ModelId::new("claude-sonnet-4-6"),
-                usage: self.usage,
-                duration_ms: 9,
-                thought_signature: None,
-            }))
+            self.complete_response().await
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            self.complete_response().await
         }
     }
 

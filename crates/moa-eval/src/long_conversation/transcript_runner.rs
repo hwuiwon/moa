@@ -19,7 +19,8 @@ use moa_config::MoaConfig;
 use moa_core::transcript::Transcript;
 use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore,
-    types::completion::CompletionRequest, types::completion::CompletionStream,
+    types::completion::CompletionRequest, types::completion::CompletionRequestView,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
     types::events_stream::EventRange, types::events_stream::EventRecord,
     types::experience::AttributionSubjectType, types::experience::LearningCandidateSourceRef,
     types::identifiers::SessionId, types::model::ModelCapabilities,
@@ -1207,7 +1208,10 @@ impl ObservedRecordedProvider {
             .unwrap_or_default()
     }
 
-    fn record_observation(&self, request: &CompletionRequest) -> moa_core::error::Result<()> {
+    fn record_observation<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+    ) -> moa_core::error::Result<()> {
         let selected_skills = selected_skills_from_request(request);
         if selected_skills.is_empty() {
             return Ok(());
@@ -1244,11 +1248,21 @@ impl LLMProvider for ObservedRecordedProvider {
             .complete_recorded(&request)
             .map_err(|error| MoaError::ProviderError(error.to_string()))
     }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.record_observation(&request)?;
+        self.recorded
+            .complete_recorded(&request)
+            .map_err(|error| MoaError::ProviderError(error.to_string()))
+    }
 }
 
-fn selected_skills_from_request(request: &CompletionRequest) -> Vec<String> {
+fn selected_skills_from_request<R: CompletionRequestView + ?Sized>(request: &R) -> Vec<String> {
     let mut skills = Vec::new();
-    for message in &request.messages {
+    for message in request.messages() {
         if !message.content.contains("<available_skills>") {
             continue;
         }
@@ -1270,9 +1284,11 @@ fn selected_skills_from_request(request: &CompletionRequest) -> Vec<String> {
     skills
 }
 
-fn latest_non_manifest_user_message(request: &CompletionRequest) -> Option<String> {
+fn latest_non_manifest_user_message<R: CompletionRequestView + ?Sized>(
+    request: &R,
+) -> Option<String> {
     request
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| {

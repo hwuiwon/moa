@@ -66,8 +66,7 @@ pub(crate) fn apply_session_trace(
     prompt: Option<&str>,
     environment: Option<&str>,
 ) {
-    let trace_context = TraceContext::from_session_meta(meta, prompt)
-        .with_environment(environment.map(str::to_string));
+    let trace_context = TraceContext::from_session_meta(meta, prompt).with_environment(environment);
     apply_trace_context_to_span(&trace_context, span);
 }
 

@@ -116,14 +116,14 @@ async fn mock_connector_end_to_end_db_memory() {
             moa_knowledge::domain::LinkedProviderKind::Nango,
             nango_provider.clone(),
         );
-    let service = KnowledgeService::from_postgres_pool(
+    let service = KnowledgeService::from_postgres_pool_with_connector_connections(
         pool.clone(),
         Arc::new(providers),
         Arc::new(FakeKnowledgeCredentialStore::default()),
         fake_ingestion_runner(),
         96,
-    )
-    .with_connector_connections(postgres_connector_service(pool.clone()));
+        Arc::new(postgres_connector_service(pool.clone())),
+    );
 
     let merge_connection = service
         .exchange_public_token(

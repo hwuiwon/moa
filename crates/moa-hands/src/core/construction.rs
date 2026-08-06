@@ -7,21 +7,18 @@ use std::sync::Arc;
 use moa_config::CloudHandsConfig;
 use moa_config::LOCAL_DEVELOPMENT_SANDBOX_REVISION;
 use moa_config::MoaConfig;
-use moa_config::ToolBudgetConfig;
-use moa_config::ToolOutputConfig;
 use moa_connectors::catalog::InstalledConnectorCatalogSnapshot;
 use moa_connectors::domain::ConnectionDefinitionRef;
 use moa_connectors::executor::ConnectorActionRuntime;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
-    traits::NullLineageHandle, traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    traits::SessionStore, types::action_policy::ActionPolicyEffect,
     types::action_policy::CallOrigin, types::agent::AgentConnectorBinding,
     types::hands::BuiltinPolicyRevision, types::hands::SandboxPolicySnapshot,
     types::hands::SandboxTier,
 };
 use moa_security::{
-    ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
-    UnmatchedPermissionPattern,
+    ActionPolicies, ActionPolicyRuleStore, McpEgressGuard, UnmatchedPermissionPattern,
 };
 
 use super::normalization::expand_local_path;
@@ -47,39 +44,11 @@ impl ToolRouter {
         providers: HashMap<String, Arc<dyn HandProvider>>,
         deployment_sandbox_policy: SandboxPolicySnapshot,
     ) -> Self {
-        let catalog_owner_id = uuid::Uuid::now_v7();
         Self {
-            catalog: std::sync::RwLock::new(Arc::new(ToolCatalogSnapshot::new(
-                catalog_owner_id,
-                registry,
-            ))),
-            catalog_owner_id,
-            providers,
-            deployment_sandbox_policy,
-            tenant_sandbox_policy: None,
-            hand_lease_reaper_installed: false,
-            local_provider: None,
-            mcp_servers: HashMap::new(),
-            mcp_health: tokio::sync::RwLock::new(std::collections::BTreeMap::new()),
-            mcp_credentials: McpDeploymentCredentials::default(),
-            mcp_egress_guard: None,
-            active_hands: tokio::sync::RwLock::new(HashMap::new()),
-            preferred_hand_routes: tokio::sync::RwLock::new(HashMap::new()),
-            hand_leases: None,
-            trusted_sandbox_files: tokio::sync::RwLock::new(HashMap::new()),
-            installed_files: tokio::sync::RwLock::new(HashMap::new()),
-            workspace_roots: tokio::sync::RwLock::new(HashMap::new()),
-            policies: ActionPolicies::default(),
-            call_origin: CallOrigin::Production,
-            unmatched_permission_patterns: std::sync::RwLock::new(Vec::new()),
-            rule_store: None,
-            session_store: None,
-            memory_tool_executor: None,
-            memory_retrieval_executor: tokio::sync::RwLock::new(None),
-            lineage: Arc::new(NullLineageHandle),
-            sandbox_root: None,
-            tool_output: ToolOutputConfig::default(),
-            tool_budgets: ToolBudgetConfig::default(),
+            catalog: super::CatalogOwner::new(registry),
+            mcp: super::McpOwner::default(),
+            hands: super::HandLifecycleOwner::new(providers, deployment_sandbox_policy),
+            bindings: super::BuiltInBindings::default(),
         }
     }
 
@@ -96,15 +65,16 @@ impl ToolRouter {
         let mut registry = ToolRegistry::default_local();
         registry.apply_budgets(&MoaConfig::default().tool_budgets);
 
-        Ok(Self {
-            sandbox_root: Some(sandbox_root.as_ref().to_path_buf()),
-            local_provider: Some(local_provider),
-            ..Self::new(
-                registry,
-                providers,
-                MoaConfig::default().sandbox_policy.deployment.snapshot()?,
-            )
-        })
+        let mut router = Self::new(
+            registry,
+            providers,
+            MoaConfig::default().sandbox_policy.deployment.snapshot()?,
+        );
+        router
+            .hands
+            .set_sandbox_root(Some(sandbox_root.as_ref().to_path_buf()));
+        router.hands.set_local_provider(Some(local_provider));
+        Ok(router)
     }
 
     /// Attaches the durable owner of each tenant's authored sandbox policy layer.
@@ -113,7 +83,7 @@ impl ToolRouter {
         mut self,
         store: Arc<dyn super::profile::TenantSandboxPolicyStore>,
     ) -> Self {
-        self.tenant_sandbox_policy = Some(store);
+        self.hands.set_tenant_sandbox_policy(store);
         self
     }
 
@@ -124,7 +94,7 @@ impl ToolRouter {
     /// reaper fails admission instead of leaking sandboxes.
     #[must_use]
     pub fn with_hand_lease_reaper(mut self) -> Self {
-        self.hand_lease_reaper_installed = true;
+        self.hands.set_hand_lease_reaper_installed();
         self
     }
 
@@ -201,16 +171,15 @@ impl ToolRouter {
             registry.retarget_hand_tools(hand_routes);
         }
 
-        let mut router = Self {
-            sandbox_root,
-            local_provider,
-            mcp_egress_guard,
-            rule_store,
-            ..Self::new(registry, providers, deployment_sandbox_policy(config)?)
-        }
-        .with_tool_output_config(config.tool_output.clone())
-        .with_tool_budgets(config.tool_budgets.clone())
-        .with_policies(ActionPolicies::from_config(config)?);
+        let mut router = Self::new(registry, providers, deployment_sandbox_policy(config)?);
+        router.hands.set_sandbox_root(sandbox_root);
+        router.hands.set_local_provider(local_provider);
+        router.mcp.set_egress_guard(mcp_egress_guard);
+        router.bindings.set_rule_store(rule_store);
+        router = router
+            .with_tool_output_config(config.tool_output.clone())
+            .with_tool_budgets(config.tool_budgets.clone())
+            .with_policies(ActionPolicies::from_config(config)?);
 
         if !config.mcp_servers.is_empty() {
             router.load_mcp_servers(config).await?;
@@ -237,12 +206,12 @@ impl ToolRouter {
         if !config.security_profile.is_cloud() {
             return Ok(());
         }
-        if self.hand_leases.is_none() {
+        if !self.hands.has_hand_lease_store() {
             return Err(MoaError::ConfigError(
                 "security_profile=cloud requires a durable hand lease store owner".to_string(),
             ));
         }
-        if !self.hand_lease_reaper_installed {
+        if !self.hands.hand_lease_reaper_installed() {
             return Err(MoaError::ConfigError(
                 "security_profile=cloud requires the durable hand-lease reaper; without it no \
                  sandbox deadline has a destruction owner"
@@ -260,7 +229,7 @@ impl ToolRouter {
     /// today stops mattering if its connector is withdrawn.
     pub(super) fn refresh_unmatched_permission_patterns(&self) {
         let tool_names = self.tool_names();
-        let unmatched = self.policies.unmatched_patterns(&tool_names);
+        let unmatched = self.bindings.policies.unmatched_patterns(&tool_names);
         for pattern in &unmatched {
             tracing::warn!(
                 field = pattern.field,
@@ -270,19 +239,13 @@ impl ToolRouter {
                  nothing; a tool it was written to deny or gate would run ungated"
             );
         }
-        *self
-            .unmatched_permission_patterns
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = unmatched;
+        self.bindings.set_unmatched_permission_patterns(unmatched);
     }
 
     /// Returns the configured permission patterns that govern no registered tool.
     #[must_use]
     pub fn unmatched_permission_patterns(&self) -> Vec<UnmatchedPermissionPattern> {
-        self.unmatched_permission_patterns
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.bindings.unmatched_permission_patterns()
     }
 
     /// Returns the registered hand providers in stable name order.
@@ -293,25 +256,20 @@ impl ToolRouter {
     /// added here.
     #[must_use]
     pub fn hand_providers(&self) -> Vec<Arc<dyn HandProvider>> {
-        let mut names = self.providers.keys().cloned().collect::<Vec<_>>();
-        names.sort();
-        names
-            .into_iter()
-            .filter_map(|name| self.providers.get(&name).cloned())
-            .collect()
+        self.hands.providers()
     }
 
     /// Attaches a persistent action-policy rule store to the router.
     #[must_use]
     pub fn with_rule_store(mut self, rule_store: Arc<dyn ActionPolicyRuleStore>) -> Self {
-        self.rule_store = Some(rule_store);
+        self.bindings.set_rule_store(Some(rule_store));
         self
     }
 
     /// Attaches a session store so built-in tools can introspect session history.
     #[must_use]
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
-        self.session_store = Some(session_store);
+        self.bindings.set_session_store(Some(session_store));
         self
     }
 
@@ -321,7 +279,7 @@ impl ToolRouter {
         mut self,
         hand_leases: Arc<dyn super::leases::HandLeaseStore>,
     ) -> Self {
-        self.hand_leases = Some(hand_leases);
+        self.hands.set_hand_lease_store(hand_leases);
         self
     }
 
@@ -331,13 +289,13 @@ impl ToolRouter {
         mut self,
         executor: Arc<dyn moa_core::traits::MemoryToolExecutor>,
     ) -> Self {
-        self.memory_tool_executor = Some(executor);
+        self.bindings.set_memory_tool_executor(Some(executor));
         self
     }
 
     /// Returns the explicitly installed graph-memory executor, when this host enables it.
     pub fn memory_tool_executor(&self) -> Option<Arc<dyn moa_core::traits::MemoryToolExecutor>> {
-        self.memory_tool_executor.clone()
+        self.bindings.memory_tool_executor()
     }
 
     /// Attaches the read-only retrieval executor backing the agentic memory tools.
@@ -346,7 +304,7 @@ impl ToolRouter {
         mut self,
         executor: Arc<dyn moa_core::traits::MemoryRetrievalExecutor>,
     ) -> Self {
-        self.memory_retrieval_executor = tokio::sync::RwLock::new(Some(executor));
+        self.bindings.set_memory_retrieval_executor(Some(executor));
         self
     }
 
@@ -355,20 +313,22 @@ impl ToolRouter {
         &self,
         executor: Arc<dyn moa_core::traits::MemoryRetrievalExecutor>,
     ) {
-        *self.memory_retrieval_executor.write().await = Some(executor);
+        self.bindings
+            .replace_memory_retrieval_executor(executor)
+            .await;
     }
 
     /// Attaches the hot-path lineage handle for built-in tools.
     #[must_use]
     pub fn with_lineage(mut self, lineage: Arc<dyn LineageHandle>) -> Self {
-        self.lineage = lineage;
+        self.bindings.lineage = lineage;
         self
     }
 
     /// Overrides the router's policy configuration.
     #[must_use]
     pub fn with_policies(mut self, policies: ActionPolicies) -> Self {
-        self.policies = policies;
+        self.bindings.set_policies(policies);
         self
     }
 
@@ -383,14 +343,14 @@ impl ToolRouter {
     /// [`ToolRouter::effective_call_origin`].
     #[must_use]
     pub fn with_call_origin(mut self, call_origin: CallOrigin) -> Self {
-        self.call_origin = call_origin;
+        self.bindings.set_call_origin(call_origin);
         self
     }
 
     /// Returns the provenance class of the runtime this router serves.
     #[must_use]
     pub fn call_origin(&self) -> CallOrigin {
-        self.call_origin
+        self.bindings.call_origin()
     }
 
     /// Returns the origin governing one call, composing both ceilings.
@@ -409,7 +369,9 @@ impl ToolRouter {
         &self,
         session: &moa_core::types::session::SessionMeta,
     ) -> CallOrigin {
-        self.call_origin.most_restrictive(session.call_origin)
+        self.bindings
+            .call_origin()
+            .most_restrictive(session.call_origin)
     }
 
     /// Returns the live catalog snapshot.
@@ -428,12 +390,7 @@ impl ToolRouter {
     /// refresh can split across revisions.
     #[must_use]
     pub fn activated_catalog(&self) -> Arc<ToolCatalogSnapshot> {
-        Arc::clone(
-            &self
-                .catalog
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        self.catalog.activated()
     }
 
     /// Builds one ephemeral installed-connector overlay over an immutable base catalog.
@@ -529,16 +486,16 @@ impl ToolRouter {
             )));
         }
 
-        registry.apply_budgets(&self.tool_budgets);
+        registry.apply_budgets(self.bindings.tool_budgets());
         Ok(Arc::new(ToolCatalogSnapshot::new(
-            self.catalog_owner_id,
+            self.catalog.owner_id(),
             registry,
         )))
     }
 
     /// Rejects a snapshot minted by a different router instance.
     pub(super) fn require_owned_catalog(&self, catalog: &ToolCatalogSnapshot) -> Result<()> {
-        if catalog.owner_id != self.catalog_owner_id {
+        if catalog.owner_id != self.catalog.owner_id() {
             return Err(MoaError::ValidationError(
                 "tool catalog snapshot belongs to a different router instance".to_string(),
             ));
@@ -556,15 +513,12 @@ impl ToolRouter {
     /// Both are replaced under the same publication so no caller can compile a
     /// prompt from one catalog revision and dispatch against another.
     pub(super) fn publish_registry(&self, registry: ToolRegistry) {
-        self.publish_catalog_snapshot(ToolCatalogSnapshot::new(self.catalog_owner_id, registry));
+        self.publish_catalog_snapshot(ToolCatalogSnapshot::new(self.catalog.owner_id(), registry));
     }
 
     /// Publishes a fully derived immutable catalog in one lock acquisition.
     pub(super) fn publish_catalog_snapshot(&self, snapshot: ToolCatalogSnapshot) {
-        *self
-            .catalog
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(snapshot);
+        self.catalog.publish(snapshot);
     }
 
     /// Returns the ordered tool schemas for prompt compilation.
@@ -651,12 +605,7 @@ impl ToolRouter {
 
     /// Loads MCP credentials and discovers the configured connectors.
     async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
-        self.mcp_credentials = McpDeploymentCredentials::from_mcp_servers(&config.mcp_servers)?;
-
-        for server in &config.mcp_servers {
-            self.mcp_servers.insert(server.name.clone(), server.clone());
-        }
-
+        self.mcp.configure(&config.mcp_servers)?;
         self.load_mcp_catalog(config).await
     }
 }

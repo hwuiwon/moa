@@ -29,8 +29,8 @@ use crate::types::{
     channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
     channel::SessionChannelBinding, channel::SessionChannelBindingId,
     channel::SessionChannelBindingResolution, completion::CompletionRequest,
-    completion::CompletionStream, contact::ContactId, contact::ContactPointId,
-    contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
+    completion::CompletionStream, completion::SharedCompletionRequest, contact::ContactId,
+    contact::ContactPointId, contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
     contact::StoredSessionAttachment, context::ProcessorOutput, context::WorkingContext,
     credentials::CredentialContext, credentials::CredentialError, credentials::CredentialIdentity,
     credentials::CredentialRef, credentials::CredentialStagingToken,
@@ -684,6 +684,10 @@ pub trait LLMProvider: Send + Sync {
 
     /// Executes a completion request.
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream>;
+
+    /// Executes a request from shared immutable storage without materializing
+    /// a second full request allocation.
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream>;
 }
 
 /// Channel-specific messaging adapter.

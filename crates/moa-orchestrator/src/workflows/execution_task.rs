@@ -718,7 +718,7 @@ async fn execute_capability(
     if let CapabilityInvocationResult::Output(output) = &invocation {
         usage.retrieved_bytes = usage
             .retrieved_bytes
-            .saturating_add(serialized_len(&output.safe_output.structured));
+            .saturating_add(serialized_len(&output.safe_output.structured_payload()));
     }
     let outcome = capability_invocation_outcome(
         capability.idempotency_class,
@@ -1093,7 +1093,7 @@ async fn execute_agent(
             };
             usage.retrieved_bytes = usage
                 .retrieved_bytes
-                .saturating_add(serialized_len(&output.safe_output.structured));
+                .saturating_add(serialized_len(&output.safe_output.structured_payload()));
 
             // Score the classified output against this task's own circuit. A halt
             // is a terminal task failure and a suspend is a user-audience input
@@ -1739,8 +1739,8 @@ fn capability_invocation_outcome(
             // replacement text rather than the raw structured payload.
             let value = output
                 .safe_output
-                .structured
-                .clone()
+                .structured_payload()
+                .cloned()
                 .unwrap_or_else(|| Value::String(output.safe_output.to_text()));
             Ok(completed_task_outcome(value, usage))
         }

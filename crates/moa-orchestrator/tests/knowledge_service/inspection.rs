@@ -8,9 +8,10 @@ async fn knowledge_service_accepts_injected_ingestion_runner_without_global_conf
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let sync_run_uid = Uuid::now_v7();
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let runner = Arc::new(FakeKnowledgeIngestionRunner::default());
     let service = KnowledgeService::new(
-        Arc::new(InMemoryKnowledgeRepository::default()),
+        repository_capabilities(repository),
         Arc::new(InMemoryKnowledgeRepository::default()),
         Arc::new(StaticKnowledgeProviders::new()),
         Arc::new(FakeKnowledgeCredentialStore::default()),

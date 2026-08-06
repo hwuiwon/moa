@@ -476,8 +476,7 @@ fn session_with_write_barrier(
 fn single_stored_uid(output: &ToolOutput, operation: &str) -> Uuid {
     assert!(!output.is_error, "{operation} output: {}", output.to_text());
     let data = output
-        .structured
-        .as_ref()
+        .structured_payload()
         .expect("successful memory write should have structured output");
     assert_eq!(data["operation"], "remember");
     assert_eq!(data["stored"], 1);
@@ -869,7 +868,9 @@ async fn session_fast_paths_keep_pinned_barrier_visible_db_memory() {
     .await
     .expect("forget dispatch");
     assert!(!forget.is_error, "forget output: {}", forget.to_text());
-    let forget_data = forget.structured.expect("forget structured output");
+    let forget_data = forget
+        .structured_payload()
+        .expect("forget structured output");
     assert_eq!(forget_data["operation"], "forget");
     assert_eq!(forget_data["invalidated"], 1);
     assert!(

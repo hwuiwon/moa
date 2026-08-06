@@ -41,7 +41,8 @@ use moa_core::{
     traits::LLMProvider,
     types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
     types::completion::{
-        CompletionRequest, CompletionResponse, CompletionStream, StopReason, TokenUsage,
+        CompletionRequest, CompletionResponse, CompletionStream, SharedCompletionRequest,
+        StopReason, TokenUsage,
     },
     types::context::ContextMessage,
     types::execution_planning::{
@@ -252,6 +253,15 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
             return Err(moa_core::error::MoaError::Cancelled);
         }
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        // The durable Restate request requires an owned DTO; materialize only
+        // at this transport boundary, after in-process shared failover routing.
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

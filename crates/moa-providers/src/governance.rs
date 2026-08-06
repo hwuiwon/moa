@@ -21,6 +21,7 @@ use moa_core::{
     traits::LLMProvider,
     types::completion::{
         CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+        JsonResponseFormat, SharedCompletionRequest,
     },
     types::context::{ContextMessage, MessageRole},
     types::model::ModelCapabilities,
@@ -104,6 +105,26 @@ impl GovernedLLMProvider {
                                 role,
                                 visibility,
                                 format!("{field}.json"),
+                            )
+                            .await
+                            .map_err(dlp_provider_error)?;
+                    }
+                    ToolContent::Process { output } => {
+                        let stdout = std::mem::take(&mut output.stdout);
+                        output.stdout = self
+                            .tokenize_text(
+                                &stdout,
+                                vault,
+                                TokenSource::new(visibility, role, format!("{field}.stdout")),
+                            )
+                            .await
+                            .map_err(dlp_provider_error)?;
+                        let stderr = std::mem::take(&mut output.stderr);
+                        output.stderr = self
+                            .tokenize_text(
+                                &stderr,
+                                vault,
+                                TokenSource::new(visibility, role, format!("{field}.stderr")),
                             )
                             .await
                             .map_err(dlp_provider_error)?;
@@ -266,6 +287,43 @@ impl GovernedLLMProvider {
             }
         })
     }
+
+    async fn tokenize_request_parts(
+        &self,
+        messages: &mut [ContextMessage],
+        tools: &mut [Value],
+        response_format: &mut Option<JsonResponseFormat>,
+    ) -> Result<TokenVault> {
+        let mut vault = TokenVault::new().map_err(dlp_provider_error)?;
+        for (index, message) in messages.iter_mut().enumerate() {
+            self.tokenize_message(message, index, &mut vault).await?;
+        }
+        for (index, tool) in tools.iter_mut().enumerate() {
+            *tool = self
+                .tokenize_structured_value(
+                    std::mem::take(tool),
+                    &mut vault,
+                    TokenSourceRole::System,
+                    TokenVisibility::Hidden,
+                    format!("request.tools[{index}]"),
+                )
+                .await
+                .map_err(dlp_provider_error)?;
+        }
+        if let Some(format) = response_format.as_mut() {
+            format.schema = self
+                .tokenize_structured_value(
+                    std::mem::take(&mut format.schema),
+                    &mut vault,
+                    TokenSourceRole::System,
+                    TokenVisibility::Hidden,
+                    "request.response_format.schema".to_string(),
+                )
+                .await
+                .map_err(dlp_provider_error)?;
+        }
+        Ok(vault)
+    }
 }
 
 #[async_trait]
@@ -279,34 +337,15 @@ impl LLMProvider for GovernedLLMProvider {
     }
 
     async fn complete(&self, mut request: CompletionRequest) -> Result<CompletionStream> {
-        let mut vault = TokenVault::new().map_err(dlp_provider_error)?;
-        for (index, message) in request.messages.iter_mut().enumerate() {
-            self.tokenize_message(message, index, &mut vault).await?;
-        }
-        for (index, tool) in request.tools.iter_mut().enumerate() {
-            *tool = self
-                .tokenize_structured_value(
-                    std::mem::take(tool),
-                    &mut vault,
-                    TokenSourceRole::System,
-                    TokenVisibility::Hidden,
-                    format!("request.tools[{index}]"),
-                )
-                .await
-                .map_err(dlp_provider_error)?;
-        }
-        if let Some(format) = request.response_format.as_mut() {
-            format.schema = self
-                .tokenize_structured_value(
-                    std::mem::take(&mut format.schema),
-                    &mut vault,
-                    TokenSourceRole::System,
-                    TokenVisibility::Hidden,
-                    "request.response_format.schema".to_string(),
-                )
-                .await
-                .map_err(dlp_provider_error)?;
-        }
+        let mut response_format = request.response_format.take();
+        let vault = self
+            .tokenize_request_parts(
+                &mut request.messages,
+                &mut request.tools,
+                &mut response_format,
+            )
+            .await?;
+        request.response_format = response_format;
 
         tracing::debug!(
             provider = self.inner.name(),
@@ -314,6 +353,28 @@ impl LLMProvider for GovernedLLMProvider {
             "egress DLP tokenized outbound request"
         );
         let inner = self.inner.complete(request).await?;
+        Ok(detokenizing_stream(inner, vault))
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        // DLP rewrites only messages, tool schemas, and response-format schema.
+        // Those transformed fields are materialized as a semantic provider
+        // payload; model, metadata, limits, temperature, and web-search policy
+        // remain borrowed from the shared failover request.
+        let source = request.request();
+        let mut messages = source.messages.clone();
+        let mut tools = source.tools.clone();
+        let mut response_format = source.response_format.clone();
+        let vault = self
+            .tokenize_request_parts(&mut messages, &mut tools, &mut response_format)
+            .await?;
+        let transformed = request.with_transformed_fields(messages, tools, response_format);
+        tracing::debug!(
+            provider = self.inner.name(),
+            distinct_tokens = vault.len(),
+            "egress DLP tokenized outbound request"
+        );
+        let inner = self.inner.complete_shared(transformed).await?;
         Ok(detokenizing_stream(inner, vault))
     }
 }
@@ -646,7 +707,10 @@ impl PiiClassifier for CachingPiiClassifier {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use moa_core::types::completion::{StopReason, TokenUsage, ToolCallContent, ToolInvocation};
+    use moa_core::types::completion::{
+        CompletionRequestView, SharedCompletionRequest, StopReason, TokenUsage, ToolCallContent,
+        ToolInvocation,
+    };
     use moa_core::types::identifiers::ModelId;
     use moa_core::types::security::SensitivityClass;
     use moa_memory_pii::{Error, PiiCategory, PiiSpan};
@@ -731,12 +795,37 @@ mod tests {
         }
 
         async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-            let rendered = serde_json::to_string(&request.messages)?;
+            self.complete_view(&request).await
+        }
+
+        async fn complete_shared(
+            &self,
+            request: SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
+            self.complete_view(&request).await
+        }
+    }
+
+    impl EchoProvider {
+        async fn complete_view<R: CompletionRequestView + ?Sized>(
+            &self,
+            request: &R,
+        ) -> Result<CompletionStream> {
+            let rendered = serde_json::to_string(request.messages())?;
             let tokens = extract_tokens(&rendered);
             self.requests
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(request);
+                .push(CompletionRequest {
+                    model: request.model().cloned(),
+                    messages: request.messages().to_vec(),
+                    tools: request.tools().to_vec(),
+                    max_output_tokens: request.max_output_tokens(),
+                    temperature: request.temperature(),
+                    response_format: request.response_format().cloned(),
+                    native_web_search: request.native_web_search(),
+                    metadata: request.metadata().clone(),
+                });
             match self.mode {
                 EchoMode::AllText => Ok(CompletionStream::from_response(response(
                     CompletionContent::Text(tokens.join(" ")),

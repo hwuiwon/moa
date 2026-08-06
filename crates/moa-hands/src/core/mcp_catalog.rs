@@ -29,7 +29,9 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::mcp::{MCPClient, McpDiscoveredToolRegistration};
 
-use super::registration::{McpClientRoute, ToolExecution, governed_tool_contract_revision};
+use super::registration::{
+    McpClientRoute, McpClientRouteState, ToolExecution, governed_tool_contract_revision,
+};
 use super::{ToolCatalogSnapshot, ToolRegistry, ToolRouter};
 
 /// Absorbs one length-framed component into a digest.
@@ -488,7 +490,7 @@ pub struct McpCatalogRefresh {
 impl ToolRouter {
     /// Returns the typed health of every configured MCP connector.
     pub async fn mcp_connector_health(&self) -> BTreeMap<String, McpConnectorHealth> {
-        self.mcp_health.read().await.clone()
+        self.mcp.health_snapshot().await
     }
 
     /// Returns the revision identifying the MCP portion of the live catalog.
@@ -555,7 +557,7 @@ impl ToolRouter {
                     %error,
                     "MCP catalog refresh could not pin the activated snapshot"
                 );
-                let health = self.mcp_health.read().await.clone();
+                let health = self.mcp.health_snapshot().await;
                 let revision = self.mcp_catalog_revision();
                 McpCatalogRefresh {
                     health: health.clone(),
@@ -577,9 +579,7 @@ impl ToolRouter {
 
     /// Returns the configured connectors in their authored order.
     fn configured_mcp_servers(&self) -> Vec<McpServerConfig> {
-        let mut servers = self.mcp_servers.values().cloned().collect::<Vec<_>>();
-        servers.sort_by(|left, right| left.name.cmp(&right.name));
-        servers
+        self.mcp.configured_servers()
     }
 
     async fn run_mcp_discovery(
@@ -588,7 +588,7 @@ impl ToolRouter {
         pass: DiscoveryPass,
     ) -> Result<McpCatalogRefresh> {
         let mut registry = (*self.registry()).clone();
-        let mut health = self.mcp_health.read().await.clone();
+        let mut health = self.mcp.health_snapshot().await;
         let mut activated = BTreeMap::new();
         let mut quarantined: BTreeMap<String, Vec<CatalogDefect>> = BTreeMap::new();
         let mut warnings: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -618,9 +618,9 @@ impl ToolRouter {
                     // connector's previous tools are replaced as a unit by an
                     // already-validated set.
                     registry.remove_mcp_server_tools(&server.name);
-                    let client_route: McpClientRoute = Arc::new(tokio::sync::RwLock::new(Some(
-                        Arc::clone(&candidate.client),
-                    )));
+                    let client_route: McpClientRoute = Arc::new(tokio::sync::Mutex::new(
+                        McpClientRouteState::with_client(Arc::clone(&candidate.client)),
+                    ));
                     let mut registered = 0_usize;
                     for tool in candidate.tools {
                         match registry.register_mcp_tool_on_route(
@@ -705,13 +705,13 @@ impl ToolRouter {
             }
         }
 
-        registry.apply_budgets(&self.tool_budgets);
+        registry.apply_budgets(self.bindings.tool_budgets());
         let revision = mcp_catalog_revision(&registry);
-        let snapshot = ToolCatalogSnapshot::new(self.catalog_owner_id, registry);
+        let snapshot = ToolCatalogSnapshot::new(self.catalog.owner_id(), registry);
         let pin = snapshot.pin()?;
         self.publish_catalog_snapshot(snapshot);
         self.refresh_unmatched_permission_patterns();
-        *self.mcp_health.write().await = health.clone();
+        self.mcp.publish_health(health.clone()).await;
         Ok(McpCatalogRefresh {
             health: health.clone(),
             revision,
@@ -804,7 +804,7 @@ impl ToolRouter {
     }
 
     async fn discover_server_tools(&self, server: &McpServerConfig) -> Result<DiscoveredConnector> {
-        let headers = self.mcp_credentials.headers_for(server)?;
+        let headers = self.mcp.headers_for(server)?;
         discover_server_tools(server, headers).await
     }
 }

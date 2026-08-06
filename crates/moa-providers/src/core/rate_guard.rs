@@ -143,6 +143,15 @@ impl RateGuard {
         self
     }
 
+    /// Returns whether this guard is held only by its coordination cache.
+    ///
+    /// The cache uses this to reclaim inactive entries without splitting the
+    /// shared state of guards that are still owned by provider instances or
+    /// in-flight callers.
+    pub(crate) fn is_cache_only(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     /// Returns the remaining 429 cooldown for this quota, or `None` when clear.
     ///
     /// Always combines the local and fleet-shared deadlines. Keeping the local

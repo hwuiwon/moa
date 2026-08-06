@@ -149,6 +149,8 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
                     combined,
                     estimated_tokens: 8_000,
                     line_count: count_lines(&old_output_text),
+                    stdout_range: None,
+                    stderr_range: None,
                     stdout: Some(stdout),
                     stderr: None,
                 })),

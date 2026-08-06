@@ -263,23 +263,34 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<moa_core::types::completion::CompletionStream> {
-            Ok(
-                moa_core::types::completion::CompletionStream::from_response(CompletionResponse {
-                    text: "Fresh answer".to_string(),
-                    content: vec![
-                        CompletionContent::ProviderToolResult {
-                            tool_name: "web_search".to_string(),
-                            summary: "Searching the web...".to_string(),
-                        },
-                        CompletionContent::Text("Fresh answer".to_string()),
-                    ],
-                    stop_reason: StopReason::EndTurn,
-                    model: moa_core::types::identifiers::ModelId::new("mock-model"),
-                    usage: token_usage(4, 2),
-                    duration_ms: 1,
-                    thought_signature: None,
-                }),
-            )
+            Ok(Self::response())
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: moa_core::types::completion::SharedCompletionRequest,
+        ) -> Result<moa_core::types::completion::CompletionStream> {
+            Ok(Self::response())
+        }
+    }
+
+    impl ProviderToolResultLlm {
+        fn response() -> moa_core::types::completion::CompletionStream {
+            moa_core::types::completion::CompletionStream::from_response(CompletionResponse {
+                text: "Fresh answer".to_string(),
+                content: vec![
+                    CompletionContent::ProviderToolResult {
+                        tool_name: "web_search".to_string(),
+                        summary: "Searching the web...".to_string(),
+                    },
+                    CompletionContent::Text("Fresh answer".to_string()),
+                ],
+                stop_reason: StopReason::EndTurn,
+                model: moa_core::types::identifiers::ModelId::new("mock-model"),
+                usage: token_usage(4, 2),
+                duration_ms: 1,
+                thought_signature: None,
+            })
         }
     }
 

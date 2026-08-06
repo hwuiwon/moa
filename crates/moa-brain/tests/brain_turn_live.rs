@@ -5,8 +5,10 @@
 use std::sync::Arc;
 
 use moa_brain::{
-    BrainTurnRequest, GraphMemoryPipelineOptions, TurnResult,
-    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
+    BrainTurnRequest, DigestStageInput, GraphMemoryPipelineStages, GraphMemoryStageInput,
+    HistoryStageInput, QueryRewriteStageInput, RuntimeStageInput, SkillInjectionStageInput,
+    TurnResult, build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    run_brain_turn,
 };
 use moa_config::MoaConfig;
 use moa_core::{
@@ -63,18 +65,29 @@ async fn live_brain_turn_completes() -> Result<()> {
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
         store.clone(),
-        GraphMemoryPipelineOptions {
-            graph_pool: store.pool().clone(),
-            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
-            shared_graph_memory_retriever: None,
-            retrieval_embedder: None,
-            shared_skill_injector: None,
-            segment_store: Some(store.clone()),
-            compaction_llm_provider: None,
-            query_rewrite_llm_provider: None,
-            identity_prompt_override: None,
-            tool_schemas: Vec::new(),
-            lineage: Arc::new(moa_core::traits::NullLineageHandle),
+        GraphMemoryPipelineStages {
+            history: HistoryStageInput {
+                compaction_llm_provider: None,
+            },
+            graph_memory: GraphMemoryStageInput::Local {
+                graph_pool: store.pool().clone(),
+                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
+                retrieval_embedder: None,
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            },
+            skill_injection: SkillInjectionStageInput::Local {
+                graph_pool: store.pool().clone(),
+                segment_store: Some(store.clone()),
+                embedder: None,
+            },
+            query_rewrite: QueryRewriteStageInput { llm_provider: None },
+            runtime: RuntimeStageInput {
+                identity_prompt_override: None,
+                tool_schemas: Vec::new(),
+            },
+            digest: DigestStageInput {
+                graph_pool: store.pool().clone(),
+            },
         },
     );
 

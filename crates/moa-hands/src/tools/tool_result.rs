@@ -351,15 +351,33 @@ async fn load_tool_result_text(
         .ok_or_else(|| MoaError::ToolError(format!("tool result {tool_id} was not found")))?;
 
     if let Some(artifact) = output.artifact.as_ref() {
-        let claim_check = artifact.claim_check(stream).ok_or_else(|| {
-            MoaError::ToolError(format!(
-                "tool result {tool_id} does not have a {} stream",
-                stream.as_str()
-            ))
-        })?;
-        return session_store
-            .load_text_artifact(session_id, claim_check)
-            .await;
+        let uses_combined_blob = matches!(stream, ToolArtifactStream::Combined)
+            || artifact.stream_range(stream).is_some();
+        if uses_combined_blob {
+            let combined = session_store
+                .load_text_artifact(session_id, &artifact.combined)
+                .await?;
+            let sliced = artifact.slice_stream(stream, &combined).map_err(|error| {
+                MoaError::ToolError(format!(
+                    "tool result {tool_id} has invalid {} stream metadata: {error}",
+                    stream.as_str()
+                ))
+            })?;
+            if let Some(text) = sliced {
+                return Ok(text.to_string());
+            }
+        }
+
+        if let Some(claim_check) = artifact.claim_check(stream) {
+            return session_store
+                .load_text_artifact(session_id, claim_check)
+                .await;
+        }
+
+        return Err(MoaError::ToolError(format!(
+            "tool result {tool_id} does not have a {} stream",
+            stream.as_str()
+        )));
     }
 
     match stream {
@@ -644,7 +662,13 @@ mod tests {
                             },
                             estimated_tokens: 20,
                             line_count: 3,
-                            stdout: None,
+                            stdout_range: None,
+                            stderr_range: None,
+                            stdout: Some(ClaimCheck {
+                                blob_id: "blob-stdout".to_string(),
+                                size: 14,
+                                preview: "legacy stdout".to_string(),
+                            }),
                             stderr: None,
                         })),
                     original_output_tokens: Some(20),
@@ -654,10 +678,10 @@ mod tests {
                     capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
                 },
             )],
-            artifacts: std::collections::HashMap::from([(
-                "blob-1".to_string(),
-                "line 1\nline 2\nline 3\n".to_string(),
-            )]),
+            artifacts: std::collections::HashMap::from([
+                ("blob-1".to_string(), "line 1\nline 2\nline 3\n".to_string()),
+                ("blob-stdout".to_string(), "legacy stdout\n".to_string()),
+            ]),
         };
         let caller_identity = test_identity(session.tenant_id);
         let ctx = ToolContext {
@@ -686,6 +710,107 @@ mod tests {
 
         assert!(output.to_text().contains("2 | line 2"));
         assert!(output.to_text().contains("3 | line 3"));
+
+        let stdout = ToolResultReadTool
+            .execute(
+                &json!({
+                    "tool_id": tool_id.to_string(),
+                    "stream": "stdout"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("legacy stdout tool_result_read");
+        assert!(stdout.to_text().contains("legacy stdout"));
+    }
+
+    #[tokio::test]
+    async fn tool_result_read_and_search_slice_single_combined_artifact() {
+        // Pins: new artifacts persist one blob, while stdout and stderr remain
+        // independently addressable through UTF-8-safe stream ranges.
+        let session = SessionMeta::default();
+        let tool_id = ToolCallId::new();
+        let combined = "out-α\nout-β\n\nstderr:\nwarning-γ\nwarning-delta\n";
+        let stderr_start = combined.find("warning-γ").expect("stderr text");
+        let stderr_end = stderr_start + "warning-γ\nwarning-delta".len();
+        let store = MockSessionStore {
+            events: vec![event_record(
+                session.id,
+                Event::ToolResult {
+                    tool_id,
+                    provider_tool_use_id: None,
+                    output: ToolOutput::text("stored separately", Duration::from_millis(1))
+                        .with_artifact(Some(moa_core::types::tools::ToolOutputArtifact {
+                            combined: ClaimCheck {
+                                blob_id: "blob-1".to_string(),
+                                size: combined.len(),
+                                preview: "out-α".to_string(),
+                            },
+                            estimated_tokens: 20,
+                            line_count: 6,
+                            stdout_range: Some(moa_core::types::tools::ToolArtifactByteRange {
+                                start: 0,
+                                end: "out-α\nout-β".len(),
+                            }),
+                            stderr_range: Some(moa_core::types::tools::ToolArtifactByteRange {
+                                start: stderr_start,
+                                end: stderr_end,
+                            }),
+                            stdout: None,
+                            stderr: None,
+                        })),
+                    original_output_tokens: Some(20),
+                    success: true,
+                    duration_ms: 1,
+                    assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                    capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+                },
+            )],
+            artifacts: std::collections::HashMap::from([(
+                "blob-1".to_string(),
+                combined.to_string(),
+            )]),
+        };
+        let caller_identity = test_identity(session.tenant_id);
+        let ctx = ToolContext {
+            budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
+            session: &session,
+            caller_identity: &caller_identity,
+            tool_call_id: None,
+            lineage: &moa_core::traits::NULL_LINEAGE_HANDLE,
+            session_store: Some(&store),
+            cancel_token: None,
+            memory_tool_executor: None,
+            memory_retrieval_executor: None,
+        };
+
+        let read = ToolResultReadTool
+            .execute(
+                &json!({
+                    "tool_id": tool_id.to_string(),
+                    "stream": "stdout",
+                    "start_line": 2,
+                    "end_line": 2
+                }),
+                &ctx,
+            )
+            .await
+            .expect("tool_result_read stdout");
+        assert!(read.to_text().contains("2 | out-β"));
+
+        let search = ToolResultSearchTool
+            .execute(
+                &json!({
+                    "tool_id": tool_id.to_string(),
+                    "stream": "stderr",
+                    "pattern": "warning-γ",
+                    "literal": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("tool_result_search stderr");
+        assert!(search.to_text().contains("1:warning-γ"));
     }
 
     #[tokio::test]

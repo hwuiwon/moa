@@ -14,7 +14,7 @@ mod recovery;
 mod registration;
 mod telemetry;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,9 +25,10 @@ use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::MemoryRetrievalExecutor,
-    traits::MemoryToolExecutor, traits::SessionStore, types::action_policy::CallOrigin,
-    types::hands::HandHandle, types::hands::SandboxFile, types::hands::SandboxPolicySnapshot,
-    types::identifiers::TenantId, types::resource::ResourceBudget,
+    traits::MemoryToolExecutor, traits::NullLineageHandle, traits::SessionStore,
+    types::action_policy::CallOrigin, types::hands::HandHandle, types::hands::SandboxFile,
+    types::hands::SandboxPolicySnapshot, types::identifiers::TenantId,
+    types::resource::ResourceBudget,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
@@ -38,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::local::LocalHandProvider;
 
-pub use dispatch::PendingConnectorToolOutput;
+pub use dispatch::{AuthorizedToolCall, PendingConnectorToolOutput};
 use leases::HandLeaseStore;
 pub use mcp_catalog::{
     CandidateConnector, CatalogDefect, McpCatalogActivation, McpCatalogRefresh, McpConnectorHealth,
@@ -246,80 +247,383 @@ impl ToolCatalogSnapshot {
     }
 }
 
-/// Routes tool invocations to built-ins, local hands, or MCP backends.
-pub struct ToolRouter {
-    /// Live executable registry and prompt schemas, published as one snapshot.
-    ///
-    /// Held as an immutable `Arc` behind a lock rather than as a mutable
-    /// registry so a background catalog refresh publishes atomically: every
-    /// reader takes one snapshot and works from it, and no prompt compilation,
-    /// capability listing, or dispatch can observe a half-refreshed connector.
-    catalog: std::sync::RwLock<Arc<ToolCatalogSnapshot>>,
-    /// Runtime identity that prevents snapshots crossing router instances.
-    catalog_owner_id: uuid::Uuid,
+/// Owns the atomically published catalog for one router instance.
+///
+/// The owner ID and its immutable snapshots share the router lifetime. The
+/// synchronous read/write lock protects only the `Arc` publication boundary:
+/// readers clone one complete snapshot and publishers replace one complete
+/// snapshot. No catalog lock may be held while a provider, tool, or network
+/// future is awaited.
+struct CatalogOwner {
+    owner_id: uuid::Uuid,
+    snapshot: std::sync::RwLock<Arc<ToolCatalogSnapshot>>,
+}
+
+impl CatalogOwner {
+    /// Creates the first immutable catalog publication for a router.
+    fn new(registry: ToolRegistry) -> Self {
+        let owner_id = uuid::Uuid::now_v7();
+        Self {
+            owner_id,
+            snapshot: std::sync::RwLock::new(Arc::new(ToolCatalogSnapshot::new(
+                owner_id, registry,
+            ))),
+        }
+    }
+
+    /// Returns the identity that all snapshots owned by this router carry.
+    fn owner_id(&self) -> uuid::Uuid {
+        self.owner_id
+    }
+
+    /// Clones the currently activated immutable catalog.
+    fn activated(&self) -> Arc<ToolCatalogSnapshot> {
+        Arc::clone(
+            &self
+                .snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Replaces the active publication under one short lock acquisition.
+    fn publish(&self, snapshot: ToolCatalogSnapshot) {
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(snapshot);
+    }
+}
+
+/// Owns deployment MCP configuration and connector health for one router.
+///
+/// Server definitions, deployment credentials, and the egress guard are
+/// immutable after construction except for the synchronous loading phase.
+/// Health has one async lock because refreshes publish observations after
+/// network discovery. The lock is cloned into a local value before discovery
+/// and reacquired only for the final health publication; per-route transport
+/// single-flight state remains in the immutable catalog route itself.
+struct McpOwner {
+    servers: HashMap<String, McpServerConfig>,
+    health: RwLock<BTreeMap<String, McpConnectorHealth>>,
+    credentials: McpDeploymentCredentials,
+    egress_guard: Option<Arc<McpEgressGuard>>,
+}
+
+impl Default for McpOwner {
+    fn default() -> Self {
+        Self {
+            servers: HashMap::new(),
+            health: RwLock::new(BTreeMap::new()),
+            credentials: McpDeploymentCredentials::default(),
+            egress_guard: None,
+        }
+    }
+}
+
+impl McpOwner {
+    /// Loads server definitions and their deployment credentials before serving.
+    fn configure(&mut self, servers: &[McpServerConfig]) -> Result<()> {
+        self.credentials = McpDeploymentCredentials::from_mcp_servers(servers)?;
+        self.servers.extend(
+            servers
+                .iter()
+                .cloned()
+                .map(|server| (server.name.clone(), server)),
+        );
+        Ok(())
+    }
+
+    /// Installs the host-side egress guard used by outbound MCP calls.
+    fn set_egress_guard(&mut self, guard: Option<Arc<McpEgressGuard>>) {
+        self.egress_guard = guard;
+    }
+
+    /// Returns an owned server configuration safe to retain across an await.
+    fn server(&self, name: &str) -> Option<McpServerConfig> {
+        self.servers.get(name).cloned()
+    }
+
+    /// Returns credentials-derived headers for one configured server.
+    fn headers_for(&self, server: &McpServerConfig) -> Result<HashMap<String, String>> {
+        self.credentials.headers_for(server)
+    }
+
+    /// Returns the configured egress guard without exposing owner internals.
+    fn egress_guard(&self) -> Option<Arc<McpEgressGuard>> {
+        self.egress_guard.clone()
+    }
+
+    /// Returns a stable-name-ordered copy of configured servers.
+    fn configured_servers(&self) -> Vec<McpServerConfig> {
+        let mut servers = self.servers.values().cloned().collect::<Vec<_>>();
+        servers.sort_by(|left, right| left.name.cmp(&right.name));
+        servers
+    }
+
+    /// Clones the last observed connector health without retaining its lock.
+    async fn health_snapshot(&self) -> BTreeMap<String, McpConnectorHealth> {
+        self.health.read().await.clone()
+    }
+
+    /// Publishes connector health after discovery has completed.
+    async fn publish_health(&self, health: BTreeMap<String, McpConnectorHealth>) {
+        *self.health.write().await = health;
+    }
+}
+
+/// Owns hand providers and process-local lifecycle caches for one router.
+///
+/// Provider registrations and policy configuration live for the router
+/// lifetime. Active handles, preferred routes, trusted/installed manifests,
+/// and workspace roots use independent async locks and are only caches or
+/// transport setup state. Durable lease operations remain the correctness
+/// authority in Postgres. Lifecycle code must clone or remove cache values
+/// before awaiting provider or lease-store work; no lifecycle lock spans an
+/// external await.
+struct HandLifecycleOwner {
     providers: HashMap<String, Arc<dyn HandProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
-    mcp_servers: HashMap<String, McpServerConfig>,
-    /// Last observed discovery outcome for every configured connector.
-    ///
-    /// This is the typed health the acceptance criteria require: an optional
-    /// connector that is down is `Unavailable` (or `Degraded` while its
-    /// last-known-good tools stay served) and every other connector's tools are
-    /// unaffected, while a required connector that is down never reaches this
-    /// map because startup fails with the same typed value.
-    mcp_health: RwLock<std::collections::BTreeMap<String, McpConnectorHealth>>,
-    mcp_credentials: McpDeploymentCredentials,
-    /// Optional data-class egress guard for outbound MCP tool calls. When
-    /// present, each call's serialized arguments are classified against the
-    /// destination server's `allowed_data_classes` allowlist and blocked (fail
-    /// closed) before dispatch when the payload carries a class the server is not
-    /// permitted to receive. Absence is valid only when no MCP servers are
-    /// configured: configured construction rejects it, and manually assembled
-    /// routers fail closed at dispatch. The guard is held here rather than on
-    mcp_egress_guard: Option<Arc<McpEgressGuard>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
     preferred_hand_routes: RwLock<HashMap<String, String>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,
-    /// Deployment-level sandbox policy layer, injected at construction so
-    /// provisioning can never substitute a default for the outermost layer.
     deployment_sandbox_policy: SandboxPolicySnapshot,
-    /// Durable owner of each tenant's authored sandbox policy layer, read on
-    /// every provisioning decision. `None` means no tenant has authored one,
-    /// which contributes the named identity layer rather than an absent one.
     tenant_sandbox_policy: Option<Arc<dyn TenantSandboxPolicyStore>>,
-    /// Whether the durable hand-lease reaper is running for this deployment.
-    ///
-    /// A provider that relies on the reaper to enforce a deadline may only
-    /// serve a bounded deadline when this is true; otherwise admission refuses
-    /// rather than provisioning a sandbox nothing will ever destroy.
     hand_lease_reaper_installed: bool,
-    /// Trusted sandbox file manifests keyed by hand scope (`scope_key`):
-    /// `"{session_id}:{worker_id}"`, where an empty worker segment is the
-    /// session-level (coordinator) scope.
     trusted_sandbox_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     workspace_roots: RwLock<HashMap<TenantId, PathBuf>>,
+    sandbox_root: Option<PathBuf>,
+}
+
+impl HandLifecycleOwner {
+    /// Creates the provider and cache domain for one router.
+    fn new(
+        providers: HashMap<String, Arc<dyn HandProvider>>,
+        deployment_sandbox_policy: SandboxPolicySnapshot,
+    ) -> Self {
+        Self {
+            providers,
+            local_provider: None,
+            active_hands: RwLock::new(HashMap::new()),
+            preferred_hand_routes: RwLock::new(HashMap::new()),
+            hand_leases: None,
+            deployment_sandbox_policy,
+            tenant_sandbox_policy: None,
+            hand_lease_reaper_installed: false,
+            trusted_sandbox_files: RwLock::new(HashMap::new()),
+            installed_files: RwLock::new(HashMap::new()),
+            workspace_roots: RwLock::new(HashMap::new()),
+            sandbox_root: None,
+        }
+    }
+
+    /// Returns the registered providers in stable name order for the reaper.
+    fn providers(&self) -> Vec<Arc<dyn HandProvider>> {
+        let mut names = self.providers.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+            .into_iter()
+            .filter_map(|name| self.providers.get(&name).cloned())
+            .collect()
+    }
+
+    /// Installs the optional local provider used by local file setup paths.
+    fn set_local_provider(&mut self, provider: Option<Arc<LocalHandProvider>>) {
+        self.local_provider = provider;
+    }
+
+    /// Remembers the local workspace root used by local hand provisioning.
+    fn set_sandbox_root(&mut self, sandbox_root: Option<PathBuf>) {
+        self.sandbox_root = sandbox_root;
+    }
+
+    /// Attaches the durable tenant policy owner.
+    fn set_tenant_sandbox_policy(&mut self, store: Arc<dyn TenantSandboxPolicyStore>) {
+        self.tenant_sandbox_policy = Some(store);
+    }
+
+    /// Attaches the durable lease owner.
+    fn set_hand_lease_store(&mut self, store: Arc<dyn HandLeaseStore>) {
+        self.hand_leases = Some(store);
+    }
+
+    /// Records that the deployment starts its durable lease reaper.
+    fn set_hand_lease_reaper_installed(&mut self) {
+        self.hand_lease_reaper_installed = true;
+    }
+
+    /// Returns whether durable lease ownership is configured.
+    fn has_hand_lease_store(&self) -> bool {
+        self.hand_leases.is_some()
+    }
+
+    /// Returns whether the durable reaper owns deadline enforcement.
+    fn hand_lease_reaper_installed(&self) -> bool {
+        self.hand_lease_reaper_installed
+    }
+
+    /// Returns the local provider, when this deployment registered one.
+    fn local_provider(&self) -> Option<Arc<LocalHandProvider>> {
+        self.local_provider.clone()
+    }
+
+    /// Returns the deployment policy layer.
+    fn deployment_policy(&self) -> &SandboxPolicySnapshot {
+        &self.deployment_sandbox_policy
+    }
+
+    /// Returns the local workspace fallback, if configured.
+    fn sandbox_root(&self) -> Option<PathBuf> {
+        self.sandbox_root.clone()
+    }
+}
+
+/// Owns built-in execution bindings and action-policy state for one router.
+///
+/// These bindings are immutable after composition except for the optional
+/// retrieval executor and unmatched-pattern snapshot, each of which has its
+/// own short async/synchronous lock. Accessors clone handles before a built-in,
+/// session-store, or policy-rule await, so no binding lock crosses external
+/// work. The owner also keeps output and tool budgets beside the bindings that
+/// govern built-in execution and catalog derivation.
+struct BuiltInBindings {
     policies: ActionPolicies,
-    /// Provenance class of the runtime this router serves.
-    ///
-    /// Stated at construction as a deployment-level ceiling and composed with
-    /// each session's durable origin. No tenant rule, deployment default, or
-    /// tool effect can hand back a capability either origin refuses.
     call_origin: CallOrigin,
-    /// Configured permission patterns that govern no registered tool.
-    ///
-    /// Recomputed whenever the tool catalog changes rather than once at startup,
-    /// so a lazily discovered connector clears a warning that was legitimately
-    /// true before its tools existed.
     unmatched_permission_patterns: std::sync::RwLock<Vec<UnmatchedPermissionPattern>>,
     rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
     session_store: Option<Arc<dyn SessionStore>>,
     memory_tool_executor: Option<Arc<dyn MemoryToolExecutor>>,
     memory_retrieval_executor: RwLock<Option<Arc<dyn MemoryRetrievalExecutor>>>,
     lineage: Arc<dyn moa_core::traits::LineageHandle>,
-    sandbox_root: Option<PathBuf>,
     tool_output: ToolOutputConfig,
     tool_budgets: ToolBudgetConfig,
+}
+
+impl Default for BuiltInBindings {
+    fn default() -> Self {
+        Self {
+            policies: ActionPolicies::default(),
+            call_origin: CallOrigin::Production,
+            unmatched_permission_patterns: std::sync::RwLock::new(Vec::new()),
+            rule_store: None,
+            session_store: None,
+            memory_tool_executor: None,
+            memory_retrieval_executor: RwLock::new(None),
+            lineage: Arc::new(NullLineageHandle),
+            tool_output: ToolOutputConfig::default(),
+            tool_budgets: ToolBudgetConfig::default(),
+        }
+    }
+}
+
+impl BuiltInBindings {
+    /// Replaces the action-policy evaluator during router composition.
+    fn set_policies(&mut self, policies: ActionPolicies) {
+        self.policies = policies;
+    }
+
+    /// Replaces the deployment-level call-origin ceiling.
+    fn set_call_origin(&mut self, call_origin: CallOrigin) {
+        self.call_origin = call_origin;
+    }
+
+    /// Returns the deployment-level call-origin ceiling.
+    fn call_origin(&self) -> CallOrigin {
+        self.call_origin
+    }
+
+    /// Installs the durable policy-rule owner.
+    fn set_rule_store(&mut self, store: Option<Arc<dyn ActionPolicyRuleStore>>) {
+        self.rule_store = store;
+    }
+
+    /// Installs the session store used by built-ins and output artifacts.
+    fn set_session_store(&mut self, store: Option<Arc<dyn SessionStore>>) {
+        self.session_store = store;
+    }
+
+    /// Installs the graph-memory write executor.
+    fn set_memory_tool_executor(&mut self, executor: Option<Arc<dyn MemoryToolExecutor>>) {
+        self.memory_tool_executor = executor;
+    }
+
+    /// Returns the graph-memory write executor handle.
+    fn memory_tool_executor(&self) -> Option<Arc<dyn MemoryToolExecutor>> {
+        self.memory_tool_executor.clone()
+    }
+
+    /// Installs the read-only graph-memory retrieval executor.
+    fn set_memory_retrieval_executor(
+        &mut self,
+        executor: Option<Arc<dyn MemoryRetrievalExecutor>>,
+    ) {
+        self.memory_retrieval_executor = RwLock::new(executor);
+    }
+
+    /// Replaces the read-only graph-memory retrieval executor asynchronously.
+    async fn replace_memory_retrieval_executor(&self, executor: Arc<dyn MemoryRetrievalExecutor>) {
+        *self.memory_retrieval_executor.write().await = Some(executor);
+    }
+
+    /// Returns the configured session store handle.
+    fn session_store(&self) -> Option<Arc<dyn SessionStore>> {
+        self.session_store.clone()
+    }
+
+    /// Returns the configured policy-rule store handle.
+    fn rule_store(&self) -> Option<Arc<dyn ActionPolicyRuleStore>> {
+        self.rule_store.clone()
+    }
+
+    /// Returns the lineage handle shared by built-in tools.
+    fn lineage(&self) -> Arc<dyn moa_core::traits::LineageHandle> {
+        Arc::clone(&self.lineage)
+    }
+
+    /// Replaces the output shaping configuration.
+    fn set_tool_output(&mut self, tool_output: ToolOutputConfig) {
+        self.tool_output = tool_output;
+    }
+
+    /// Returns the output shaping configuration.
+    fn tool_output(&self) -> &ToolOutputConfig {
+        &self.tool_output
+    }
+
+    /// Replaces the per-tool budget configuration.
+    fn set_tool_budgets(&mut self, tool_budgets: ToolBudgetConfig) {
+        self.tool_budgets = tool_budgets;
+    }
+
+    /// Returns the per-tool budget configuration.
+    fn tool_budgets(&self) -> &ToolBudgetConfig {
+        &self.tool_budgets
+    }
+
+    /// Replaces the current unmatched permission-pattern snapshot.
+    fn set_unmatched_permission_patterns(&self, patterns: Vec<UnmatchedPermissionPattern>) {
+        *self
+            .unmatched_permission_patterns
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = patterns;
+    }
+
+    /// Returns a copy of the current unmatched permission-pattern snapshot.
+    fn unmatched_permission_patterns(&self) -> Vec<UnmatchedPermissionPattern> {
+        self.unmatched_permission_patterns
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Routes tool invocations to built-ins, local hands, or MCP backends.
+pub struct ToolRouter {
+    catalog: CatalogOwner,
+    mcp: McpOwner,
+    hands: HandLifecycleOwner,
+    bindings: BuiltInBindings,
 }
 
 #[cfg(test)]

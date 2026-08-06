@@ -91,6 +91,13 @@ impl LLMProvider for ScriptedProvider {
             thought_signature: None,
         }))
     }
+
+    async fn complete_shared(
+        &self,
+        _request: moa_core::types::completion::SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        self.complete(CompletionRequest::new("shared-test")).await
+    }
 }
 
 /// Metrics the eval collector would produce for one scripted turn.

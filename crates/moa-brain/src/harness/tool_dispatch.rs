@@ -305,15 +305,17 @@ pub(super) async fn execute_tool(
     let mut execution_call = call.clone();
     execution_call.id = Some(tool_id.to_string());
     let execution_result = tool_router
-        .execute_authorized_within(
+        .execute_authorized(moa_hands::AuthorizedToolCall {
             session,
             caller_identity,
-            &execution_call,
-            tool_id,
+            worker_id: None,
+            invocation: &execution_call,
+            tool_call_id: tool_id,
             active_canary,
-            ToolCallScope::from_tokens(cancel_token, hard_cancel_token)
+            catalog: None,
+            scope: ToolCallScope::from_tokens(cancel_token, hard_cancel_token)
                 .with_budget(resource_budget),
-        )
+        })
         .instrument(tool_span.clone())
         .await;
     let duration_ms = started_at.elapsed().as_millis() as i64;

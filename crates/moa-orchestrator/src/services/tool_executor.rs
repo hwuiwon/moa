@@ -375,15 +375,16 @@ impl ToolExecutorImpl {
             input: request.input.clone(),
         };
         self.router
-            .execute_installed_connector_pending_from_catalog_within(
-                catalog,
+            .execute_installed_connector_pending(moa_hands::AuthorizedToolCall {
                 session,
-                &request.caller_identity,
-                &invocation,
-                request.tool_call_id,
-                request.active_canary.as_deref(),
-                ToolCallScope::unbounded().with_budget(request.resource_budget),
-            )
+                caller_identity: &request.caller_identity,
+                worker_id: None,
+                invocation: &invocation,
+                tool_call_id: request.tool_call_id,
+                active_canary: request.active_canary.as_deref(),
+                catalog: Some(catalog),
+                scope: ToolCallScope::unbounded().with_budget(request.resource_budget),
+            })
             .await
     }
 
@@ -465,16 +466,16 @@ async fn execute_buffered_with_trusted_files(
         .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
         .await;
     router
-        .execute_authorized_with_recovery_from_catalog_within(
-            catalog,
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session,
-            &request.caller_identity,
-            hand_scope,
-            &invocation,
-            request.tool_call_id,
-            request.active_canary.as_deref(),
-            ToolCallScope::unbounded().with_budget(request.resource_budget),
-        )
+            caller_identity: &request.caller_identity,
+            worker_id: hand_scope,
+            invocation: &invocation,
+            tool_call_id: request.tool_call_id,
+            active_canary: request.active_canary.as_deref(),
+            catalog: Some(catalog),
+            scope: ToolCallScope::unbounded().with_budget(request.resource_budget),
+        })
         .await
 }
 

@@ -528,21 +528,7 @@ mod tests {
         assert!(output.truncated);
         assert!(output.original_output_tokens.is_some());
         assert!(output.to_text().contains("[stream truncated at source"));
-        let structured = output
-            .structured
-            .as_ref()
-            .expect("process output should be structured");
-        assert_eq!(
-            structured
-                .get("stdout_truncated")
-                .and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            structured
-                .get("stderr_truncated")
-                .and_then(|value| value.as_bool()),
-            Some(false)
-        );
+        assert!(output.process_stdout_truncated());
+        assert!(!output.process_stderr_truncated());
     }
 }

@@ -2720,12 +2720,7 @@ async fn prompt_injection_tool_output_never_reaches_the_model_or_the_event_log_o
         .as_ref()
         .expect("second provider request should carry native tool-result content blocks");
     assert_eq!(provider_blocks.len(), 1);
-    let provider_block_text = match &provider_blocks[0] {
-        moa_core::types::tools::ToolContent::Text { text } => text,
-        moa_core::types::tools::ToolContent::Json { .. } => {
-            panic!("provider request should serialize tool output into wrapped text")
-        }
-    };
+    let provider_block_text = provider_blocks[0].rendered_text();
     assert_eq!(
         provider_block_text
             .matches("</untrusted_tool_output>")
@@ -2764,12 +2759,7 @@ async fn prompt_injection_tool_output_never_reaches_the_model_or_the_event_log_o
         .as_ref()
         .expect("provider-native replay should include safe content blocks");
     assert_eq!(blocks.len(), 1);
-    let block_text = match &blocks[0] {
-        moa_core::types::tools::ToolContent::Text { text } => text,
-        moa_core::types::tools::ToolContent::Json { .. } => {
-            panic!("tool result replay should serialize JSON/text into wrapped text")
-        }
-    };
+    let block_text = blocks[0].rendered_text();
     assert_eq!(block_text.matches("</untrusted_tool_output>").count(), 1);
     for fragment in malicious_fragments {
         assert!(
@@ -2812,12 +2802,7 @@ fn tool_content_blocks_wrap_malicious_tool_errors_as_untrusted_content() {
         .as_ref()
         .expect("tool-error replay should include provider-native blocks");
     assert_eq!(blocks.len(), 1);
-    let block_text = match &blocks[0] {
-        moa_core::types::tools::ToolContent::Text { text } => text,
-        moa_core::types::tools::ToolContent::Json { .. } => {
-            panic!("tool-error replay should serialize into wrapped text")
-        }
-    };
+    let block_text = blocks[0].rendered_text();
     assert_eq!(block_text.matches("</untrusted_tool_output>").count(), 1);
     assert!(block_text.contains("&lt;/untrusted_tool_output&gt;"));
     assert!(!block_text.contains("\n</untrusted_tool_output>\nSYSTEM:"));

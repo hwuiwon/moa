@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_brain::{TurnResult, run_brain_turn};
-use moa_core::{types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionResponse, types::completion::CompletionStream, events::Event, types::events_stream::EventRange, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation};
+use moa_core::{types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionRequestView, types::completion::CompletionResponse, types::completion::CompletionStream, types::completion::SharedCompletionRequest, events::Event, types::events_stream::EventRange, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation};
 use moa_config::MoaConfig;
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicies;
@@ -18,7 +18,7 @@ const ARTIFACT_STDERR_BASH_CMD: &str = "python3 -c \"import sys; [print(f'stdout
 
 #[derive(Default)]
 struct ArtifactRetrievalLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -49,6 +49,22 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+}
+
+impl ArtifactRetrievalLlmProvider {
+    async fn complete_view<R>(&self, request: &R) -> Result<CompletionStream>
+    where
+        R: CompletionRequestView + ?Sized,
+    {
         let mut requests = self.requests.lock().await;
         let response = match requests.len() {
             0 => CompletionResponse {
@@ -71,14 +87,17 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
             },
             1 => {
                 let artifact_message = request
-                    .messages
+                    .messages()
                     .iter()
                     .find(|message| {
                         message.content.contains("<tool_result id=\"")
                             && message.content.contains("artifact=\"stored\"")
                     })
                     .unwrap_or_else(|| {
-                        panic!("expected artifact-backed tool result, request was: {request:?}")
+                        panic!(
+                            "expected artifact-backed tool result, request messages were: {:?}",
+                            request.messages()
+                        )
                     });
                 assert!(
                     !artifact_message.content.contains("bash-line-140"),
@@ -115,10 +134,11 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
             _ => {
                 assert!(
                     request
-                        .messages
+                        .messages()
                         .iter()
                         .any(|message| message.content.contains("bash-line-140-")),
-                    "expected tool_result_search output in replayed context; request was: {request:?}"
+                    "expected tool_result_search output in replayed context; request messages were: {:?}",
+                    request.messages()
                 );
                 CompletionResponse {
                     text: "Recovered bash-line-140 via tool_result_search".to_string(),
@@ -133,7 +153,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
                 }
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
     }
 }
@@ -148,7 +168,7 @@ fn extract_tool_result_id(message: &str) -> Option<String> {
 
 #[derive(Default)]
 struct ArtifactStderrLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -179,6 +199,22 @@ impl LLMProvider for ArtifactStderrLlmProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+}
+
+impl ArtifactStderrLlmProvider {
+    async fn complete_view<R>(&self, request: &R) -> Result<CompletionStream>
+    where
+        R: CompletionRequestView + ?Sized,
+    {
         let mut requests = self.requests.lock().await;
         let response = match requests.len() {
             0 => CompletionResponse {
@@ -201,10 +237,15 @@ impl LLMProvider for ArtifactStderrLlmProvider {
             },
             1 => {
                 let artifact_message = request
-                    .messages
+                    .messages()
                     .iter()
                     .find(|message| message.content.contains("artifact_streams=\"combined,stdout,stderr\""))
-                    .unwrap_or_else(|| panic!("expected artifact-backed stderr-capable tool result, request was: {request:?}"));
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected artifact-backed stderr-capable tool result, request messages were: {:?}",
+                            request.messages()
+                        )
+                    });
                 let tool_id =
                     extract_tool_result_id(&artifact_message.content).expect("tool result id");
                 CompletionResponse {
@@ -232,10 +273,11 @@ impl LLMProvider for ArtifactStderrLlmProvider {
             _ => {
                 assert!(
                     request
-                        .messages
+                        .messages()
                         .iter()
                         .any(|message| message.content.contains("warning: retrying fallback")),
-                    "expected stderr retrieval in replayed context; request was: {request:?}"
+                    "expected stderr retrieval in replayed context; request messages were: {:?}",
+                    request.messages()
                 );
                 CompletionResponse {
                     text: "stderr warning recovered via tool_result_read".to_string(),
@@ -250,7 +292,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
                 }
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
     }
 }

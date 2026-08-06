@@ -577,6 +577,20 @@ mod tests {
                 .lock()
                 .expect("route request journal lock should remain available")
                 .push(request);
+            self.response()
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: moa_core::types::completion::SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.response()
+        }
+    }
+
+    impl ScriptedRouteProvider {
+        fn response(&self) -> Result<CompletionStream> {
             match &self.behavior {
                 ProviderBehavior::Response(response) => {
                     Ok(CompletionStream::from_response(response.clone()))

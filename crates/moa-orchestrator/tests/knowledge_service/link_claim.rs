@@ -22,8 +22,8 @@ fn link_service_with_connectors(
     credentials: Arc<FakeKnowledgeCredentialStore>,
     connector_connections: Arc<FakeKnowledgeConnectorConnections>,
 ) -> KnowledgeService {
-    KnowledgeService::new(
-        repository.clone(),
+    KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository,
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -32,8 +32,8 @@ fn link_service_with_connectors(
         credentials,
         fake_ingestion_runner(),
         80,
+        connector_connections,
     )
-    .with_connector_connection_port(connector_connections)
 }
 
 fn exchange_request(tenant_id: TenantId) -> KnowledgeExchangeTokenRequest {
@@ -60,8 +60,8 @@ async fn nango_provider_native_link_compensation_writes_no_tenant_credential() {
             "provider refused the initial sync",
         ),
     );
-    let service = KnowledgeService::new(
-        repository.clone(),
+    let service = KnowledgeService::new_with_connector_connections(
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -70,8 +70,8 @@ async fn nango_provider_native_link_compensation_writes_no_tenant_credential() {
         credentials.clone(),
         fake_ingestion_runner(),
         80,
-    )
-    .with_connector_connection_port(Arc::new(FakeKnowledgeConnectorConnections::default()));
+        Arc::new(FakeKnowledgeConnectorConnections::default()),
+    );
 
     service
         .exchange_public_token(

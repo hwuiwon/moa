@@ -48,17 +48,20 @@ async fn session_search_finds_prior_events() {
         .unwrap();
 
     let secured = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "session_search".to_string(),
                 input: json!({ "query": "port binding", "last_n": 3 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -67,8 +70,7 @@ async fn session_search_finds_prior_events() {
     assert!(output.to_text().contains("deploy failed on port binding"));
     assert!(
         output
-            .structured
-            .as_ref()
+            .structured_payload()
             .and_then(|value| value.as_array())
             .is_some_and(|items| !items.is_empty())
     );
@@ -117,17 +119,20 @@ async fn session_search_filters_error_events() {
         .unwrap();
 
     let secured_2 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "session_search".to_string(),
                 input: json!({ "query": "deploy", "event_type": "error" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 

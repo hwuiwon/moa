@@ -178,13 +178,16 @@ async fn an_experiment_origin_call_cannot_reach_a_production_connector_offline()
     );
 
     let dispatch_error = trial_router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &connector_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &connector_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("the dispatch path must refuse the same capability");
     assert!(matches!(
@@ -193,14 +196,16 @@ async fn an_experiment_origin_call_cannot_reach_a_production_connector_offline()
     ));
 
     let durable_error = trial_router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &connector_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &connector_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("the durable path must refuse the same capability");
     assert!(
@@ -218,13 +223,16 @@ async fn an_experiment_origin_call_cannot_reach_a_production_connector_offline()
 
     let production_router = router_for(&connector.url, dir.path()).await;
     let secured = production_router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &connector_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &connector_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("production traffic keeps the same connector");
     assert_eq!(secured.safe_output.to_text(), "deal created");
@@ -265,14 +273,16 @@ async fn a_trial_owned_session_loses_the_connector_on_a_production_router_offlin
     );
 
     let durable_error = router
-        .execute_authorized_with_recovery(
-            &trial_session,
-            &identity(),
-            None,
-            &connector_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &trial_session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &connector_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("the durable path must refuse the same capability");
     assert!(matches!(
@@ -285,14 +295,16 @@ async fn a_trial_owned_session_loses_the_connector_on_a_production_router_offlin
     );
 
     let secured = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &connector_invocation(),
-            ToolCallId::new(),
-            None,
-        )
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &connector_invocation(),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("a production-origin session keeps the connector on the same router");
     assert_eq!(secured.safe_output.to_text(), "deal created");
@@ -311,17 +323,20 @@ async fn an_experiment_origin_fails_closed_on_the_host_tier_offline() {
         .expect("local router")
         .with_call_origin(trial_origin());
     let error = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "fixture.txt", "content": "trial fixture" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("host execution must not serve deny-all experiment traffic");
     assert!(

@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use moa_config::{MoaConfig, ProviderStreamTimeoutConfig};
 use moa_core::{
     error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionRequest,
-    types::completion::CompletionStream, types::identifiers::ModelId,
+    types::completion::CompletionRequestView, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::identifiers::ModelId,
     types::model::ModelCapabilities, types::model::ProviderNativeTool,
 };
 use serde_json::Value;
@@ -186,20 +187,13 @@ impl OpenAIProvider {
     }
 }
 
-#[async_trait::async_trait]
-impl LLMProvider for OpenAIProvider {
-    fn name(&self) -> &str {
-        "openai"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        self.default_capabilities.clone()
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        let requested_model = request
-            .model
-            .as_ref()
+impl OpenAIProvider {
+    async fn complete_request<R: CompletionRequestView + ?Sized>(
+        &self,
+        request: &R,
+        requested_model_override: Option<&ModelId>,
+    ) -> Result<CompletionStream> {
+        let requested_model = requested_model_override
             .map(ModelId::as_str)
             .unwrap_or(self.default_model.as_str())
             .to_string();
@@ -215,28 +209,27 @@ impl LLMProvider for OpenAIProvider {
         guard.note_request().await?;
         let model_capabilities = capabilities_for_model(&resolved_model)?;
         let canonical_response_schema = request
-            .response_format
-            .as_ref()
+            .response_format()
             .filter(|format| format.strict)
             .map(|format| format.schema.clone());
-        let canonical_tool_schemas = super::tools::canonical_tool_input_schemas(&request.tools);
+        let canonical_tool_schemas = super::tools::canonical_tool_input_schemas(request.tools());
         let span_recorder = LLMSpanRecorder::new(
             "openai",
             resolved_model.clone(),
-            &request,
-            request.max_output_tokens,
+            request,
+            request.max_output_tokens(),
             model_capabilities.pricing.clone(),
         );
         span_recorder.set_phase("build_request");
         let span = span_recorder.span().clone();
         let request = match build_responses_request(
-            &request,
+            request,
             &resolved_model,
             &self.default_reasoning_effort,
             enabled_native_tools(
                 &model_capabilities,
                 self.web_search_enabled
-                    && request.native_web_search
+                    && request.native_web_search()
                         != moa_core::types::completion::NativeWebSearchPolicy::Disabled,
             ),
         ) {
@@ -293,6 +286,26 @@ impl LLMProvider for OpenAIProvider {
         );
 
         Ok(CompletionStream::new(rx, completion_task))
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for OpenAIProvider {
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.default_capabilities.clone()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let requested_model = request.model.as_ref();
+        self.complete_request(&request, requested_model).await
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.complete_request(&request, request.model()).await
     }
 }
 

@@ -598,17 +598,21 @@ impl ResourceLedger {
     }
 
     /// Commits actual usage and frees the unused part of a reservation.
+    ///
+    /// Consumes the reservation so each linear token can settle exactly once.
+    // The owned parameter is intentional: borrowing this non-`Clone`, non-`Copy`
+    // token would permit the caller to retain and reuse the settlement handle.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn reconcile(
         &mut self,
         reservation: ResourceReservation,
         actual: ResourceAmounts,
     ) -> Result<ReconcileOutcome, ResourceError> {
-        let reserved =
-            self.open
-                .remove(&reservation.id)
-                .ok_or(ResourceError::UnknownReservation {
-                    id: reservation.id.to_string(),
-                })?;
+        let ResourceReservation { id, .. } = reservation;
+        let reserved = self
+            .open
+            .remove(&id)
+            .ok_or(ResourceError::UnknownReservation { id: id.to_string() })?;
         self.outstanding = self.outstanding.saturating_sub(&reserved);
         self.committed = self
             .committed
@@ -626,13 +630,17 @@ impl ResourceLedger {
     }
 
     /// Returns a reservation without committing any usage.
+    ///
+    /// Consumes the reservation so each linear token can settle exactly once.
+    // The owned parameter is intentional: borrowing this non-`Clone`, non-`Copy`
+    // token would permit the caller to retain and reuse the settlement handle.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn release(&mut self, reservation: ResourceReservation) -> Result<(), ResourceError> {
-        let reserved =
-            self.open
-                .remove(&reservation.id)
-                .ok_or(ResourceError::UnknownReservation {
-                    id: reservation.id.to_string(),
-                })?;
+        let ResourceReservation { id, .. } = reservation;
+        let reserved = self
+            .open
+            .remove(&id)
+            .ok_or(ResourceError::UnknownReservation { id: id.to_string() })?;
         self.outstanding = self.outstanding.saturating_sub(&reserved);
         Ok(())
     }

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use moa_brain::{
-    ContextPipeline, GraphMemoryPipelineOptions,
+    ContextPipeline, DigestStageInput, GraphMemoryPipelineStages, GraphMemoryStageInput,
+    HistoryStageInput, QueryRewriteStageInput, RuntimeStageInput, SkillInjectionStageInput,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
     pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
@@ -393,18 +394,33 @@ async fn build_pipeline(
         build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &eval_config,
             deps.session_store,
-            GraphMemoryPipelineOptions {
-                graph_pool: deps.graph_pool,
-                kms: deps.kms,
-                shared_graph_memory_retriever: None,
-                retrieval_embedder: None,
-                shared_skill_injector: None,
-                segment_store: Some(deps.segment_store),
-                compaction_llm_provider: Some(deps.llm_provider),
-                query_rewrite_llm_provider: query_rewrite_provider,
-                identity_prompt_override: Some(compose_identity_prompt(&agent_config.instructions)),
-                tool_schemas,
-                lineage: deps.lineage,
+            GraphMemoryPipelineStages {
+                history: HistoryStageInput {
+                    compaction_llm_provider: Some(deps.llm_provider),
+                },
+                graph_memory: GraphMemoryStageInput::Local {
+                    graph_pool: deps.graph_pool.clone(),
+                    kms: deps.kms,
+                    retrieval_embedder: None,
+                    lineage: deps.lineage.clone(),
+                },
+                skill_injection: SkillInjectionStageInput::Local {
+                    graph_pool: deps.graph_pool.clone(),
+                    segment_store: Some(deps.segment_store),
+                    embedder: None,
+                },
+                query_rewrite: QueryRewriteStageInput {
+                    llm_provider: query_rewrite_provider,
+                },
+                runtime: RuntimeStageInput {
+                    identity_prompt_override: Some(compose_identity_prompt(
+                        &agent_config.instructions,
+                    )),
+                    tool_schemas,
+                },
+                digest: DigestStageInput {
+                    graph_pool: deps.graph_pool,
+                },
             },
         ),
     )
@@ -598,8 +614,9 @@ mod tests {
     use moa_core::{
         traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::StopReason, types::completion::TokenUsage,
-        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::completion::SharedCompletionRequest, types::completion::StopReason,
+        types::completion::TokenUsage, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat,
     };
     use tempfile::tempdir;
 
@@ -620,6 +637,22 @@ mod tests {
 
     #[derive(Clone)]
     struct MockProvider;
+
+    impl MockProvider {
+        fn response() -> CompletionStream {
+            CompletionStream::from_response(CompletionResponse {
+                text: "ok".to_string(),
+                content: vec![moa_core::types::completion::CompletionContent::Text(
+                    "ok".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: moa_core::types::identifiers::ModelId::new("mock-model"),
+                usage: token_usage(1, 1),
+                duration_ms: 1,
+                thought_signature: None,
+            })
+        }
+    }
 
     #[async_trait]
     impl LLMProvider for MockProvider {
@@ -652,17 +685,14 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
-            Ok(CompletionStream::from_response(CompletionResponse {
-                text: "ok".to_string(),
-                content: vec![moa_core::types::completion::CompletionContent::Text(
-                    "ok".to_string(),
-                )],
-                stop_reason: StopReason::EndTurn,
-                model: moa_core::types::identifiers::ModelId::new("mock-model"),
-                usage: token_usage(1, 1),
-                duration_ms: 1,
-                thought_signature: None,
-            }))
+            Ok(Self::response())
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            Ok(Self::response())
         }
     }
 

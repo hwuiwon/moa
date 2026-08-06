@@ -25,7 +25,7 @@
 //! store handle, and there is no process-global install ordering.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use moa_config::MoaConfig;
@@ -38,7 +38,7 @@ use moa_runtime_store::DeadlineRuntimeCacheStore;
 use tokio::sync::Semaphore;
 
 use super::concurrency::ConcurrencyLimiter;
-use super::global_concurrency::GlobalConcurrency;
+use super::global_concurrency::{GlobalConcurrency, GlobalConcurrencyConfig};
 use super::pacer::{PacerConfig, RatePacer};
 use super::rate_guard::RateGuard;
 
@@ -99,7 +99,7 @@ impl CoordinatedControl {
 /// This is a registry of process-local semaphores, not coordination state: it
 /// exists so two independently-constructed limiters for one credential share a
 /// ceiling inside this process. Cross-replica coordination never goes through it.
-static LOCAL_BUDGETS: OnceLock<Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
+static LOCAL_BUDGETS: OnceLock<Mutex<HashMap<String, Weak<Semaphore>>>> = OnceLock::new();
 
 /// Redis coordination commands should be short atomic operations. A fixed bound
 /// ensures the configured failure policy decides a hung store instead of waiting
@@ -112,14 +112,19 @@ const COORDINATION_OPERATION_TIMEOUT: Duration = Duration::from_millis(250);
 /// `(provider, credential)` clone that one semaphore, so kinds share the budget.
 fn local_budget_semaphore(key: &str, limit: usize) -> Arc<Semaphore> {
     let registry = LOCAL_BUDGETS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut budgets = registry
-        .lock()
-        .expect("provider concurrency budget registry mutex poisoned");
-    Arc::clone(
-        budgets
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(Semaphore::new(limit))),
-    )
+    let mut budgets = registry.lock().unwrap_or_else(PoisonError::into_inner);
+
+    // The registry keeps only weak references. An expired key is therefore
+    // reclaimable as soon as the next limiter is constructed, while a live
+    // semaphore remains the first-created budget for every active limiter.
+    budgets.retain(|_, semaphore| semaphore.strong_count() > 0);
+    if let Some(semaphore) = budgets.get(key).and_then(Weak::upgrade) {
+        return semaphore;
+    }
+
+    let semaphore = Arc::new(Semaphore::new(limit));
+    budgets.insert(key.to_string(), Arc::downgrade(&semaphore));
+    semaphore
 }
 
 /// Records that a distributed control fell back to its process-local bound.
@@ -283,16 +288,16 @@ impl ProviderCoordination {
                 // credential) semaphore as the local path, so kinds still share
                 // one budget when the coordination store is unavailable.
                 let fallback = local_budget_semaphore(&key, limit);
-                let global = GlobalConcurrency::new(
+                let global = GlobalConcurrency::new(GlobalConcurrencyConfig {
                     store,
-                    key,
+                    quota_key: key,
                     limit,
-                    Duration::from_millis(self.concurrency.lease_ttl_ms),
-                    provider.to_string(),
-                    kind.label(),
-                    fallback,
-                    self.failure_policy(),
-                );
+                    lease_ttl: Duration::from_millis(self.concurrency.lease_ttl_ms),
+                    provider_label: provider.to_string(),
+                    call_kind_label: kind.label(),
+                    local_fallback: fallback,
+                    failure_policy: self.failure_policy(),
+                });
                 ConcurrencyLimiter::global(global, block_threshold)
             }
             _ => {
@@ -335,6 +340,10 @@ impl ProviderCoordination {
         let identity = QuotaIdentity::new(provider, credential);
         let key = identity.guard_cache_key(kind.label());
         let mut guards = self.guards.lock().unwrap_or_else(PoisonError::into_inner);
+        // A cache entry is the sole owner once every provider instance and
+        // caller has dropped its clone. Remove only those entries so active
+        // clients continue to share the same local cooldown and retry budget.
+        guards.retain(|_, guard| !guard.is_cache_only());
         guards
             .entry(key)
             .or_insert_with(|| {
@@ -485,6 +494,7 @@ fn budget_key(provider: &str, credential: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use moa_core::error::Result;
@@ -507,6 +517,33 @@ mod tests {
     ) -> ProviderCoordination {
         ProviderCoordination::new(concurrency, ProviderPacingConfig::default(), store)
             .expect("coordination should build")
+    }
+
+    static TEST_KEY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_budget_key(label: &str) -> String {
+        let sequence = TEST_KEY_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("moa:test:{label}:{sequence}")
+    }
+
+    fn local_budget_contains(key: &str) -> bool {
+        let registry = LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let budgets = registry.lock().unwrap_or_else(PoisonError::into_inner);
+        budgets.contains_key(key)
+    }
+
+    fn local_budget_key_count() -> usize {
+        let registry = LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let budgets = registry.lock().unwrap_or_else(PoisonError::into_inner);
+        budgets.len()
+    }
+
+    fn guard_cache_len(coordination: &ProviderCoordination) -> usize {
+        coordination
+            .guards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Minimal in-memory coordination store for the global-scope factory test.
@@ -593,6 +630,79 @@ mod tests {
         let policy = coordination(ProviderConcurrencyConfig::default(), None);
         let limiter = policy.limiter(CallKind::Chat, "anthropic", "local-scope-key", None);
         assert!(limiter.is_bounded());
+    }
+
+    #[test]
+    fn poisoned_local_budget_registry_recovers_without_panicking() {
+        // Pins: a poisoned process-local registry remains usable and does not
+        // turn a recoverable mutex failure into a library panic.
+        let registry = LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let poison = std::thread::spawn(move || {
+            let _guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+            panic!("intentional provider-budget mutex poison");
+        });
+        assert!(poison.join().is_err(), "the poison thread must panic");
+
+        let key = test_budget_key("poison-recovery");
+        let result = std::panic::catch_unwind(|| local_budget_semaphore(&key, 1));
+        assert!(
+            result.is_ok(),
+            "poison recovery must not panic inside the library helper"
+        );
+        drop(result.expect("poisoned registry should return a semaphore"));
+    }
+
+    #[test]
+    fn expired_local_budget_entries_are_reclaimed_on_next_admission() {
+        // Pins: many distinct live credentials are visible while their limiters
+        // are active, then a later admission removes every dead weak entry.
+        const DISTINCT_KEYS: usize = 256;
+        let mut live = Vec::with_capacity(DISTINCT_KEYS);
+        let mut keys = Vec::with_capacity(DISTINCT_KEYS);
+        for index in 0..DISTINCT_KEYS {
+            let key = test_budget_key(&format!("reclaim-{index}"));
+            let semaphore = local_budget_semaphore(&key, 1);
+            keys.push(key.clone());
+            live.push((key, semaphore));
+        }
+        let live_key_count = local_budget_key_count();
+        assert!(
+            live_key_count >= DISTINCT_KEYS,
+            "the diagnostic count must include every active distinct budget key"
+        );
+        drop(live);
+
+        let trigger_key = test_budget_key("reclaim-trigger");
+        let trigger = local_budget_semaphore(&trigger_key, 1);
+        drop(trigger);
+
+        assert!(
+            keys.iter().all(|key| !local_budget_contains(key)),
+            "expired semaphore keys must be reclaimed during the next admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_live_local_budget_limit_is_shared_across_later_limiters() {
+        // Pins: a live credential keeps the first-created semaphore and its limit
+        // even when a later client supplies a different configured limit.
+        let policy = coordination(ProviderConcurrencyConfig::default(), None);
+        let key = test_budget_key("first-created-limit");
+        let first = policy.limiter(CallKind::Chat, "openai", &key, Some(1));
+        let later = policy.limiter(CallKind::Embedding, "openai", &key, Some(2));
+
+        let held = first
+            .acquire_within(Duration::from_millis(10))
+            .await
+            .expect("the first limiter should acquire the only slot");
+        assert!(
+            later
+                .acquire_within(Duration::from_millis(10))
+                .await
+                .is_none(),
+            "later limiters must share the first live semaphore and limit"
+        );
+        drop(held);
     }
 
     #[tokio::test]
@@ -793,6 +903,66 @@ mod tests {
                 .is_none(),
             "a different credential must keep independent cooldown state"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_guard_construction_preserves_shared_quota_identity() {
+        // Pins: concurrent model-client construction for one credential returns
+        // guards backed by one local cooldown state, not one state per caller.
+        const CALLERS: usize = 8;
+        let policy = Arc::new(coordination(ProviderConcurrencyConfig::default(), None));
+        let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS));
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let policy = Arc::clone(&policy);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                policy.rate_guard(CallKind::Chat, "anthropic", "concurrent-key")
+            }));
+        }
+
+        let mut guards = Vec::with_capacity(CALLERS);
+        for handle in handles {
+            guards.push(handle.await.expect("guard construction should not panic"));
+        }
+
+        guards[0]
+            .record_rate_limited(Some(Duration::from_secs(10)))
+            .await;
+        for guard in guards.iter().skip(1) {
+            assert!(
+                guard
+                    .pause_remaining()
+                    .await
+                    .expect("local cooldown read should succeed")
+                    .is_some(),
+                "all concurrent guard callers must observe one cooldown"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_rate_guards_are_reclaimed_without_evicting_active_clones() {
+        // Pins: a guard remains cached while a provider owns a clone, then is
+        // reclaimed after every external clone drops.
+        let policy = coordination(ProviderConcurrencyConfig::default(), None);
+        let active = policy.rate_guard(CallKind::Chat, "anthropic", "active-key");
+        let active_clone = policy.rate_guard(CallKind::Chat, "anthropic", "active-key");
+        drop(active_clone);
+
+        let other = policy.rate_guard(CallKind::Chat, "anthropic", "other-key");
+        assert_eq!(guard_cache_len(&policy), 2);
+        drop(active);
+        drop(other);
+
+        let replacement = policy.rate_guard(CallKind::Chat, "anthropic", "replacement-key");
+        assert_eq!(
+            guard_cache_len(&policy),
+            1,
+            "inactive guard entries must be reclaimed before admitting a new key"
+        );
+        drop(replacement);
     }
 
     #[tokio::test(start_paused = true)]

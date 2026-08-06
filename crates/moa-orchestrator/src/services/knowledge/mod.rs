@@ -519,32 +519,53 @@ pub struct KnowledgeService {
 impl KnowledgeService {
     /// Creates a knowledge service with explicit dependencies for tests or alternate runtimes.
     #[must_use]
-    pub fn new<R>(
-        repository: Arc<R>,
+    pub fn new(
+        repository: KnowledgeRepositoryCapabilities,
         discovery: Arc<dyn KnowledgeDiscoveryStore>,
         providers: Arc<dyn KnowledgeProviderResolver>,
         credentials: Arc<dyn KnowledgeCredentialStore>,
         ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
         max_preview_chars: usize,
-    ) -> Self
-    where
-        R: KnowledgeConnectionRepository
-            + KnowledgeSyncRepository
-            + KnowledgeIngestionRepository
-            + KnowledgeEventRepository
-            + 'static,
-    {
+    ) -> Self {
         Self {
             repository: KnowledgeRepositorySource::Fixed {
-                connection: repository.clone(),
-                sync: repository.clone(),
-                ingestion: repository.clone(),
-                event: repository,
+                connection: repository.connection,
+                sync: repository.sync,
+                ingestion: repository.ingestion,
+                event: repository.event,
             },
             discovery,
             providers,
             credentials,
             connector_connections: None,
+            ingestion_runner,
+            max_preview_chars,
+            lineage_clickhouse: None,
+        }
+    }
+
+    /// Creates a knowledge service with explicit repository and connector ports.
+    #[must_use]
+    pub fn new_with_connector_connections(
+        repository: KnowledgeRepositoryCapabilities,
+        discovery: Arc<dyn KnowledgeDiscoveryStore>,
+        providers: Arc<dyn KnowledgeProviderResolver>,
+        credentials: Arc<dyn KnowledgeCredentialStore>,
+        ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
+        max_preview_chars: usize,
+        connector_connections: Arc<dyn KnowledgeConnectorConnections>,
+    ) -> Self {
+        Self {
+            repository: KnowledgeRepositorySource::Fixed {
+                connection: repository.connection,
+                sync: repository.sync,
+                ingestion: repository.ingestion,
+                event: repository.event,
+            },
+            discovery,
+            providers,
+            credentials,
+            connector_connections: Some(connector_connections),
             ingestion_runner,
             max_preview_chars,
             lineage_clickhouse: None,
@@ -573,6 +594,29 @@ impl KnowledgeService {
         }
     }
 
+    /// Creates a tenant-scoped Postgres knowledge service with connector support.
+    #[must_use]
+    pub fn from_postgres_pool_with_connector_connections(
+        pool: sqlx::PgPool,
+        providers: Arc<dyn KnowledgeProviderResolver>,
+        credentials: Arc<dyn KnowledgeCredentialStore>,
+        ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
+        max_preview_chars: usize,
+        connector_connections: Arc<dyn KnowledgeConnectorConnections>,
+    ) -> Self {
+        let discovery = Arc::new(PostgresKnowledgeDiscoveryStore::new(pool.clone()));
+        Self {
+            repository: KnowledgeRepositorySource::Postgres { pool },
+            discovery,
+            providers,
+            credentials,
+            connector_connections: Some(connector_connections),
+            ingestion_runner,
+            max_preview_chars,
+            lineage_clickhouse: None,
+        }
+    }
+
     /// Creates the config-backed production knowledge application service.
     ///
     /// `credential_vault` is the process's single durable credential owner: it
@@ -585,8 +629,9 @@ impl KnowledgeService {
         credential_vault: Arc<dyn CredentialVault>,
         config: &MoaConfig,
         runtime_cache: Arc<dyn RuntimeCacheStore>,
+        connector_connections: Arc<dyn KnowledgeConnectorConnections>,
     ) -> Self {
-        Self::from_postgres_pool(
+        Self::from_postgres_pool_with_connector_connections(
             pool.clone(),
             Arc::new(ConfigKnowledgeProviders::new(config.knowledge.clone())),
             Arc::new(VaultKnowledgeCredentialStore::new(credential_vault)),
@@ -597,6 +642,7 @@ impl KnowledgeService {
                 runtime_cache,
             )),
             config.knowledge.observability.max_object_preview_chars,
+            connector_connections,
         )
         .with_clickhouse_lineage(
             config
@@ -614,27 +660,6 @@ impl KnowledgeService {
         lineage_clickhouse: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
     ) -> Self {
         self.lineage_clickhouse = lineage_clickhouse;
-        self
-    }
-
-    /// Injects the process-shared generic connector lifecycle service.
-    ///
-    /// Runtime composition must pass the same service used by connector
-    /// management and action dispatch; knowledge must never construct a hidden
-    /// repository/service stack for its managed parent.
-    #[must_use]
-    pub fn with_connector_connections(mut self, connector_connections: ConnectorService) -> Self {
-        self.connector_connections = Some(Arc::new(connector_connections));
-        self
-    }
-
-    /// Injects a connector lifecycle port for deterministic service tests.
-    #[must_use]
-    pub fn with_connector_connection_port(
-        mut self,
-        connector_connections: Arc<dyn KnowledgeConnectorConnections>,
-    ) -> Self {
-        self.connector_connections = Some(connector_connections);
         self
     }
 
@@ -851,6 +876,36 @@ impl KnowledgeConnectorConnections for ConnectorService {
             reason,
         )
         .await
+    }
+}
+
+/// Independent repository capabilities used by the knowledge application service.
+///
+/// Each port can be backed by a different implementation, which keeps service
+/// construction aligned with the narrow domain capabilities it actually uses.
+#[derive(Clone)]
+pub struct KnowledgeRepositoryCapabilities {
+    connection: Arc<dyn KnowledgeConnectionRepository>,
+    sync: Arc<dyn KnowledgeSyncRepository>,
+    ingestion: Arc<dyn KnowledgeIngestionRepository>,
+    event: Arc<dyn KnowledgeEventRepository>,
+}
+
+impl KnowledgeRepositoryCapabilities {
+    /// Builds a repository capability bundle from four independently owned ports.
+    #[must_use]
+    pub fn new(
+        connection: Arc<dyn KnowledgeConnectionRepository>,
+        sync: Arc<dyn KnowledgeSyncRepository>,
+        ingestion: Arc<dyn KnowledgeIngestionRepository>,
+        event: Arc<dyn KnowledgeEventRepository>,
+    ) -> Self {
+        Self {
+            connection,
+            sync,
+            ingestion,
+            event,
+        }
     }
 }
 

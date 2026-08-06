@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 use super::{
     action_policy::ActionClass, action_policy::ActionPolicyEffect, action_policy::RiskLevel,
@@ -44,12 +45,74 @@ pub struct ToolOutputArtifact {
     pub estimated_tokens: u32,
     /// Total number of lines in the combined output.
     pub line_count: usize,
-    /// Persisted stdout stream for process-backed tools when available.
+    /// Byte range for stdout inside [`Self::combined`] for newly written artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_range: Option<ToolArtifactByteRange>,
+    /// Byte range for stderr inside [`Self::combined`] for newly written artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_range: Option<ToolArtifactByteRange>,
+    /// Legacy separately persisted stdout stream.
+    ///
+    /// New artifacts leave this empty and use [`Self::stdout_range`]. It remains
+    /// readable so events written before the single-blob format continue to work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout: Option<ClaimCheck>,
-    /// Persisted stderr stream for process-backed tools when available.
+    /// Legacy separately persisted stderr stream.
+    ///
+    /// New artifacts leave this empty and use [`Self::stderr_range`]. It remains
+    /// readable so events written before the single-blob format continue to work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<ClaimCheck>,
+}
+
+/// A UTF-8 byte range into a combined tool-output artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolArtifactByteRange {
+    /// Inclusive byte offset of the stream.
+    pub start: usize,
+    /// Exclusive byte offset of the stream.
+    pub end: usize,
+}
+
+/// Failure while resolving a stream range from a combined artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ToolArtifactSliceError {
+    /// The persisted range is outside the loaded blob or is reversed.
+    #[error("artifact range {start}..{end} is outside a {text_len}-byte blob")]
+    OutOfBounds {
+        /// Inclusive start offset.
+        start: usize,
+        /// Exclusive end offset.
+        end: usize,
+        /// Loaded blob length.
+        text_len: usize,
+    },
+    /// A persisted offset would split a UTF-8 code point.
+    #[error("artifact range offset {offset} is not a UTF-8 character boundary")]
+    NotUtf8Boundary {
+        /// Invalid byte offset.
+        offset: usize,
+    },
+}
+
+impl ToolArtifactByteRange {
+    /// Slices a loaded combined artifact without copying or splitting UTF-8.
+    pub fn slice<'a>(&self, text: &'a str) -> Result<&'a str, ToolArtifactSliceError> {
+        if self.start > self.end || self.end > text.len() {
+            return Err(ToolArtifactSliceError::OutOfBounds {
+                start: self.start,
+                end: self.end,
+                text_len: text.len(),
+            });
+        }
+        if !text.is_char_boundary(self.start) {
+            return Err(ToolArtifactSliceError::NotUtf8Boundary { offset: self.start });
+        }
+        if !text.is_char_boundary(self.end) {
+            return Err(ToolArtifactSliceError::NotUtf8Boundary { offset: self.end });
+        }
+        Ok(&text[self.start..self.end])
+    }
 }
 
 /// Metadata for one trusted sandbox file stored in a durable manifest.
@@ -88,7 +151,10 @@ pub struct TrustedSandboxFileManifestPayload {
 }
 
 impl ToolOutputArtifact {
-    /// Returns the claim check for one artifact stream when present.
+    /// Returns the legacy claim check for one separately stored stream.
+    ///
+    /// New single-blob artifacts expose stdout and stderr through
+    /// [`Self::stream_range`] and [`Self::slice_stream`].
     pub fn claim_check(&self, stream: ToolArtifactStream) -> Option<&ClaimCheck> {
         match stream {
             ToolArtifactStream::Combined => Some(&self.combined),
@@ -97,13 +163,37 @@ impl ToolOutputArtifact {
         }
     }
 
+    /// Returns the range for a stream stored inside the combined blob.
+    pub fn stream_range(&self, stream: ToolArtifactStream) -> Option<&ToolArtifactByteRange> {
+        match stream {
+            ToolArtifactStream::Combined => None,
+            ToolArtifactStream::Stdout => self.stdout_range.as_ref(),
+            ToolArtifactStream::Stderr => self.stderr_range.as_ref(),
+        }
+    }
+
+    /// Resolves one stream from a loaded combined artifact without copying it.
+    pub fn slice_stream<'a>(
+        &self,
+        stream: ToolArtifactStream,
+        combined: &'a str,
+    ) -> Result<Option<&'a str>, ToolArtifactSliceError> {
+        match stream {
+            ToolArtifactStream::Combined => Ok(Some(combined)),
+            ToolArtifactStream::Stdout | ToolArtifactStream::Stderr => self
+                .stream_range(stream)
+                .map(|range| range.slice(combined))
+                .transpose(),
+        }
+    }
+
     /// Returns the available stream names for prompting and diagnostics.
     pub fn available_streams(&self) -> Vec<&'static str> {
         let mut streams = vec![ToolArtifactStream::Combined.as_str()];
-        if self.stdout.is_some() {
+        if self.stdout_range.is_some() || self.stdout.is_some() {
             streams.push(ToolArtifactStream::Stdout.as_str());
         }
-        if self.stderr.is_some() {
+        if self.stderr_range.is_some() || self.stderr.is_some() {
             streams.push(ToolArtifactStream::Stderr.as_str());
         }
         streams
@@ -124,6 +214,68 @@ pub enum ToolContent {
         /// JSON payload.
         data: Value,
     },
+    /// Raw streams and status from a process-backed tool.
+    ///
+    /// Process output is kept in this single carrier. The output's optional
+    /// structured field does not contain copies of stdout or stderr.
+    Process {
+        /// Process streams and status.
+        output: ProcessOutput,
+    },
+}
+
+/// Raw streams and status returned by a process-backed tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessOutput {
+    /// Captured standard output.
+    pub stdout: String,
+    /// Captured standard error.
+    pub stderr: String,
+    /// Process exit code.
+    pub exit_code: i32,
+    /// Whether stdout was truncated by the source adapter.
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    /// Whether stderr was truncated by the source adapter.
+    #[serde(default)]
+    pub stderr_truncated: bool,
+}
+
+impl ProcessOutput {
+    /// Returns the stable display blocks for this process result.
+    pub fn rendered_blocks(&self) -> Vec<String> {
+        let mut blocks = Vec::new();
+        if !self.stdout.is_empty() {
+            blocks.push(self.stdout.clone());
+        }
+        if !self.stderr.is_empty() {
+            blocks.push(format!("stderr:\n{}", self.stderr));
+        }
+        if blocks.is_empty() || self.exit_code != 0 {
+            blocks.push(format!("exit_code: {}", self.exit_code));
+        }
+        blocks
+    }
+
+    /// Renders the process result using the stable tool-output text format.
+    pub fn to_text(&self) -> String {
+        self.rendered_blocks()
+            .into_iter()
+            .map(|block| block.trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+impl ToolContent {
+    /// Renders one content block for provider adapters that need text input.
+    pub fn rendered_text(&self) -> String {
+        match self {
+            Self::Text { text } => text.clone(),
+            Self::Json { data } => data.to_string(),
+            Self::Process { output } => output.to_text(),
+        }
+    }
 }
 
 /// High-level shape of tool inputs for normalization and action reviews.
@@ -222,7 +374,13 @@ pub struct ToolOutput {
     pub content: Vec<ToolContent>,
     /// Whether the tool result represents an error.
     pub is_error: bool,
-    /// Optional structured payload for programmatic consumers.
+    /// Optional additional structured payload for programmatic consumers.
+    ///
+    /// [`ToolOutput::json`] stores its canonical JSON payload in a
+    /// [`ToolContent::Json`] block and leaves this field empty. Callers that
+    /// need the machine-readable payload should use [`Self::structured_payload`]
+    /// so both current and legacy serialized outputs are handled consistently.
+    #[serde(default)]
     pub structured: Option<Value>,
     /// Execution duration.
     pub duration: Duration,
@@ -292,33 +450,18 @@ impl ToolOutput {
         stderr_truncated: bool,
         original_output_tokens: Option<u32>,
     ) -> Self {
-        let mut content = Vec::new();
-        if !stdout.is_empty() {
-            content.push(ToolContent::Text {
-                text: stdout.clone(),
-            });
-        }
-        if !stderr.is_empty() {
-            content.push(ToolContent::Text {
-                text: format!("stderr:\n{stderr}"),
-            });
-        }
-        if content.is_empty() || exit_code != 0 {
-            content.push(ToolContent::Text {
-                text: format!("exit_code: {exit_code}"),
-            });
-        }
-
         Self {
-            content,
+            content: vec![ToolContent::Process {
+                output: ProcessOutput {
+                    stdout,
+                    stderr,
+                    exit_code,
+                    stdout_truncated,
+                    stderr_truncated,
+                },
+            }],
             is_error: exit_code != 0,
-            structured: Some(serde_json::json!({
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
-            })),
+            structured: None,
             duration,
             truncated: stdout_truncated || stderr_truncated,
             original_output_tokens,
@@ -333,10 +476,10 @@ impl ToolOutput {
                 ToolContent::Text {
                     text: summary.into(),
                 },
-                ToolContent::Json { data: data.clone() },
+                ToolContent::Json { data },
             ],
             is_error: false,
-            structured: Some(data),
+            structured: None,
             duration,
             truncated: false,
             original_output_tokens: None,
@@ -380,8 +523,33 @@ impl ToolOutput {
         self
     }
 
+    /// Returns the canonical structured payload for this output.
+    ///
+    /// New JSON outputs carry their payload in a [`ToolContent::Json`] block;
+    /// outputs with a separate machine payload retain it in `structured`.
+    /// The latter fallback also lets older persisted outputs replay after the
+    /// JSON constructor stopped storing the same value twice.
+    pub fn structured_payload(&self) -> Option<&Value> {
+        self.structured.as_ref().or_else(|| {
+            self.content.iter().find_map(|block| match block {
+                ToolContent::Json { data } => Some(data),
+                _ => None,
+            })
+        })
+    }
+
+    fn process_output(&self) -> Option<&ProcessOutput> {
+        self.content.iter().find_map(|block| match block {
+            ToolContent::Process { output } => Some(output),
+            _ => None,
+        })
+    }
+
     /// Returns the preserved process exit code when this output came from a shell-like tool.
     pub fn process_exit_code(&self) -> Option<i32> {
+        if let Some(output) = self.process_output() {
+            return Some(output.exit_code);
+        }
         self.structured
             .as_ref()
             .and_then(|data| data.get("exit_code"))
@@ -391,6 +559,9 @@ impl ToolOutput {
 
     /// Returns the preserved process stdout when this output came from a shell-like tool.
     pub fn process_stdout(&self) -> Option<&str> {
+        if let Some(output) = self.process_output() {
+            return Some(output.stdout.as_str());
+        }
         self.structured
             .as_ref()
             .and_then(|data| data.get("stdout"))
@@ -399,10 +570,39 @@ impl ToolOutput {
 
     /// Returns the preserved process stderr when this output came from a shell-like tool.
     pub fn process_stderr(&self) -> Option<&str> {
+        if let Some(output) = self.process_output() {
+            return Some(output.stderr.as_str());
+        }
         self.structured
             .as_ref()
             .and_then(|data| data.get("stderr"))
             .and_then(Value::as_str)
+    }
+
+    /// Returns whether the source adapter truncated process stdout.
+    pub fn process_stdout_truncated(&self) -> bool {
+        self.process_output()
+            .map(|output| output.stdout_truncated)
+            .or_else(|| {
+                self.structured
+                    .as_ref()
+                    .and_then(|data| data.get("stdout_truncated"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Returns whether the source adapter truncated process stderr.
+    pub fn process_stderr_truncated(&self) -> bool {
+        self.process_output()
+            .map(|output| output.stderr_truncated)
+            .or_else(|| {
+                self.structured
+                    .as_ref()
+                    .and_then(|data| data.get("stderr_truncated"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
     }
 
     /// Renders the tool result into a single text block suitable for the LLM context.
@@ -415,6 +615,7 @@ impl ToolOutput {
                 ToolContent::Json { data } => {
                     serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
                 }
+                ToolContent::Process { output } => output.to_text(),
             })
             .filter(|block| !block.trim().is_empty())
             .collect::<Vec<_>>();
@@ -674,7 +875,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{ClaimCheck, ToolArtifactStream, ToolCallRequest, ToolContent, ToolOutput};
+    use super::{
+        ClaimCheck, ToolArtifactByteRange, ToolArtifactStream, ToolCallRequest, ToolContent,
+        ToolOutput,
+    };
     use crate::{
         traits::{Identity, IdentityType},
         types::identifiers::{SessionId, TenantId, ToolCallId},
@@ -762,6 +966,39 @@ mod tests {
     }
 
     #[test]
+    fn process_output_has_one_canonical_stream_carrier() {
+        // Pins: process streams are serialized once in ProcessOutput rather than
+        // being copied into both display content and a structured JSON value.
+        let output = ToolOutput::from_process(
+            "hello\n".to_string(),
+            "warning\n".to_string(),
+            0,
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(output.content.len(), 1);
+        let ToolContent::Process { output: process } = &output.content[0] else {
+            panic!("process output should have one process content carrier");
+        };
+        assert_eq!(process.stdout, "hello\n");
+        assert_eq!(process.stderr, "warning\n");
+        assert!(output.structured.is_none());
+        assert!(output.structured_payload().is_none());
+
+        let encoded = serde_json::to_value(&output).expect("serialize process output");
+        assert!(encoded["structured"].is_null());
+        let encoded_text = encoded.to_string();
+        assert_eq!(encoded_text.matches("hello\\n").count(), 1);
+        assert_eq!(encoded_text.matches("warning\\n").count(), 1);
+
+        let replayed: ToolOutput = serde_json::from_value(encoded).expect("replay process output");
+        assert_eq!(replayed.process_stdout(), Some("hello\n"));
+        assert_eq!(replayed.process_stderr(), Some("warning\n"));
+        assert_eq!(replayed.process_exit_code(), Some(0));
+        assert_eq!(replayed.to_text(), "hello\n\nstderr:\nwarning");
+    }
+
+    #[test]
     fn tool_output_from_process_failure_includes_exit_code_and_stderr() {
         let output = ToolOutput::from_process(
             "partial".to_string(),
@@ -780,18 +1017,39 @@ mod tests {
 
     #[test]
     fn tool_output_json_creates_text_and_json_blocks() {
-        let output = ToolOutput::json(
-            "2 matches",
-            serde_json::json!([{ "path": "a.txt" }]),
-            Duration::from_millis(3),
-        );
+        let data = serde_json::json!([{ "path": "a.txt" }]);
+        let output = ToolOutput::json("2 matches", data.clone(), Duration::from_millis(3));
 
         assert!(!output.is_error);
         assert!(matches!(output.content[0], ToolContent::Text { .. }));
         assert!(matches!(output.content[1], ToolContent::Json { .. }));
+        assert!(output.structured.is_none());
+        assert_eq!(output.structured_payload(), Some(&data));
         assert!(!output.truncated);
         assert!(output.to_text().contains("2 matches"));
         assert!(output.to_text().contains("\"path\": \"a.txt\""));
+    }
+
+    #[test]
+    fn legacy_structured_process_output_still_replays() {
+        // Pins: rows written before ProcessOutput became the canonical carrier
+        // still expose the process accessors during replay.
+        let mut encoded = serde_json::to_value(ToolOutput::text("hello", Duration::from_millis(1)))
+            .expect("serialize legacy-shaped output");
+        encoded["structured"] = serde_json::json!({
+            "stdout": "hello\n",
+            "stderr": "",
+            "exit_code": 0,
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+        });
+
+        let replayed: ToolOutput = serde_json::from_value(encoded).expect("replay legacy output");
+        assert_eq!(replayed.process_stdout(), Some("hello\n"));
+        assert_eq!(replayed.process_stderr(), Some(""));
+        assert_eq!(replayed.process_exit_code(), Some(0));
+        assert!(!replayed.process_stdout_truncated());
+        assert!(!replayed.process_stderr_truncated());
     }
 
     #[test]
@@ -813,6 +1071,8 @@ mod tests {
             },
             estimated_tokens: 10,
             line_count: 3,
+            stdout_range: None,
+            stderr_range: None,
             stdout: Some(ClaimCheck {
                 blob_id: "stdout".to_string(),
                 size: 5,
@@ -836,5 +1096,53 @@ mod tests {
             "stdout"
         );
         assert!(artifact.claim_check(ToolArtifactStream::Stderr).is_none());
+    }
+
+    #[test]
+    fn single_blob_stream_ranges_slice_unicode_safely() {
+        let combined = "α\nβ\nstderr:\n警告\n";
+        let stdout_end = "α\nβ".len();
+        let stderr_start = combined.find("警告").expect("stderr text");
+        let artifact = super::ToolOutputArtifact {
+            combined: ClaimCheck {
+                blob_id: "combined".to_string(),
+                size: combined.len(),
+                preview: combined.to_string(),
+            },
+            estimated_tokens: 4,
+            line_count: 4,
+            stdout_range: Some(ToolArtifactByteRange {
+                start: 0,
+                end: stdout_end,
+            }),
+            stderr_range: Some(ToolArtifactByteRange {
+                start: stderr_start,
+                end: stderr_start + "警告".len(),
+            }),
+            stdout: None,
+            stderr: None,
+        };
+
+        assert_eq!(
+            artifact
+                .slice_stream(ToolArtifactStream::Stdout, combined)
+                .expect("stdout range"),
+            Some("α\nβ")
+        );
+        assert_eq!(
+            artifact
+                .slice_stream(ToolArtifactStream::Stderr, combined)
+                .expect("stderr range"),
+            Some("警告")
+        );
+        assert_eq!(
+            artifact
+                .slice_stream(ToolArtifactStream::Combined, combined)
+                .expect("combined range"),
+            Some(combined)
+        );
+
+        let invalid = super::ToolArtifactByteRange { start: 1, end: 2 };
+        assert!(invalid.slice(combined).is_err());
     }
 }

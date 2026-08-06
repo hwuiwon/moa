@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Formatter};
 use std::future::Future;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
@@ -185,6 +186,211 @@ impl CompletionRequest {
     /// Creates a minimal request alias for simple prompt-only completions.
     pub fn simple(prompt: impl Into<String>) -> Self {
         Self::new(prompt)
+    }
+
+    /// Materializes an owned request from a read-only provider view.
+    ///
+    /// This is reserved for an ownership or serialization boundary that
+    /// requires the concrete request DTO, such as a durable service call.
+    /// Providers that can consume a [`CompletionRequestView`] directly should
+    /// keep using the view so shared failover storage remains single-copy.
+    #[must_use]
+    pub fn from_view(request: &impl CompletionRequestView) -> Self {
+        Self {
+            model: request.model().cloned(),
+            messages: request.messages().to_vec(),
+            tools: request.tools().to_vec(),
+            max_output_tokens: request.max_output_tokens(),
+            temperature: request.temperature(),
+            response_format: request.response_format().cloned(),
+            native_web_search: request.native_web_search(),
+            metadata: request.metadata().clone(),
+        }
+    }
+}
+
+/// Read-only view of a completion request at a provider boundary.
+///
+/// Implementations use this view for both ordinary owned requests and shared
+/// failover requests. The shared implementation can overlay only fields that
+/// a decorator semantically transforms while borrowing every untouched field
+/// from the original request allocation.
+pub trait CompletionRequestView {
+    /// Returns the effective model requested by the caller or a decorator.
+    fn model(&self) -> Option<&ModelId>;
+
+    /// Returns the messages visible to the provider.
+    fn messages(&self) -> &[ContextMessage];
+
+    /// Returns the tool schemas visible to the provider.
+    fn tools(&self) -> &[Value];
+
+    /// Returns the maximum output token budget.
+    fn max_output_tokens(&self) -> Option<usize>;
+
+    /// Returns the optional temperature override.
+    fn temperature(&self) -> Option<f32>;
+
+    /// Returns the provider-native response format.
+    fn response_format(&self) -> Option<&JsonResponseFormat>;
+
+    /// Returns the request-scoped native web-search policy.
+    fn native_web_search(&self) -> NativeWebSearchPolicy;
+
+    /// Returns request metadata without materializing another map.
+    fn metadata(&self) -> &HashMap<String, Value>;
+}
+
+impl CompletionRequestView for CompletionRequest {
+    fn model(&self) -> Option<&ModelId> {
+        self.model.as_ref()
+    }
+
+    fn messages(&self) -> &[ContextMessage] {
+        &self.messages
+    }
+
+    fn tools(&self) -> &[Value] {
+        &self.tools
+    }
+
+    fn max_output_tokens(&self) -> Option<usize> {
+        self.max_output_tokens
+    }
+
+    fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    fn response_format(&self) -> Option<&JsonResponseFormat> {
+        self.response_format.as_ref()
+    }
+
+    fn native_web_search(&self) -> NativeWebSearchPolicy {
+        self.native_web_search
+    }
+
+    fn metadata(&self) -> &HashMap<String, Value> {
+        &self.metadata
+    }
+}
+
+/// Immutable, cheaply clonable ownership of one completion request.
+///
+/// Provider failover may replay the same logical request against several
+/// candidates. The ordinary [`CompletionRequest`] remains the owned serde/API
+/// DTO used by callers, while this handle keeps its payload behind one
+/// reference-counted allocation. A candidate-specific model override is kept
+/// in the handle and does not copy the request's messages, tools, or metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedCompletionRequest {
+    request: Arc<CompletionRequest>,
+    model_override: Option<ModelId>,
+    transformed_messages: Option<Arc<[ContextMessage]>>,
+    transformed_tools: Option<Arc<[Value]>>,
+    transformed_response_format: Option<Option<Arc<JsonResponseFormat>>>,
+}
+
+impl SharedCompletionRequest {
+    /// Moves an owned request into shared immutable storage.
+    #[must_use]
+    pub fn new(request: CompletionRequest) -> Self {
+        Self {
+            request: Arc::new(request),
+            model_override: None,
+            transformed_messages: None,
+            transformed_tools: None,
+            transformed_response_format: None,
+        }
+    }
+
+    /// Returns a handle sharing this request with a candidate-specific model.
+    #[must_use]
+    pub fn with_model_override(&self, model: Option<&ModelId>) -> Self {
+        Self {
+            request: Arc::clone(&self.request),
+            model_override: model.cloned(),
+            transformed_messages: self.transformed_messages.clone(),
+            transformed_tools: self.transformed_tools.clone(),
+            transformed_response_format: self.transformed_response_format.clone(),
+        }
+    }
+
+    /// Returns a request view with explicitly transformed provider fields.
+    ///
+    /// This is for semantic decorators such as egress DLP. Only the fields
+    /// passed here are materialized; model, metadata, token limits, temperature,
+    /// and native-search policy continue borrowing from the original request.
+    /// The transformed fields are a new provider payload, not a second failover
+    /// copy of the untouched request.
+    #[must_use]
+    pub fn with_transformed_fields(
+        &self,
+        messages: Vec<ContextMessage>,
+        tools: Vec<Value>,
+        response_format: Option<JsonResponseFormat>,
+    ) -> Self {
+        Self {
+            request: Arc::clone(&self.request),
+            model_override: self.model_override.clone(),
+            transformed_messages: Some(Arc::from(messages)),
+            transformed_tools: Some(Arc::from(tools)),
+            transformed_response_format: Some(response_format.map(Arc::new)),
+        }
+    }
+
+    /// Returns the immutable request payload shared by all candidates.
+    #[must_use]
+    pub fn request(&self) -> &CompletionRequest {
+        self.request.as_ref()
+    }
+
+    /// Returns the effective model, including a candidate override when set.
+    #[must_use]
+    pub fn model(&self) -> Option<&ModelId> {
+        self.model_override.as_ref().or(self.request.model.as_ref())
+    }
+}
+
+impl CompletionRequestView for SharedCompletionRequest {
+    fn model(&self) -> Option<&ModelId> {
+        self.model()
+    }
+
+    fn messages(&self) -> &[ContextMessage] {
+        self.transformed_messages
+            .as_deref()
+            .unwrap_or(self.request.messages.as_slice())
+    }
+
+    fn tools(&self) -> &[Value] {
+        self.transformed_tools
+            .as_deref()
+            .unwrap_or(self.request.tools.as_slice())
+    }
+
+    fn max_output_tokens(&self) -> Option<usize> {
+        self.request.max_output_tokens
+    }
+
+    fn temperature(&self) -> Option<f32> {
+        self.request.temperature
+    }
+
+    fn response_format(&self) -> Option<&JsonResponseFormat> {
+        match &self.transformed_response_format {
+            None => self.request.response_format.as_ref(),
+            Some(None) => None,
+            Some(Some(format)) => Some(format.as_ref()),
+        }
+    }
+
+    fn native_web_search(&self) -> NativeWebSearchPolicy {
+        self.request.native_web_search
+    }
+
+    fn metadata(&self) -> &HashMap<String, Value> {
+        &self.request.metadata
     }
 }
 
@@ -379,8 +585,8 @@ mod tests {
     use tokio::time::{Duration as TokioDuration, sleep};
 
     use super::{
-        CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, StopReason,
-        TokenUsage,
+        CompletionContent, CompletionRequest, CompletionRequestView, CompletionResponse,
+        CompletionStream, SharedCompletionRequest, StopReason, TokenUsage,
     };
     use crate::error::MoaError;
     use crate::types::identifiers::ModelId;
@@ -426,6 +632,34 @@ mod tests {
             first_json.contains(r#""metadata":{"alpha":1,"middle":2,"zeta":3}"#),
             "metadata should be serialized in stable key order: {first_json}"
         );
+    }
+
+    #[test]
+    fn shared_completion_request_reuses_payload_for_model_overrides() {
+        // Pins: failover candidates share the request allocation and only own
+        // the model override needed by their provider boundary.
+        let mut request = CompletionRequest::new("hello");
+        request.tools.push(json!({"name": "search"}));
+        request.metadata.insert("tenant".to_string(), json!("acme"));
+        let shared = SharedCompletionRequest::new(request);
+        let fallback_model = ModelId::new("fallback");
+        let fallback = shared.with_model_override(Some(&fallback_model));
+
+        assert!(std::ptr::eq(shared.request(), fallback.request()));
+        assert_eq!(shared.model(), None);
+        assert_eq!(fallback.model(), Some(&fallback_model));
+
+        let transformed = fallback.with_transformed_fields(
+            shared.request().messages.clone(),
+            shared.request().tools.clone(),
+            None,
+        );
+        assert!(std::ptr::eq(
+            transformed.metadata(),
+            shared.request().metadata()
+        ));
+        assert_eq!(transformed.model(), Some(&fallback_model));
+        assert_eq!(transformed.tools(), shared.request().tools);
     }
 
     #[tokio::test]

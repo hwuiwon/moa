@@ -159,7 +159,7 @@ impl ToolRouter {
         validate_tool_invocation(tool_definition, invocation)?;
         let capability = registered_tool.execution.capability_id(&invocation.name);
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
-        let rules = if let Some(rule_store) = &self.rule_store {
+        let rules = if let Some(rule_store) = self.bindings.rule_store() {
             let policy_actor = identity_actor_for_policy_lookup(session);
             rule_store
                 .list_action_policy_rules_for_tool(
@@ -171,7 +171,7 @@ impl ToolRouter {
         } else {
             Vec::new()
         };
-        let mut policy = self.policies.check(
+        let mut policy = self.bindings.policies.check(
             &policy_input,
             &capability,
             &moa_security::ActionPolicyContext::from_session(session)
@@ -194,12 +194,9 @@ impl ToolRouter {
         }
         let needs_review_preview = matches!(policy.effect, ActionPolicyEffect::AdminReview);
         let review_root = if needs_review_preview {
-            self.workspace_roots
-                .read()
+            self.workspace_root(&session.tenant_id)
                 .await
-                .get(&session.tenant_id)
-                .cloned()
-                .or_else(|| self.sandbox_root.clone())
+                .or_else(|| self.hands.sandbox_root())
         } else {
             None
         };

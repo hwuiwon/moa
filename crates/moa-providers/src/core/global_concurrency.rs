@@ -51,6 +51,26 @@ fn next_lease_id() -> String {
     format!("{}-{}-{}", std::process::id(), system_now_ms(), sequence)
 }
 
+/// Named construction inputs for one global provider concurrency budget.
+pub(super) struct GlobalConcurrencyConfig {
+    /// Runtime store that owns the cross-replica lease set.
+    pub(super) store: Arc<dyn RuntimeCacheStore>,
+    /// Shared `(provider, credential)` quota key for the lease set.
+    pub(super) quota_key: String,
+    /// Maximum number of live leases for the quota key.
+    pub(super) limit: usize,
+    /// TTL after which an abandoned lease is reclaimed.
+    pub(super) lease_ttl: Duration,
+    /// Provider label used by coordination metrics and warnings.
+    pub(super) provider_label: String,
+    /// Call-kind label used by saturation metrics.
+    pub(super) call_kind_label: &'static str,
+    /// Process-local bound used when coordination degrades.
+    pub(super) local_fallback: Arc<Semaphore>,
+    /// Policy applied when the coordination store cannot answer.
+    pub(super) failure_policy: CoordinationFailurePolicy,
+}
+
 /// Cross-replica in-flight gate backed by a bounded TTL lease set in the store.
 pub(crate) struct GlobalConcurrency {
     store: Arc<dyn RuntimeCacheStore>,
@@ -69,48 +89,23 @@ pub(crate) struct GlobalConcurrency {
 
 impl GlobalConcurrency {
     /// Builds a global limiter for one `(provider, credential)` budget.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        store: Arc<dyn RuntimeCacheStore>,
-        key: String,
-        limit: usize,
-        lease_ttl: Duration,
-        provider: String,
-        kind: &'static str,
-        local_fallback: Arc<Semaphore>,
-        on_failure: CoordinationFailurePolicy,
-    ) -> Self {
+    pub(super) fn new(config: GlobalConcurrencyConfig) -> Self {
         Self {
-            store,
-            key,
-            limit,
-            lease_ttl,
-            provider,
-            kind,
-            local_fallback,
-            on_failure,
+            store: config.store,
+            key: config.quota_key,
+            limit: config.limit,
+            lease_ttl: config.lease_ttl,
+            provider: config.provider_label,
+            kind: config.call_kind_label,
+            local_fallback: config.local_fallback,
+            on_failure: config.failure_policy,
         }
     }
 
-    /// Test constructor with an explicit store and failure policy.
+    /// Builds a test limiter from the same named inputs as production.
     #[cfg(test)]
-    pub(crate) fn for_test(
-        store: Arc<dyn RuntimeCacheStore>,
-        key: impl Into<String>,
-        limit: usize,
-        lease_ttl: Duration,
-        on_failure: CoordinationFailurePolicy,
-    ) -> Self {
-        Self {
-            store,
-            key: key.into(),
-            limit,
-            lease_ttl,
-            provider: "test".to_string(),
-            kind: "test",
-            local_fallback: Arc::new(Semaphore::new(limit)),
-            on_failure,
-        }
+    fn for_test(config: GlobalConcurrencyConfig) -> Self {
+        Self::new(config)
     }
 
     /// Acquires a global slot, waiting at most `max_wait`.
@@ -289,13 +284,16 @@ mod tests {
         limit: usize,
         ttl: Duration,
     ) -> GlobalConcurrency {
-        GlobalConcurrency::for_test(
+        GlobalConcurrency::for_test(GlobalConcurrencyConfig {
             store,
-            "moa:concurrency:test",
+            quota_key: "moa:concurrency:test".to_string(),
             limit,
-            ttl,
-            CoordinationFailurePolicy::BoundedDegraded,
-        )
+            lease_ttl: ttl,
+            provider_label: "test".to_string(),
+            call_kind_label: "test",
+            local_fallback: Arc::new(Semaphore::new(limit)),
+            failure_policy: CoordinationFailurePolicy::BoundedDegraded,
+        })
     }
 
     #[tokio::test]
@@ -399,13 +397,16 @@ mod tests {
         // unavailable, instead of enforcing a per-replica ceiling that the fleet
         // would multiply. This is the case bounded_degraded deliberately allows,
         // so the two policies cannot be confused.
-        let limiter = GlobalConcurrency::for_test(
-            Arc::new(FailingStore),
-            "moa:concurrency:fail-closed",
-            4,
-            Duration::from_secs(60),
-            CoordinationFailurePolicy::FailClosed,
-        );
+        let limiter = GlobalConcurrency::for_test(GlobalConcurrencyConfig {
+            store: Arc::new(FailingStore),
+            quota_key: "moa:concurrency:fail-closed".to_string(),
+            limit: 4,
+            lease_ttl: Duration::from_secs(60),
+            provider_label: "test".to_string(),
+            call_kind_label: "test",
+            local_fallback: Arc::new(Semaphore::new(4)),
+            failure_policy: CoordinationFailurePolicy::FailClosed,
+        });
 
         let started = Instant::now();
         assert!(
@@ -444,20 +445,26 @@ mod tests {
         );
         let key = format!("moa:test:concurrency:{}", system_now_ms());
         let ttl = Duration::from_secs(30);
-        let replica_a = GlobalConcurrency::for_test(
-            Arc::clone(&store),
-            key.clone(),
-            2,
-            ttl,
-            CoordinationFailurePolicy::BoundedDegraded,
-        );
-        let replica_b = GlobalConcurrency::for_test(
-            Arc::clone(&store),
-            key.clone(),
-            2,
-            ttl,
-            CoordinationFailurePolicy::BoundedDegraded,
-        );
+        let replica_a = GlobalConcurrency::for_test(GlobalConcurrencyConfig {
+            store: Arc::clone(&store),
+            quota_key: key.clone(),
+            limit: 2,
+            lease_ttl: ttl,
+            provider_label: "test".to_string(),
+            call_kind_label: "test",
+            local_fallback: Arc::new(Semaphore::new(2)),
+            failure_policy: CoordinationFailurePolicy::BoundedDegraded,
+        });
+        let replica_b = GlobalConcurrency::for_test(GlobalConcurrencyConfig {
+            store: Arc::clone(&store),
+            quota_key: key.clone(),
+            limit: 2,
+            lease_ttl: ttl,
+            provider_label: "test".to_string(),
+            call_kind_label: "test",
+            local_fallback: Arc::new(Semaphore::new(2)),
+            failure_policy: CoordinationFailurePolicy::BoundedDegraded,
+        });
 
         let slot_a = replica_a
             .acquire(Duration::from_millis(200))

@@ -7,12 +7,14 @@ use moa_db::ScopedConn;
 use moa_knowledge::{
     domain::{
         DocumentVersion, IngestionStepStatus, KnowledgeBlock, KnowledgeChunk, KnowledgeConnection,
-        KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
+        KnowledgeIngestionStep, KnowledgeObject, KnowledgeProviderEventRecord, KnowledgeSyncRun,
+        ObjectStatus, SyncRunStatus,
     },
     repository::{
         KnowledgeDiscoveryStore, PostgresKnowledgeDiscoveryStore, PostgresKnowledgeRepository,
         ProviderAccountConnectionLookup, connection::KnowledgeConnectionRepository,
-        document::KnowledgeIngestionRepository, sync::KnowledgeSyncRepository,
+        document::KnowledgeIngestionRepository, event::KnowledgeEventRepository,
+        sync::KnowledgeSyncRepository,
     },
 };
 use moa_test_support::postgres;
@@ -283,6 +285,66 @@ async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge(
         name == "knowledge_connections_provider_account_idx"
             && definition.contains("(provider, provider_connection_id, tenant_id, connection_uid)")
     }));
+}
+
+#[tokio::test]
+async fn provider_events_redact_payload_and_preserve_idempotent_duplicates_db_knowledge() {
+    // Pins: the first provider event stores a recursively redacted payload, and
+    // a duplicate delivery returns that original row instead of its new payload.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated provider-event DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo = repository(&db, tenant_id);
+    let provider_event_uid = Uuid::now_v7();
+    let provider_event_id = format!("provider-event-{}", Uuid::now_v7());
+    let expected_payload = json!({
+        "object": { "id": "object-1" },
+        "nested": { "safe": true },
+    });
+
+    let inserted = repo
+        .record_provider_event(KnowledgeProviderEventRecord {
+            provider_event_uid,
+            tenant_id,
+            connection_uid: None,
+            provider: "nango".to_string(),
+            provider_event_id: provider_event_id.clone(),
+            event_type: "record.updated".to_string(),
+            status: "received".to_string(),
+            payload: json!({
+                "object": { "id": "object-1" },
+                "access_token": "must-redact",
+                "nested": {
+                    "safe": true,
+                    "client_secret": "must-redact"
+                }
+            }),
+            duplicate: false,
+        })
+        .await
+        .expect("insert provider event");
+    assert!(!inserted.duplicate);
+    assert_eq!(inserted.provider_event_uid, provider_event_uid);
+    assert_eq!(inserted.payload, expected_payload);
+
+    let duplicate = repo
+        .record_provider_event(KnowledgeProviderEventRecord {
+            provider_event_uid: Uuid::now_v7(),
+            tenant_id,
+            connection_uid: None,
+            provider: "nango".to_string(),
+            provider_event_id,
+            event_type: "record.updated".to_string(),
+            status: "received".to_string(),
+            payload: json!({ "replacement": "must-not-be-stored" }),
+            duplicate: false,
+        })
+        .await
+        .expect("load duplicate provider event");
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.provider_event_uid, provider_event_uid);
+    assert_eq!(duplicate.payload, expected_payload);
 }
 
 #[tokio::test]

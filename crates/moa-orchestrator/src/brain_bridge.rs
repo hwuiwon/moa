@@ -3,7 +3,8 @@
 use std::{sync::Arc, time::Instant};
 
 use moa_brain::{
-    GraphMemoryPipelineOptions,
+    ContextPipeline, DigestStageInput, GraphMemoryPipelineStages, GraphMemoryStageInput,
+    HistoryStageInput, QueryRewriteStageInput, RuntimeStageInput, SkillInjectionStageInput,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
     lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
     query_rewrite::QueryRewriteResult,
@@ -16,6 +17,7 @@ use moa_core::{
     session_engine::session_requires_processing,
     session_replay::record_pipeline_compile_duration,
     traits::Identity,
+    traits::LLMProvider,
     traits::SessionStore,
     types::completion::CompletionRequest,
     types::context::{TURN_ID_METADATA_KEY, WorkingContext},
@@ -83,39 +85,82 @@ pub(crate) struct PreparedTurnRequestOutput {
 pub(crate) struct TurnRequestPreparer {
     session_store: Arc<dyn SessionStore>,
     config: Arc<moa_config::MoaConfig>,
-    graph_pool: sqlx::PgPool,
-    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
     providers: Arc<ProviderRegistry>,
     connector_catalogs: ScopedConnectorCatalogProvider,
-    graph_memory_retriever: Arc<moa_brain::pipeline::memory::GraphMemoryRetriever>,
-    skill_injector: Arc<moa_brain::pipeline::skills::SkillInjector>,
+    stage_factory: TurnPipelineStageFactory,
     lineage: Arc<dyn moa_core::traits::LineageHandle>,
+}
+
+/// Private factory for rebuilding the shared context stages with per-turn inputs.
+#[derive(Clone)]
+pub(crate) struct TurnPipelineStageFactory {
+    digest_pool: sqlx::PgPool,
+    graph_memory: Arc<moa_brain::pipeline::memory::GraphMemoryRetriever>,
+    skill_injection: Arc<moa_brain::pipeline::skills::SkillInjector>,
+}
+
+impl TurnPipelineStageFactory {
+    /// Creates a stage factory from the runtime's shared stage instances.
+    pub(crate) fn new(
+        digest_pool: sqlx::PgPool,
+        graph_memory: Arc<moa_brain::pipeline::memory::GraphMemoryRetriever>,
+        skill_injection: Arc<moa_brain::pipeline::skills::SkillInjector>,
+    ) -> Self {
+        Self {
+            digest_pool,
+            graph_memory,
+            skill_injection,
+        }
+    }
+
+    fn build(
+        &self,
+        config: &moa_config::MoaConfig,
+        session_store: Arc<dyn SessionStore>,
+        query_rewrite_provider: Option<Arc<dyn LLMProvider>>,
+        tool_schemas: Vec<serde_json::Value>,
+    ) -> ContextPipeline {
+        build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+            config,
+            session_store,
+            GraphMemoryPipelineStages {
+                history: HistoryStageInput {
+                    compaction_llm_provider: None,
+                },
+                graph_memory: GraphMemoryStageInput::Shared(self.graph_memory.clone()),
+                skill_injection: SkillInjectionStageInput::Shared(self.skill_injection.clone()),
+                query_rewrite: QueryRewriteStageInput {
+                    llm_provider: query_rewrite_provider,
+                },
+                runtime: RuntimeStageInput {
+                    identity_prompt_override: None,
+                    tool_schemas,
+                },
+                digest: DigestStageInput {
+                    graph_pool: self.digest_pool.clone(),
+                },
+            },
+        )
+    }
 }
 
 impl TurnRequestPreparer {
     /// Creates a request compiler from the runtime's shared dependencies.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session_store: Arc<dyn SessionStore>,
         config: Arc<moa_config::MoaConfig>,
-        graph_pool: sqlx::PgPool,
-        kms: Arc<dyn moa_crypto::KeyManagementProvider>,
         providers: Arc<ProviderRegistry>,
         connector_catalogs: ScopedConnectorCatalogProvider,
-        graph_memory_retriever: Arc<moa_brain::pipeline::memory::GraphMemoryRetriever>,
-        skill_injector: Arc<moa_brain::pipeline::skills::SkillInjector>,
+        stage_factory: TurnPipelineStageFactory,
         lineage: Arc<dyn moa_core::traits::LineageHandle>,
     ) -> Self {
         Self {
             session_store,
             config,
-            graph_pool,
-            kms,
             providers,
             connector_catalogs,
-            graph_memory_retriever,
-            skill_injector,
+            stage_factory,
             lineage,
         }
     }
@@ -192,22 +237,11 @@ impl TurnRequestPreparer {
             tool_catalog.snapshot().tool_requires_sandbox(name)
         });
         let tool_catalog_pin = tool_catalog.pin().clone();
-        let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+        let pipeline = self.stage_factory.build(
             config.as_ref(),
             session_store.clone(),
-            GraphMemoryPipelineOptions {
-                graph_pool: self.graph_pool.clone(),
-                kms: self.kms.clone(),
-                shared_graph_memory_retriever: Some(self.graph_memory_retriever.clone()),
-                retrieval_embedder: None,
-                shared_skill_injector: Some(self.skill_injector.clone()),
-                segment_store: None,
-                compaction_llm_provider: None,
-                query_rewrite_llm_provider: query_rewrite_provider,
-                identity_prompt_override: None,
-                tool_schemas: root_tool_schemas,
-                lineage: lineage.clone(),
-            },
+            query_rewrite_provider,
+            root_tool_schemas,
         );
         let mut context = WorkingContext::new(&session, capabilities);
         context.set_caller_identity(identity);

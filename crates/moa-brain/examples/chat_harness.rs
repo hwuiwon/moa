@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use moa_brain::{
-    BrainTurnRequest, GraphMemoryPipelineOptions,
+    BrainTurnRequest, DigestStageInput, GraphMemoryPipelineStages, GraphMemoryStageInput,
+    HistoryStageInput, QueryRewriteStageInput, RuntimeStageInput, SkillInjectionStageInput,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_config::MoaConfig;
@@ -47,18 +48,31 @@ async fn main() -> Result<()> {
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
         store.clone(),
-        GraphMemoryPipelineOptions {
-            graph_pool: store.pool().clone(),
-            kms: Arc::new(LocalKmsProvider::new()),
-            shared_graph_memory_retriever: None,
-            retrieval_embedder: None,
-            shared_skill_injector: None,
-            segment_store: Some(store.clone()),
-            compaction_llm_provider: Some(provider.clone()),
-            query_rewrite_llm_provider: Some(provider.clone()),
-            identity_prompt_override: None,
-            tool_schemas: tool_router.tool_schemas(),
-            lineage: Arc::new(moa_core::traits::NullLineageHandle),
+        GraphMemoryPipelineStages {
+            history: HistoryStageInput {
+                compaction_llm_provider: Some(provider.clone()),
+            },
+            graph_memory: GraphMemoryStageInput::Local {
+                graph_pool: store.pool().clone(),
+                kms: Arc::new(LocalKmsProvider::new()),
+                retrieval_embedder: None,
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
+            },
+            skill_injection: SkillInjectionStageInput::Local {
+                graph_pool: store.pool().clone(),
+                segment_store: Some(store.clone()),
+                embedder: None,
+            },
+            query_rewrite: QueryRewriteStageInput {
+                llm_provider: Some(provider.clone()),
+            },
+            runtime: RuntimeStageInput {
+                identity_prompt_override: None,
+                tool_schemas: tool_router.tool_schemas(),
+            },
+            digest: DigestStageInput {
+                graph_pool: store.pool().clone(),
+            },
         },
     );
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");

@@ -685,10 +685,7 @@ fn tool_output_text(output: &moa_core::types::tools::ToolOutput) -> String {
     output
         .content
         .iter()
-        .map(|content| match content {
-            ToolContent::Text { text } => text.clone(),
-            ToolContent::Json { data } => data.to_string(),
-        })
+        .map(ToolContent::rendered_text)
         .collect::<Vec<_>>()
         .join(" ")
 }

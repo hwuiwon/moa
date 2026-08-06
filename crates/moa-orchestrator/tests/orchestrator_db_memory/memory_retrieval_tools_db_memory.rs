@@ -464,8 +464,7 @@ fn contact_session(tenant_id: TenantId, contact_id: ContactId) -> SessionMeta {
 
 fn result_uids(output: &ToolOutput, array_key: &str, uid_key: &str) -> BTreeSet<Uuid> {
     output
-        .structured
-        .as_ref()
+        .structured_payload()
         .and_then(|value| value.get(array_key))
         .and_then(Value::as_array)
         .expect("tool output should contain the expected result array")
@@ -485,7 +484,7 @@ fn tool_summary(output: &ToolOutput) -> &str {
         .iter()
         .find_map(|content| match content {
             ToolContent::Text { text } => Some(text.as_str()),
-            ToolContent::Json { .. } => None,
+            ToolContent::Json { .. } | ToolContent::Process { .. } => None,
         })
         .expect("tool output should contain a text summary")
 }

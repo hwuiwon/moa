@@ -275,16 +275,16 @@ async fn generic_recovery_never_invokes_installed_connector_runtime_offline() {
         )
         .expect("fixture overlay should compile");
     let output = router
-        .execute_authorized_with_recovery_from_catalog_within(
-            &overlay,
-            &fixture.session(),
-            &fixture.identity,
-            None,
-            &fixture.invocation(),
-            ToolCallId(Uuid::from_u128(0xc411)),
-            None,
-            ToolCallScope::unbounded(),
-        )
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &fixture.session(),
+            caller_identity: &fixture.identity,
+            worker_id: None,
+            invocation: &fixture.invocation(),
+            tool_call_id: ToolCallId(Uuid::from_u128(0xc411)),
+            active_canary: None,
+            catalog: Some(&overlay),
+            scope: ToolCallScope::unbounded(),
+        })
         .await
         .expect("generic recovery should return a classified fail-closed result");
 
@@ -320,15 +320,16 @@ async fn dedicated_pending_dispatch_invokes_connector_runtime_once_offline() {
         )
         .expect("fixture overlay should compile");
     let error = router
-        .execute_installed_connector_pending_from_catalog_within(
-            &overlay,
-            &fixture.session(),
-            &fixture.identity,
-            &fixture.invocation(),
-            ToolCallId(Uuid::from_u128(0xc412)),
-            None,
-            ToolCallScope::unbounded(),
-        )
+        .execute_installed_connector_pending(moa_hands::AuthorizedToolCall {
+            session: &fixture.session(),
+            caller_identity: &fixture.identity,
+            worker_id: None,
+            invocation: &fixture.invocation(),
+            tool_call_id: ToolCallId(Uuid::from_u128(0xc412)),
+            active_canary: None,
+            catalog: Some(&overlay),
+            scope: ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("fixture runtime should return its typed transport failure");
 

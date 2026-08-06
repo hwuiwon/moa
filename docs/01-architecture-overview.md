@@ -437,7 +437,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | Redis-compatible Valkey in the orchestrator; in-process memory only in isolated non-orchestrator tests |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `HandProvider` | Declare enforceable capabilities per sandbox tier, then provision, execute, pause/resume, destroy hands. `capabilities()` is required with no default body, and every provisioned hand carries one required six-dimension `EffectiveSandboxProfile` the provider must translate or reject. | local, Docker, Daytona, E2B |
-| `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
+| `LLMProvider` | Provider completion interface, including the shared immutable request path used for failover replay | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, ZeroEntropy zembed-1, Gemini embedding, and test/mock adapters |
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |

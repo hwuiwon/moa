@@ -43,13 +43,56 @@ use crate::tools::sandbox_descriptor::{
 
 use super::{DEFAULT_PROVIDER_NAME, ToolRouter};
 
-/// Mutable transport route shared by every tool from one activated connector.
+/// Monotonic generation of a client installed on one MCP route.
+pub(super) type McpRouteGeneration = u64;
+
+/// Mutable transport state shared by every tool from one activated connector.
 ///
 /// The route lives inside the immutable registry snapshot. Catalog publication
 /// therefore swaps schemas and their clients together, while reconnect can
 /// replace the transport behind an already selected route without rebuilding
-/// the catalog.
-pub(super) type McpClientRoute = Arc<tokio::sync::RwLock<Option<Arc<MCPClient>>>>;
+/// the catalog. The generation starts at zero for an uninitialized route and
+/// advances on every successful client installation.
+pub(super) struct McpClientRouteState {
+    /// The last client successfully installed for this route.
+    pub(super) client: Option<Arc<MCPClient>>,
+    /// Generation of [`Self::client`], or zero before the first installation.
+    pub(super) generation: McpRouteGeneration,
+}
+
+impl McpClientRouteState {
+    /// Creates a route that will connect on first use.
+    pub(super) const fn empty() -> Self {
+        Self {
+            client: None,
+            generation: 0,
+        }
+    }
+
+    /// Creates a route carrying a client from a successful catalog discovery.
+    pub(super) fn with_client(client: Arc<MCPClient>) -> Self {
+        Self {
+            client: Some(client),
+            generation: 1,
+        }
+    }
+
+    /// Installs a client and returns its new route generation.
+    pub(super) fn install(&mut self, client: Arc<MCPClient>) -> Result<McpRouteGeneration> {
+        let generation = self.generation.checked_add(1).ok_or_else(|| {
+            MoaError::ProviderError("MCP client route generation exhausted".to_string())
+        })?;
+        self.client = Some(client);
+        self.generation = generation;
+        Ok(generation)
+    }
+}
+
+/// Mutable transport route shared by every tool from one activated connector.
+///
+/// Each catalog route owns its own async mutex. The lock is used for the
+/// check-and-install initialization transition, never for a remote tool call.
+pub(super) type McpClientRoute = Arc<tokio::sync::Mutex<McpClientRouteState>>;
 
 /// One provider route for a hand-routed tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -542,7 +585,7 @@ impl ToolRegistry {
         self.register_mcp_tool_on_route(
             server_name,
             tool.into(),
-            Arc::new(tokio::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(McpClientRouteState::empty())),
         )
     }
 

@@ -223,7 +223,20 @@ impl LLMProvider for MockLlmProvider {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(CompletionStream::from_response(CompletionResponse {
+        Ok(Self::response_stream())
+    }
+
+    async fn complete_shared(
+        &self,
+        _request: moa_core::types::completion::SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        Ok(Self::response_stream())
+    }
+}
+
+impl MockLlmProvider {
+    fn response_stream() -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
             text: "## Key Facts\n- compacted history\n\n## Decisions\n- keep the recent tail verbatim\n".to_string(),
             content: vec![CompletionContent::Text(
                 "## Key Facts\n- compacted history\n\n## Decisions\n- keep the recent tail verbatim\n"
@@ -234,7 +247,7 @@ impl LLMProvider for MockLlmProvider {
             usage: token_usage(120, 40),
             duration_ms: 25,
             thought_signature: None,
-        }))
+        })
     }
 }
 

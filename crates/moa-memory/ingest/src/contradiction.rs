@@ -800,7 +800,8 @@ mod tests {
     use moa_core::{
         traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::completion::SharedCompletionRequest, types::completion::StopReason,
+        types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
     use moa_providers::NoopReranker;
@@ -845,7 +846,20 @@ mod tests {
             request: CompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
             *self.request.lock().expect("capture request") = Some(request);
-            Ok(CompletionStream::from_response(CompletionResponse {
+            Ok(self.response_stream())
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            Ok(self.response_stream())
+        }
+    }
+
+    impl StaticJudgeProvider {
+        fn response_stream(&self) -> CompletionStream {
+            CompletionStream::from_response(CompletionResponse {
                 text: self.response.clone(),
                 content: Vec::new(),
                 stop_reason: StopReason::EndTurn,
@@ -853,7 +867,7 @@ mod tests {
                 usage: TokenUsage::default(),
                 duration_ms: 1,
                 thought_signature: None,
-            }))
+            })
         }
     }
 

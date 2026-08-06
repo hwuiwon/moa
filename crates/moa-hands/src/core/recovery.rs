@@ -4,18 +4,17 @@ use std::time::Duration;
 
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
-    traits::Identity, types::completion::ToolInvocation, types::hands::HandHandle,
-    types::identifiers::ToolCallId, types::security::ToolCapabilityId, types::session::SessionMeta,
-    types::tools::IdempotencyClass, types::tools::SecuredToolOutput, types::tools::ToolDefinition,
-    types::tools::ToolOutput,
+    types::completion::ToolInvocation, types::hands::HandHandle, types::security::ToolCapabilityId,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::SecuredToolOutput,
+    types::tools::ToolDefinition, types::tools::ToolOutput,
 };
 use moa_observability::{record_tool_failure, record_tool_reprovision};
 use tracing::Instrument;
 
-use super::dispatch::McpDispatch;
+use super::dispatch::{AuthorizedToolCall, McpDispatch};
 use super::lifecycle::{hand_id, scope_key};
-use super::registration::McpClientRoute;
-use super::{HandRoute, ToolCallScope, ToolCatalogSnapshot, ToolExecution, ToolRouter};
+use super::registration::{McpClientRoute, McpRouteGeneration};
+use super::{HandRoute, ToolExecution, ToolRouter};
 
 const MAX_TOOL_RETRIES: u32 = 3;
 const MAX_TOOL_REPROVISIONS: u32 = 2;
@@ -36,6 +35,7 @@ struct McpFailureContext<'a> {
     idempotency_class: IdempotencyClass,
     active_canary: Option<&'a str>,
     client_route: &'a McpClientRoute,
+    expected_generation: McpRouteGeneration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,70 +49,53 @@ fn is_terminal_resource_error(error: &MoaError) -> bool {
 }
 
 impl ToolRouter {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_authorized_with_recovery_inner(
         &self,
-        catalog: &ToolCatalogSnapshot,
-        session: &SessionMeta,
-        caller_identity: &Identity,
-        worker_id: Option<&str>,
-        invocation: &ToolInvocation,
-        tool_call_id: ToolCallId,
-        active_canary: Option<&str>,
-        scope: ToolCallScope<'_>,
+        request: AuthorizedToolCall<'_>,
     ) -> Result<SecuredToolOutput> {
+        let Some(catalog) = request.catalog else {
+            return Err(MoaError::ConfigError(
+                "authorized recovery call is missing its catalog selection".to_string(),
+            ));
+        };
         let registry = &catalog.registry;
-        let Some(registered_tool) = registry.tools.get(&invocation.name) else {
+        let Some(registered_tool) = registry.tools.get(&request.invocation.name) else {
             // An unknown tool has no registry entry to resolve a capability from,
             // so the identity is the requested name under the built-in namespace.
             // This output is still classified: it is text the model will read.
             let class = ToolFailureClass::Fatal {
-                reason: format!("unknown tool: {}", invocation.name),
+                reason: format!("unknown tool: {}", request.invocation.name),
             };
             return Ok(Self::secure_router_output(
-                ToolCapabilityId::builtin(&invocation.name),
-                active_canary,
+                ToolCapabilityId::builtin(&request.invocation.name),
+                request.active_canary,
                 ToolOutput::from(class),
                 None,
             ));
         };
-        let capability = registered_tool.execution.capability_id(&invocation.name);
+        let capability = registered_tool
+            .execution
+            .capability_id(&request.invocation.name);
 
         match &registered_tool.execution {
             ToolExecution::BuiltIn(tool) => {
                 let result = self
-                    .execute_builtin_once(
-                        session,
-                        caller_identity,
-                        invocation,
-                        &registered_tool.definition,
-                        tool,
-                        active_canary,
-                        scope,
-                    )
+                    .execute_builtin_once(&request, &registered_tool.definition, tool)
                     .await;
                 Ok(match result {
                     Ok(secured) => secured,
                     Err(error) if is_terminal_resource_error(&error) => return Err(error),
                     Err(error) => Self::secure_router_output(
                         capability,
-                        active_canary,
+                        request.active_canary,
                         ToolOutput::from(classify_tool_error(&error, 0)),
                         None,
                     ),
                 })
             }
             ToolExecution::Hand { routes } => {
-                self.execute_hand_with_recovery(
-                    session,
-                    worker_id,
-                    invocation,
-                    &registered_tool.definition,
-                    routes,
-                    active_canary,
-                    scope,
-                )
-                .await
+                self.execute_hand_with_recovery(&request, &registered_tool.definition, routes)
+                    .await
             }
             ToolExecution::Mcp {
                 server_name,
@@ -122,27 +105,24 @@ impl ToolRouter {
                 let client_route = registered_tool.mcp_client_route.clone().ok_or_else(|| {
                     MoaError::ConfigError(format!(
                         "MCP tool {} has no client route in its catalog snapshot",
-                        invocation.name
+                        request.invocation.name
                     ))
                 })?;
                 self.execute_mcp_with_recovery(
-                    session,
-                    invocation,
+                    &request,
                     &registered_tool.definition,
                     McpDispatch {
                         server_name,
                         remote_tool_name,
                         client_route,
-                        tool_call_id,
+                        expected_generation: 0,
                     },
-                    active_canary,
-                    scope,
                 )
                 .await
             }
             ToolExecution::InstalledConnectorAction { .. } => Ok(Self::secure_router_output(
                 capability,
-                active_canary,
+                request.active_canary,
                 ToolOutput::error(
                     "installed connector actions require the durable pending-output dispatch path; generic recovery will not retransmit them",
                     Duration::ZERO,
@@ -152,17 +132,17 @@ impl ToolRouter {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn execute_hand_with_recovery(
         &self,
-        session: &SessionMeta,
-        worker_id: Option<&str>,
-        invocation: &ToolInvocation,
+        request: &AuthorizedToolCall<'_>,
         tool_definition: &ToolDefinition,
         routes: &[HandRoute],
-        active_canary: Option<&str>,
-        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
+        let session = request.session;
+        let worker_id = request.worker_id;
+        let invocation = request.invocation;
+        let active_canary = request.active_canary;
+        let scope = request.scope;
         let routes = self.ordered_hand_routes(session, worker_id, routes).await?;
         let mut route_index = 0_usize;
         let mut retry_attempts = 0_u32;
@@ -177,7 +157,7 @@ impl ToolRouter {
             scope.admit()?;
             let route = routes[route_index].clone();
             let provider = route.provider.as_str();
-            let provider_impl = self.providers.get(provider).cloned().ok_or_else(|| {
+            let provider_impl = self.hands.providers.get(provider).cloned().ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
             let next_route = routes.get(route_index + 1);
@@ -191,9 +171,7 @@ impl ToolRouter {
                     let class = classify_tool_error(&error, consecutive_timeouts);
                     if self
                         .try_fallback_hand_route(
-                            session,
-                            worker_id,
-                            invocation,
+                            request,
                             &route,
                             next_route,
                             &class,
@@ -223,9 +201,7 @@ impl ToolRouter {
                     };
                     if self
                         .try_fallback_hand_route(
-                            session,
-                            worker_id,
-                            invocation,
+                            request,
                             &route,
                             next_route,
                             &class,
@@ -285,9 +261,7 @@ impl ToolRouter {
                     }
                     if self
                         .try_fallback_hand_route(
-                            session,
-                            worker_id,
-                            invocation,
+                            request,
                             &route,
                             next_route,
                             &class,
@@ -348,16 +322,7 @@ impl ToolRouter {
             }
 
             match self
-                .execute_hand_on_handle(
-                    session,
-                    worker_id,
-                    invocation,
-                    tool_definition,
-                    provider,
-                    &hand,
-                    active_canary,
-                    scope,
-                )
+                .execute_hand_on_handle(request, tool_definition, provider, &hand)
                 .await
             {
                 Ok(output) => {
@@ -380,9 +345,7 @@ impl ToolRouter {
                     }
                     if self
                         .try_fallback_hand_route(
-                            session,
-                            worker_id,
-                            invocation,
+                            request,
                             &route,
                             next_route,
                             &class,
@@ -456,7 +419,13 @@ impl ToolRouter {
         }
         let mut ordered = routes.to_vec();
         let scope = scope_key(session, worker_id);
-        let preferred = self.preferred_hand_routes.read().await.get(&scope).cloned();
+        let preferred = self
+            .hands
+            .preferred_hand_routes
+            .read()
+            .await
+            .get(&scope)
+            .cloned();
         if let Some(preferred) = preferred
             && let Some(index) = ordered.iter().position(|route| route.provider == preferred)
         {
@@ -472,18 +441,16 @@ impl ToolRouter {
         worker_id: Option<&str>,
         provider: &str,
     ) {
-        self.preferred_hand_routes
+        self.hands
+            .preferred_hand_routes
             .write()
             .await
             .insert(scope_key(session, worker_id), provider.to_string());
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn try_fallback_hand_route(
         &self,
-        session: &SessionMeta,
-        worker_id: Option<&str>,
-        invocation: &ToolInvocation,
+        request: &AuthorizedToolCall<'_>,
         route: &HandRoute,
         next_route: Option<&HandRoute>,
         class: &ToolFailureClass,
@@ -497,17 +464,17 @@ impl ToolRouter {
             return false;
         }
 
-        record_tool_failure(&route.provider, &invocation.name, class.label());
+        record_tool_failure(&route.provider, &request.invocation.name, class.label());
         tracing::warn!(
             provider = %route.provider,
             fallback_provider = %next_route.provider,
-            tool = %invocation.name,
+            tool = %request.invocation.name,
             class = class.label(),
             "hand route failed; trying fallback provider"
         );
 
-        let scope = scope_key(session, worker_id);
-        let mut preferred = self.preferred_hand_routes.write().await;
+        let scope = scope_key(request.session, request.worker_id);
+        let mut preferred = self.hands.preferred_hand_routes.write().await;
         if preferred
             .get(&scope)
             .is_some_and(|provider| provider == &route.provider)
@@ -519,35 +486,26 @@ impl ToolRouter {
 
     async fn execute_mcp_with_recovery(
         &self,
-        session: &SessionMeta,
-        invocation: &ToolInvocation,
+        request: &AuthorizedToolCall<'_>,
         tool_definition: &ToolDefinition,
         dispatch: McpDispatch<'_>,
-        active_canary: Option<&str>,
-        scope: ToolCallScope<'_>,
     ) -> Result<SecuredToolOutput> {
         let mut retry_attempts = 0_u32;
         let mut reprovisions = 0_u32;
         let mut consecutive_timeouts = 0_u32;
         let mut consecutive_gateway_failures = 0_u32;
+        let mut dispatch = dispatch;
         let server_name = dispatch.server_name;
 
         loop {
             // Re-asked per attempt: an expired run must stop retrying an
             // outbound connector rather than working through its retry budget.
-            scope.admit()?;
+            request.scope.admit()?;
             // Every attempt re-resolves the tenant's credential under the same
             // durable tool-call identity, so a retry replays one credential audit
             // row rather than appending one per attempt.
             match self
-                .execute_mcp_once_with_scope(
-                    session,
-                    invocation,
-                    tool_definition,
-                    dispatch.clone(),
-                    active_canary,
-                    scope,
-                )
+                .execute_mcp_once_with_scope(request, tool_definition, &mut dispatch)
                 .await
             {
                 Ok(output) => return Ok(output),
@@ -566,11 +524,12 @@ impl ToolRouter {
                     if let Some(result) = self
                         .handle_mcp_failure(
                             McpFailureContext {
-                                invocation,
+                                invocation: request.invocation,
                                 server_name,
                                 idempotency_class: tool_definition.idempotency_class,
-                                active_canary,
+                                active_canary: request.active_canary,
                                 client_route: &dispatch.client_route,
+                                expected_generation: dispatch.expected_generation,
                             },
                             class,
                             RecoveryStage::AfterUncertainExecution,
@@ -713,14 +672,21 @@ impl ToolRouter {
                 Ok(None)
             }
             ToolFailureClass::ReProvision { .. } if reprovisions < MAX_TOOL_REPROVISIONS => {
-                if let Err(error) = self
-                    .reconnect_mcp_client(ctx.server_name, ctx.client_route)
+                let replaced = match self
+                    .reconnect_mcp_client(
+                        ctx.server_name,
+                        ctx.client_route,
+                        ctx.expected_generation,
+                    )
                     .await
                 {
-                    return Ok(secured(classify_tool_error(&error, 0)));
+                    Ok(replaced) => replaced,
+                    Err(error) => return Ok(secured(classify_tool_error(&error, 0))),
+                };
+                if replaced {
+                    self.record_reprovision(ctx.server_name, &ctx.invocation.name)
+                        .await;
                 }
-                self.record_reprovision(ctx.server_name, &ctx.invocation.name)
-                    .await;
                 Ok(None)
             }
             _ => Ok(secured(class)),

@@ -76,7 +76,8 @@ const HAND_LEASE_PROVISION_WAIT_MS: u64 = 25;
 impl ToolRouter {
     /// Remembers the filesystem workspace root for one tenant.
     pub async fn remember_workspace_root(&self, tenant_id: TenantId, workspace_root: PathBuf) {
-        self.workspace_roots
+        self.hands
+            .workspace_roots
             .write()
             .await
             .insert(tenant_id, workspace_root);
@@ -84,7 +85,12 @@ impl ToolRouter {
 
     /// Returns the remembered filesystem workspace root for one tenant.
     pub async fn workspace_root(&self, tenant_id: &TenantId) -> Option<PathBuf> {
-        self.workspace_roots.read().await.get(tenant_id).cloned()
+        self.hands
+            .workspace_roots
+            .read()
+            .await
+            .get(tenant_id)
+            .cloned()
     }
 
     /// Stores trusted files that should be installed lazily before hand tool execution.
@@ -99,16 +105,22 @@ impl ToolRouter {
     ) {
         let scope = scope_key(session, worker_id);
         if files.is_empty() {
-            self.trusted_sandbox_files.write().await.remove(&scope);
+            self.hands
+                .trusted_sandbox_files
+                .write()
+                .await
+                .remove(&scope);
             let scope_prefix = format!("{scope}:");
-            self.installed_files
+            self.hands
+                .installed_files
                 .write()
                 .await
                 .retain(|key, _| !key.starts_with(&scope_prefix));
             return;
         }
 
-        self.trusted_sandbox_files
+        self.hands
+            .trusted_sandbox_files
             .write()
             .await
             .insert(scope, files);
@@ -122,6 +134,7 @@ impl ToolRouter {
         handle: &HandHandle,
     ) -> Result<()> {
         let files = self
+            .hands
             .trusted_sandbox_files
             .read()
             .await
@@ -145,6 +158,7 @@ impl ToolRouter {
     ) -> Result<()> {
         let key = session_provider_key(session, worker_id, provider);
         let already_installed = self
+            .hands
             .installed_files
             .read()
             .await
@@ -153,12 +167,13 @@ impl ToolRouter {
         if already_installed {
             return Ok(());
         }
-        let provider_impl = self
-            .providers
-            .get(provider)
-            .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
+        let provider_impl =
+            self.hands.providers.get(provider).ok_or_else(|| {
+                MoaError::ProviderError(format!("unknown hand provider: {provider}"))
+            })?;
         provider_impl.install_files(handle, files).await?;
-        self.installed_files
+        self.hands
+            .installed_files
             .write()
             .await
             .insert(key, files.to_vec());
@@ -204,7 +219,7 @@ impl ToolRouter {
         };
 
         let mut hands = {
-            let mut active_hands = self.active_hands.write().await;
+            let mut active_hands = self.hands.active_hands.write().await;
             let keys = active_hands
                 .keys()
                 .filter(|key| key.starts_with(&match_prefix))
@@ -218,17 +233,23 @@ impl ToolRouter {
                 })
                 .collect::<HashMap<_, _>>()
         };
-        self.installed_files
+        self.hands
+            .installed_files
             .write()
             .await
             .retain(|key, _| !key.starts_with(&match_prefix));
         match scope {
             Some(worker_id) => {
                 let scope_key = format!("{session_prefix}{worker_id}");
-                self.preferred_hand_routes.write().await.remove(&scope_key);
+                self.hands
+                    .preferred_hand_routes
+                    .write()
+                    .await
+                    .remove(&scope_key);
             }
             None => {
-                self.preferred_hand_routes
+                self.hands
+                    .preferred_hand_routes
                     .write()
                     .await
                     .retain(|key, _| !key.starts_with(&session_prefix));
@@ -241,17 +262,22 @@ impl ToolRouter {
             // scope under the session prefix.
             Some(worker_id) => {
                 let scope_key = format!("{session_prefix}{worker_id}");
-                self.trusted_sandbox_files.write().await.remove(&scope_key);
+                self.hands
+                    .trusted_sandbox_files
+                    .write()
+                    .await
+                    .remove(&scope_key);
             }
             None => {
-                self.trusted_sandbox_files
+                self.hands
+                    .trusted_sandbox_files
                     .write()
                     .await
                     .retain(|key, _| !key.starts_with(&session_prefix));
             }
         }
 
-        if let Some(lease_store) = &self.hand_leases {
+        if let Some(lease_store) = &self.hands.hand_leases {
             match lease_store.list_session(*session_id).await {
                 Ok(leases) => {
                     for lease in leases {
@@ -322,7 +348,7 @@ impl ToolRouter {
             let remainder = key.strip_prefix(&session_prefix).unwrap_or_default();
             let (worker_id, provider_name) = remainder.rsplit_once(':').unwrap_or(("", remainder));
             let handle_id = hand_id(&handle);
-            let Some(provider) = self.providers.get(provider_name) else {
+            let Some(provider) = self.hands.providers.get(provider_name) else {
                 complete = false;
                 tracing::warn!(
                     session_id = %session_id,
@@ -348,7 +374,7 @@ impl ToolRouter {
                     // generation mismatch) instead of re-fetching. A cached hand
                     // with no matching live lease carries no generation.
                     if let Some(generation) = generation
-                        && let Some(lease_store) = &self.hand_leases
+                        && let Some(lease_store) = &self.hands.hand_leases
                         && let Err(error) = lease_store
                             .mark_status(
                                 *session_id,
@@ -425,8 +451,8 @@ impl ToolRouter {
             );
             let policy = HandLeasePolicy::from_effective(&effective);
             let key = session_provider_key(session, worker_id, provider);
-            let handle = if self.hand_leases.is_some() {
-                let cached_handle = self.active_hands.read().await.get(&key).cloned();
+            let handle = if self.hands.hand_leases.is_some() {
+                let cached_handle = self.hands.active_hands.read().await.get(&key).cloned();
                 if let Some(handle) = cached_handle
                     && let Some(validated) = self
                         .validate_cached_durable_hand(
@@ -441,7 +467,7 @@ impl ToolRouter {
                     )
                     .await?
                 }
-            } else if let Some(handle) = self.active_hands.read().await.get(&key) {
+            } else if let Some(handle) = self.hands.active_hands.read().await.get(&key) {
                 handle.clone()
             } else {
                 self.provision_uncached_hand(route, session, key, &effective, budget)
@@ -464,7 +490,7 @@ impl ToolRouter {
         policy: &HandLeasePolicy,
     ) -> Result<Option<HandHandle>> {
         let scope = worker_id.unwrap_or_default();
-        let Some(lease_store) = &self.hand_leases else {
+        let Some(lease_store) = &self.hands.hand_leases else {
             return Ok(Some(cached_handle.clone()));
         };
         let Some(lease) = lease_store.get(session.id, scope, provider).await? else {
@@ -554,7 +580,7 @@ impl ToolRouter {
     }
 
     async fn remove_cached_hand_if_matches(&self, key: &str, expected_handle: &HandHandle) {
-        let mut active_hands = self.active_hands.write().await;
+        let mut active_hands = self.hands.active_hands.write().await;
         if active_hands.get(key) == Some(expected_handle) {
             active_hands.remove(key);
         }
@@ -573,7 +599,7 @@ impl ToolRouter {
     ) -> Result<HandHandle> {
         let provider = route.provider.as_str();
         let scope = worker_id.unwrap_or_default();
-        let lease_store = self.hand_leases.as_ref().ok_or_else(|| {
+        let lease_store = self.hands.hand_leases.as_ref().ok_or_else(|| {
             MoaError::StorageError("durable hand lease store missing".to_string())
         })?;
         let wait_started = Instant::now();
@@ -608,7 +634,7 @@ impl ToolRouter {
                             return Err(error);
                         }
                     };
-                    let provider_impl = self.providers.get(provider).ok_or_else(|| {
+                    let provider_impl = self.hands.providers.get(provider).ok_or_else(|| {
                         MoaError::ProviderError(format!("unknown hand provider: {provider}"))
                     })?;
                     if let Err(error) = provider_impl.destroy(&previous).await {
@@ -818,12 +844,13 @@ impl ToolRouter {
         let span = sandbox_provision_span("provision_uncached_hand", provider, tier_label);
         let record_span = span.clone();
         async move {
-            let provider_impl = self.providers.get(provider).ok_or_else(|| {
+            let provider_impl = self.hands.providers.get(provider).ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
             let workspace_mount =
                 if provider == DEFAULT_PROVIDER_NAME && matches!(tier, SandboxTier::Local) {
-                    self.workspace_roots
+                    self.hands
+                        .workspace_roots
                         .read()
                         .await
                         .get(&tenant_key(session))
@@ -847,7 +874,11 @@ impl ToolRouter {
             record_span.record("moa.sandbox.id", hand_id(&handle));
             record_span.record("moa.sandbox.cold_start_ms", cold_start.as_millis() as i64);
 
-            self.active_hands.write().await.insert(key, handle.clone());
+            self.hands
+                .active_hands
+                .write()
+                .await
+                .insert(key, handle.clone());
             Ok(handle)
         }
         .instrument(span)
@@ -856,7 +887,7 @@ impl ToolRouter {
 
     async fn destroy_provisioned_hand(&self, provider: &str, key: &str, handle: &HandHandle) {
         self.remove_cached_hand_if_matches(key, handle).await;
-        let Some(provider_impl) = self.providers.get(provider) else {
+        let Some(provider_impl) = self.hands.providers.get(provider) else {
             tracing::warn!(
                 provider,
                 hand_id = %hand_id(handle),
@@ -887,10 +918,10 @@ impl ToolRouter {
             ))
         })?;
         let handle = self.hydrate_lease_handle(provider, lease_handle).await?;
-        let provider_impl = self
-            .providers
-            .get(provider)
-            .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
+        let provider_impl =
+            self.hands.providers.get(provider).ok_or_else(|| {
+                MoaError::ProviderError(format!("unknown hand provider: {provider}"))
+            })?;
         match provider_impl.status(&handle).await? {
             HandStatus::Running | HandStatus::Provisioning => {}
             HandStatus::Paused | HandStatus::Stopped => {
@@ -903,7 +934,8 @@ impl ToolRouter {
                 )));
             }
         }
-        self.active_hands
+        self.hands
+            .active_hands
             .write()
             .await
             .insert(key.to_string(), handle.clone());
@@ -916,7 +948,7 @@ impl ToolRouter {
         handle: &HandHandle,
     ) -> Result<LeaseHandle> {
         if provider == DEFAULT_PROVIDER_NAME
-            && let Some(local_provider) = &self.local_provider
+            && let Some(local_provider) = &self.hands.local_provider
         {
             return local_provider.lease_handle(handle).await;
         }
@@ -929,7 +961,7 @@ impl ToolRouter {
         lease_handle: &LeaseHandle,
     ) -> Result<HandHandle> {
         if provider == DEFAULT_PROVIDER_NAME
-            && let Some(local_provider) = &self.local_provider
+            && let Some(local_provider) = &self.hands.local_provider
         {
             return local_provider.adopt_lease_handle(lease_handle).await;
         }
@@ -949,8 +981,8 @@ impl ToolRouter {
         async move {
             let scope = worker_id.unwrap_or_default();
             let key = session_provider_key(session, worker_id, provider);
-            let old_handle = self.active_hands.write().await.remove(&key);
-            let provider_impl = self.providers.get(provider).ok_or_else(|| {
+            let old_handle = self.hands.active_hands.write().await.remove(&key);
+            let provider_impl = self.hands.providers.get(provider).ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
 
@@ -958,7 +990,7 @@ impl ToolRouter {
                 provider_impl.destroy(handle).await?;
             }
 
-            if let Some(lease_store) = &self.hand_leases
+            if let Some(lease_store) = &self.hands.hand_leases
                 && let Some(lease) = lease_store.get(session.id, scope, provider).await?
             {
                 let status = if old_handle.is_some() {
@@ -978,7 +1010,7 @@ impl ToolRouter {
             let cold_start = started_at.elapsed();
             record_span.record("moa.sandbox.id", hand_id(&handle));
             record_span.record("moa.sandbox.cold_start_ms", cold_start.as_millis() as i64);
-            if let Some(files) = self.installed_files.read().await.get(&key).cloned() {
+            if let Some(files) = self.hands.installed_files.read().await.get(&key).cloned() {
                 provider_impl.install_files(&handle, &files).await?;
             }
             Ok(handle)
@@ -1340,25 +1372,29 @@ mod tests {
         let second_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect("first router provisions and executes");
         second_router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect("second router reuses durable lease");
 
@@ -1384,22 +1420,26 @@ mod tests {
         let right_invocation = bash_invocation();
 
         let secured = tokio::join!(
-            left_router.execute_authorized_with_recovery(
-                &left_session,
-                &left_identity,
-                None,
-                &left_invocation,
-                ToolCallId::new(),
-                None,
-            ),
-            right_router.execute_authorized_with_recovery(
-                &right_session,
-                &right_identity,
-                None,
-                &right_invocation,
-                ToolCallId::new(),
-                None,
-            )
+            left_router.execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &left_session,
+                caller_identity: &left_identity,
+                worker_id: None,
+                invocation: &left_invocation,
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            }),
+            right_router.execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &right_session,
+                caller_identity: &right_identity,
+                worker_id: None,
+                invocation: &right_invocation,
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
         );
 
         let (left, right) = secured;
@@ -1420,14 +1460,16 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect("first router provisions and executes");
         cleanup_router.reclaim_hands(&session.id, None).await;
@@ -1444,14 +1486,16 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect("first execution provisions");
         let first = lease_store
@@ -1474,14 +1518,16 @@ mod tests {
         );
 
         router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect("second execution reuses renewed lease");
         let renewed = lease_store
@@ -1508,14 +1554,16 @@ mod tests {
             .expect("mark lease stale");
         let replacement_result = tokio::time::timeout(
             Duration::from_secs(1),
-            router.execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            ),
+            router.execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            }),
         )
         .await;
         match replacement_result {
@@ -1560,14 +1608,16 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         let error = router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect_err("activation fence loss should fail execution");
 
@@ -1595,14 +1645,16 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store.clone());
 
         first_router
-            .execute_authorized_with_recovery(
-                &session,
-                &identity(),
-                None,
-                &bash_invocation(),
-                ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &bash_invocation(),
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: crate::core::ToolCallScope::unbounded(),
+            })
             .await
             .expect("provision before cleanup");
         cleanup_router.reclaim_hands(&session.id, None).await;

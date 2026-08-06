@@ -493,8 +493,8 @@ async fn invoke_exact_compensator(
         result
             .output
             .safe_output
-            .structured
-            .clone()
+            .structured_payload()
+            .cloned()
             .unwrap_or_else(|| Value::String(result.output.safe_output.to_text())),
     )))
 }
@@ -624,8 +624,8 @@ fn compensation_review_result(resolution: ExecutionActionReviewResolution) -> Co
                 CompensatorResult::Output(
                     output
                         .safe_output
-                        .structured
-                        .clone()
+                        .structured_payload()
+                        .cloned()
                         .unwrap_or_else(|| Value::String(output.safe_output.to_text())),
                 )
             }

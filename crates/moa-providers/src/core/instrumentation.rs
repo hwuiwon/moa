@@ -1,9 +1,9 @@
 //! Shared tracing helpers for provider-level LLM completion spans.
 
 use moa_core::{
-    error::MoaError, types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::StopReason,
-    types::completion::TokenUsage, types::model::TokenPricing,
+    error::MoaError, types::completion::CompletionContent,
+    types::completion::CompletionRequestView, types::completion::CompletionResponse,
+    types::completion::StopReason, types::completion::TokenUsage, types::model::TokenPricing,
     types::observability::genai_operation_name, types::observability::genai_provider_name,
 };
 use moa_observability::{
@@ -69,10 +69,10 @@ pub(crate) struct LLMSpanRecorder {
 
 impl LLMSpanRecorder {
     /// Creates a new `GenAI` span recorder for one logical chat completion.
-    pub(crate) fn new(
+    pub(crate) fn new<R: CompletionRequestView + ?Sized>(
         system: &'static str,
         request_model: impl Into<String>,
-        request: &CompletionRequest,
+        request: &R,
         max_tokens: Option<usize>,
         pricing: TokenPricing,
     ) -> Self {
@@ -89,7 +89,7 @@ impl LLMSpanRecorder {
                 operation: Some(operation),
                 stream: Some(true),
                 request_model: Some(request_model.clone()),
-                temperature: request.temperature.map(f64::from),
+                temperature: request.temperature().map(f64::from),
                 max_tokens,
                 conversation_id: metadata_string(request, "_moa.session_id"),
                 ..LLMSpanAttributes::default()
@@ -460,9 +460,9 @@ fn has_meaningful_output(block: &CompletionContent) -> bool {
     }
 }
 
-fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
+fn metadata_string<R: CompletionRequestView + ?Sized>(request: &R, key: &str) -> Option<String> {
     request
-        .metadata
+        .metadata()
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)

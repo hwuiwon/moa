@@ -30,8 +30,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionRequest,
-    types::completion::CompletionStream, types::model::ModelCapabilities,
-    types::resource::DeadlineGuard, types::resource::ResourceBudget,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::model::ModelCapabilities, types::resource::DeadlineGuard,
+    types::resource::ResourceBudget,
 };
 
 /// Buffered blocks held between the inner provider stream and the caller.
@@ -95,6 +96,17 @@ impl LLMProvider for CancellableLLMProvider {
         // The connection handshake is itself cancellable: a provider that hangs
         // before returning a stream must not outlive the scope either.
         let stream = self.guard.run(self.inner.complete(request)).await??;
+        Ok(guarded_stream(stream, self.guard.clone()))
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.guard.admit()?;
+        // The shared request remains immutable through the cancellation layer;
+        // the inner provider owns any provider-specific transformation.
+        let stream = self
+            .guard
+            .run(self.inner.complete_shared(request))
+            .await??;
         Ok(guarded_stream(stream, self.guard.clone()))
     }
 }
@@ -174,8 +186,8 @@ mod tests {
     use moa_core::{
         error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
         types::completion::CompletionRequest, types::completion::CompletionResponse,
-        types::completion::CompletionStream, types::completion::StopReason,
-        types::completion::TokenUsage, types::identifiers::ModelId,
+        types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::resource::DeadlineGuard,
     };
     use tokio::sync::mpsc;
@@ -242,6 +254,13 @@ mod tests {
             });
             Ok(CompletionStream::new(receiver, completion))
         }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
+            self.complete(CompletionRequest::new("shared-test")).await
+        }
     }
 
     struct FinishSentinel(Arc<AtomicUsize>);
@@ -278,6 +297,13 @@ mod tests {
                 duration_ms: 0,
                 thought_signature: None,
             }))
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
+            self.complete(CompletionRequest::new("shared-test")).await
         }
     }
 

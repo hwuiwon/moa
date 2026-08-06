@@ -91,8 +91,7 @@ impl OrchestratorMemoryRetrievalExecutor {
         };
         let context = MemoryToolInvocation {
             pool: &self.pool,
-            kms: &self.kms,
-            retrieval_engine: &self.retrieval_engine,
+            retrieval_engine: self.retrieval_engine.as_ref(),
             session,
             identity: caller_identity,
             retrieval_operation_id,
@@ -102,7 +101,7 @@ impl OrchestratorMemoryRetrievalExecutor {
         };
         match tool_name {
             "memory_search" => memory_search_tool(&context, input).await,
-            "memory_navigate" => memory_navigate_tool(&context, input).await,
+            "memory_navigate" => memory_navigate_tool(&context, Arc::clone(&self.kms), input).await,
             other => Err(MoaError::ToolError(format!(
                 "unknown memory retrieval tool `{other}`"
             ))),
@@ -133,8 +132,7 @@ impl MemoryRetrievalExecutor for OrchestratorMemoryRetrievalExecutor {
 
 struct MemoryToolInvocation<'a> {
     pool: &'a sqlx::PgPool,
-    kms: &'a Arc<dyn KeyManagementProvider>,
-    retrieval_engine: &'a Arc<MemoryRetrievalEngine>,
+    retrieval_engine: &'a MemoryRetrievalEngine,
     session: &'a SessionMeta,
     identity: &'a Identity,
     retrieval_operation_id: &'a str,
@@ -185,7 +183,6 @@ async fn memory_search_tool(
 
     let deps = MemoryServiceDeps {
         pool: context.pool,
-        kms: context.kms,
         retrieval_engine: context.retrieval_engine,
     };
     let hits = search_hits_for_tool(
@@ -263,6 +260,7 @@ fn hit_excerpt(hit: &RetrievalHit) -> String {
 
 async fn memory_navigate_tool(
     context: &MemoryToolInvocation<'_>,
+    kms: Arc<dyn KeyManagementProvider>,
     input: &Value,
 ) -> Result<ToolOutput> {
     let params: NavigateInput = serde_json::from_value(input.clone())
@@ -275,7 +273,7 @@ async fn memory_navigate_tool(
 
     let neighbors = neighbors_for_tool(
         context.pool,
-        context.kms,
+        kms,
         context.policy,
         params.node_uid,
         hops,

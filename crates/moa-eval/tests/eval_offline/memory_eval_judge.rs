@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result as MoaResult, traits::LLMProvider,
     types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
-    types::model::ModelCapabilities,
+    types::completion::CompletionRequestView, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::completion::StopReason, types::completion::TokenUsage, types::context::ContextMessage,
+    types::identifiers::ModelId, types::model::ModelCapabilities,
 };
 use moa_eval::memory_eval::{
     AnswerJudge, DeterministicJudge, JudgeInput, PairwiseLlmJudge, PairwiseWinner, ProbeType,
@@ -328,7 +329,20 @@ async fn pairwise_llm_judge_rejects_closed_form_probes_without_provider_calls() 
 #[derive(Clone)]
 struct ScriptedJudgeProvider {
     responses: Arc<Mutex<VecDeque<String>>>,
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+}
+
+#[derive(Clone)]
+struct RecordedRequest {
+    messages: Vec<ContextMessage>,
+}
+
+impl RecordedRequest {
+    fn from_view<R: CompletionRequestView + ?Sized>(request: &R) -> Self {
+        Self {
+            messages: request.messages().to_vec(),
+        }
+    }
 }
 
 impl ScriptedJudgeProvider {
@@ -344,28 +358,14 @@ impl ScriptedJudgeProvider {
         }
     }
 
-    fn requests(&self) -> Vec<CompletionRequest> {
+    fn requests(&self) -> Vec<RecordedRequest> {
         self.requests
             .lock()
             .expect("scripted judge request log lock should not be poisoned")
             .clone()
     }
-}
 
-#[async_trait]
-impl LLMProvider for ScriptedJudgeProvider {
-    fn name(&self) -> &str {
-        "scripted-judge"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities {
-            model_id: ModelId::new("scripted-judge"),
-            ..ModelCapabilities::default()
-        }
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> MoaResult<CompletionStream> {
+    fn record_request<R: CompletionRequestView + ?Sized>(&self, request: &R) -> MoaResult<()> {
         self.requests
             .lock()
             .map_err(|error| {
@@ -373,8 +373,12 @@ impl LLMProvider for ScriptedJudgeProvider {
                     "scripted judge request log lock poisoned: {error}"
                 ))
             })?
-            .push(request);
+            .push(RecordedRequest::from_view(request));
 
+        Ok(())
+    }
+
+    fn next_response(&self) -> MoaResult<CompletionStream> {
         let text = self
             .responses
             .lock()
@@ -395,5 +399,32 @@ impl LLMProvider for ScriptedJudgeProvider {
             duration_ms: 1,
             thought_signature: None,
         }))
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ScriptedJudgeProvider {
+    fn name(&self) -> &str {
+        "scripted-judge"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: ModelId::new("scripted-judge"),
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> MoaResult<CompletionStream> {
+        self.record_request(&request)?;
+        self.next_response()
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> MoaResult<CompletionStream> {
+        self.record_request(&request)?;
+        self.next_response()
     }
 }

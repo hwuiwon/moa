@@ -166,17 +166,20 @@ async fn deployment_credentials_authenticate_the_full_mcp_exchange_offline() {
         .await
         .unwrap();
     let secured = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: Some("provider-transcript-id".to_string()),
                 name: moa_hands::mcp_tool_reference("secure-api", "ping"),
                 input: json!({}),
             },
-            ToolCallId(TOOL_CALL_ID),
-            None,
-        )
+            tool_call_id: ToolCallId(TOOL_CALL_ID),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
     let output = secured.safe_output;
@@ -250,19 +253,20 @@ async fn cancellation_stops_an_in_flight_authenticated_mcp_call_offline() {
 
     let result = timeout(
         Duration::from_secs(2),
-        router.execute_authorized_with_cancel(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        router.execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: Some("provider-transcript-cancel".to_string()),
                 name: moa_hands::mcp_tool_reference("slow-api", "wait"),
                 input: json!({}),
             },
-            ToolCallId::new(),
-            None,
-            Some(&cancel),
-            Some(&cancel),
-        ),
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::from_tokens(Some(&cancel), Some(&cancel)),
+        }),
     )
     .await
     .expect("cancellation should beat the MCP transport timeout");
@@ -337,18 +341,20 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
         .await
         .unwrap();
     let malformed = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &ToolInvocation {
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: Some("reviewed-provider-call-bad".to_string()),
                 name: moa_hands::mcp_tool_reference("filings", "lookup_filing"),
                 input: json!({"item_key": 7}),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("malformed MCP input must fail before dispatch");
     match malformed {
@@ -370,18 +376,20 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
     }
 
     let secured_2 = router
-        .execute_authorized_with_recovery(
-            &session(),
-            &identity(),
-            None,
-            &ToolInvocation {
+        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: Some("reviewed-provider-call-good".to_string()),
                 name: moa_hands::mcp_tool_reference("filings", "lookup_filing"),
                 input: json!({"item_key": "AAPL-10K"}),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect("valid MCP input should dispatch");
 
@@ -494,17 +502,20 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
         .await
         .unwrap();
     let error = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: moa_hands::mcp_tool_reference("http-api", "explode"),
                 input: json!({}),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap_err();
 
@@ -668,17 +679,20 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
     );
 
     let secured_3 = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: moa_hands::mcp_tool_reference("sse-api", "sse_echo"),
                 input: json!({ "text": "hello" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -1457,18 +1471,21 @@ async fn dispatching_a_connectors_published_name_says_which_reference_to_use_off
         .expect("router with a connector");
 
     let error = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 // The name the SERVER publishes — not the registered reference.
                 name: "screen_company".to_string(),
                 input: json!({}),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("a connector's published name must not resolve");
 
@@ -1484,17 +1501,20 @@ async fn dispatching_a_connectors_published_name_says_which_reference_to_use_off
 
     // An ordinary typo must NOT be dressed up as a qualification problem.
     let plain = router
-        .execute_authorized(
-            &session(),
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "no_such_tool_anywhere".to_string(),
                 input: json!({}),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .expect_err("an unknown name must still fail")
         .to_string();

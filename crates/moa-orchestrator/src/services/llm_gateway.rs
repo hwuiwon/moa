@@ -48,6 +48,9 @@ const COMPLETION_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25
 const COMPLETION_CANCELLATION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const COMPLETION_CANCELLATION_KEY_DOMAIN: &str = "moa:llm-completion-cancel:v1";
 const COMPLETION_CANCELLATION_VALUE: &[u8] = b"cancelled";
+const SESSION_ID_METADATA_KEY: &str = "_moa.session_id";
+const TENANT_ID_METADATA_KEY: &str = "_moa.tenant_id";
+const CONTACT_ID_METADATA_KEY: &str = "_moa.contact_id";
 
 /// Durable workflow kind that owns one cancellable LLM completion.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -156,6 +159,74 @@ pub struct BoundedCompletionRequest {
     pub request: CompletionRequest,
     /// Deadline and metered allowance this dispatch may consume.
     pub budget: ResourceBudget,
+}
+
+/// The request metadata needed after the provider-owned request has completed.
+///
+/// The provider receives the complete request by value so streaming adapters can
+/// move it into their spawned tasks. This compact snapshot keeps gateway
+/// persistence independent of a second full [`CompletionRequest`] clone. Raw
+/// metadata values are retained so validation and malformed-value warnings keep
+/// the same persistence-gated timing as the request-based helpers.
+#[derive(Debug)]
+struct CompletionAuditContext {
+    defer_brain_response: bool,
+    session_id: Option<Value>,
+    tenant_id: Option<Value>,
+    contact_id: Option<Value>,
+    user_turn: Option<Value>,
+    memory_write_barrier: Option<Value>,
+}
+
+impl CompletionAuditContext {
+    /// Captures only the metadata consumed by gateway persistence and ingestion.
+    fn from_request(request: &CompletionRequest) -> Self {
+        Self {
+            defer_brain_response: should_defer_brain_response(request),
+            session_id: request.metadata.get(SESSION_ID_METADATA_KEY).cloned(),
+            tenant_id: request.metadata.get(TENANT_ID_METADATA_KEY).cloned(),
+            contact_id: request.metadata.get(CONTACT_ID_METADATA_KEY).cloned(),
+            user_turn: request.metadata.get(USER_TURN_METADATA_KEY).cloned(),
+            memory_write_barrier: request
+                .metadata
+                .get(MEMORY_WRITE_BARRIER_METADATA_KEY)
+                .cloned(),
+        }
+    }
+
+    /// Parses the session identity using the same malformed-metadata handling as the request path.
+    fn session_id(&self) -> Option<SessionId> {
+        session_id_from_metadata(self.session_id.as_ref())
+    }
+
+    /// Parses the tenant/contact turn scope using the same request metadata rules.
+    fn turn_scope(&self) -> Option<(TenantId, ContactId)> {
+        let tenant_id =
+            uuid_metadata_value(self.tenant_id.as_ref(), TENANT_ID_METADATA_KEY).map(TenantId)?;
+        let contact_id = uuid_metadata_value(self.contact_id.as_ref(), CONTACT_ID_METADATA_KEY)
+            .map(ContactId)?;
+        Some((tenant_id, contact_id))
+    }
+
+    /// Returns the durable user-turn text when its metadata is a string.
+    fn user_turn(&self) -> Option<&str> {
+        string_metadata_value(self.user_turn.as_ref(), USER_TURN_METADATA_KEY)
+    }
+
+    /// Parses the optional validated memory-write barrier.
+    ///
+    /// An invalid present barrier remains an error so the enclosing turn is
+    /// rejected, matching [`session_turn_from_completion_request`].
+    fn memory_write_barrier(
+        &self,
+    ) -> moa_core::error::Result<Option<moa_core::types::memory::InformationBarrierId>> {
+        string_metadata_value(
+            self.memory_write_barrier.as_ref(),
+            MEMORY_WRITE_BARRIER_METADATA_KEY,
+        )
+        .map(moa_core::types::memory::InformationBarrierId::parse)
+        .transpose()
+    }
 }
 
 /// Concrete Restate service implementation backed by configured providers.
@@ -475,7 +546,7 @@ fn admit_completion_usage(
 
 async fn record_completion(
     ctx: &Context<'_>,
-    request: &CompletionRequest,
+    audit_context: CompletionAuditContext,
     response: CompletionResponse,
     provider_id: &str,
 ) -> Result<Json<CompletionResponse>, HandlerError> {
@@ -515,8 +586,8 @@ async fn record_completion(
     }
     record_llm_cost_cents(provider_id, response.model.as_str(), u64::from(cost_cents));
 
-    if should_persist_brain_response(request, &response)
-        && let Some(session_id) = session_id_from_request(request)
+    if should_persist_brain_response(&audit_context, &response)
+        && let Some(session_id) = audit_context.session_id()
     {
         let event = Event::BrainResponse {
             text: response.text.clone(),
@@ -544,8 +615,8 @@ async fn record_completion(
         .await?
         .into_inner();
 
-        if let Some(turn) = session_turn_from_completion_request(
-            request,
+        if let Some(turn) = session_turn_from_audit_context(
+            &audit_context,
             session_id,
             appended.sequence_num,
             appended.timestamp,
@@ -577,13 +648,13 @@ impl LLMGateway for LLMGatewayImpl {
             .providers
             .resolve_provider_id(request.model.as_ref().map(ModelId::as_str))
             .map_err(moa_error_to_handler_error)?;
-        let request_for_run = request.clone();
+        let audit_context = CompletionAuditContext::from_request(&request);
         let service = self.clone();
         let response = ctx
             .run(|| async move {
                 service
                     .complete_buffered_with_owner_fence(
-                        request_for_run,
+                        request,
                         ResourceBudget::UNBOUNDED,
                         completion_owner,
                     )
@@ -594,7 +665,7 @@ impl LLMGateway for LLMGatewayImpl {
             .retry_policy(llm_run_retry_policy())
             .await?
             .into_inner();
-        record_completion(&ctx, &request, response, provider_id.as_str()).await
+        record_completion(&ctx, audit_context, response, provider_id.as_str()).await
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -615,12 +686,12 @@ impl LLMGateway for LLMGatewayImpl {
             .providers
             .resolve_provider_id(request.model.as_ref().map(ModelId::as_str))
             .map_err(moa_error_to_handler_error)?;
-        let request_for_run = request.clone();
+        let audit_context = CompletionAuditContext::from_request(&request);
         let service = self.clone();
         let response = ctx
             .run(|| async move {
                 service
-                    .complete_buffered_with_owner_fence(request_for_run, budget, completion_owner)
+                    .complete_buffered_with_owner_fence(request, budget, completion_owner)
                     .await
                     .map(Json::from)
             })
@@ -628,7 +699,7 @@ impl LLMGateway for LLMGatewayImpl {
             .retry_policy(llm_run_retry_policy())
             .await?
             .into_inner();
-        record_completion(&ctx, &request, response, provider_id.as_str()).await
+        record_completion(&ctx, audit_context, response, provider_id.as_str()).await
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -688,10 +759,10 @@ pub fn should_defer_brain_response(request: &CompletionRequest) -> bool {
 }
 
 fn should_persist_brain_response(
-    request: &CompletionRequest,
+    audit_context: &CompletionAuditContext,
     response: &CompletionResponse,
 ) -> bool {
-    response.stop_reason != StopReason::Cancelled && !should_defer_brain_response(request)
+    response.stop_reason != StopReason::Cancelled && !audit_context.defer_brain_response
 }
 
 /// Computes the normalized completion cost in cents for one model response.
@@ -737,8 +808,8 @@ fn llm_run_retry_policy() -> RunRetryPolicy {
         .max_attempts(1)
 }
 
-fn session_id_from_request(request: &CompletionRequest) -> Option<SessionId> {
-    let session_value = request.metadata.get("_moa.session_id")?;
+fn session_id_from_metadata(session_value: Option<&Value>) -> Option<SessionId> {
+    let session_value = session_value?;
     match session_value {
         Value::String(raw) => parse_session_id(raw),
         other => {
@@ -752,8 +823,16 @@ fn session_id_from_request(request: &CompletionRequest) -> Option<SessionId> {
 }
 
 fn turn_scope_from_request(request: &CompletionRequest) -> Option<(TenantId, ContactId)> {
-    let tenant_id = uuid_metadata(request, "_moa.tenant_id").map(TenantId)?;
-    let contact_id = uuid_metadata(request, "_moa.contact_id").map(ContactId)?;
+    let tenant_id = uuid_metadata_value(
+        request.metadata.get(TENANT_ID_METADATA_KEY),
+        TENANT_ID_METADATA_KEY,
+    )
+    .map(TenantId)?;
+    let contact_id = uuid_metadata_value(
+        request.metadata.get(CONTACT_ID_METADATA_KEY),
+        CONTACT_ID_METADATA_KEY,
+    )
+    .map(ContactId)?;
     Some((tenant_id, contact_id))
 }
 
@@ -794,8 +873,35 @@ pub(crate) fn session_turn_from_completion_request(
     })
 }
 
+fn session_turn_from_audit_context(
+    audit_context: &CompletionAuditContext,
+    session_id: SessionId,
+    turn_seq: u64,
+    finalized_at: DateTime<Utc>,
+) -> Option<SessionTurn> {
+    let (tenant_id, contact_id) = audit_context.turn_scope()?;
+    let transcript = turn_transcript(audit_context.user_turn()?);
+    if transcript.trim().is_empty() {
+        return None;
+    }
+    Some(SessionTurn {
+        tenant_id,
+        contact_id: Some(contact_id),
+        session_id,
+        turn_seq,
+        dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
+        transcript,
+        finalized_at,
+        barrier: audit_context.memory_write_barrier().ok()?,
+    })
+}
+
 fn string_metadata<'a>(request: &'a CompletionRequest, key: &str) -> Option<&'a str> {
-    match request.metadata.get(key)? {
+    string_metadata_value(request.metadata.get(key), key)
+}
+
+fn string_metadata_value<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a str> {
+    match value? {
         Value::String(raw) => Some(raw.as_str()),
         other => {
             tracing::warn!(metadata = %other, key, "ignoring non-string request metadata");
@@ -804,8 +910,8 @@ fn string_metadata<'a>(request: &'a CompletionRequest, key: &str) -> Option<&'a 
     }
 }
 
-fn uuid_metadata(request: &CompletionRequest, key: &str) -> Option<Uuid> {
-    let raw = string_metadata(request, key)?;
+fn uuid_metadata_value(value: Option<&Value>, key: &str) -> Option<Uuid> {
+    let raw = string_metadata_value(value, key)?;
     match Uuid::parse_str(raw) {
         Ok(id) => Some(id),
         Err(error) => {
@@ -859,10 +965,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        COMPLETION_OWNER_METADATA_KEY, LLMCompletionOwner, MEMORY_WRITE_BARRIER_METADATA_KEY,
-        USER_TURN_METADATA_KEY, attach_completion_owner, bound_completion_request,
-        cancelled_completion_response, session_turn_from_completion_request,
-        should_persist_brain_response, take_completion_owner,
+        COMPLETION_OWNER_METADATA_KEY, CompletionAuditContext, LLMCompletionOwner,
+        MEMORY_WRITE_BARRIER_METADATA_KEY, USER_TURN_METADATA_KEY, attach_completion_owner,
+        bound_completion_request, cancelled_completion_response, session_turn_from_audit_context,
+        session_turn_from_completion_request, should_persist_brain_response, take_completion_owner,
     };
 
     #[test]
@@ -880,12 +986,13 @@ mod tests {
         assert!(!request.metadata.contains_key(COMPLETION_OWNER_METADATA_KEY));
 
         let cancelled = cancelled_completion_response(ModelId::new("cancelled-test"));
+        let audit_context = CompletionAuditContext::from_request(&request);
         assert_eq!(cancelled.stop_reason, StopReason::Cancelled);
         assert!(cancelled.text.is_empty());
         assert!(cancelled.content.is_empty());
         assert_eq!(cancelled.usage, Default::default());
         assert!(
-            !should_persist_brain_response(&request, &cancelled),
+            !should_persist_brain_response(&audit_context, &cancelled),
             "cancelled completions must not append an empty visible response or ingest a turn"
         );
     }
@@ -991,8 +1098,14 @@ mod tests {
             metadata,
         };
 
+        let audit_context = CompletionAuditContext::from_request(&request);
         let turn = session_turn_from_completion_request(&request, session_id, 42, finalized_at)
             .expect("request metadata should produce an ingestable turn");
+        let audit_turn =
+            session_turn_from_audit_context(&audit_context, session_id, 42, finalized_at)
+                .expect("audit metadata should produce the same ingestable turn");
+
+        assert_eq!(audit_turn, turn);
 
         assert_eq!(turn.tenant_id, tenant_id);
         assert_eq!(turn.contact_id, Some(contact_id));
@@ -1043,6 +1156,38 @@ mod tests {
 
         assert!(
             session_turn_from_completion_request(&request, session_id, 7, Utc::now()).is_none()
+        );
+    }
+
+    #[test]
+    fn completion_audit_context_preserves_malformed_barrier_rejection() {
+        // Pins: moving only persistence metadata out of the request retains the
+        // same rejection when a validated memory barrier is malformed.
+        let session_id = SessionId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "_moa.tenant_id".to_string(),
+            json!(TenantId::new().to_string()),
+        );
+        metadata.insert(
+            "_moa.contact_id".to_string(),
+            json!(ContactId::new().to_string()),
+        );
+        metadata.insert(USER_TURN_METADATA_KEY.to_string(), json!("hello"));
+        metadata.insert(MEMORY_WRITE_BARRIER_METADATA_KEY.to_string(), json!(""));
+        let request = CompletionRequest {
+            metadata,
+            ..CompletionRequest::new("hello")
+        };
+        let audit_context = CompletionAuditContext::from_request(&request);
+        let finalized_at = Utc::now();
+
+        assert_eq!(
+            session_turn_from_audit_context(&audit_context, session_id, 7, finalized_at),
+            session_turn_from_completion_request(&request, session_id, 7, finalized_at)
+        );
+        assert!(
+            session_turn_from_audit_context(&audit_context, session_id, 7, finalized_at).is_none()
         );
     }
 }

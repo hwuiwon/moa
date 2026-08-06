@@ -256,7 +256,7 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         .artifact
         .as_ref()
         .expect("artifact metadata should be present");
-    assert!(artifact.stderr.is_some());
+    assert!(artifact.stderr_range.is_some());
     let stderr_read = events
         .iter()
         .find_map(|record| match &record.event {

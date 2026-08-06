@@ -109,7 +109,10 @@ async fn pinned_clearances_isolate_reads_and_replayed_audit_is_idempotent_db_mem
         )
         .await
         .expect("execute cleared search");
-    assert_eq!(hit_uids(&cleared_output.structured), vec![node_uid]);
+    assert_eq!(
+        hit_uids(cleared_output.structured_payload()),
+        vec![node_uid]
+    );
 
     let replay_output = executor
         .execute_retrieval_tool(
@@ -121,7 +124,7 @@ async fn pinned_clearances_isolate_reads_and_replayed_audit_is_idempotent_db_mem
         )
         .await
         .expect("replay cleared search from another worker");
-    assert_eq!(hit_uids(&replay_output.structured), vec![node_uid]);
+    assert_eq!(hit_uids(replay_output.structured_payload()), vec![node_uid]);
 
     let uncleared_output = executor
         .execute_retrieval_tool(
@@ -133,7 +136,7 @@ async fn pinned_clearances_isolate_reads_and_replayed_audit_is_idempotent_db_mem
         )
         .await
         .expect("execute uncleared search");
-    assert!(hit_uids(&uncleared_output.structured).is_empty());
+    assert!(hit_uids(uncleared_output.structured_payload()).is_empty());
 
     let event_rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
         "SELECT id, event_jcs FROM security_events \
@@ -194,9 +197,8 @@ fn session_with_clearances(
     }
 }
 
-fn hit_uids(structured: &Option<Value>) -> Vec<Uuid> {
+fn hit_uids(structured: Option<&Value>) -> Vec<Uuid> {
     structured
-        .as_ref()
         .and_then(|value| value.get("hits"))
         .and_then(Value::as_array)
         .expect("memory search returns a hits array")

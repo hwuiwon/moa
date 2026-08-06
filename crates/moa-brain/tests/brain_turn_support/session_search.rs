@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_brain::{TurnResult, run_brain_turn};
-use moa_core::{types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionResponse, types::completion::CompletionStream, events::Event, types::events_stream::EventRange, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::identifiers::ToolCallId, types::completion::ToolInvocation, types::tools::ToolOutput, types::identifiers::UserId};
+use moa_core::{types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionRequestView, types::completion::CompletionResponse, types::completion::CompletionStream, types::completion::SharedCompletionRequest, events::Event, types::events_stream::EventRange, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::identifiers::ToolCallId, types::completion::ToolInvocation, types::tools::ToolOutput, types::identifiers::UserId};
 use moa_config::MoaConfig;
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -32,7 +32,7 @@ fn extract_tool_id_field(message: &str) -> Option<String> {
 }
 
 struct SessionSearchArtifactLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
     expected_tool_id: ToolCallId,
 }
 
@@ -73,14 +73,31 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+}
+
+impl SessionSearchArtifactLlmProvider {
+    async fn complete_view<R>(&self, request: &R) -> Result<CompletionStream>
+    where
+        R: CompletionRequestView + ?Sized,
+    {
         let mut requests = self.requests.lock().await;
         let response = match requests.len() {
             0 => {
                 assert!(
-                    !request.messages.iter().any(|message| message
+                    !request.messages().iter().any(|message| message
                         .content
                         .contains(&self.expected_tool_id.to_string())),
-                    "expected old tool id to be absent from active context so the model must use session_search; request was: {request:?}"
+                            "expected old tool id to be absent from active context so the model must use session_search; request messages were: {:?}",
+                            request.messages()
                 );
                 CompletionResponse {
                     text: String::new(),
@@ -105,12 +122,13 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
             }
             1 => {
                 let session_search_message = request
-                    .messages
+                    .messages()
                     .iter()
                     .find(|message| message.content.contains("## #"))
                     .unwrap_or_else(|| {
                         panic!(
-                            "expected session_search output in context; request was: {request:?}"
+                            "expected session_search output in context; message_count={}"
+                            , request.messages().len()
                         )
                     });
                 let tool_id = extract_tool_id_field(&session_search_message.content)
@@ -140,10 +158,11 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
             _ => {
                 assert!(
                     request
-                        .messages
+                        .messages()
                         .iter()
                         .any(|message| message.content.contains("bash-line-140-")),
-                    "expected tool_result_search output in replayed context; request was: {request:?}"
+                    "expected tool_result_search output in replayed context; message_count={}"
+                    , request.messages().len()
                 );
                 CompletionResponse {
                     text: "Recovered old artifact via session_search and tool_result_search"
@@ -160,14 +179,14 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
                 }
             }
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
     }
 }
 
 #[derive(Default)]
 struct RepeatingToolLlmProvider {
-    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    requests: Arc<Mutex<Vec<()>>>,
 }
 
 #[async_trait]
@@ -198,6 +217,22 @@ impl LLMProvider for RepeatingToolLlmProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+}
+
+impl RepeatingToolLlmProvider {
+    async fn complete_view<R>(&self, request: &R) -> Result<CompletionStream>
+    where
+        R: CompletionRequestView + ?Sized,
+    {
         let mut requests = self.requests.lock().await;
         let request_index = requests.len();
         let response = match request_index {
@@ -223,7 +258,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
             1 | 3 => {
                 assert!(
                     request
-                        .messages
+                        .messages()
                         .iter()
                         .any(|message| message.content.contains("hello from tool"))
                 );
@@ -249,7 +284,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 thought_signature: None,
             },
         };
-        requests.push(request);
+        requests.push(());
         Ok(CompletionStream::from_response(response))
     }
 }

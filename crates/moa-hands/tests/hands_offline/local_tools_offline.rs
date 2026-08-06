@@ -9,31 +9,37 @@ async fn file_read_reads_written_content() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": "hello" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
     let secured = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
                 input: json!({ "path": "notes.txt" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
     let output = secured.safe_output;
@@ -48,10 +54,11 @@ async fn str_replace_updates_only_the_target_region() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({
@@ -59,17 +66,20 @@ async fn str_replace_updates_only_the_target_region() {
                     "content": "fn demo() {\n    alpha();\n    beta();\n}\n",
                 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
     let secured_2 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "str_replace".to_string(),
                 input: json!({
@@ -78,9 +88,11 @@ async fn str_replace_updates_only_the_target_region() {
                     "new_str": "    gamma();\n",
                 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -92,17 +104,20 @@ async fn str_replace_updates_only_the_target_region() {
     assert!(!rendered.contains("replaced 1 lines with 1 lines"));
 
     let secured_3 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
                 input: json!({ "path": "src/lib.rs" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -121,10 +136,11 @@ async fn file_write_overwrite_returns_compact_diff() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({
@@ -135,9 +151,11 @@ async fn file_write_overwrite_returns_compact_diff() {
                         .join("\n"),
                 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -152,17 +170,20 @@ async fn file_write_overwrite_returns_compact_diff() {
         .join("\n");
 
     let secured_4 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "src/demo.rs", "content": updated.clone() }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -183,46 +204,55 @@ async fn file_search_finds_files_by_glob() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": "ignore me" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
     let secured_5 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*.rs" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -245,32 +275,38 @@ async fn file_search_skips_git_directory_contents() {
     let session = session();
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
     let secured_6 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -310,17 +346,20 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
         .await;
 
     let secured_7 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*.py" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -360,17 +399,20 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
         .await;
 
     let secured_8 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -389,10 +431,11 @@ async fn file_search_truncates_pathological_match_sets() {
 
     for index in 0..1_050 {
         router
-            .execute_authorized(
-                &session,
-                &identity(),
-                &ToolInvocation {
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                worker_id: None,
+                invocation: &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
                     input: json!({
@@ -400,25 +443,30 @@ async fn file_search_truncates_pathological_match_sets() {
                         "content": "pub fn demo() {}",
                     }),
                 },
-                ToolCallId::new(),
-                None,
-            )
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await
             .unwrap();
     }
 
     let secured_9 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*.rs" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -426,7 +474,9 @@ async fn file_search_truncates_pathological_match_sets() {
 
     let rendered = output.to_text();
     assert!(rendered.contains("[search truncated at 1000 matches"));
-    let structured = output.structured.expect("structured file search payload");
+    let structured = output
+        .structured_payload()
+        .expect("structured file search payload");
     let matches = structured
         .get("matches")
         .and_then(|value| value.as_array())
@@ -456,17 +506,20 @@ async fn file_operations_reject_path_traversal() {
     let session = session();
 
     let error = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
                 input: json!({ "path": "../secret.txt" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap_err();
 
@@ -574,17 +627,20 @@ async fn bash_captures_stdout_and_stderr() {
     let session = session();
 
     let secured_10 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
                 input: json!({ "cmd": "printf 'out'; printf 'err' 1>&2" }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -602,19 +658,22 @@ async fn bash_success_output_is_truncated_to_router_budget() {
     let session = session();
 
     let secured_11 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
                 input: json!({
                     "cmd": "python3 -c \"print('x' * 120000)\""
                 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -634,19 +693,22 @@ async fn bash_error_output_is_not_truncated() {
     let session = session();
 
     let secured_12 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
                 input: json!({
                     "cmd": "python3 -c \"import sys; sys.stderr.write('e' * 20000); sys.exit(7)\""
                 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -671,32 +733,38 @@ async fn file_read_within_budget_is_not_router_truncated() {
         .join("\n");
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": content }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
     let secured_13 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
                 input: json!({ "path": "notes.txt", "start_line": 1, "end_line": 100 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -724,32 +792,38 @@ async fn file_read_budget_override_truncates_large_results() {
         .join("\n");
 
     router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
                 input: json!({ "path": "large.txt", "content": content }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
     let secured_14 = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
                 input: json!({ "path": "large.txt", "start_line": 1, "end_line": 200 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap();
 
@@ -770,17 +844,20 @@ async fn bash_respects_timeout() {
     let session = session();
 
     let error = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
                 input: json!({ "cmd": "sleep 10", "timeout_secs": 1 }),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap_err();
 
@@ -807,15 +884,16 @@ async fn local_bash_hard_cancel_kills_running_process() {
         let cancel_token = cancel_token.clone();
         tokio::spawn(async move {
             router
-                .execute_authorized_with_cancel(
-                    &session,
-                    &identity(),
-                    &invocation,
-                    ToolCallId::new(),
-                    None,
-                    None,
-                    Some(&cancel_token),
-                )
+                .execute_authorized(moa_hands::AuthorizedToolCall {
+                    session: &session,
+                    caller_identity: &identity(),
+                    worker_id: None,
+                    invocation: &invocation,
+                    tool_call_id: ToolCallId::new(),
+                    active_canary: None,
+                    catalog: None,
+                    scope: moa_hands::ToolCallScope::from_tokens(None, Some(&cancel_token)),
+                })
                 .await
         })
     };
@@ -959,17 +1037,20 @@ async fn execute_authorized_rejects_unregistered_tool_name() {
     let session = session();
 
     let error = router
-        .execute_authorized(
-            &session,
-            &identity(),
-            &ToolInvocation {
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session,
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
                 id: None,
                 name: "does_not_exist".to_string(),
                 input: json!({}),
             },
-            ToolCallId::new(),
-            None,
-        )
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
         .await
         .unwrap_err();
     match error {

@@ -236,7 +236,7 @@ async fn provider_webhook_resolves_signed_provider_account_identity() {
         .insert_connection(connection.clone())
         .expect("fixture Nango connection should be inserted");
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -297,7 +297,7 @@ async fn provider_webhook_rejects_ambiguous_provider_account_before_recording() 
         .insert_connection(second)
         .expect("second Merge connection should be inserted");
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -336,7 +336,7 @@ async fn provider_webhook_rejects_unknown_provider_account_before_recording() {
     // Pins: a signed provider account identity with no local binding fails closed.
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(
             StaticKnowledgeProviders::new()
@@ -381,7 +381,7 @@ async fn provider_webhook_rejects_missing_verified_binding_before_recording() {
         .insert_connection(connection.clone())
         .expect("fixture connection should be inserted");
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier(
             "nango",
@@ -492,7 +492,7 @@ async fn knowledge_auto_sync_parser_webhook_rejects_bad_signature_and_stores_red
         ParserWebhookVerifier::new("llamaparse").with_signing_key("llamaparse-webhook-secret"),
     );
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("llamaparse", verifier)),
         Arc::new(FakeKnowledgeCredentialStore::default()),
@@ -629,7 +629,7 @@ async fn knowledge_auto_sync_parser_webhook_rejects_bad_custom_header_and_accept
             .with_custom_header("x-reducto-webhook-secret", "expected-header-secret"),
     );
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("reducto", verifier)),
         Arc::new(FakeKnowledgeCredentialStore::default()),
@@ -737,7 +737,7 @@ async fn parser_completion_webhook_rejects_unbound_object_before_recording() {
         ParserWebhookVerifier::new("llamaparse").with_custom_header("x-parser-secret", "expected"),
     );
     let service = KnowledgeService::new(
-        repository.clone(),
+        repository_capabilities(repository.clone()),
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("llamaparse", verifier)),
         Arc::new(FakeKnowledgeCredentialStore::default()),

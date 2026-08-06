@@ -149,7 +149,7 @@ impl ToolRouter {
         let origin = SandboxPolicySnapshot::origin(self.effective_call_origin(session));
 
         let effective = resolve_effective_sandbox_profile(
-            &self.deployment_sandbox_policy,
+            self.hands.deployment_policy(),
             &tenant,
             &agent,
             &route.policy,
@@ -159,14 +159,15 @@ impl ToolRouter {
         capabilities.admit(
             route.tier,
             effective.profile(),
-            self.hand_lease_reaper_installed,
+            self.hands.hand_lease_reaper_installed(),
         )?;
         Ok(effective)
     }
 
     /// Returns one registered provider's declared capabilities.
     pub(super) fn provider_capabilities(&self, provider: &str) -> Result<HandProviderCapabilities> {
-        self.providers
+        self.hands
+            .providers
             .get(provider)
             .map(|registered| registered.capabilities())
             .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))
@@ -179,7 +180,7 @@ impl ToolRouter {
     /// widen the deployment, agent, or route layers, and it is named in the
     /// policy identity hash so a tenant that later authors one changes it.
     async fn tenant_sandbox_policy(&self, tenant_id: TenantId) -> Result<SandboxPolicySnapshot> {
-        let Some(store) = self.tenant_sandbox_policy.as_ref() else {
+        let Some(store) = self.hands.tenant_sandbox_policy.as_ref() else {
             return Ok(SandboxPolicySnapshot::builtin(
                 BuiltinPolicyRevision::TenantUnset,
             ));

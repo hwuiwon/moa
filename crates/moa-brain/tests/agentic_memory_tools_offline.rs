@@ -17,7 +17,8 @@ use moa_core::{
     error::Result, events::Event, traits::ContextProcessor, traits::Identity, traits::IdentityType,
     traits::LLMProvider, traits::MemoryRetrievalExecutor, traits::SessionStore,
     types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::CompletionRequestView, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
     types::completion::StopReason, types::completion::TokenUsage,
     types::completion::ToolCallContent, types::completion::ToolInvocation,
     types::context::ProcessorOutput, types::context::WorkingContext,
@@ -137,6 +138,18 @@ impl CapturingProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    fn response() -> CompletionStream {
+        CompletionStream::from_response(CompletionResponse {
+            text: "done".to_string(),
+            content: vec![CompletionContent::Text("done".to_string())],
+            stop_reason: StopReason::EndTurn,
+            model: ModelId::new("claude-sonnet-4-6"),
+            usage: usage(20, 4),
+            duration_ms: 5,
+            thought_signature: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -151,15 +164,11 @@ impl LLMProvider for CapturingProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
         self.requests.lock().await.push(request);
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: "done".to_string(),
-            content: vec![CompletionContent::Text("done".to_string())],
-            stop_reason: StopReason::EndTurn,
-            model: ModelId::new("claude-sonnet-4-6"),
-            usage: usage(20, 4),
-            duration_ms: 5,
-            thought_signature: None,
-        }))
+        Ok(Self::response())
+    }
+
+    async fn complete_shared(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
+        Ok(Self::response())
     }
 }
 
@@ -181,6 +190,19 @@ impl LLMProvider for MemorySearchThenEndProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+
+    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.complete_view(&request).await
+    }
+}
+
+impl MemorySearchThenEndProvider {
+    async fn complete_view<R>(&self, request: &R) -> Result<CompletionStream>
+    where
+        R: CompletionRequestView + ?Sized,
+    {
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -201,7 +223,7 @@ impl LLMProvider for MemorySearchThenEndProvider {
             }
         } else {
             let tool_message = request
-                .messages
+                .messages()
                 .iter()
                 .find(|message| message.role == moa_core::types::context::MessageRole::Tool)
                 .expect("memory_search tool result must be replayed into context");
@@ -230,7 +252,10 @@ impl LLMProvider for MemorySearchThenEndProvider {
                 thought_signature: None,
             }
         };
-        requests.push(request);
+        requests.push(CompletionRequest {
+            messages: request.messages().to_vec(),
+            ..CompletionRequest::new("")
+        });
         Ok(CompletionStream::from_response(response))
     }
 }
@@ -400,8 +425,7 @@ async fn offered_memory_search_executes_and_returns_provenance() {
         })
         .expect("memory_search must produce a tool result event");
     let structured = tool_result
-        .structured
-        .as_ref()
+        .structured_payload()
         .expect("memory_search tool output must carry a structured payload");
     let hit = &structured["hits"][0];
     assert_eq!(hit["graph_uid"], json!(GRAPH_UID));

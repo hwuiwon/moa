@@ -2676,14 +2676,16 @@ mod tests {
             );
 
             let durable_error = router
-                .execute_authorized_with_recovery(
-                    &session,
-                    &identity,
-                    None,
-                    &connector_invocation(),
-                    moa_core::types::identifiers::ToolCallId::new(),
-                    None,
-                )
+                .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+                    session: &session,
+                    caller_identity: &identity,
+                    worker_id: None,
+                    invocation: &connector_invocation(),
+                    tool_call_id: moa_core::types::identifiers::ToolCallId::new(),
+                    active_canary: None,
+                    catalog: None,
+                    scope: moa_hands::ToolCallScope::unbounded(),
+                })
                 .await
                 .expect_err("the durable path must refuse the same capability");
             assert!(
@@ -2707,14 +2709,16 @@ mod tests {
         };
         assert!(production.call_origin.is_production());
         let secured = router
-            .execute_authorized_with_recovery(
-                &production,
-                &identity,
-                None,
-                &connector_invocation(),
-                moa_core::types::identifiers::ToolCallId::new(),
-                None,
-            )
+            .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+                session: &production,
+                caller_identity: &identity,
+                worker_id: None,
+                invocation: &connector_invocation(),
+                tool_call_id: moa_core::types::identifiers::ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
             .await
             .expect("production traffic keeps the same connector on the same router");
         assert_eq!(secured.safe_output.to_text(), "deal created");

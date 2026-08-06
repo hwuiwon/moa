@@ -296,6 +296,19 @@ mod tests {
         }
 
         async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+            self.complete_response().await
+        }
+
+        async fn complete_shared(
+            &self,
+            _request: moa_core::types::completion::SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
+            self.complete_response().await
+        }
+    }
+
+    impl MockProvider {
+        async fn complete_response(&self) -> Result<CompletionStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;

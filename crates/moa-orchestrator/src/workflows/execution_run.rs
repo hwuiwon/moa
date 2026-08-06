@@ -10,7 +10,7 @@ use moa_core::{
     events::ExecutionInputRequired,
     traits::LLMProvider,
     types::{
-        completion::{CompletionRequest, CompletionStream},
+        completion::{CompletionRequest, CompletionStream, SharedCompletionRequest},
         execution_planning::{
             EXECUTION_REPORT_MAX_BYTES, ExecutionPlanningAuditEnvelope,
             ExecutionPlanningAuditPayload,
@@ -608,6 +608,16 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_> {
         .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
         .into_inner();
         Ok(CompletionStream::from_response(response))
+    }
+
+    async fn complete_shared(
+        &self,
+        request: SharedCompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        // Restate's Json boundary owns a concrete request DTO; materialize it
+        // once at that boundary while preserving shared storage through all
+        // in-process failover providers.
+        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

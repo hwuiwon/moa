@@ -1,7 +1,7 @@
 //! Runtime registry for configured LLM provider families.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use moa_config::MoaConfig;
 use moa_config::QueryRewriteConfig;
@@ -54,12 +54,90 @@ enum ProviderSource {
 
 type ProviderFactory =
     Arc<dyn Fn(&str) -> moa_core::error::Result<Arc<dyn LLMProvider>> + Send + Sync>;
-type ProviderCache = Arc<RwLock<HashMap<ProviderCacheKey, ResolvedProvider>>>;
+type ProviderCache = Arc<Mutex<ProviderCacheState>>;
+
+/// Maximum number of inactive provider/model instances retained by one registry.
+///
+/// The cache is process-local and providers may be selected by extensible model
+/// ids, so a fixed capacity bounds credential-backed client retention without
+/// imposing a model catalog on routing. Active callers can temporarily prevent
+/// an entry from being evicted; in that case a new provider is returned without
+/// adding another cache-held reference.
+const PROVIDER_CACHE_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProviderCacheKey {
     id: ProviderId,
     model: ModelId,
+}
+
+/// Explicit bounded LRU state for resolved provider instances.
+#[derive(Default)]
+struct ProviderCacheState {
+    entries: HashMap<ProviderCacheKey, ResolvedProvider>,
+    recency: VecDeque<ProviderCacheKey>,
+}
+
+impl ProviderCacheState {
+    fn get(&mut self, key: &ProviderCacheKey) -> Option<ResolvedProvider> {
+        let provider = self.entries.get(key).cloned();
+        if provider.is_some() {
+            self.touch(key);
+        }
+        provider
+    }
+
+    fn insert_or_get(
+        &mut self,
+        key: ProviderCacheKey,
+        provider: ResolvedProvider,
+    ) -> ResolvedProvider {
+        if let Some(existing) = self.entries.get(&key).cloned() {
+            self.touch(&key);
+            return existing;
+        }
+
+        while self.entries.len() >= PROVIDER_CACHE_CAPACITY {
+            if !self.evict_inactive() {
+                // Every retained provider is active outside this cache. Do not
+                // evict one and create a second instance for the same live
+                // caller; returning this uncached value keeps the cache bounded
+                // while preserving safe ownership of the active provider.
+                return provider;
+            }
+        }
+
+        self.recency.push_back(key.clone());
+        let returned = provider.clone();
+        self.entries.insert(key, provider);
+        returned
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.recency.clear();
+    }
+
+    fn touch(&mut self, key: &ProviderCacheKey) {
+        if let Some(position) = self.recency.iter().position(|candidate| candidate == key) {
+            self.recency.remove(position);
+        }
+        self.recency.push_back(key.clone());
+    }
+
+    fn evict_inactive(&mut self) -> bool {
+        let Some(position) = self.recency.iter().position(|candidate| {
+            self.entries
+                .get(candidate)
+                .is_some_and(|resolved| Arc::strong_count(&resolved.provider) == 1)
+        }) else {
+            return false;
+        };
+        let Some(key) = self.recency.remove(position) else {
+            return false;
+        };
+        self.entries.remove(&key).is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -213,10 +291,9 @@ impl ProviderRegistry {
     ///
     /// This is the governed-provider composition point: the runtime calls it after building
     /// the registry when `[llm_dlp].tokenize_enabled` is set. When it is not called,
-    /// providers are resolved directly with zero added overhead. Governance is a
-    /// thin outer decorator shared across all resolution paths (main, auxiliary,
-    /// rewriter, and each failover fallback), so all LLM egress is governed
-    /// uniformly.
+    /// providers are resolved directly with zero added overhead. Resolved clients stay
+    /// unwrapped in the cache; governance is applied at each public provider boundary so
+    /// a main failover chain can place one governor around the whole chain.
     #[must_use]
     pub fn with_llm_dlp(
         mut self,
@@ -233,11 +310,14 @@ impl ProviderRegistry {
             classifier_model,
         )) as Arc<dyn PiiClassifier>;
         self.llm_dlp = Some(LlmDlpState { classifier });
-        // Any provider resolved before governance was attached would be cached
-        // un-governed; drop the cache so every subsequent resolution is wrapped.
-        if let Ok(mut cache) = self.provider_cache.write() {
-            cache.clear();
-        }
+        // Clear resolution state so every subsequent boundary applies the newly
+        // attached governance wrapper.
+        let mut cache = self
+            .provider_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.clear();
+        drop(cache);
         self
     }
 
@@ -493,8 +573,12 @@ impl ProviderRegistry {
         config: &MoaConfig,
     ) -> moa_core::error::Result<ModelRouter> {
         let main_model = config.model_for_task(ModelTask::MainLoop);
-        let main = self.provider_for_model(Some(main_model))?;
-        let main = self.apply_main_failover(config, main_model, main)?;
+        // Build the failover chain from raw cached clients, then govern the chain
+        // once. This keeps DLP's transformed request fields shared across every
+        // candidate instead of cloning and tokenizing them at each candidate.
+        let main = self.provider_for_model_raw(Some(main_model))?;
+        let main = self.apply_main_failover_raw(config, main_model, main)?;
+        let main = self.govern(main);
         let auxiliary = config
             .models
             .auxiliary
@@ -519,6 +603,26 @@ impl ProviderRegistry {
         config: &MoaConfig,
         primary_model: &str,
         main: Arc<dyn LLMProvider>,
+    ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
+        self.apply_main_failover_impl(config, primary_model, main, true)
+    }
+
+    /// Builds a failover chain from raw cached clients for one outer decorator.
+    fn apply_main_failover_raw(
+        &self,
+        config: &MoaConfig,
+        primary_model: &str,
+        main: Arc<dyn LLMProvider>,
+    ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
+        self.apply_main_failover_impl(config, primary_model, main, false)
+    }
+
+    fn apply_main_failover_impl(
+        &self,
+        config: &MoaConfig,
+        primary_model: &str,
+        main: Arc<dyn LLMProvider>,
+        govern_fallbacks: bool,
     ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
         if config.models.fallback_models.is_empty() {
             return Ok(main);
@@ -552,8 +656,12 @@ impl ProviderRegistry {
             match self
                 .resolve_provider_id(Some(entry))
                 .and_then(|(id, model)| {
-                    self.provider_for_id(id, &model)
-                        .map(|r| (r.provider, model))
+                    let resolved = if govern_fallbacks {
+                        self.provider_for_id(id, &model)?
+                    } else {
+                        self.provider_for_id_raw(id, &model)?
+                    };
+                    Ok((resolved.provider, model))
                 }) {
                 Ok(pair) => fallbacks.push(pair),
                 Err(error) => tracing::warn!(
@@ -572,8 +680,16 @@ impl ProviderRegistry {
         &self,
         requested_model: Option<&str>,
     ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
+        let provider = self.provider_for_model_raw(requested_model)?;
+        Ok(self.govern(provider))
+    }
+
+    fn provider_for_model_raw(
+        &self,
+        requested_model: Option<&str>,
+    ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
         let (id, model) = self.resolve_provider_id(requested_model)?;
-        Ok(self.provider_for_id(id, &model)?.provider)
+        Ok(self.provider_for_id_raw(id, &model)?.provider)
     }
 
     /// Resolves a provider instance for an already-selected provider id and model.
@@ -582,8 +698,21 @@ impl ProviderRegistry {
         id: ProviderId,
         model: &ModelId,
     ) -> moa_core::error::Result<ResolvedProvider> {
+        let resolved = self.provider_for_id_raw(id, model)?;
+        Ok(ResolvedProvider {
+            provider: self.govern(resolved.provider),
+            model: resolved.model,
+        })
+    }
+
+    fn provider_for_id_raw(
+        &self,
+        id: ProviderId,
+        model: &ModelId,
+    ) -> moa_core::error::Result<ResolvedProvider> {
         // Fail closed before any work: an active deployment policy must never let
-        // a non-compliant provider be built or cached.
+        // a non-compliant provider be built or cached. The cache stores raw clients
+        // so a failover chain can be governed once at its outer boundary.
         self.enforce_deployment_policy(id)?;
 
         let cache_key = ProviderCacheKey {
@@ -602,11 +731,10 @@ impl ProviderRegistry {
             .build(model.as_str())?;
 
         let resolved = ResolvedProvider {
-            provider: self.govern(provider),
+            provider,
             model: model.clone(),
         };
-        self.cache_provider(cache_key, resolved.clone());
-        Ok(resolved)
+        Ok(self.cache_provider(cache_key, resolved))
     }
 
     fn resolve_requested_model(
@@ -690,19 +818,23 @@ impl ProviderRegistry {
     }
 
     fn cached_provider(&self, key: &ProviderCacheKey) -> Option<ResolvedProvider> {
-        let cache = match self.provider_cache.read() {
-            Ok(cache) => cache,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        cache.get(key).cloned()
+        let mut cache = self
+            .provider_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(key)
     }
 
-    fn cache_provider(&self, key: ProviderCacheKey, provider: ResolvedProvider) {
-        let mut cache = match self.provider_cache.write() {
+    fn cache_provider(
+        &self,
+        key: ProviderCacheKey,
+        provider: ResolvedProvider,
+    ) -> ResolvedProvider {
+        let mut cache = match self.provider_cache.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
         };
-        cache.entry(key).or_insert(provider);
+        cache.insert_or_get(key, provider)
     }
 }
 
@@ -958,7 +1090,8 @@ mod tests {
     use moa_core::{
         traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::completion::SharedCompletionRequest, types::completion::StopReason,
+        types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
@@ -1012,6 +1145,13 @@ mod tests {
                 thought_signature: None,
             }))
         }
+
+        async fn complete_shared(
+            &self,
+            _request: SharedCompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
+            self.complete(CompletionRequest::new("shared-test")).await
+        }
     }
 
     fn provider(model: &'static str) -> Arc<dyn LLMProvider> {
@@ -1027,6 +1167,15 @@ mod tests {
                 model: model.to_string(),
             }))
         })
+    }
+
+    fn cache_len(registry: &ProviderRegistry) -> usize {
+        registry
+            .provider_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .len()
     }
 
     #[test]
@@ -1095,6 +1244,98 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &third));
         assert_eq!(builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn provider_registry_reuses_hot_model_concurrently() {
+        // Pins: a hot model remains one shared client for concurrent registry
+        // callers, even though provider construction itself is synchronous.
+        const CALLERS: usize = 8;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            provider_descriptor(ProviderId::OpenAI),
+            model_factory(builds.clone()),
+        );
+        let hot = registry
+            .provider_for_model(Some("gpt-hot-concurrent"))
+            .expect("the hot model should build once");
+        let registry = Arc::new(registry);
+        let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                registry
+                    .provider_for_model(Some("gpt-hot-concurrent"))
+                    .expect("the hot model should remain routable")
+            }));
+        }
+
+        for handle in handles {
+            let resolved = handle
+                .join()
+                .expect("concurrent provider lookup should not panic");
+            assert!(
+                Arc::ptr_eq(&hot, &resolved),
+                "hot-key lookups must reuse the cached provider instance"
+            );
+        }
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "a cached hot model must not be rebuilt by concurrent readers"
+        );
+    }
+
+    #[test]
+    fn provider_cache_reclaims_inactive_models_and_keeps_active_clients() {
+        // Pins: model-id extensibility does not create an unbounded cache, while
+        // an active provider Arc prevents its cache entry from being evicted.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            provider_descriptor(ProviderId::OpenAI),
+            model_factory(builds.clone()),
+        );
+
+        let active = registry
+            .provider_for_model(Some("gpt-active-cache-client"))
+            .expect("the active model should build");
+        let inactive = registry
+            .provider_for_model(Some("gpt-inactive-cache-client"))
+            .expect("the inactive model should build");
+        drop(inactive);
+
+        for index in 0..super::PROVIDER_CACHE_CAPACITY {
+            let model = format!("gpt-extensible-{index}");
+            let _ = registry
+                .provider_for_model(Some(&model))
+                .expect("extensible OpenAI model ids must remain routable");
+        }
+        assert!(
+            cache_len(&registry) <= super::PROVIDER_CACHE_CAPACITY,
+            "provider cache must stay within its configured capacity"
+        );
+
+        let active_again = registry
+            .provider_for_model(Some("gpt-active-cache-client"))
+            .expect("the active model must remain routable");
+        assert!(
+            Arc::ptr_eq(&active, &active_again),
+            "an active provider Arc must not be evicted from the cache"
+        );
+
+        let builds_before_reclaimed_lookup = builds.load(Ordering::SeqCst);
+        let _recreated = registry
+            .provider_for_model(Some("gpt-inactive-cache-client"))
+            .expect("an evicted inactive model must remain routable");
+        assert!(
+            builds.load(Ordering::SeqCst) > builds_before_reclaimed_lookup,
+            "an inactive model evicted by capacity must be rebuilt on a later lookup"
+        );
     }
 
     #[test]

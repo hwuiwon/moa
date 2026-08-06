@@ -1549,7 +1549,7 @@ mod tests {
             Instant::now(),
         );
         assert!(!partial.is_error, "partial success is not an error");
-        let data = partial.structured.expect("structured payload");
+        let data = partial.structured_payload().expect("structured payload");
         assert_eq!(data["stored"], 1);
         assert_eq!(data["rejected"], 1);
         assert_eq!(data["results"][0]["status"], "stored");
@@ -1575,7 +1575,10 @@ mod tests {
                 .to_text()
                 .contains("Do not retry this memory tool in this turn")
         );
-        assert_eq!(all_rejected.structured.expect("payload")["stored"], 0);
+        assert_eq!(
+            all_rejected.structured_payload().expect("payload")["stored"],
+            0
+        );
     }
 
     #[tokio::test]
@@ -1605,7 +1608,7 @@ mod tests {
             output.is_error,
             "every item rejected marks the batch failed"
         );
-        let data = output.structured.expect("structured payload");
+        let data = output.structured_payload().expect("structured payload");
         assert_eq!(data["stored"], 0);
         assert_eq!(data["rejected"], 3);
         let results = data["results"].as_array().expect("results array");

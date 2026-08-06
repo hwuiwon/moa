@@ -17,7 +17,8 @@ use moa_brain::pipeline::runtime_context::{Clock, RuntimeContextProcessor};
 use moa_brain::pipeline::tools::ToolDefinitionProcessor;
 use moa_brain::query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
 use moa_brain::{
-    GraphMemoryPipelineOptions,
+    DigestStageInput, GraphMemoryPipelineStages, GraphMemoryStageInput, HistoryStageInput,
+    QueryRewriteStageInput, RuntimeStageInput, SkillInjectionStageInput,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
 use moa_config::MoaConfig;
@@ -28,12 +29,13 @@ use moa_core::{
     error::Result, traits::ContextProcessor, traits::Identity, traits::IdentityType,
     traits::LLMProvider, traits::NullLineageHandle, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
-    types::completion::TokenUsage, types::contact::ContactId, types::context::ContextMessage,
-    types::context::MessageRole, types::context::TURN_ID_METADATA_KEY,
-    types::context::WorkingContext, types::identifiers::ModelId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::model::ModelCapabilities, types::observability::stable_prefix_fingerprint,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::completion::StopReason, types::completion::TokenUsage, types::contact::ContactId,
+    types::context::ContextMessage, types::context::MessageRole,
+    types::context::TURN_ID_METADATA_KEY, types::context::WorkingContext,
+    types::identifiers::ModelId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::model::ModelCapabilities,
+    types::observability::stable_prefix_fingerprint,
 };
 use moa_crypto::LocalKmsProvider;
 use moa_db::ScopedConn;
@@ -67,18 +69,27 @@ async fn digest_processor_registers_at_documented_position() {
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
         session_store,
-        GraphMemoryPipelineOptions {
-            graph_pool: pool,
-            kms: Arc::new(LocalKmsProvider::new()),
-            shared_graph_memory_retriever: None,
-            retrieval_embedder: None,
-            shared_skill_injector: None,
-            segment_store: None,
-            compaction_llm_provider: None,
-            query_rewrite_llm_provider: None,
-            identity_prompt_override: None,
-            tool_schemas: Vec::new(),
-            lineage: Arc::new(NullLineageHandle),
+        GraphMemoryPipelineStages {
+            history: HistoryStageInput {
+                compaction_llm_provider: None,
+            },
+            graph_memory: GraphMemoryStageInput::Local {
+                graph_pool: pool.clone(),
+                kms: Arc::new(LocalKmsProvider::new()),
+                retrieval_embedder: None,
+                lineage: Arc::new(NullLineageHandle),
+            },
+            skill_injection: SkillInjectionStageInput::Local {
+                graph_pool: pool.clone(),
+                segment_store: None,
+                embedder: None,
+            },
+            query_rewrite: QueryRewriteStageInput { llm_provider: None },
+            runtime: RuntimeStageInput {
+                identity_prompt_override: None,
+                tool_schemas: Vec::new(),
+            },
+            digest: DigestStageInput { graph_pool: pool },
         },
     );
     let names = pipeline.stage_names();
@@ -575,6 +586,16 @@ impl LLMProvider for RewriteProvider {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        Ok(self.response_stream())
+    }
+
+    async fn complete_shared(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
+        Ok(self.response_stream())
+    }
+}
+
+impl RewriteProvider {
+    fn response_stream(&self) -> CompletionStream {
         let response = CompletionResponse {
             text: self.response.clone(),
             content: vec![CompletionContent::Text(self.response.clone())],
@@ -584,7 +605,7 @@ impl LLMProvider for RewriteProvider {
             duration_ms: 1,
             thought_signature: None,
         };
-        Ok(CompletionStream::from_response(response))
+        CompletionStream::from_response(response)
     }
 }
 

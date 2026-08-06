@@ -9,8 +9,8 @@ use super::tools::{
 use super::*;
 use crate::core::schema::compile_for_anthropic_output;
 
-pub(super) fn build_request_body(
-    request: &CompletionRequest,
+pub(super) fn build_request_body<R: CompletionRequestView + ?Sized>(
+    request: &R,
     model: &str,
     capabilities: &ModelCapabilities,
     web_search_enabled: bool,
@@ -23,21 +23,21 @@ pub(super) fn build_request_body(
     // before this index replay byte-identically on later turns, so the last
     // built message under the boundary gets a moving cache breakpoint.
     let stable_history_end = request
-        .metadata
+        .metadata()
         .get(moa_core::types::completion::STABLE_HISTORY_END_METADATA_KEY)
         .and_then(Value::as_u64)
         .map(|value| value as usize);
     let mut frozen_history_position = None;
 
     let mut index = 0;
-    while index < request.messages.len() {
+    while index < request.messages().len() {
         if frozen_history_position.is_none()
             && stable_history_end.is_some_and(|boundary| index >= boundary)
             && !messages.is_empty()
         {
             frozen_history_position = Some(messages.len() - 1);
         }
-        let message = &request.messages[index];
+        let message = &request.messages()[index];
         if in_leading_system_prefix && message.role == MessageRole::System {
             system_messages.push(anthropic_text_block(message.content.clone()));
             index += 1;
@@ -52,7 +52,7 @@ pub(super) fn build_request_body(
         }
 
         if message.tool_invocation.is_some() {
-            index += append_tool_exchange_or_text(&mut messages, &request.messages[index..])?;
+            index += append_tool_exchange_or_text(&mut messages, &request.messages()[index..])?;
             continue;
         }
 
@@ -66,7 +66,7 @@ pub(super) fn build_request_body(
         index += 1;
     }
     if frozen_history_position.is_none()
-        && stable_history_end.is_some_and(|boundary| boundary >= request.messages.len())
+        && stable_history_end.is_some_and(|boundary| boundary >= request.messages().len())
         && !messages.is_empty()
     {
         frozen_history_position = Some(messages.len() - 1);
@@ -79,7 +79,7 @@ pub(super) fn build_request_body(
     }
 
     let max_tokens = request
-        .max_output_tokens
+        .max_output_tokens()
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
         .min(capabilities.max_output);
 
@@ -88,17 +88,18 @@ pub(super) fn build_request_body(
     body.insert("max_tokens".to_string(), json!(max_tokens));
     body.insert("stream".to_string(), Value::Bool(true));
 
-    if let Some(temperature) = request.temperature {
+    if let Some(temperature) = request.temperature() {
         body.insert("temperature".to_string(), json!(temperature));
     }
 
     let mut tools = request
-        .tools
+        .tools()
         .iter()
         .map(anthropic_tool_from_schema)
         .collect::<Vec<_>>();
     if web_search_enabled
-        && request.native_web_search != moa_core::types::completion::NativeWebSearchPolicy::Disabled
+        && request.native_web_search()
+            != moa_core::types::completion::NativeWebSearchPolicy::Disabled
     {
         tools.extend(
             capabilities
@@ -129,7 +130,7 @@ pub(super) fn build_request_body(
     if !tools.is_empty() {
         body.insert("tools".to_string(), Value::Array(tools));
     }
-    if let Some(response_format) = request.response_format.as_ref() {
+    if let Some(response_format) = request.response_format() {
         body.insert(
             "output_config".to_string(),
             anthropic_output_config(response_format),
@@ -267,9 +268,9 @@ struct CacheTokenEstimate {
 }
 
 impl CacheTokenEstimate {
-    fn from_request(request: &CompletionRequest) -> Self {
+    fn from_request<R: CompletionRequestView + ?Sized>(request: &R) -> Self {
         let tool_tokens = request
-            .tools
+            .tools()
             .iter()
             .map(|tool| estimate_text_tokens(&tool.to_string()))
             .sum::<usize>();
@@ -277,7 +278,7 @@ impl CacheTokenEstimate {
         let mut system_prefix_tokens = 0;
         let mut all_message_tokens = 0;
         let mut in_leading_system_prefix = true;
-        for message in &request.messages {
+        for message in request.messages() {
             let tokens = estimate_text_tokens(&message.content);
             all_message_tokens += tokens;
             if in_leading_system_prefix && message.role == MessageRole::System {
