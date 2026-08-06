@@ -45,11 +45,8 @@ kubectl --context kind-moa-local -n moa-system port-forward service/moa-lgtm \
 
 Open `http://localhost:3000` for Grafana. The local Postgres datasource is
 provisioned at startup. Dashboards remain single-sourced under
-`dashboards/grafana`; the Phase 0 report helper imports all of them through the
-canonical `scripts/observability/sync-grafana-dashboards.sh` path after Grafana
-starts. They are not copied into this Kustomize overlay.
-
-After generating representative local traffic, collect the Phase 0 inventory:
+`dashboards/grafana` After generating representative local traffic,
+collect the Phase 0 inventory:
 
 ```bash
 bash k8s/overlays/local/phase0-observability-report.sh

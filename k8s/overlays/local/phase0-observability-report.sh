@@ -88,8 +88,7 @@ service_account_token="$(curl --silent --show-error --fail \
   || fail "Grafana service-account token creation returned no token"
 env \
   GRAFANA_URL="${GRAFANA_URL}" \
-  GRAFANA_SERVICE_ACCOUNT_TOKEN="${service_account_token}" \
-  bash "${repo_root}/scripts/observability/sync-grafana-dashboards.sh"
+  GRAFANA_SERVICE_ACCOUNT_TOKEN="${service_account_token}"
 unset service_account_token
 
 prometheus_query() {

@@ -21,7 +21,3 @@ The workflow requires these GitHub Actions secrets:
   permission to create and update dashboards in the destination folder.
 - `GRAFANA_FOLDER_UID` (optional): the UID of the destination folder. When it is
   omitted, Grafana imports dashboards into the General folder.
-
-For an intentional local sync, export the same values and run
-`bash scripts/observability/sync-grafana-dashboards.sh`. The script never reads
-Kubernetes credentials or cluster Secrets.

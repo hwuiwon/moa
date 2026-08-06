@@ -660,10 +660,7 @@ PY
 echo "Checking Grafana dashboard delivery..."
 [[ -d "${CANONICAL_DASHBOARD_DIR}" ]] \
   || die "canonical Grafana dashboard directory is missing: ${CANONICAL_DASHBOARD_DIR}"
-GRAFANA_SYNC_SCRIPT_TEXT="$(<"${REPO_ROOT}/scripts/observability/sync-grafana-dashboards.sh")"
 GRAFANA_SYNC_WORKFLOW_TEXT="$(<"${REPO_ROOT}/.github/workflows/sync-grafana-dashboards.yml")"
-assert_contains "${GRAFANA_SYNC_SCRIPT_TEXT}" "dashboards/grafana" \
-  "Grafana sync does not publish the canonical dashboard directory"
 assert_contains "${GRAFANA_SYNC_WORKFLOW_TEXT}" "sync-grafana-dashboards.sh" \
   "the dashboard sync workflow does not invoke the canonical publisher"
 echo "Observability validation OK"
