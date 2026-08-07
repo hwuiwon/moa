@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use moa_core::{
     traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::JsonResponseFormat,
-    types::context::ContextMessage,
+    types::completion::SharedCompletionRequest, types::context::ContextMessage,
 };
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use serde_json::json;
@@ -29,7 +29,7 @@ impl LiveProvider {
 
     async fn complete(
         &self,
-        request: CompletionRequest,
+        request: SharedCompletionRequest,
     ) -> moa_core::error::Result<moa_core::types::completion::CompletionStream> {
         match self {
             Self::OpenAi(provider) => provider.complete(request).await,
@@ -153,6 +153,7 @@ async fn complete_until(
     attempts: usize,
     mut predicate: impl FnMut(&str) -> bool,
 ) -> moa_core::types::completion::CompletionResponse {
+    let request = request.into_shared();
     let mut last_response = None;
     for attempt in 0..attempts.max(1) {
         let response = provider
@@ -182,9 +183,10 @@ async fn live_providers_answer_simple_prompt_across_available_keys() {
 
     for provider in providers {
         let response = provider
-            .complete(CompletionRequest::simple(
-                "What is 2+2? Respond with just the answer.",
-            ))
+            .complete(
+                CompletionRequest::simple("What is 2+2? Respond with just the answer.")
+                    .into_shared(),
+            )
             .await
             .unwrap_or_else(|error| {
                 panic!("{} simple completion failed: {error}", provider.label())
@@ -241,7 +243,11 @@ async fn live_openai_structured_output_returns_direct_response() {
 
     let started = Instant::now();
     let response = timeout(Duration::from_secs(10), async {
-        provider.complete(request).await?.collect().await
+        provider
+            .complete(request.into_shared())
+            .await?
+            .collect()
+            .await
     })
     .await
     .expect("OpenAI structured output request should finish within 10 seconds")
@@ -278,19 +284,22 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
         let mut metadata = HashMap::new();
         metadata.insert("suite".to_string(), json!("live-provider-matrix"));
         let response = provider
-            .complete(CompletionRequest {
-                model: None,
-                messages: vec![moa_core::types::context::ContextMessage::user(format!(
-                    "You must call the emit_token tool exactly once with token \"{token}\". \
+            .complete(
+                CompletionRequest {
+                    model: None,
+                    messages: vec![moa_core::types::context::ContextMessage::user(format!(
+                        "You must call the emit_token tool exactly once with token \"{token}\". \
                      Do not answer in plain text before the tool call."
-                ))],
-                tools: vec![emit_token_tool()],
-                max_output_tokens: Some(256),
-                temperature: None,
-                response_format: None,
-                native_web_search: Default::default(),
-                metadata,
-            })
+                    ))],
+                    tools: vec![emit_token_tool()],
+                    max_output_tokens: Some(256),
+                    temperature: None,
+                    response_format: None,
+                    native_web_search: Default::default(),
+                    metadata,
+                }
+                .into_shared(),
+            )
             .await
             .unwrap_or_else(|error| {
                 panic!("{} tool-call request failed: {error}", provider.label())
@@ -336,9 +345,12 @@ async fn live_providers_can_use_native_web_search_across_available_keys() {
     for provider in providers {
         let response = timeout(
             Duration::from_secs(90),
-            provider.complete(CompletionRequest::simple(
-                "Use web search to find one current news headline from today and cite the source in one short sentence.",
-            )),
+            provider.complete(
+                CompletionRequest::simple(
+                    "Use web search to find one current news headline from today and cite the source in one short sentence.",
+                )
+                .into_shared(),
+            ),
         )
         .await
         .unwrap_or_else(|_| panic!("{} web-search request timed out", provider.label()))
@@ -421,9 +433,12 @@ async fn live_providers_stream_incrementally_across_available_keys() {
 
     for provider in providers {
         let mut stream = provider
-            .complete(CompletionRequest::simple(
-                "Count from 1 to 5 on a single line, comma-separated. No other words.",
-            ))
+            .complete(
+                CompletionRequest::simple(
+                    "Count from 1 to 5 on a single line, comma-separated. No other words.",
+                )
+                .into_shared(),
+            )
             .await
             .unwrap_or_else(|e| panic!("{} streaming request failed: {e}", provider.label()));
 
@@ -467,9 +482,10 @@ async fn live_providers_report_token_usage_across_available_keys() {
 
     for provider in providers {
         let response = provider
-            .complete(CompletionRequest::simple(
-                "Name three primary colors as a comma-separated list.",
-            ))
+            .complete(
+                CompletionRequest::simple("Name three primary colors as a comma-separated list.")
+                    .into_shared(),
+            )
             .await
             .unwrap_or_else(|e| panic!("{} usage request failed: {e}", provider.label()))
             .collect()
@@ -502,19 +518,22 @@ async fn live_providers_truncate_at_max_output_tokens_across_available_keys() {
 
     for provider in providers {
         let response = provider
-            .complete(CompletionRequest {
-                model: None,
-                messages: vec![ContextMessage::user(
-                    "Describe the history of the Roman Empire in full detail.",
-                )],
-                tools: Vec::new(),
-                // OpenAI's Responses API rejects max_output_tokens < 16, so use the shared floor.
-                max_output_tokens: Some(16),
-                temperature: None,
-                response_format: None,
-                native_web_search: Default::default(),
-                metadata: HashMap::new(),
-            })
+            .complete(
+                CompletionRequest {
+                    model: None,
+                    messages: vec![ContextMessage::user(
+                        "Describe the history of the Roman Empire in full detail.",
+                    )],
+                    tools: Vec::new(),
+                    // OpenAI's Responses API rejects max_output_tokens < 16, so use the shared floor.
+                    max_output_tokens: Some(16),
+                    temperature: None,
+                    response_format: None,
+                    native_web_search: Default::default(),
+                    metadata: HashMap::new(),
+                }
+                .into_shared(),
+            )
             .await
             .unwrap_or_else(|e| panic!("{} max-tokens request failed: {e}", provider.label()))
             .collect()

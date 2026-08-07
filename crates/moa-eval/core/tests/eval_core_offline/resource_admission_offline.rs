@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::traits::LLMProvider;
 use moa_core::types::completion::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, StopReason,
-    TokenUsage,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+    SharedCompletionRequest, StopReason, TokenUsage,
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::types::model::{ModelCapabilities, TokenPricing, ToolCallFormat};
@@ -73,7 +73,7 @@ impl LLMProvider for ScriptedProvider {
 
     async fn complete(
         &self,
-        _request: CompletionRequest,
+        _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(CompletionStream::from_response(CompletionResponse {
@@ -90,13 +90,6 @@ impl LLMProvider for ScriptedProvider {
             duration_ms: 1,
             thought_signature: None,
         }))
-    }
-
-    async fn complete_shared(
-        &self,
-        _request: moa_core::types::completion::SharedCompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete(CompletionRequest::new("shared-test")).await
     }
 }
 
@@ -199,7 +192,7 @@ async fn reserve_dispatch_reconcile(
     let reservation = ledger.try_reserve(request, Utc::now())?;
 
     let response = provider
-        .complete(CompletionRequest::new("hello"))
+        .complete(CompletionRequest::new("hello").into_shared())
         .await
         .expect("scripted provider")
         .collect()

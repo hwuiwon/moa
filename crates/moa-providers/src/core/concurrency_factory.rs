@@ -24,7 +24,7 @@
 //! [`ProviderCoordination`]. Serializable configuration never carries a live
 //! store handle, and there is no process-global install ordering.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
@@ -99,7 +99,147 @@ impl CoordinatedControl {
 /// This is a registry of process-local semaphores, not coordination state: it
 /// exists so two independently-constructed limiters for one credential share a
 /// ceiling inside this process. Cross-replica coordination never goes through it.
-static LOCAL_BUDGETS: OnceLock<Mutex<HashMap<String, Weak<Semaphore>>>> = OnceLock::new();
+static LOCAL_BUDGETS: OnceLock<Mutex<LocalBudgetRegistry>> = OnceLock::new();
+
+/// Dead process-local semaphore entries inspected on one new-key lookup.
+const LOCAL_BUDGET_RECLAIM_BATCH: usize = 8;
+
+/// Cache-only rate guards inspected on one new-key lookup.
+const RATE_GUARD_RECLAIM_BATCH: usize = 8;
+
+#[derive(Default)]
+struct LocalBudgetRegistry {
+    entries: HashMap<String, Weak<Semaphore>>,
+    cleanup_order: VecDeque<String>,
+    cleanup_cursor: usize,
+    #[cfg(test)]
+    cleanup_inspections: usize,
+}
+
+impl LocalBudgetRegistry {
+    fn semaphore(&mut self, key: &str, limit: usize) -> Arc<Semaphore> {
+        if let Some(semaphore) = self.entries.get(key).and_then(Weak::upgrade) {
+            return semaphore;
+        }
+        if self.entries.contains_key(key) {
+            self.remove(key);
+        }
+
+        self.reclaim_dead(LOCAL_BUDGET_RECLAIM_BATCH);
+        let semaphore = Arc::new(Semaphore::new(limit));
+        self.entries
+            .insert(key.to_string(), Arc::downgrade(&semaphore));
+        self.cleanup_order.push_back(key.to_string());
+        semaphore
+    }
+
+    fn reclaim_dead(&mut self, budget: usize) {
+        let inspections = budget.min(self.cleanup_order.len());
+        for _ in 0..inspections {
+            if self.cleanup_order.is_empty() {
+                self.cleanup_cursor = 0;
+                return;
+            }
+            if self.cleanup_cursor >= self.cleanup_order.len() {
+                self.cleanup_cursor = 0;
+            }
+            #[cfg(test)]
+            {
+                self.cleanup_inspections += 1;
+            }
+            let Some(key) = self.cleanup_order.get(self.cleanup_cursor).cloned() else {
+                return;
+            };
+            let dead = self
+                .entries
+                .get(&key)
+                .is_none_or(|semaphore| semaphore.strong_count() == 0);
+            if dead {
+                self.entries.remove(&key);
+                self.cleanup_order.remove(self.cleanup_cursor);
+            } else {
+                self.cleanup_cursor += 1;
+            }
+        }
+        if self.cleanup_cursor >= self.cleanup_order.len() {
+            self.cleanup_cursor = 0;
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+        if let Some(position) = self
+            .cleanup_order
+            .iter()
+            .position(|candidate| candidate == key)
+        {
+            self.cleanup_order.remove(position);
+            if position < self.cleanup_cursor {
+                self.cleanup_cursor -= 1;
+            }
+            if self.cleanup_cursor >= self.cleanup_order.len() {
+                self.cleanup_cursor = 0;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct RateGuardCache {
+    entries: HashMap<String, RateGuard>,
+    cleanup_order: VecDeque<String>,
+    cleanup_cursor: usize,
+    #[cfg(test)]
+    cleanup_inspections: usize,
+}
+
+impl RateGuardCache {
+    fn get(&self, key: &str) -> Option<RateGuard> {
+        self.entries.get(key).cloned()
+    }
+
+    fn get_or_insert_with(&mut self, key: String, build: impl FnOnce() -> RateGuard) -> RateGuard {
+        if let Some(guard) = self.get(&key) {
+            return guard;
+        }
+
+        self.reclaim_stale(RATE_GUARD_RECLAIM_BATCH);
+        let guard = build();
+        self.entries.insert(key.clone(), guard.clone());
+        self.cleanup_order.push_back(key);
+        guard
+    }
+
+    fn reclaim_stale(&mut self, budget: usize) {
+        let inspections = budget.min(self.cleanup_order.len());
+        for _ in 0..inspections {
+            if self.cleanup_order.is_empty() {
+                self.cleanup_cursor = 0;
+                return;
+            }
+            if self.cleanup_cursor >= self.cleanup_order.len() {
+                self.cleanup_cursor = 0;
+            }
+            #[cfg(test)]
+            {
+                self.cleanup_inspections += 1;
+            }
+            let Some(key) = self.cleanup_order.get(self.cleanup_cursor).cloned() else {
+                return;
+            };
+            let reclaimable = self.entries.get(&key).is_none_or(RateGuard::is_reclaimable);
+            if reclaimable {
+                self.entries.remove(&key);
+                self.cleanup_order.remove(self.cleanup_cursor);
+            } else {
+                self.cleanup_cursor += 1;
+            }
+        }
+        if self.cleanup_cursor >= self.cleanup_order.len() {
+            self.cleanup_cursor = 0;
+        }
+    }
+}
 
 /// Redis coordination commands should be short atomic operations. A fixed bound
 /// ensures the configured failure policy decides a hung store instead of waiting
@@ -111,20 +251,9 @@ const COORDINATION_OPERATION_TIMEOUT: Duration = Duration::from_millis(250);
 /// The first caller for a key fixes its size; later limiters for the same
 /// `(provider, credential)` clone that one semaphore, so kinds share the budget.
 fn local_budget_semaphore(key: &str, limit: usize) -> Arc<Semaphore> {
-    let registry = LOCAL_BUDGETS.get_or_init(|| Mutex::new(HashMap::new()));
+    let registry = LOCAL_BUDGETS.get_or_init(|| Mutex::new(LocalBudgetRegistry::default()));
     let mut budgets = registry.lock().unwrap_or_else(PoisonError::into_inner);
-
-    // The registry keeps only weak references. An expired key is therefore
-    // reclaimable as soon as the next limiter is constructed, while a live
-    // semaphore remains the first-created budget for every active limiter.
-    budgets.retain(|_, semaphore| semaphore.strong_count() > 0);
-    if let Some(semaphore) = budgets.get(key).and_then(Weak::upgrade) {
-        return semaphore;
-    }
-
-    let semaphore = Arc::new(Semaphore::new(limit));
-    budgets.insert(key.to_string(), Arc::downgrade(&semaphore));
-    semaphore
+    budgets.semaphore(key, limit)
 }
 
 /// Records that a distributed control fell back to its process-local bound.
@@ -184,7 +313,7 @@ pub(crate) struct ProviderCoordination {
     concurrency: ProviderConcurrencyConfig,
     pacing: ProviderPacingConfig,
     store: Option<Arc<dyn RuntimeCacheStore>>,
-    guards: Arc<Mutex<HashMap<String, RateGuard>>>,
+    guards: Arc<Mutex<RateGuardCache>>,
 }
 
 impl ProviderCoordination {
@@ -241,7 +370,7 @@ impl ProviderCoordination {
             concurrency,
             pacing,
             store,
-            guards: Arc::new(Mutex::new(HashMap::new())),
+            guards: Arc::new(Mutex::new(RateGuardCache::default())),
         })
     }
 
@@ -340,22 +469,15 @@ impl ProviderCoordination {
         let identity = QuotaIdentity::new(provider, credential);
         let key = identity.guard_cache_key(kind.label());
         let mut guards = self.guards.lock().unwrap_or_else(PoisonError::into_inner);
-        // A cache entry is the sole owner once every provider instance and
-        // caller has dropped its clone. Remove only those entries so active
-        // clients continue to share the same local cooldown and retry budget.
-        guards.retain(|_, guard| !guard.is_cache_only());
-        guards
-            .entry(key)
-            .or_insert_with(|| {
-                RateGuard::new(self.pacing.clone())
-                    .with_class(kind.label())
-                    .with_shared_quota(
-                        self.coordinated_store(CoordinatedControl::Cooldown),
-                        identity,
-                        self.failure_policy(),
-                    )
-            })
-            .clone()
+        guards.get_or_insert_with(key, || {
+            RateGuard::new(self.pacing.clone())
+                .with_class(kind.label())
+                .with_shared_quota(
+                    self.coordinated_store(CoordinatedControl::Cooldown),
+                    identity,
+                    self.failure_policy(),
+                )
+        })
     }
 }
 
@@ -526,24 +648,30 @@ mod tests {
         format!("moa:test:{label}:{sequence}")
     }
 
-    fn local_budget_contains(key: &str) -> bool {
-        let registry = LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-        let budgets = registry.lock().unwrap_or_else(PoisonError::into_inner);
-        budgets.contains_key(key)
-    }
-
-    fn local_budget_key_count() -> usize {
-        let registry = LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-        let budgets = registry.lock().unwrap_or_else(PoisonError::into_inner);
-        budgets.len()
-    }
-
     fn guard_cache_len(coordination: &ProviderCoordination) -> usize {
         coordination
             .guards
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .entries
             .len()
+    }
+
+    fn guard_cache_contains(coordination: &ProviderCoordination, key: &str) -> bool {
+        coordination
+            .guards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .contains_key(key)
+    }
+
+    fn guard_cleanup_inspections(coordination: &ProviderCoordination) -> usize {
+        coordination
+            .guards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cleanup_inspections
     }
 
     /// Minimal in-memory coordination store for the global-scope factory test.
@@ -636,7 +764,8 @@ mod tests {
     fn poisoned_local_budget_registry_recovers_without_panicking() {
         // Pins: a poisoned process-local registry remains usable and does not
         // turn a recoverable mutex failure into a library panic.
-        let registry = LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let registry =
+            LOCAL_BUDGETS.get_or_init(|| std::sync::Mutex::new(LocalBudgetRegistry::default()));
         let poison = std::thread::spawn(move || {
             let _guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
             panic!("intentional provider-budget mutex poison");
@@ -653,32 +782,51 @@ mod tests {
     }
 
     #[test]
-    fn expired_local_budget_entries_are_reclaimed_on_next_admission() {
-        // Pins: many distinct live credentials are visible while their limiters
-        // are active, then a later admission removes every dead weak entry.
-        const DISTINCT_KEYS: usize = 256;
-        let mut live = Vec::with_capacity(DISTINCT_KEYS);
-        let mut keys = Vec::with_capacity(DISTINCT_KEYS);
+    fn process_local_semaphore_cleanup_is_amortized_and_skipped_on_live_hits() {
+        // Pins: an existing local budget returns the first live semaphore and
+        // limit without scanning dead peers; each new key performs only one
+        // bounded cleanup batch, and repeated misses eventually reclaim old keys.
+        const DISTINCT_KEYS: usize = LOCAL_BUDGET_RECLAIM_BATCH * 4;
+        let mut registry = LocalBudgetRegistry::default();
+        let first = registry.semaphore("existing", 1);
+        let mut dead = Vec::with_capacity(DISTINCT_KEYS);
+        let mut dead_keys = Vec::with_capacity(DISTINCT_KEYS);
         for index in 0..DISTINCT_KEYS {
-            let key = test_budget_key(&format!("reclaim-{index}"));
-            let semaphore = local_budget_semaphore(&key, 1);
-            keys.push(key.clone());
-            live.push((key, semaphore));
+            let key = format!("dead-{index}");
+            dead_keys.push(key.clone());
+            dead.push(registry.semaphore(&key, 1));
         }
-        let live_key_count = local_budget_key_count();
-        assert!(
-            live_key_count >= DISTINCT_KEYS,
-            "the diagnostic count must include every active distinct budget key"
+        drop(dead);
+
+        let inspections_before_hit = registry.cleanup_inspections;
+        let same = registry.semaphore("existing", 99);
+        assert!(Arc::ptr_eq(&first, &same));
+        assert_eq!(
+            registry.cleanup_inspections, inspections_before_hit,
+            "a live existing-key lookup must not inspect unrelated weak entries"
         );
-        drop(live);
 
-        let trigger_key = test_budget_key("reclaim-trigger");
-        let trigger = local_budget_semaphore(&trigger_key, 1);
-        drop(trigger);
-
+        let entries_before_miss = registry.entries.len();
+        let inspections_before_miss = registry.cleanup_inspections;
+        drop(registry.semaphore("trigger-0", 1));
+        assert_eq!(
+            registry.cleanup_inspections - inspections_before_miss,
+            LOCAL_BUDGET_RECLAIM_BATCH,
+            "one miss must inspect exactly the amortized cleanup batch"
+        );
         assert!(
-            keys.iter().all(|key| !local_budget_contains(key)),
-            "expired semaphore keys must be reclaimed during the next admission"
+            registry.entries.len() > 2 && registry.entries.len() < entries_before_miss + 1,
+            "one cleanup batch should reclaim some, but not all, dead entries"
+        );
+
+        for index in 1..=DISTINCT_KEYS {
+            drop(registry.semaphore(&format!("trigger-{index}"), 1));
+        }
+        assert!(
+            dead_keys
+                .iter()
+                .all(|key| !registry.entries.contains_key(key)),
+            "bounded cleanup passes must eventually visit every dead semaphore"
         );
     }
 
@@ -963,6 +1111,163 @@ mod tests {
             "inactive guard entries must be reclaimed before admitting a new key"
         );
         drop(replacement);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_only_guard_retains_live_cooldown_until_expiry() {
+        // Pins: provider-client churn cannot discard a credential cooldown just
+        // because the coordination cache owns the guard's final strong handle.
+        let policy = coordination(ProviderConcurrencyConfig::default(), None);
+        let credential = "cooldown-retention-key";
+        let cache_key = QuotaIdentity::new("anthropic", credential).guard_cache_key("chat");
+        let guard = policy.rate_guard(CallKind::Chat, "anthropic", credential);
+        guard
+            .record_rate_limited(Some(Duration::from_secs(10)))
+            .await;
+        drop(guard);
+
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "cooldown-trigger"));
+        assert!(guard_cache_contains(&policy, &cache_key));
+        let reacquired = policy.rate_guard(CallKind::Chat, "anthropic", credential);
+        assert!(
+            reacquired
+                .pause_remaining()
+                .await
+                .expect("retained cooldown should remain readable")
+                .is_some(),
+            "a reconstructed model client must observe the live cooldown"
+        );
+
+        drop(reacquired);
+        tokio::time::advance(Duration::from_secs(11)).await;
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "cooldown-cleanup"));
+        assert!(
+            !guard_cache_contains(&policy, &cache_key),
+            "the cache-only guard should become reclaimable after cooldown expiry"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_only_guard_retains_retry_budget_until_window_expiry() {
+        // Pins: dropping every model client cannot reset an exhausted local
+        // retry budget while its measurement window is still live.
+        let policy = coordination(ProviderConcurrencyConfig::default(), None);
+        let credential = "retry-retention-key";
+        let cache_key = QuotaIdentity::new("anthropic", credential).guard_cache_key("chat");
+        let guard = policy.rate_guard(CallKind::Chat, "anthropic", credential);
+        guard
+            .note_request()
+            .await
+            .expect("request should be counted");
+        for _ in 0..ProviderPacingConfig::default().retry_budget_floor {
+            assert!(guard.allow_retry().await, "retry floor should be available");
+        }
+        assert!(
+            !guard.allow_retry().await,
+            "retry floor should be exhausted"
+        );
+        drop(guard);
+
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "retry-trigger"));
+        assert!(guard_cache_contains(&policy, &cache_key));
+        let reacquired = policy.rate_guard(CallKind::Chat, "anthropic", credential);
+        assert!(
+            !reacquired.allow_retry().await,
+            "a reconstructed model client must inherit the exhausted retry budget"
+        );
+
+        drop(reacquired);
+        tokio::time::advance(Duration::from_millis(
+            ProviderPacingConfig::default().retry_budget_window_ms + 1,
+        ))
+        .await;
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "retry-cleanup"));
+        assert!(
+            !guard_cache_contains(&policy, &cache_key),
+            "the cache-only guard should become reclaimable after retry-window expiry"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skipped_guard_cleanup_cycles_retain_state_then_rotate_expiry() {
+        // Pins: existing-key hits and cleanup batches that have not reached one
+        // cache-only guard preserve its live cooldown and exhausted retry budget;
+        // a later bounded pass reclaims it only after rotate expires the window.
+        let policy = coordination(ProviderConcurrencyConfig::default(), None);
+        let mut fillers = Vec::with_capacity(RATE_GUARD_RECLAIM_BATCH + 1);
+        for index in 0..=RATE_GUARD_RECLAIM_BATCH {
+            fillers.push(policy.rate_guard(
+                CallKind::Chat,
+                "anthropic",
+                &format!("skipped-filler-{index}"),
+            ));
+        }
+
+        let credential = "skipped-live-state";
+        let cache_key = QuotaIdentity::new("anthropic", credential).guard_cache_key("chat");
+        let guard = policy.rate_guard(CallKind::Chat, "anthropic", credential);
+        guard
+            .record_rate_limited(Some(Duration::from_secs(10)))
+            .await;
+        guard
+            .note_request()
+            .await
+            .expect("request should be counted");
+        for _ in 0..ProviderPacingConfig::default().retry_budget_floor {
+            assert!(guard.allow_retry().await, "retry floor should be available");
+        }
+        assert!(
+            !guard.allow_retry().await,
+            "retry floor should be exhausted"
+        );
+        drop(guard);
+
+        {
+            let mut cache = policy.guards.lock().unwrap_or_else(PoisonError::into_inner);
+            cache.cleanup_cursor = 0;
+            cache.cleanup_inspections = 0;
+        }
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "skipped-filler-0"));
+        assert_eq!(
+            guard_cleanup_inspections(&policy),
+            0,
+            "an existing-key hot lookup must not start a guard cleanup cycle"
+        );
+
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "skipped-trigger-0"));
+        assert_eq!(
+            guard_cleanup_inspections(&policy),
+            RATE_GUARD_RECLAIM_BATCH,
+            "one new key must inspect only the fixed guard cleanup batch"
+        );
+        assert!(
+            guard_cache_contains(&policy, &cache_key),
+            "the unvisited cache-only guard must retain its live state"
+        );
+        let retained = policy.rate_guard(CallKind::Chat, "anthropic", credential);
+        assert!(
+            retained
+                .pause_remaining()
+                .await
+                .expect("retained cooldown should be readable")
+                .is_some()
+        );
+        assert!(
+            !retained.allow_retry().await,
+            "a skipped cleanup cycle must not reset the exhausted retry budget"
+        );
+        drop(retained);
+
+        tokio::time::advance(Duration::from_millis(
+            ProviderPacingConfig::default().retry_budget_window_ms + 1,
+        ))
+        .await;
+        drop(policy.rate_guard(CallKind::Chat, "anthropic", "skipped-trigger-1"));
+        assert!(
+            !guard_cache_contains(&policy, &cache_key),
+            "the later bounded pass must reclaim state after rotate expires its retry window"
+        );
+        drop(fillers);
     }
 
     #[tokio::test(start_paused = true)]

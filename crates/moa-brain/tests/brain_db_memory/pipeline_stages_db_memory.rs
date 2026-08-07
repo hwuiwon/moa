@@ -585,11 +585,7 @@ impl LLMProvider for RewriteProvider {
         capabilities(&self.model_id)
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(self.response_stream())
-    }
-
-    async fn complete_shared(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
         Ok(self.response_stream())
     }
 }

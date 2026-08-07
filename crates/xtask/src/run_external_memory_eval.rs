@@ -1832,7 +1832,7 @@ async fn execute_paid_completion(
         })?;
     let started = Instant::now();
     let response = match timeout(call_timeout, async {
-        let stream = provider.complete(request).await?;
+        let stream = provider.complete(request.into_shared()).await?;
         stream.into_response().await
     })
     .await
@@ -2884,13 +2884,6 @@ mod tests {
         }
 
         async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> moa_core::error::Result<CompletionStream> {
-            self.complete_response().await
-        }
-
-        async fn complete_shared(
             &self,
             _request: SharedCompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {

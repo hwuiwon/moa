@@ -395,10 +395,9 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        traits::LLMProvider, types::completion::CompletionRequest,
-        types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::SharedCompletionRequest, types::completion::StopReason,
-        types::completion::TokenUsage, types::identifiers::ModelId,
+        traits::LLMProvider, types::completion::CompletionResponse,
+        types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
@@ -436,13 +435,6 @@ mod tests {
         }
 
         async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> moa_core::error::Result<CompletionStream> {
-            Ok(self.response_stream())
-        }
-
-        async fn complete_shared(
             &self,
             _request: SharedCompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {

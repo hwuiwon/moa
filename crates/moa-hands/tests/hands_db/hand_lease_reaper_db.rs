@@ -5,7 +5,7 @@
 //! This lane proves the parts only a database can: that two replicas issuing the
 //! same `FOR UPDATE ... SKIP LOCKED` claim take disjoint generations rather than
 //! both destroying one sandbox, that finalization is fenced to the claimed
-//! generation, that a released generation comes back as `stale` behind its
+//! generation, that a released generation stays `failed` behind its
 //! backoff and never as `active`, and that the tenant policy layer round-trips
 //! through the durable store.
 //!
@@ -28,7 +28,8 @@ use moa_core::types::hands::{
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_hands::PostgresTenantSandboxPolicyStore;
 use moa_hands::core::leases::{
-    HandLeasePolicy, HandLeaseStatus, HandLeaseStore, LeaseHandle, PostgresHandLeaseStore,
+    HandLeasePolicy, HandLeaseProvisionRequest, HandLeaseStatus, HandLeaseStore, LeaseHandle,
+    PostgresHandLeaseStore,
 };
 use moa_hands::core::reaper::{ExpiredHandLeaseClaims, PostgresExpiredHandLeaseClaims};
 use moa_hands::{TenantSandboxPolicyStore, deployment_sandbox_policy};
@@ -83,14 +84,15 @@ async fn seed_expired_active_lease(pool: &PgPool, session_id: SessionId, tenant_
     let store = PostgresHandLeaseStore::new(pool.clone());
     let policy = lease_policy(seconds(60), seconds(120));
     let claim = store
-        .claim_for_provisioning(
+        .claim_for_provisioning(HandLeaseProvisionRequest {
             session_id,
-            "",
+            worker_id: "",
             tenant_id,
-            "local",
-            SandboxTier::Local,
-            &policy,
-        )
+            provider: "local",
+            tier: SandboxTier::Local,
+            policy: &policy,
+            caller_deadline: None,
+        })
         .await
         .expect("claim provisioning")
         .expect("claim is owned");
@@ -100,9 +102,12 @@ async fn seed_expired_active_lease(pool: &PgPool, session_id: SessionId, tenant_
             "",
             "local",
             claim.generation,
-            LeaseHandle::new(moa_core::types::hands::HandHandle::local(
-                std::path::PathBuf::from("/tmp/moa-reaper-db"),
-            )),
+            LeaseHandle::new(
+                claim.provisioning_operation_id,
+                moa_core::types::hands::HandHandle::local(std::path::PathBuf::from(
+                    "/tmp/moa-reaper-db",
+                )),
+            ),
         )
         .await
         .expect("activate lease");
@@ -221,7 +226,7 @@ async fn competing_replicas_claim_disjoint_generations_without_new_traffic_db() 
 #[tokio::test]
 #[ignore = "requires the local compose Postgres via MOA_DATABASE_URL"]
 async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
-    // Pins: releasing a claimed generation for retry puts it back as `stale`
+    // Pins: releasing a claimed generation for retry puts it back as `failed`
     // behind a future `reap_not_before`, so the sandbox is neither reusable nor
     // retried in a tight loop. Reactivating here would hand a caller a sandbox
     // the reaper already decided to destroy.
@@ -256,7 +261,7 @@ async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
     .expect("read released lease");
 
     assert_eq!(
-        status, "stale",
+        status, "failed",
         "a failed destroy must stay fenced off from reuse, never return to active"
     );
     assert_eq!(attempts, 1, "the failed attempt must be counted");
@@ -375,14 +380,15 @@ async fn renewal_cannot_push_idle_past_the_hard_deadline_in_postgres_db() {
     let session_id = SessionId::new();
     let policy = lease_policy(seconds(60), seconds(120));
     let claim = store
-        .claim_for_provisioning(
+        .claim_for_provisioning(HandLeaseProvisionRequest {
             session_id,
-            "",
-            TenantId::new(),
-            "local",
-            SandboxTier::Local,
-            &policy,
-        )
+            worker_id: "",
+            tenant_id: TenantId::new(),
+            provider: "local",
+            tier: SandboxTier::Local,
+            policy: &policy,
+            caller_deadline: None,
+        })
         .await
         .expect("claim provisioning")
         .expect("claim is owned");
@@ -393,9 +399,12 @@ async fn renewal_cannot_push_idle_past_the_hard_deadline_in_postgres_db() {
             "",
             "local",
             claim.generation,
-            LeaseHandle::new(moa_core::types::hands::HandHandle::local(
-                std::path::PathBuf::from("/tmp/moa-renew-db"),
-            )),
+            LeaseHandle::new(
+                claim.provisioning_operation_id,
+                moa_core::types::hands::HandHandle::local(std::path::PathBuf::from(
+                    "/tmp/moa-renew-db",
+                )),
+            ),
         )
         .await
         .expect("activate lease");
@@ -403,7 +412,14 @@ async fn renewal_cannot_push_idle_past_the_hard_deadline_in_postgres_db() {
     let greedy = chrono::Utc::now() + chrono::Duration::hours(24);
     assert!(
         store
-            .renew_active(session_id, "", "local", claim.generation, greedy)
+            .renew_active(
+                session_id,
+                "",
+                "local",
+                claim.generation,
+                claim.provisioning_operation_id,
+                greedy,
+            )
             .await
             .expect("renewal inside the hard lifetime succeeds")
     );

@@ -27,8 +27,8 @@ use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::MemoryRetrievalExecutor,
     traits::MemoryToolExecutor, traits::NullLineageHandle, traits::SessionStore,
     types::action_policy::CallOrigin, types::hands::HandHandle, types::hands::SandboxFile,
-    types::hands::SandboxPolicySnapshot, types::identifiers::TenantId,
-    types::resource::ResourceBudget,
+    types::hands::SandboxPolicySnapshot, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::resource::ResourceBudget,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
@@ -384,16 +384,45 @@ impl McpOwner {
 struct HandLifecycleOwner {
     providers: HashMap<String, Arc<dyn HandProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
-    active_hands: RwLock<HashMap<String, HandHandle>>,
+    active_hands: RwLock<HashMap<String, ActiveHand>>,
     preferred_hand_routes: RwLock<HashMap<String, String>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,
     deployment_sandbox_policy: SandboxPolicySnapshot,
     tenant_sandbox_policy: Option<Arc<dyn TenantSandboxPolicyStore>>,
     hand_lease_reaper_installed: bool,
-    trusted_sandbox_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
-    installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
+    trusted_sandbox_files: RwLock<HashMap<HandScopeKey, Arc<TrustedSandboxManifest>>>,
+    installed_files: RwLock<HashMap<HandScopeKey, HashMap<String, InstalledManifestMarker>>>,
     workspace_roots: RwLock<HashMap<TenantId, PathBuf>>,
     sandbox_root: Option<PathBuf>,
+}
+
+/// One process-local active binding, including its durable generation when present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveHand {
+    handle: HandHandle,
+    generation: Option<i64>,
+}
+
+/// Exact conversational scope used by trusted and installed manifest caches.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HandScopeKey {
+    session_id: SessionId,
+    worker_id: String,
+}
+
+/// One immutable trusted-file publication shared cheaply across dispatches.
+#[derive(Debug)]
+struct TrustedSandboxManifest {
+    identity: uuid::Uuid,
+    files: Arc<[SandboxFile]>,
+}
+
+/// Proof that one immutable manifest was installed on one exact active binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstalledManifestMarker {
+    manifest_identity: uuid::Uuid,
+    handle: HandHandle,
+    generation: Option<i64>,
 }
 
 impl HandLifecycleOwner {

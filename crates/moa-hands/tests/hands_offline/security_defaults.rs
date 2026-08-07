@@ -28,6 +28,7 @@ use opentelemetry_sdk::trace::{
 };
 use serde_json::json;
 use tempfile::tempdir;
+use tracing::instrument::WithSubscriber;
 use tracing_subscriber::layer::SubscriberExt;
 
 const INPUT_SECRET: &str = "sk-test-input-secret-9a7b";
@@ -160,6 +161,23 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
+    capture_spans_after(|| async {}, emit).await
+}
+
+async fn capture_spans_after<Before, BeforeFut, F, Fut>(
+    before_emit: Before,
+    emit: F,
+) -> Vec<SpanData>
+where
+    Before: FnOnce() -> BeforeFut,
+    BeforeFut: Future<Output = ()>,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    // Establish controlled uninstrumented callsites before creating the
+    // capture dispatcher. `Dispatch::new` then rebuilds their cached interest.
+    before_emit().await;
+
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_sampler(Sampler::AlwaysOn)
@@ -169,15 +187,46 @@ where
     let layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let subscriber = tracing_subscriber::registry().with(layer);
 
-    {
-        let _guard = tracing::subscriber::set_default(subscriber);
-        emit().await;
-    }
+    // Construct and enter the scoped dispatcher without an intervening yield.
+    // `WithSubscriber` re-enters it on every poll, so capture remains correct
+    // when Tokio moves this test task between worker threads.
+    emit().with_subscriber(subscriber).await;
 
-    let _ = provider.force_flush();
+    provider
+        .force_flush()
+        .expect("in-memory span provider should flush");
     exporter
         .get_finished_spans()
         .expect("in-memory exporter should return finished spans")
+}
+
+async fn execute_failing_local_bash(input: serde_json::Value) -> ToolOutput {
+    let mut config = local_config();
+    config.local.docker_enabled = false;
+    let dir = tempdir().expect("tempdir should be created");
+    config.local.sandbox_dir = dir.path().display().to_string();
+    let router = ToolRouter::from_config(&config, None, None)
+        .await
+        .expect("local opt-in should allow router construction");
+    let secured = router
+        .execute_authorized(moa_hands::AuthorizedToolCall {
+            session: &session(),
+            caller_identity: &identity(),
+            worker_id: None,
+            invocation: &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input,
+            },
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: moa_hands::ToolCallScope::unbounded(),
+        })
+        .await
+        .expect("failing bash command should still return a ToolOutput");
+
+    secured.safe_output
 }
 
 fn find_span<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
@@ -440,7 +489,7 @@ fn bash_default_policy_is_not_allow() {
     assert_eq!(bash.policy.default_effect, ActionPolicyEffect::AdminReview);
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
     // Pins: tool execution spans keep correlation metadata but do not attach raw
     // input or raw error strings unless body tracing is explicitly enabled.
@@ -449,7 +498,7 @@ async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
     let serialized_input =
         serde_json::to_string(&input).expect("test input should serialize to JSON");
 
-    let spans = capture_spans(|| {
+    let spans = capture_spans(move || {
         let input = input.clone();
         async move {
             let mut registry = ToolRegistry::new();
@@ -510,56 +559,78 @@ async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
     assert_spans_do_not_contain(&spans, &[INPUT_SECRET, ERROR_SECRET]);
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_hand_error_output_spans_redact_bodies_by_default() {
     // Pins: error ToolOutput bodies remain available to the caller, while the
     // local provider span records fixed status text without raw tool output.
     assert_trace_body_env_disabled();
     let command = format!("printf '%s\\n' '{ERROR_SECRET}' >&2; exit 7");
     let input = json!({ "cmd": command });
+    let uninstrumented_input = input.clone();
 
-    let spans = capture_spans(|| {
-        let input = input.clone();
-        async move {
-            let mut config = local_config();
-            config.local.docker_enabled = false;
-            let dir = tempdir().expect("tempdir should be created");
-            config.local.sandbox_dir = dir.path().display().to_string();
-            let router = ToolRouter::from_config(&config, None, None)
-                .await
-                .expect("local opt-in should allow router construction");
-            let secured_2 = router
-                .execute_authorized(moa_hands::AuthorizedToolCall {
-                    session: &session(),
-                    caller_identity: &identity(),
-                    worker_id: None,
-                    invocation: &ToolInvocation {
-                        id: None,
-                        name: "bash".to_string(),
-                        input,
-                    },
-                    tool_call_id: ToolCallId::new(),
-                    active_canary: None,
-                    catalog: None,
-                    scope: moa_hands::ToolCallScope::unbounded(),
-                })
-                .await
-                .expect("failing bash command should still return a ToolOutput");
-            let output = secured_2.safe_output;
+    // Warm the `execute_tool`/`hand.execute` callsites before the scoped
+    // dispatcher exists. A sibling test in this binary may otherwise register
+    // them first with no active subscriber, caching their interest as `never`
+    // and leaving this capture with no application spans at all.
+    let spans = capture_spans_after(
+        move || async move {
+            let output = execute_failing_local_bash(uninstrumented_input).await;
+            assert!(output.is_error, "precondition bash call should fail");
+        },
+        move || {
+            let input = input.clone();
+            async move {
+                let mut config = local_config();
+                config.local.docker_enabled = false;
+                let dir = tempdir().expect("tempdir should be created");
+                config.local.sandbox_dir = dir.path().display().to_string();
+                let router = ToolRouter::from_config(&config, None, None)
+                    .await
+                    .expect("local opt-in should allow router construction");
+                let secured_2 = router
+                    .execute_authorized(moa_hands::AuthorizedToolCall {
+                        session: &session(),
+                        caller_identity: &identity(),
+                        worker_id: None,
+                        invocation: &ToolInvocation {
+                            id: None,
+                            name: "bash".to_string(),
+                            input,
+                        },
+                        tool_call_id: ToolCallId::new(),
+                        active_canary: None,
+                        catalog: None,
+                        scope: moa_hands::ToolCallScope::unbounded(),
+                    })
+                    .await
+                    .expect("failing bash command should still return a ToolOutput");
+                let output = secured_2.safe_output;
 
-            assert!(
-                output.is_error,
-                "setup command should produce an error output"
-            );
-            assert!(
-                output.to_text().contains(ERROR_SECRET),
-                "setup should prove the raw output contained the fake secret"
-            );
-        }
-    })
+                assert!(
+                    output.is_error,
+                    "setup command should produce an error output"
+                );
+                assert!(
+                    output.to_text().contains(ERROR_SECRET),
+                    "setup should prove the raw output contained the fake secret"
+                );
+            }
+        },
+    )
     .await;
 
+    let tool_span = find_span(&spans, "execute_tool bash");
     let hand_span = find_span(&spans, "hand.execute local/bash");
+    assert_eq!(
+        hand_span.span_context.trace_id(),
+        tool_span.span_context.trace_id(),
+        "the hand span must stay on the task-scoped tool trace"
+    );
+    assert_eq!(
+        hand_span.parent_span_id,
+        tool_span.span_context.span_id(),
+        "the hand span must be a direct child of the captured tool span"
+    );
     assert_eq!(
         attr_string(hand_span, "moa.hand.provider").as_deref(),
         Some("local")
@@ -573,6 +644,39 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
         Some(TOOL_ERROR_OUTPUT_STATUS)
     );
     assert_spans_do_not_contain(&spans, &[ERROR_SECRET]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn span_capture_keeps_callsites_first_registered_without_a_subscriber() {
+    // Pins: a scoped capture dispatcher remains interested when another task
+    // first registers the same static callsites without an active subscriber.
+    let input = json!({ "cmd": "printf 'guard error' >&2; exit 7" });
+    let uninstrumented_input = input.clone();
+
+    let spans = capture_spans_after(
+        move || async move {
+            let output = execute_failing_local_bash(uninstrumented_input).await;
+            assert!(output.is_error, "precondition bash call should fail");
+        },
+        move || async move {
+            let output = execute_failing_local_bash(input).await;
+            assert!(output.is_error, "captured bash call should fail");
+        },
+    )
+    .await;
+
+    let tool_span = find_span(&spans, "execute_tool bash");
+    let hand_span = find_span(&spans, "hand.execute local/bash");
+    assert_eq!(
+        hand_span.span_context.trace_id(),
+        tool_span.span_context.trace_id(),
+        "the hand span must remain on the captured tool trace"
+    );
+    assert_eq!(
+        hand_span.parent_span_id,
+        tool_span.span_context.span_id(),
+        "the hand span must remain a direct child of the captured tool span"
+    );
 }
 
 /// In-memory action-policy rule store returning fixed rules for a tool.
@@ -852,7 +956,7 @@ async fn a_rule_never_makes_an_unregistered_tool_visible() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sandbox_provision_spans_carry_policy_identity_and_no_policy_contents() {
     // Pins: provisioning telemetry emits the sandbox's policy IDENTITY — the
     // hash and the egress mode — and never its CONTENTS. The two fields also
@@ -887,18 +991,7 @@ async fn sandbox_provision_spans_carry_policy_identity_and_no_policy_contents() 
     // The exported name carries the lifecycle stage (`otel.name` is set to
     // "sandbox_provision {operation}"), so match on the prefix and take the
     // cold-provision span, which is the one that resolves the policy.
-    let provision = spans
-        .iter()
-        .find(|span| span.name.as_ref() == "sandbox_provision get_or_provision_hand")
-        .unwrap_or_else(|| {
-            panic!(
-                "provisioning must emit a sandbox_provision span, saw {:?}",
-                spans
-                    .iter()
-                    .map(|span| span.name.as_ref())
-                    .collect::<Vec<_>>()
-            )
-        });
+    let provision = find_span(&spans, "sandbox_provision get_or_provision_hand");
 
     let hash = attr_string(provision, "moa.sandbox.profile_hash")
         .expect("the resolved policy identity hash must reach the span");

@@ -52,7 +52,7 @@ where
     G: FnMut(SessionSignal) -> StreamSignalDisposition,
 {
     let started_at = Instant::now();
-    let mut stream = llm_provider.complete(request).await?;
+    let mut stream = llm_provider.complete(request.into_shared()).await?;
     let mut streamed_text = String::new();
     let mut started_assistant = false;
     let mut recorded_first_token = false;
@@ -260,13 +260,6 @@ mod tests {
         }
 
         async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<moa_core::types::completion::CompletionStream> {
-            Ok(Self::response())
-        }
-
-        async fn complete_shared(
             &self,
             _request: moa_core::types::completion::SharedCompletionRequest,
         ) -> Result<moa_core::types::completion::CompletionStream> {

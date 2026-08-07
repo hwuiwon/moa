@@ -1091,6 +1091,75 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum ParentToolContent {
+        Text { text: String },
+        Json { data: Value },
+    }
+
+    #[test]
+    fn tool_result_process_output_has_parent_shape_golden_json() {
+        // Pins: retained Restate readers from the parent revision know only the
+        // text/json content variants. The in-memory process carrier must cross
+        // that durable boundary through this exact parent-compatible shape.
+        let event = Event::tool_result(
+            ToolCallId::from(Uuid::from_u128(1)),
+            Some("toolu_parent".to_string()),
+            SecuredToolOutput::assessed_safe(
+                ToolOutput::from_process(
+                    "stdout with trailing space \n".to_string(),
+                    "stderr with trailing tab\t\n".to_string(),
+                    7,
+                    std::time::Duration::from_millis(2),
+                ),
+                ToolCapabilityId::hand("bash"),
+            ),
+        );
+
+        let encoded = serde_json::to_value(event).expect("serialize parent-shape tool result");
+        let output = &encoded["data"]["output"];
+        assert_eq!(
+            output,
+            &serde_json::json!({
+                "content": [
+                    { "type": "text", "text": "stdout with trailing space \n" },
+                    { "type": "text", "text": "stderr:\nstderr with trailing tab\t\n" },
+                    { "type": "text", "text": "exit_code: 7" }
+                ],
+                "is_error": true,
+                "structured": {
+                    "stdout": "stdout with trailing space \n",
+                    "stderr": "stderr with trailing tab\t\n",
+                    "exit_code": 7,
+                    "stdout_truncated": false,
+                    "stderr_truncated": false
+                },
+                "duration": { "secs": 0, "nanos": 2_000_000 },
+                "truncated": false
+            })
+        );
+
+        let parent_content: Vec<ParentToolContent> =
+            serde_json::from_value(output["content"].clone())
+                .expect("parent content enum must decode the durable output");
+        let rendered = parent_content
+            .into_iter()
+            .map(|block| match block {
+                ParentToolContent::Text { text } => text,
+                ParentToolContent::Json { data } => data.to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "stdout with trailing space \n",
+                "stderr:\nstderr with trailing tab\t\n",
+                "exit_code: 7"
+            ]
+        );
+    }
+
     #[test]
     fn turn_failure_dedupe_identity_is_scoped_by_actor_and_turn() {
         // Pins: the canonical failed-turn fact is identified by actor AND turn. A

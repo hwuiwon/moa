@@ -103,7 +103,7 @@ async fn openai_responses_streaming_response_chunks_parse_into_provider_events()
         .expect("override OpenAI API base")
         .with_max_retries(0);
     let mut stream = provider
-        .complete(CompletionRequest::simple("show me the workspace root"))
+        .complete(CompletionRequest::simple("show me the workspace root").into_shared())
         .await
         .expect("start OpenAI Responses stream");
 

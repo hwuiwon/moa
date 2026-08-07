@@ -361,7 +361,12 @@ impl PairwiseLlmJudge {
     ) -> Result<JudgeVerdict> {
         let request = pairwise_request(input, answer_a, answer_b);
 
-        let response = self.provider.complete(request).await?.collect().await?;
+        let response = self
+            .provider
+            .complete(request.into_shared())
+            .await?
+            .collect()
+            .await?;
         normalized_verdict(&response.text).ok_or_else(|| {
             invalid_config_error(format!(
                 "memory eval pairwise judge returned an unrecognized verdict: {}",

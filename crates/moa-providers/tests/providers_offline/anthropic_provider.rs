@@ -71,7 +71,7 @@ async fn provider_streams_tokens_incrementally() {
         .with_max_retries(0);
 
     let mut stream = provider
-        .complete(CompletionRequest::simple("hello"))
+        .complete(CompletionRequest::simple("hello").into_shared())
         .await
         .unwrap();
     let first_block = timeout(Duration::from_millis(50), stream.next())
@@ -155,7 +155,7 @@ async fn provider_retries_after_rate_limit() {
         .with_max_retries(3);
 
     let response = provider
-        .complete(CompletionRequest::simple("hello"))
+        .complete(CompletionRequest::simple("hello").into_shared())
         .await
         .unwrap()
         .collect()
@@ -210,7 +210,7 @@ async fn provider_streams_tool_use_blocks() {
         .with_max_retries(0);
 
     let mut stream = provider
-        .complete(CompletionRequest::simple("show me cwd"))
+        .complete(CompletionRequest::simple("show me cwd").into_shared())
         .await
         .unwrap();
     let first_block = stream.next().await.unwrap().unwrap();
@@ -274,7 +274,7 @@ async fn provider_returns_error_after_partial_output_without_retrying() {
         .with_max_retries(3);
 
     let mut stream = provider
-        .complete(CompletionRequest::simple("hello"))
+        .complete(CompletionRequest::simple("hello").into_shared())
         .await
         .unwrap();
     let first_block = timeout(Duration::from_millis(50), stream.next())

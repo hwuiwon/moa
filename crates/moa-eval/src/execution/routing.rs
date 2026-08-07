@@ -14,8 +14,8 @@ use moa_core::{
     traits::LLMProvider,
     types::{
         completion::{
-            CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-            SharedCompletionRequest, StopReason, TokenUsage,
+            CompletionContent, CompletionResponse, CompletionStream, SharedCompletionRequest,
+            StopReason, TokenUsage,
         },
         execution_planning::{
             DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
@@ -288,13 +288,6 @@ impl LLMProvider for ScriptedRoutingProvider {
     }
 
     async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete_fixture()
-    }
-
-    async fn complete_shared(
         &self,
         _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

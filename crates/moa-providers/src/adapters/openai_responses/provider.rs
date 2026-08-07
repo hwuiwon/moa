@@ -299,12 +299,7 @@ impl LLMProvider for OpenAIProvider {
         self.default_capabilities.clone()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        let requested_model = request.model.as_ref();
-        self.complete_request(&request, requested_model).await
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
         self.complete_request(&request, request.model()).await
     }
 }

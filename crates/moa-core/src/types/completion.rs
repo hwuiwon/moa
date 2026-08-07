@@ -188,6 +188,12 @@ impl CompletionRequest {
         Self::new(prompt)
     }
 
+    /// Moves this durable/inspectable DTO into canonical provider request storage.
+    #[must_use]
+    pub fn into_shared(self) -> SharedCompletionRequest {
+        SharedCompletionRequest::new(self)
+    }
+
     /// Materializes an owned request from a read-only provider view.
     ///
     /// This is reserved for an ownership or serialization boundary that
@@ -275,13 +281,14 @@ impl CompletionRequestView for CompletionRequest {
     }
 }
 
-/// Immutable, cheaply clonable ownership of one completion request.
+/// Canonical immutable, cheaply clonable ownership of one provider request.
 ///
 /// Provider failover may replay the same logical request against several
 /// candidates. The ordinary [`CompletionRequest`] remains the owned serde/API
-/// DTO used by callers, while this handle keeps its payload behind one
-/// reference-counted allocation. A candidate-specific model override is kept
-/// in the handle and does not copy the request's messages, tools, or metadata.
+/// DTO at durable serialization and explicit inspection boundaries. Provider
+/// dispatch uses this handle so the payload stays behind one reference-counted
+/// allocation. A candidate-specific model override is kept in the handle and
+/// does not copy the request's messages, tools, or metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SharedCompletionRequest {
     request: Arc<CompletionRequest>,

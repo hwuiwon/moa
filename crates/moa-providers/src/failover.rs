@@ -18,9 +18,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionStream,
-    types::completion::SharedCompletionRequest, types::identifiers::ModelId,
-    types::model::ModelCapabilities,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::identifiers::ModelId, types::model::ModelCapabilities,
 };
 
 /// Buffer size for the failover forwarding stream.
@@ -83,7 +82,7 @@ impl FailoverLLMProvider {
         candidate: &FailoverCandidate,
         request: SharedCompletionRequest,
     ) -> CandidateOutcome {
-        let mut stream = match candidate.provider.complete_shared(request).await {
+        let mut stream = match candidate.provider.complete(request).await {
             Ok(stream) => stream,
             // A rate-class failure before the stream was even created is the
             // cleanest failover signal (paused provider / exhausted budget /
@@ -120,21 +119,13 @@ impl LLMProvider for FailoverLLMProvider {
         self.chain[0].provider.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.complete_shared_request(SharedCompletionRequest::new(request))
-            .await
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
-        self.complete_shared_request(request).await
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.complete_request(request).await
     }
 }
 
 impl FailoverLLMProvider {
-    async fn complete_shared_request(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
+    async fn complete_request(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
         let last_index = self.chain.len() - 1;
         let mut last_error: Option<MoaError> = None;
 
@@ -265,7 +256,6 @@ mod tests {
         model: &'static str,
         behavior: Behavior,
         calls: Arc<AtomicUsize>,
-        owned_calls: Arc<AtomicUsize>,
         shared_request_address: Arc<AtomicUsize>,
     }
 
@@ -283,17 +273,12 @@ mod tests {
                 model,
                 behavior,
                 calls: Arc::new(AtomicUsize::new(0)),
-                owned_calls: Arc::new(AtomicUsize::new(0)),
                 shared_request_address: Arc::new(AtomicUsize::new(0)),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
-        }
-
-        fn owned_calls(&self) -> usize {
-            self.owned_calls.load(Ordering::SeqCst)
         }
 
         fn shared_request_address(&self) -> usize {
@@ -343,19 +328,7 @@ mod tests {
             }
         }
 
-        async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-            self.owned_calls.fetch_add(1, Ordering::SeqCst);
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            match self.behavior {
-                Behavior::Fail(make_error) => Err(make_error()),
-                Behavior::Serve => self.response(request.model.as_ref()),
-            }
-        }
-
-        async fn complete_shared(
-            &self,
-            request: SharedCompletionRequest,
-        ) -> Result<CompletionStream> {
+        async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
             self.shared_request_address.store(
                 std::ptr::from_ref(request.request()) as usize,
                 Ordering::SeqCst,
@@ -430,7 +403,7 @@ mod tests {
         );
 
         let response = failover
-            .complete(CompletionRequest::new("hi"))
+            .complete(CompletionRequest::new("hi").into_shared())
             .await
             .expect("failover should produce the fallback stream")
             .into_response()
@@ -440,8 +413,6 @@ mod tests {
         assert_eq!(response.model, ModelId::new("gpt-5.4"));
         assert_eq!(primary.calls(), 1);
         assert_eq!(fallback.calls(), 1);
-        assert_eq!(primary.owned_calls(), 0);
-        assert_eq!(fallback.owned_calls(), 0);
         assert_eq!(
             primary.shared_request_address(),
             fallback.shared_request_address(),
@@ -466,7 +437,7 @@ mod tests {
         );
 
         let response = failover
-            .complete(CompletionRequest::new("hi"))
+            .complete(CompletionRequest::new("hi").into_shared())
             .await
             .expect("primary should serve")
             .into_response()
@@ -494,7 +465,7 @@ mod tests {
         );
 
         let error = failover
-            .complete(CompletionRequest::new("hi"))
+            .complete(CompletionRequest::new("hi").into_shared())
             .await
             .expect_err("a non-rate primary error must not fail over");
 
@@ -522,7 +493,7 @@ mod tests {
         );
 
         let error = failover
-            .complete(CompletionRequest::new("hi"))
+            .complete(CompletionRequest::new("hi").into_shared())
             .await
             .expect_err("an all-rate-limited chain surfaces the terminal error");
 

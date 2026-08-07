@@ -23,8 +23,7 @@ pub fn resolve_provider_selection(
 pub fn build_provider_from_config(config: &MoaConfig) -> Result<Arc<dyn LLMProvider>> {
     let registry = ProviderRegistry::from_config(config, None)?;
     let (provider_id, model_id) = resolve_provider_selection(config, None)?;
-    let primary = registry.provider_for_id(provider_id, &model_id)?.provider;
-    registry.apply_main_failover(config, model_id.as_str(), primary)
+    registry.main_provider_with_failover(config, provider_id, &model_id)
 }
 
 /// Builds a provider for an explicit model override and returns the canonical model id.
@@ -38,8 +37,7 @@ pub fn build_provider_from_model(
 ) -> Result<(Arc<dyn LLMProvider>, ModelId)> {
     let registry = ProviderRegistry::from_config(config, None)?;
     let (provider_id, model_id) = resolve_provider_selection(config, model_override)?;
-    let primary = registry.provider_for_id(provider_id, &model_id)?.provider;
-    let provider = registry.apply_main_failover(config, model_id.as_str(), primary)?;
+    let provider = registry.main_provider_with_failover(config, provider_id, &model_id)?;
     Ok((provider, model_id))
 }
 

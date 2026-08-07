@@ -45,7 +45,7 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        error::Result, types::completion::CompletionRequest, types::completion::CompletionStream,
+        error::Result, types::completion::CompletionStream,
         types::completion::SharedCompletionRequest, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
         types::provider::ModelTask, types::provider::ModelTier,
@@ -68,15 +68,8 @@ mod tests {
             self.capabilities.clone()
         }
 
-        async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        async fn complete(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
             panic!("mock provider complete() should not be called in router unit tests");
-        }
-
-        async fn complete_shared(
-            &self,
-            _request: SharedCompletionRequest,
-        ) -> Result<CompletionStream> {
-            panic!("mock provider complete_shared() should not be called in router unit tests");
         }
     }
 

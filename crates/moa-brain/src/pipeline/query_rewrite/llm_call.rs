@@ -49,7 +49,7 @@ impl QueryRewriter {
             ]),
         };
 
-        let stream = self.llm.complete(request).await?;
+        let stream = self.llm.complete(request.into_shared()).await?;
         let response = stream.collect().await?;
         let parsed = parse_rewrite_response(&response.text, reason)?;
         Ok(validate_rewrite_result(parsed, input, ctx, reason))

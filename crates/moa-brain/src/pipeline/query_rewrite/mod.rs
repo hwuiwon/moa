@@ -262,12 +262,12 @@ mod tests {
     use moa_config::QueryRewriteConfig;
     use moa_core::{
         error::Result, events::Event, traits::ContextProcessor, traits::LLMProvider,
-        types::channel::Channel, types::completion::CompletionRequest,
-        types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::StopReason, types::completion::TokenUsage,
-        types::context::ContextMessage, types::context::ProcessorOutput,
-        types::context::WorkingContext, types::events_stream::EventRecord,
-        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::channel::Channel, types::completion::CompletionResponse,
+        types::completion::CompletionStream, types::completion::StopReason,
+        types::completion::TokenUsage, types::context::ContextMessage,
+        types::context::ProcessorOutput, types::context::WorkingContext,
+        types::events_stream::EventRecord, types::identifiers::ModelId,
+        types::identifiers::SessionId, types::identifiers::TenantId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
         types::provider::ModelTier, types::session::SessionMeta,
     };
@@ -295,11 +295,7 @@ mod tests {
             capabilities()
         }
 
-        async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-            self.complete_response().await
-        }
-
-        async fn complete_shared(
+        async fn complete(
             &self,
             _request: moa_core::types::completion::SharedCompletionRequest,
         ) -> Result<CompletionStream> {

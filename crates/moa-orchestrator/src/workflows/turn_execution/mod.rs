@@ -212,8 +212,11 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
 
     async fn complete(
         &self,
-        mut request: CompletionRequest,
+        request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
+        // Restate's JSON transport requires the owned durable DTO. This is the
+        // explicit serialization boundary after in-process shared routing.
+        let mut request = CompletionRequest::from_view(&request);
         // Routing and planning invoke the provider sequentially; a planner repair
         // consumes the next explicit attempt coordinate in the same workflow replay.
         let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
@@ -253,15 +256,6 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
             return Err(moa_core::error::MoaError::Cancelled);
         }
         Ok(CompletionStream::from_response(response))
-    }
-
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        // The durable Restate request requires an owned DTO; materialize only
-        // at this transport boundary, after in-process shared failover routing.
-        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

@@ -722,6 +722,12 @@ mod tests {
             .await
             .expect("legacy stdout tool_result_read");
         assert!(stdout.to_text().contains("legacy stdout"));
+        assert_eq!(
+            load_tool_result_text(&store, session.id, tool_id, ToolArtifactStream::Stdout,)
+                .await
+                .expect("load exact legacy stdout"),
+            "legacy stdout\n"
+        );
     }
 
     #[tokio::test]
@@ -730,9 +736,11 @@ mod tests {
         // independently addressable through UTF-8-safe stream ranges.
         let session = SessionMeta::default();
         let tool_id = ToolCallId::new();
-        let combined = "out-α\nout-β\n\nstderr:\nwarning-γ\nwarning-delta\n";
-        let stderr_start = combined.find("warning-γ").expect("stderr text");
-        let stderr_end = stderr_start + "warning-γ\nwarning-delta".len();
+        let stdout = "out-α\nout-β \n\n";
+        let stderr = "warning-γ\nwarning-delta\t \n";
+        let combined = format!("{stdout}\n\nstderr:\n{stderr}");
+        let stderr_start = stdout.len() + "\n\nstderr:\n".len();
+        let stderr_end = stderr_start + stderr.len();
         let store = MockSessionStore {
             events: vec![event_record(
                 session.id,
@@ -750,7 +758,7 @@ mod tests {
                             line_count: 6,
                             stdout_range: Some(moa_core::types::tools::ToolArtifactByteRange {
                                 start: 0,
-                                end: "out-α\nout-β".len(),
+                                end: stdout.len(),
                             }),
                             stderr_range: Some(moa_core::types::tools::ToolArtifactByteRange {
                                 start: stderr_start,
@@ -766,10 +774,7 @@ mod tests {
                     capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
                 },
             )],
-            artifacts: std::collections::HashMap::from([(
-                "blob-1".to_string(),
-                combined.to_string(),
-            )]),
+            artifacts: std::collections::HashMap::from([("blob-1".to_string(), combined)]),
         };
         let caller_identity = test_identity(session.tenant_id);
         let ctx = ToolContext {
@@ -783,6 +788,19 @@ mod tests {
             memory_tool_executor: None,
             memory_retrieval_executor: None,
         };
+
+        assert_eq!(
+            load_tool_result_text(&store, session.id, tool_id, ToolArtifactStream::Stdout,)
+                .await
+                .expect("load exact single-blob stdout"),
+            stdout
+        );
+        assert_eq!(
+            load_tool_result_text(&store, session.id, tool_id, ToolArtifactStream::Stderr,)
+                .await
+                .expect("load exact single-blob stderr"),
+            stderr
+        );
 
         let read = ToolResultReadTool
             .execute(

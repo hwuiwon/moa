@@ -10,7 +10,7 @@ URL; runtime startup validates that the complete history is already present.
 
 `migrations/postgres/` is a flat, append-only sequence with exactly one regular
 file for every version from `V000001` through the current maximum, currently
-`V000056`. Filenames
+`V000057`. Filenames
 must match `V<six digits>__<lowercase_snake_case>.sql`.
 
 `V000001__contiguous_history_epoch.sql` marks the current fresh-install-only
@@ -28,7 +28,8 @@ The 2026-08-03 hard-reset epoch removes the retired per-user token-vault tables
 from the migrations that originally created them. V29 remains a no-op marker so
 the sequence stays contiguous, typed connector origins are V53, the one-way
 session `paused` to `idle` lifecycle cutover is V54, durable execution-plan
-compensation is V55, and replay-stable ingestion apply outcomes are V56. Any database
+compensation is V55, replay-stable ingestion apply outcomes are V56, and
+provider-visible hand provisioning operation intents are V57. Any database
 that applied an earlier checksum for the rewritten files must be rebuilt; the
 runner intentionally rejects that divergence before DDL.
 

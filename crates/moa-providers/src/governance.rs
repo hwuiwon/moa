@@ -20,7 +20,7 @@ use moa_core::{
     error::{MoaError, Result},
     traits::LLMProvider,
     types::completion::{
-        CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+        CompletionContent, CompletionRequestView, CompletionResponse, CompletionStream,
         JsonResponseFormat, SharedCompletionRequest,
     },
     types::context::{ContextMessage, MessageRole},
@@ -336,35 +336,14 @@ impl LLMProvider for GovernedLLMProvider {
         self.inner.capabilities()
     }
 
-    async fn complete(&self, mut request: CompletionRequest) -> Result<CompletionStream> {
-        let mut response_format = request.response_format.take();
-        let vault = self
-            .tokenize_request_parts(
-                &mut request.messages,
-                &mut request.tools,
-                &mut response_format,
-            )
-            .await?;
-        request.response_format = response_format;
-
-        tracing::debug!(
-            provider = self.inner.name(),
-            distinct_tokens = vault.len(),
-            "egress DLP tokenized outbound request"
-        );
-        let inner = self.inner.complete(request).await?;
-        Ok(detokenizing_stream(inner, vault))
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
         // DLP rewrites only messages, tool schemas, and response-format schema.
         // Those transformed fields are materialized as a semantic provider
         // payload; model, metadata, limits, temperature, and web-search policy
         // remain borrowed from the shared failover request.
-        let source = request.request();
-        let mut messages = source.messages.clone();
-        let mut tools = source.tools.clone();
-        let mut response_format = source.response_format.clone();
+        let mut messages = request.messages().to_vec();
+        let mut tools = request.tools().to_vec();
+        let mut response_format = request.response_format().cloned();
         let vault = self
             .tokenize_request_parts(&mut messages, &mut tools, &mut response_format)
             .await?;
@@ -374,7 +353,7 @@ impl LLMProvider for GovernedLLMProvider {
             distinct_tokens = vault.len(),
             "egress DLP tokenized outbound request"
         );
-        let inner = self.inner.complete_shared(transformed).await?;
+        let inner = self.inner.complete(transformed).await?;
         Ok(detokenizing_stream(inner, vault))
     }
 }
@@ -708,8 +687,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use moa_core::types::completion::{
-        CompletionRequestView, SharedCompletionRequest, StopReason, TokenUsage, ToolCallContent,
-        ToolInvocation,
+        CompletionRequest, CompletionRequestView, SharedCompletionRequest, StopReason, TokenUsage,
+        ToolCallContent, ToolInvocation,
     };
     use moa_core::types::identifiers::ModelId;
     use moa_core::types::security::SensitivityClass;
@@ -794,14 +773,7 @@ mod tests {
             ModelCapabilities::default()
         }
 
-        async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-            self.complete_view(&request).await
-        }
-
-        async fn complete_shared(
-            &self,
-            request: SharedCompletionRequest,
-        ) -> Result<CompletionStream> {
+        async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
             self.complete_view(&request).await
         }
     }
@@ -920,9 +892,14 @@ mod tests {
             ],
             ..CompletionRequest::new("ignored")
         };
-        let (_, response) = drain_text(provider.complete(request).await.expect("complete"))
-            .await
-            .expect("drain");
+        let (_, response) = drain_text(
+            provider
+                .complete(request.into_shared())
+                .await
+                .expect("complete"),
+        )
+        .await
+        .expect("drain");
         assert_eq!(response.text, "[REDACTED] sk-shared");
     }
 
@@ -932,10 +909,13 @@ mod tests {
         let inner = EchoProvider::new(EchoMode::SplitFirst);
         let provider = GovernedLLMProvider::new(inner, classifier(vec!["sk-system"]));
         let stream = provider
-            .complete(CompletionRequest {
-                messages: vec![ContextMessage::system("secret sk-system")],
-                ..CompletionRequest::new("ignored")
-            })
+            .complete(
+                CompletionRequest {
+                    messages: vec![ContextMessage::system("secret sk-system")],
+                    ..CompletionRequest::new("ignored")
+                }
+                .into_shared(),
+            )
             .await
             .expect("complete");
         let (streamed, response) = drain_text(stream).await.expect("drain");
@@ -949,17 +929,20 @@ mod tests {
         let inner = EchoProvider::new(EchoMode::FirstToolArgument);
         let provider = GovernedLLMProvider::new(inner, classifier(vec!["sk-private"]));
         let error = provider
-            .complete(CompletionRequest {
-                messages: vec![ContextMessage::assistant_tool_call(
-                    ToolInvocation {
-                        id: Some("private-call".to_string()),
-                        name: "private".to_string(),
-                        input: json!({"credential": "sk-private"}),
-                    },
-                    "calling private tool",
-                )],
-                ..CompletionRequest::new("ignored")
-            })
+            .complete(
+                CompletionRequest {
+                    messages: vec![ContextMessage::assistant_tool_call(
+                        ToolInvocation {
+                            id: Some("private-call".to_string()),
+                            name: "private".to_string(),
+                            input: json!({"credential": "sk-private"}),
+                        },
+                        "calling private tool",
+                    )],
+                    ..CompletionRequest::new("ignored")
+                }
+                .into_shared(),
+            )
             .await
             .expect("stream")
             .into_response()
@@ -1004,10 +987,13 @@ mod tests {
             data: json!({"sk-key": "sk-value", "account": 424242}),
         }]);
         provider
-            .complete(CompletionRequest {
-                messages: vec![message],
-                ..CompletionRequest::new("ignored")
-            })
+            .complete(
+                CompletionRequest {
+                    messages: vec![message],
+                    ..CompletionRequest::new("ignored")
+                }
+                .into_shared(),
+            )
             .await
             .expect("complete")
             .collect()
@@ -1090,7 +1076,7 @@ mod tests {
             }),
         );
         let error = provider
-            .complete(CompletionRequest::new("unknown sensitivity"))
+            .complete(CompletionRequest::new("unknown sensitivity").into_shared())
             .await
             .expect_err("abstention blocks");
         assert!(matches!(error, MoaError::ProviderError(message) if message.contains("abstained")));
@@ -1121,7 +1107,7 @@ mod tests {
         let inner = EchoProvider::new(EchoMode::AllText);
         let provider = GovernedLLMProvider::new(inner.clone(), Arc::new(Incomplete));
         let error = provider
-            .complete(CompletionRequest::new("possibly sensitive"))
+            .complete(CompletionRequest::new("possibly sensitive").into_shared())
             .await
             .expect_err("incomplete spans block");
         assert!(
@@ -1151,6 +1137,154 @@ mod tests {
                 abstained: false,
             })
         }
+    }
+
+    struct RateLimitedProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LLMProvider for RateLimitedProvider {
+        fn name(&self) -> &str {
+            "rate-limited"
+        }
+
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn complete(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(MoaError::RateLimited {
+                retries: 0,
+                message: "test primary paused".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_preserves_every_effective_request_field() {
+        // Pins: governance consumes the effective request view, including
+        // failover/decorator overlays, while retaining every untouched field.
+        let inner = EchoProvider::new(EchoMode::AllText);
+        let provider = GovernedLLMProvider::new(inner.clone(), classifier(Vec::new()));
+        let effective_model = ModelId::new("effective-model");
+        let effective_messages = vec![ContextMessage::user("effective message")];
+        let effective_tools = vec![json!({
+            "type": "function",
+            "name": "effective_tool",
+            "parameters": {"type": "object"}
+        })];
+        let effective_format = JsonResponseFormat::strict_json_schema(
+            "effective_response",
+            "effective schema",
+            json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
+        );
+        let metadata = HashMap::from([
+            ("request_id".to_string(), json!("overlay-acceptance")),
+            ("attempt".to_string(), json!(7)),
+        ]);
+        let request = CompletionRequest {
+            model: Some(ModelId::new("base-model")),
+            messages: vec![ContextMessage::user("base message")],
+            tools: vec![json!({"name": "base_tool"})],
+            max_output_tokens: Some(777),
+            temperature: Some(0.25),
+            response_format: Some(JsonResponseFormat::strict_json_schema(
+                "base_response",
+                "base schema",
+                json!({"type": "array"}),
+            )),
+            native_web_search: moa_core::types::completion::NativeWebSearchPolicy::Disabled,
+            metadata: metadata.clone(),
+        }
+        .into_shared()
+        .with_model_override(Some(&effective_model))
+        .with_transformed_fields(
+            effective_messages.clone(),
+            effective_tools.clone(),
+            Some(effective_format.clone()),
+        );
+
+        provider
+            .complete(request)
+            .await
+            .expect("governed effective request should dispatch")
+            .collect()
+            .await
+            .expect("echo response should collect");
+
+        let recorded = inner
+            .requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first()
+            .cloned()
+            .expect("effective request should reach the provider");
+        assert_eq!(
+            recorded,
+            CompletionRequest {
+                model: Some(effective_model),
+                messages: effective_messages,
+                tools: effective_tools,
+                max_output_tokens: Some(777),
+                temperature: Some(0.25),
+                response_format: Some(effective_format),
+                native_web_search: moa_core::types::completion::NativeWebSearchPolicy::Disabled,
+                metadata,
+            },
+            "governance must forward the complete effective request view"
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_classifies_once_across_primary_failover() {
+        // Pins: governance wraps the raw failover chain once, so a blocked
+        // primary cannot classify the same outbound request a second time.
+        let primary = Arc::new(RateLimitedProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let fallback = EchoProvider::new(EchoMode::AllText);
+        let failover = crate::FailoverLLMProvider::wrap(
+            primary.clone(),
+            vec![(fallback.clone(), ModelId::new("fallback-model"))],
+        );
+        let counting = Arc::new(CountingClassifier {
+            calls: AtomicUsize::new(0),
+        });
+        let provider = GovernedLLMProvider::new(failover, counting.clone());
+
+        provider
+            .complete(CompletionRequest::new("classify this once").into_shared())
+            .await
+            .expect("rate-limited primary should fail over")
+            .collect()
+            .await
+            .expect("fallback response should collect");
+
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fallback
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            1
+        );
+        assert_eq!(
+            counting.calls.load(Ordering::SeqCst),
+            2,
+            "one text field requires its source and residual classifications exactly once"
+        );
+        assert_eq!(
+            fallback
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)[0]
+                .model,
+            Some(ModelId::new("fallback-model")),
+            "the raw failover chain must still apply the fallback model overlay"
+        );
     }
 
     #[tokio::test]
@@ -1190,7 +1324,7 @@ mod tests {
         let provider = GovernedLLMProvider::new(inner.clone(), Arc::new(Failing));
         assert!(
             provider
-                .complete(CompletionRequest::new("secret"))
+                .complete(CompletionRequest::new("secret").into_shared())
                 .await
                 .is_err()
         );

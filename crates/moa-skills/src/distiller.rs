@@ -376,7 +376,7 @@ pub async fn distill_skill_from_experience_with_learning(
 
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
     let response = llm
-        .complete(build_experience_distillation_request(&input))
+        .complete(build_experience_distillation_request(&input).into_shared())
         .await?
         .collect()
         .await?;

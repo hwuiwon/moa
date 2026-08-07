@@ -174,10 +174,13 @@ pub(crate) async fn maybe_compact_events(
         let checkpoint = latest_checkpoint_state(events);
         let candidate = &unsummarized[..candidate_end];
         let response = llm
-            .complete(compaction_request(
-                checkpoint.as_ref().map(|state| state.summary.as_str()),
-                candidate,
-            ))
+            .complete(
+                compaction_request(
+                    checkpoint.as_ref().map(|state| state.summary.as_str()),
+                    candidate,
+                )
+                .into_shared(),
+            )
             .await?
             .collect()
             .await?;

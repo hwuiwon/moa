@@ -94,26 +94,19 @@ impl LLMProvider for MockProvider {
 
     async fn complete(
         &self,
-        request: CompletionRequest,
+        request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
+        // This test double records owned gateway requests, so the DTO conversion
+        // is the explicit assertion boundary rather than a provider-side copy.
         self.requests
             .lock()
             .expect("mock provider request log should not be poisoned")
-            .push(request);
+            .push(CompletionRequest::from_view(&request));
 
         match &self.response {
             MockOutcome::Success(response) => Ok(CompletionStream::from_response(response.clone())),
             MockOutcome::Error(message) => Err(MoaError::ProviderError(message.clone())),
         }
-    }
-
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        // This test double records owned gateway requests, so the DTO conversion
-        // is the explicit assertion boundary rather than a provider-side copy.
-        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

@@ -382,6 +382,7 @@ async fn an_over_limit_bash_timeout_never_reaches_the_executor_offline() {
         .await
         .expect("local hand provider");
     let spec = moa_core::types::hands::HandSpec {
+        provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: moa_core::types::hands::SandboxTier::Local,
         image: None,

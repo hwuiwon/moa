@@ -85,7 +85,7 @@ async fn openai_provider_translates_requests_to_responses_api() {
     };
 
     let response = provider
-        .complete(request)
+        .complete(request.into_shared())
         .await
         .unwrap()
         .collect()
@@ -173,7 +173,7 @@ async fn openai_provider_uses_non_streaming_response_for_structured_output() {
     ));
 
     let response = provider
-        .complete(request)
+        .complete(request.into_shared())
         .await
         .unwrap()
         .collect()
@@ -272,7 +272,7 @@ async fn openai_provider_retries_empty_structured_response() {
     ));
 
     let response = provider
-        .complete(request)
+        .complete(request.into_shared())
         .await
         .unwrap()
         .collect()
@@ -337,7 +337,7 @@ async fn openai_provider_serializes_tool_result_messages_as_function_call_output
     };
 
     let response = provider
-        .complete(request)
+        .complete(request.into_shared())
         .await
         .unwrap()
         .collect()
@@ -394,7 +394,7 @@ async fn openai_provider_serializes_assistant_tool_calls_as_function_call_items(
     };
 
     let response = provider
-        .complete(request)
+        .complete(request.into_shared())
         .await
         .unwrap()
         .collect()
@@ -431,9 +431,7 @@ async fn openai_provider_includes_native_web_search_when_enabled() {
         .with_max_retries(0);
 
     let response = provider
-        .complete(CompletionRequest::simple(
-            "What happened in the news today?",
-        ))
+        .complete(CompletionRequest::simple("What happened in the news today?").into_shared())
         .await
         .unwrap()
         .collect()
@@ -471,9 +469,7 @@ async fn openai_provider_omits_native_web_search_when_disabled() {
         .with_max_retries(0);
 
     let response = provider
-        .complete(CompletionRequest::simple(
-            "What happened in the news today?",
-        ))
+        .complete(CompletionRequest::simple("What happened in the news today?").into_shared())
         .await
         .unwrap()
         .collect()
@@ -528,7 +524,7 @@ async fn openai_provider_streams_tool_calls_from_responses_events() {
         metadata: Default::default(),
     };
 
-    let mut stream = provider.complete(request).await.unwrap();
+    let mut stream = provider.complete(request.into_shared()).await.unwrap();
     let first_block = timeout(Duration::from_millis(50), stream.next())
         .await
         .unwrap()
@@ -606,7 +602,7 @@ async fn openai_provider_retries_after_rate_limit() {
         .with_max_retries(3);
 
     let response = provider
-        .complete(CompletionRequest::simple("hello"))
+        .complete(CompletionRequest::simple("hello").into_shared())
         .await
         .unwrap()
         .collect()
@@ -649,16 +645,19 @@ async fn openai_provider_drops_oversized_metadata_values() {
     metadata.insert("oversized".to_string(), serde_json::json!("x".repeat(600)));
 
     let response = provider
-        .complete(CompletionRequest {
-            model: None,
-            messages: vec![ContextMessage::user("hello")],
-            tools: vec![],
-            max_output_tokens: Some(32),
-            temperature: None,
-            response_format: None,
-            native_web_search: Default::default(),
-            metadata,
-        })
+        .complete(
+            CompletionRequest {
+                model: None,
+                messages: vec![ContextMessage::user("hello")],
+                tools: vec![],
+                max_output_tokens: Some(32),
+                temperature: None,
+                response_format: None,
+                native_web_search: Default::default(),
+                metadata,
+            }
+            .into_shared(),
+        )
         .await
         .unwrap()
         .collect()
@@ -698,7 +697,7 @@ async fn openai_provider_does_not_retry_after_partial_stream_output() {
         .with_max_retries(3);
 
     let mut stream = provider
-        .complete(CompletionRequest::simple("hello"))
+        .complete(CompletionRequest::simple("hello").into_shared())
         .await
         .unwrap();
     let first_block = timeout(Duration::from_millis(50), stream.next())
@@ -767,7 +766,7 @@ async fn openai_provider_streams_parallel_tool_calls_in_order() {
         metadata: Default::default(),
     };
 
-    let mut stream = provider.complete(request).await.unwrap();
+    let mut stream = provider.complete(request.into_shared()).await.unwrap();
     let first = stream.next().await.unwrap().unwrap();
     let second = stream.next().await.unwrap().unwrap();
 
@@ -815,7 +814,7 @@ async fn openai_provider_rejects_system_only_requests() {
         metadata: Default::default(),
     };
 
-    let error = provider.complete(request).await.unwrap_err();
+    let error = provider.complete(request.into_shared()).await.unwrap_err();
     assert!(
         error
             .to_string()

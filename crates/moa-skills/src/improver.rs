@@ -151,7 +151,7 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let current_markdown = render_skill_markdown(&current)?;
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
     let response = llm
-        .complete(build_improvement_request(&current_markdown, evidence))
+        .complete(build_improvement_request(&current_markdown, evidence).into_shared())
         .await?
         .collect()
         .await?;

@@ -8,11 +8,13 @@ use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
     types::action_policy::RiskLevel, types::completion::ToolInvocation, types::hands::HandHandle,
     types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxTier,
-    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
-    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDiffStrategy,
-    types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
+    types::identifiers::HandProvisioningOperationId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::tools::IdempotencyClass, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
+    types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::{HandRoute, ToolRegistry, ToolRouter};
 
@@ -26,6 +28,7 @@ struct MockProviderState {
     execute_results: VecDeque<Result<ToolOutput>>,
     classifications: VecDeque<ToolFailureClass>,
     health_checks: VecDeque<Result<bool>>,
+    provisioned_hands: HashMap<HandProvisioningOperationId, HandHandle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,17 +105,34 @@ impl HandProvider for MockHandProvider {
         self.name
     }
 
-    async fn provision(&self, _spec: HandSpec) -> Result<HandHandle> {
+    async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
         let mut state = self.state.lock().expect("lock mock provider state");
         state.provision_calls += 1;
+        if let Some(handle) = state.provisioned_hands.get(&spec.provisioning_operation_id) {
+            return Ok(handle.clone());
+        }
         if let Some(result) = state.provision_results.pop_front() {
             result?;
         }
         state.next_handle += 1;
-        Ok(HandHandle::docker(format!(
-            "{}-{}",
-            self.name, state.next_handle
-        )))
+        let handle = HandHandle::docker(format!("{}-{}", self.name, state.next_handle));
+        state
+            .provisioned_hands
+            .insert(spec.provisioning_operation_id, handle.clone());
+        Ok(handle)
+    }
+
+    async fn provisioned_hands(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<Vec<HandHandle>> {
+        let state = self.state.lock().expect("lock mock provider state");
+        Ok(state
+            .provisioned_hands
+            .get(&operation_id)
+            .cloned()
+            .into_iter()
+            .collect())
     }
 
     async fn execute(&self, _handle: &HandHandle, _tool: &str, _input: &str) -> Result<ToolOutput> {
@@ -335,6 +355,64 @@ async fn recovery_retries_retryable_failures_up_to_three_attempts() {
 }
 
 #[tokio::test]
+async fn cancellation_during_retry_backoff_stops_recovery_offline() {
+    // Pins: cancellation after one failed execution interrupts the retry delay
+    // and prevents a second attempt, instead of waiting out provider backoff.
+    let provider = Arc::new(MockHandProvider::new(
+        "mock-cancel-backoff",
+        MockProviderState {
+            execute_results: VecDeque::from([Err(MoaError::ProviderError(
+                "temporary provider outage".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::Retryable {
+                reason: "temporary provider outage".to_string(),
+                backoff_hint: Duration::from_secs(30),
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
+    let session = session();
+    let caller = identity();
+    let invocation = bash_invocation();
+    let cancel = CancellationToken::new();
+
+    let call = router.execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
+        session: &session,
+        caller_identity: &caller,
+        worker_id: None,
+        invocation: &invocation,
+        tool_call_id: ToolCallId::new(),
+        active_canary: None,
+        catalog: None,
+        scope: crate::core::ToolCallScope::from_tokens(Some(&cancel), Some(&cancel)),
+    });
+    let canceller = async {
+        while provider.snapshot().execute_calls == 0 {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(call, canceller)
+    })
+    .await
+    .expect("cancellation should interrupt the 30-second retry backoff");
+
+    assert!(matches!(result, Err(MoaError::Cancelled)));
+    assert_eq!(
+        provider.snapshot(),
+        MockProviderSnapshot {
+            provision_calls: 1,
+            destroy_calls: 0,
+            execute_calls: 1,
+        },
+        "cancelled recovery must not provision or execute another attempt"
+    );
+}
+
+#[tokio::test]
 async fn recovery_reprovisions_and_succeeds_after_transient_sandbox_death() {
     let provider = Arc::new(MockHandProvider::new(
         "mock-reprovision",
@@ -512,6 +590,8 @@ async fn recovery_propagates_budget_exhaustion_from_health_check() {
 
 #[tokio::test]
 async fn recovery_caps_reprovision_attempts_per_session() {
+    // Pins: one logical call may replace a dead sandbox at most twice; the
+    // third failed execution returns the classified terminal tool output.
     let provider = Arc::new(MockHandProvider::new(
         "mock-cap",
         MockProviderState {

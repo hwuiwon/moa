@@ -1,6 +1,6 @@
 //! Local hand provider with direct host execution and optional Docker sandboxes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -18,10 +18,12 @@ use moa_core::{
     types::hands::HandStatus, types::hands::MemoryLimit, types::hands::ResourceSupport,
     types::hands::SandboxFile, types::hands::SandboxProfile, types::hands::SandboxTier,
     types::hands::SandboxTierCapabilities, types::hands::validate_sandbox_file_path,
-    types::resource::ResourceBudget, types::tools::ToolOutput,
+    types::identifiers::HandProvisioningOperationId, types::resource::ResourceBudget,
+    types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
 use opentelemetry::trace::Status;
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -40,6 +42,12 @@ const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
+const HAND_SANDBOX_PREFIX: &str = "hand-";
+const HAND_INTENT_DIRECTORY: &str = ".moa-hand-intents";
+const HAND_INTENT_MARKER_SUFFIX: &str = ".json";
+const DOCKER_NAME_PREFIX: &str = "moa-hand-";
+const DOCKER_OPERATION_LABEL: &str = "com.moa.provisioning-operation-id";
+const DOCKER_SPEC_LABEL: &str = "com.moa.provisioning-spec-sha256";
 const TOOL_ERROR_OUTPUT_STATUS: &str = "tool returned error output";
 const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
 
@@ -153,6 +161,32 @@ struct DockerSandbox {
     hard_deadline: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalProvisioningMarker {
+    operation_id: HandProvisioningOperationId,
+    spec_fingerprint: String,
+    sandbox_tier: SandboxTier,
+    workspace_mount: Option<PathBuf>,
+    hard_deadline: Option<DateTime<Utc>>,
+}
+
+#[derive(serde::Serialize)]
+struct LocalCreationSpecIdentity<'a> {
+    sandbox_tier: SandboxTier,
+    image: &'a Option<String>,
+    env: Vec<(&'a str, &'a str)>,
+    workspace_mount: &'a Option<PathBuf>,
+    effective_profile_hash: &'a str,
+}
+
+#[derive(Debug)]
+struct DockerInspection {
+    container_id: String,
+    operation_id: String,
+    spec_fingerprint: String,
+}
+
 /// Returns the absolute instant a profile's maximum lifetime expires.
 ///
 /// Recorded as wall-clock rather than a monotonic instant so it survives the
@@ -192,6 +226,7 @@ fn hard_deadline_for(profile: &SandboxProfile) -> Option<DateTime<Utc>> {
 #[derive(Clone)]
 pub struct LocalHandProvider {
     work_dir: Arc<PathBuf>,
+    docker_reconciliation_enabled: bool,
     docker_available: bool,
     command_timeout: Duration,
     local_sandboxes: Arc<RwLock<HashMap<PathBuf, LocalSandbox>>>,
@@ -214,6 +249,7 @@ impl LocalHandProvider {
 
         Ok(Self {
             work_dir: Arc::new(work_dir),
+            docker_reconciliation_enabled: detect_docker_availability,
             docker_available: if detect_docker_availability {
                 detect_docker().await
             } else {
@@ -237,16 +273,235 @@ impl LocalHandProvider {
         self
     }
 
-    async fn create_sandbox_dir(&self) -> Result<PathBuf> {
-        let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::now_v7()));
-        fs::create_dir_all(&sandbox_dir).await?;
-        #[cfg(unix)]
-        fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o770)).await?;
-        Ok(sandbox_dir)
+    fn sandbox_dir(&self, operation_id: HandProvisioningOperationId) -> PathBuf {
+        self.work_dir
+            .join(format!("{HAND_SANDBOX_PREFIX}{operation_id}"))
     }
 
-    async fn provision_docker(&self, spec: &HandSpec, sandbox_dir: &Path) -> Result<HandHandle> {
+    fn intent_marker_path(&self, operation_id: HandProvisioningOperationId) -> PathBuf {
+        self.work_dir
+            .join(HAND_INTENT_DIRECTORY)
+            .join(format!("{operation_id}{HAND_INTENT_MARKER_SUFFIX}"))
+    }
+
+    fn docker_name(operation_id: HandProvisioningOperationId) -> String {
+        format!("{DOCKER_NAME_PREFIX}{operation_id}")
+    }
+
+    fn creation_fingerprint(spec: &HandSpec) -> Result<String> {
+        let mut env = spec
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        env.sort_unstable();
+        let identity = LocalCreationSpecIdentity {
+            sandbox_tier: spec.sandbox_tier,
+            image: &spec.image,
+            env,
+            workspace_mount: &spec.workspace_mount,
+            effective_profile_hash: spec.effective_profile.profile_hash(),
+        };
+        let digest = Sha256::digest(serde_json::to_vec(&identity)?);
+        Ok(hex::encode(digest))
+    }
+
+    async fn publish_intent_marker(&self, marker: &LocalProvisioningMarker) -> Result<bool> {
+        let marker_path = self.intent_marker_path(marker.operation_id);
+        let parent = marker_path.parent().ok_or_else(|| {
+            MoaError::ProviderError("local hand intent marker has no parent directory".to_string())
+        })?;
+        fs::create_dir_all(parent).await?;
+        let temporary_path = marker_path.with_extension(format!(
+            "{HAND_INTENT_MARKER_SUFFIX}.{}.tmp",
+            Uuid::now_v7()
+        ));
+        fs::write(&temporary_path, serde_json::to_vec(marker)?).await?;
+        let published = match fs::hard_link(&temporary_path, &marker_path).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                let _ = fs::remove_file(&temporary_path).await;
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = fs::remove_file(&temporary_path).await {
+            tracing::warn!(
+                %error,
+                path = %temporary_path.display(),
+                "failed to remove temporary local hand intent marker"
+            );
+        }
+        Ok(published)
+    }
+
+    async fn read_intent_marker(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<Option<LocalProvisioningMarker>> {
+        let marker_path = self.intent_marker_path(operation_id);
+        match fs::read(&marker_path).await {
+            Ok(bytes) => {
+                let marker: LocalProvisioningMarker = serde_json::from_slice(&bytes)?;
+                if marker.operation_id != operation_id {
+                    return Err(MoaError::ProviderError(format!(
+                        "local hand intent marker {} belongs to operation {} instead of {operation_id}",
+                        marker_path.display(),
+                        marker.operation_id
+                    )));
+                }
+                Ok(Some(marker))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn prepare_sandbox_dir(
+        &self,
+        spec: &HandSpec,
+    ) -> Result<(PathBuf, LocalProvisioningMarker)> {
+        let sandbox_dir = self.sandbox_dir(spec.provisioning_operation_id);
+        let expected_fingerprint = Self::creation_fingerprint(spec)?;
+        let marker = match self
+            .read_intent_marker(spec.provisioning_operation_id)
+            .await?
+        {
+            Some(marker) => {
+                if marker.spec_fingerprint != expected_fingerprint {
+                    return Err(MoaError::ProviderError(format!(
+                        "hand provisioning operation {} was reused with a different creation spec",
+                        spec.provisioning_operation_id
+                    )));
+                }
+                marker
+            }
+            None => {
+                if fs::try_exists(&sandbox_dir).await? {
+                    return Err(MoaError::ProviderError(format!(
+                        "deterministic sandbox path {} exists without its provisioning intent marker",
+                        sandbox_dir.display()
+                    )));
+                }
+                let marker = LocalProvisioningMarker {
+                    operation_id: spec.provisioning_operation_id,
+                    spec_fingerprint: expected_fingerprint,
+                    sandbox_tier: spec.sandbox_tier,
+                    workspace_mount: spec.workspace_mount.clone(),
+                    hard_deadline: hard_deadline_for(spec.effective_profile.profile()),
+                };
+                if self.publish_intent_marker(&marker).await? {
+                    marker
+                } else {
+                    let winner = self
+                        .read_intent_marker(spec.provisioning_operation_id)
+                        .await?
+                        .ok_or_else(|| {
+                            MoaError::ProviderError(format!(
+                                "hand provisioning intent {} disappeared during concurrent publication",
+                                spec.provisioning_operation_id
+                            ))
+                        })?;
+                    if winner.spec_fingerprint != marker.spec_fingerprint {
+                        return Err(MoaError::ProviderError(format!(
+                            "hand provisioning operation {} was concurrently reused with a different creation spec",
+                            spec.provisioning_operation_id
+                        )));
+                    }
+                    winner
+                }
+            }
+        };
+
+        match fs::create_dir(&sandbox_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        #[cfg(unix)]
+        fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o770)).await?;
+        Ok((sandbox_dir, marker))
+    }
+
+    async fn register_docker_sandbox(
+        &self,
+        container_id: String,
+        sandbox_dir: &Path,
+        workspace_mount: &Path,
+        hard_deadline: Option<DateTime<Utc>>,
+    ) -> HandHandle {
         let extra_search_skips = file_search::load_moaignore(sandbox_dir).await;
+        self.docker_sandboxes.write().await.insert(
+            container_id.clone(),
+            DockerSandbox {
+                sandbox_dir: sandbox_dir.to_path_buf(),
+                workspace_mount: workspace_mount.to_string_lossy().into_owned(),
+                extra_search_skips,
+                hard_deadline,
+            },
+        );
+        HandHandle::docker(container_id)
+    }
+
+    async fn docker_containers_for_operation(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<BTreeSet<String>> {
+        if !self.docker_reconciliation_enabled {
+            return Err(MoaError::ProviderError(format!(
+                "cannot reconcile Docker hand provisioning operation {operation_id} because Docker reconciliation is disabled"
+            )));
+        }
+        let expected_name = Self::docker_name(operation_id);
+        let mut container_ids = BTreeSet::new();
+        if let Some(inspection) = inspect_docker_container(&expected_name).await? {
+            validate_docker_operation(&inspection, operation_id)?;
+            container_ids.insert(inspection.container_id);
+        }
+        for container_id in list_docker_containers(operation_id).await? {
+            let inspection = inspect_docker_container(&container_id)
+                .await?
+                .ok_or_else(|| {
+                    MoaError::ProviderError(format!(
+                        "Docker listed hand container {container_id} but it disappeared before inspection"
+                    ))
+                })?;
+            validate_docker_operation(&inspection, operation_id)?;
+            container_ids.insert(inspection.container_id);
+        }
+        Ok(container_ids)
+    }
+
+    async fn resolve_docker_sandbox(
+        &self,
+        container_name: &str,
+        spec: &HandSpec,
+        marker: &LocalProvisioningMarker,
+        sandbox_dir: &Path,
+        workspace_mount: &Path,
+    ) -> Result<Option<HandHandle>> {
+        let Some(inspection) = inspect_docker_container(container_name).await? else {
+            return Ok(None);
+        };
+        validate_docker_operation(&inspection, spec.provisioning_operation_id)?;
+        validate_docker_spec(&inspection, &marker.spec_fingerprint)?;
+        Ok(Some(
+            self.register_docker_sandbox(
+                inspection.container_id,
+                sandbox_dir,
+                workspace_mount,
+                marker.hard_deadline,
+            )
+            .await,
+        ))
+    }
+
+    async fn provision_docker(
+        &self,
+        spec: &HandSpec,
+        sandbox_dir: &Path,
+        marker: &LocalProvisioningMarker,
+    ) -> Result<HandHandle> {
         let image = spec
             .image
             .clone()
@@ -256,11 +511,27 @@ impl LocalHandProvider {
             .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCKER_WORKSPACE));
         let mount = format!("{}:{}", sandbox_dir.display(), workspace_mount.display());
+        let container_name = Self::docker_name(spec.provisioning_operation_id);
+        if let Some(handle) = self
+            .resolve_docker_sandbox(&container_name, spec, marker, sandbox_dir, &workspace_mount)
+            .await?
+        {
+            return Ok(handle);
+        }
         let user = docker_user_spec().await;
         let mut args = vec![
             "run".to_string(),
             "-d".to_string(),
             "--rm".to_string(),
+            "--name".to_string(),
+            container_name.clone(),
+            "--label".to_string(),
+            format!(
+                "{DOCKER_OPERATION_LABEL}={}",
+                spec.provisioning_operation_id
+            ),
+            "--label".to_string(),
+            format!("{DOCKER_SPEC_LABEL}={}", marker.spec_fingerprint),
             "--user".to_string(),
             user,
             "--read-only".to_string(),
@@ -292,6 +563,18 @@ impl LocalHandProvider {
         ]);
         let output = Command::new("docker").args(&args).output().await?;
         if !output.status.success() {
+            if let Some(handle) = self
+                .resolve_docker_sandbox(
+                    &container_name,
+                    spec,
+                    marker,
+                    sandbox_dir,
+                    &workspace_mount,
+                )
+                .await?
+            {
+                return Ok(handle);
+            }
             return Err(MoaError::ProviderError(format!(
                 "failed to start docker sandbox: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -299,19 +582,22 @@ impl LocalHandProvider {
         }
 
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        self.docker_sandboxes.write().await.insert(
-            container_id.clone(),
-            DockerSandbox {
-                sandbox_dir: sandbox_dir.to_path_buf(),
-                workspace_mount: workspace_mount.to_string_lossy().into_owned(),
-                extra_search_skips,
-                hard_deadline: hard_deadline_for(spec.effective_profile.profile()),
-            },
-        );
-        Ok(HandHandle::docker(container_id))
+        Ok(self
+            .register_docker_sandbox(
+                container_id,
+                sandbox_dir,
+                &workspace_mount,
+                marker.hard_deadline,
+            )
+            .await)
     }
 
-    async fn provision_local(&self, spec: &HandSpec, sandbox_dir: PathBuf) -> Result<HandHandle> {
+    async fn provision_local(
+        &self,
+        spec: &HandSpec,
+        sandbox_dir: PathBuf,
+        marker: &LocalProvisioningMarker,
+    ) -> Result<HandHandle> {
         reject_unenforceable_host_profile(spec.effective_profile.profile())?;
         let execution_root = spec
             .workspace_mount
@@ -323,7 +609,7 @@ impl LocalHandProvider {
             LocalSandbox {
                 execution_root,
                 extra_search_skips,
-                hard_deadline: hard_deadline_for(spec.effective_profile.profile()),
+                hard_deadline: marker.hard_deadline,
             },
         );
         Ok(HandHandle::local(sandbox_dir))
@@ -477,22 +763,34 @@ impl LocalHandProvider {
     }
 
     async fn destroy_local_sandbox(&self, sandbox_dir: &Path) -> Result<()> {
+        if let Some(operation_id) = operation_id_from_sandbox_dir(sandbox_dir)
+            && self
+                .read_intent_marker(operation_id)
+                .await?
+                .is_some_and(|marker| marker.sandbox_tier == SandboxTier::Container)
+        {
+            let remaining = self.docker_containers_for_operation(operation_id).await?;
+            if !remaining.is_empty() {
+                return Err(MoaError::ProviderError(format!(
+                    "refusing to remove local state for hand provisioning operation {operation_id} while {} Docker container(s) remain",
+                    remaining.len()
+                )));
+            }
+        }
         match fs::remove_dir_all(sandbox_dir).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-    }
-
-    async fn cleanup_failed_sandbox_dir(&self, sandbox_dir: &Path, reason: &str) {
-        if let Err(error) = self.destroy_local_sandbox(sandbox_dir).await {
-            tracing::warn!(
-                %error,
-                %reason,
-                sandbox_dir = %sandbox_dir.display(),
-                "failed to clean up local sandbox directory after provisioning failure"
-            );
+        if let Some(operation_id) = operation_id_from_sandbox_dir(sandbox_dir) {
+            let marker_path = self.intent_marker_path(operation_id);
+            match fs::remove_file(marker_path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Ok(())
     }
 
     async fn install_files_at_root(&self, root: &Path, files: &[SandboxFile]) -> Result<()> {
@@ -510,11 +808,16 @@ impl LocalHandProvider {
     }
 
     /// Builds the durable lease payload needed to reconnect this local or Docker handle.
-    pub async fn lease_handle(&self, handle: &HandHandle) -> Result<LeaseHandle> {
+    pub async fn lease_handle(
+        &self,
+        provisioning_operation_id: HandProvisioningOperationId,
+        handle: &HandHandle,
+    ) -> Result<LeaseHandle> {
         match handle {
             HandHandle::Local { sandbox_dir } => {
                 let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
                 Ok(LeaseHandle::with_metadata(
+                    provisioning_operation_id,
                     handle.clone(),
                     serde_json::json!({
                         "kind": "local",
@@ -537,6 +840,7 @@ impl LocalHandProvider {
                         ))
                     })?;
                 Ok(LeaseHandle::with_metadata(
+                    provisioning_operation_id,
                     handle.clone(),
                     serde_json::json!({
                         "kind": "docker",
@@ -817,19 +1121,13 @@ impl HandProvider for LocalHandProvider {
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
         match spec.sandbox_tier {
             SandboxTier::None | SandboxTier::Local => {
-                let sandbox_dir = self.create_sandbox_dir().await?;
-                self.provision_local(&spec, sandbox_dir).await
+                reject_unenforceable_host_profile(spec.effective_profile.profile())?;
+                let (sandbox_dir, marker) = self.prepare_sandbox_dir(&spec).await?;
+                self.provision_local(&spec, sandbox_dir, &marker).await
             }
             SandboxTier::Container if self.docker_available => {
-                let sandbox_dir = self.create_sandbox_dir().await?;
-                match self.provision_docker(&spec, &sandbox_dir).await {
-                    Ok(handle) => Ok(handle),
-                    Err(error) => {
-                        self.cleanup_failed_sandbox_dir(&sandbox_dir, "docker provisioning failed")
-                            .await;
-                        Err(error)
-                    }
-                }
+                let (sandbox_dir, marker) = self.prepare_sandbox_dir(&spec).await?;
+                self.provision_docker(&spec, &sandbox_dir, &marker).await
             }
             SandboxTier::Container => Err(MoaError::ProviderError(
                 "container sandbox requested but Docker is unavailable".to_string(),
@@ -838,6 +1136,54 @@ impl HandProvider for LocalHandProvider {
                 "microvm sandboxes are not supported by the local hand provider".to_string(),
             )),
         }
+    }
+
+    async fn provisioned_hands(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<Vec<HandHandle>> {
+        let sandbox_dir = self.sandbox_dir(operation_id);
+        let marker = self.read_intent_marker(operation_id).await?;
+        let mut handles = Vec::new();
+
+        // Docker is provider-visible state. It must remain discoverable even
+        // after a partial cleanup removed the local marker and bind directory.
+        let container_ids = if self.docker_reconciliation_enabled
+            || marker
+                .as_ref()
+                .is_some_and(|marker| marker.sandbox_tier == SandboxTier::Container)
+        {
+            self.docker_containers_for_operation(operation_id).await?
+        } else {
+            BTreeSet::new()
+        };
+
+        for container_id in container_ids {
+            if let Some(marker) = marker.as_ref()
+                && marker.sandbox_tier == SandboxTier::Container
+            {
+                let workspace_mount = marker
+                    .workspace_mount
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCKER_WORKSPACE));
+                handles.push(
+                    self.register_docker_sandbox(
+                        container_id,
+                        &sandbox_dir,
+                        &workspace_mount,
+                        marker.hard_deadline,
+                    )
+                    .await,
+                );
+            } else {
+                handles.push(HandHandle::docker(container_id));
+            }
+        }
+
+        if marker.is_some() || fs::try_exists(&sandbox_dir).await? {
+            handles.push(HandHandle::local(sandbox_dir));
+        }
+        Ok(handles)
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
@@ -1075,6 +1421,103 @@ async fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> 
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn operation_id_from_sandbox_dir(sandbox_dir: &Path) -> Option<HandProvisioningOperationId> {
+    let name = sandbox_dir.file_name()?.to_str()?;
+    let value = name.strip_prefix(HAND_SANDBOX_PREFIX)?;
+    Uuid::parse_str(value).ok().map(HandProvisioningOperationId)
+}
+
+async fn inspect_docker_container(reference: &str) -> Result<Option<DockerInspection>> {
+    let output = Command::new("docker")
+        .args(["container", "inspect", "--format", "{{json .}}", reference])
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such object") || stderr.contains("No such container") {
+            return Ok(None);
+        }
+        return Err(MoaError::ProviderError(format!(
+            "failed to inspect Docker hand container {reference}: {}",
+            stderr.trim()
+        )));
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let labels = value.get("Config").and_then(|config| config.get("Labels"));
+    Ok(Some(DockerInspection {
+        container_id: value
+            .get("Id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(reference)
+            .to_string(),
+        operation_id: labels
+            .and_then(|labels| labels.get(DOCKER_OPERATION_LABEL))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        spec_fingerprint: labels
+            .and_then(|labels| labels.get(DOCKER_SPEC_LABEL))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }))
+}
+
+fn validate_docker_operation(
+    inspection: &DockerInspection,
+    expected_operation_id: HandProvisioningOperationId,
+) -> Result<()> {
+    if inspection.operation_id != expected_operation_id.to_string() {
+        return Err(MoaError::ProviderError(format!(
+            "deterministic Docker hand container {} carries operation label {:?}, expected {expected_operation_id}",
+            inspection.container_id, inspection.operation_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_docker_spec(
+    inspection: &DockerInspection,
+    expected_spec_fingerprint: &str,
+) -> Result<()> {
+    if inspection.spec_fingerprint != expected_spec_fingerprint {
+        return Err(MoaError::ProviderError(format!(
+            "Docker hand container {} carries a different creation spec fingerprint",
+            inspection.container_id
+        )));
+    }
+    Ok(())
+}
+
+async fn list_docker_containers(operation_id: HandProvisioningOperationId) -> Result<Vec<String>> {
+    let filter = format!("label={DOCKER_OPERATION_LABEL}={operation_id}");
+    let output = Command::new("docker")
+        .args([
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            &filter,
+        ])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(MoaError::ProviderError(format!(
+            "failed to enumerate Docker hands for operation {operation_id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 async fn docker_status(container_id: &str) -> Result<HandStatus> {

@@ -436,7 +436,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `BlobStore` | Claim-check storage for large session artifacts | `PostgresBlobStore` by default; explicit `FileBlobStore` for local or mounted-path use |
 | `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | Redis-compatible Valkey in the orchestrator; in-process memory only in isolated non-orchestrator tests |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
-| `HandProvider` | Declare enforceable capabilities per sandbox tier, then provision, execute, pause/resume, destroy hands. `capabilities()` is required with no default body, and every provisioned hand carries one required six-dimension `EffectiveSandboxProfile` the provider must translate or reject. | local, Docker, Daytona, E2B |
+| `HandProvider` | Declare enforceable capabilities per sandbox tier, then provision, discover, execute, pause/resume, and destroy hands. `capabilities()` and `provisioned_hands()` are required with no default bodies. Every platform-created `HandSpec` carries one durable `HandProvisioningOperationId`, the lease's absolute provisioning deadline through `budget.deadline`, and one required six-dimension `EffectiveSandboxProfile`. The platform bounds the complete create dispatch by that persisted deadline. `provision()` is idempotent for the operation ID and same creation spec, rejects reuse with a different spec, and `provisioned_hands()` enumerates every matching live resource so recovery can reconcile providers that may create duplicates. | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface, including the shared immutable request path used for failover replay | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, ZeroEntropy zembed-1, Gemini embedding, and test/mock adapters |
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
@@ -607,7 +607,7 @@ policy.
 | Execution runs | Postgres | `moa.execution_run` and `moa.execution_task` store immutable plan snapshots, provenance, amendments, budgets, stable logical tasks, outcomes, citations, completion checks, and terminal results |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity, plus `learning_log_source` typed provenance |
 | Learning attribution | Postgres | `moa.artifact_revision_contribution` and `moa.artifact_suite_contribution` record whose data produced which derived artifact bytes; `moa.privacy_erasure_record_decision` records one durable disposition per record per erasure operation |
-| Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
+| Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation and operation fencing, the absolute provider-create deadline, the later reconciliation time, status, and expiry for cross-pod reuse and cleanup |
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
 | Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids. `SessionAttachmentStore::put` takes a deterministic slot (tenant, session, client message id, ordinal) whose UUIDv5 is the row's primary key, claims that row before writing the object create-only, and reports whether the write created storage or replayed an identical one |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
@@ -616,7 +616,7 @@ policy.
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
 The central PostgreSQL migration inventory is a fresh-install-only chain of
-exactly 54 files, `V000001..V000054`. The ownership manifest contains one entry
+exactly 57 files, `V000001..V000057`. The ownership manifest contains one entry
 for every logical table family. `xtask check-migrations` rejects gaps, extra
 files, and missing or stale ownership entries. The 2026-08-03 hard-reset epoch
 removes the retired per-user token-vault tables from their original catalog

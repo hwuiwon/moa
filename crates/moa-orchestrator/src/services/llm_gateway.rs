@@ -163,11 +163,11 @@ pub struct BoundedCompletionRequest {
 
 /// The request metadata needed after the provider-owned request has completed.
 ///
-/// The provider receives the complete request by value so streaming adapters can
-/// move it into their spawned tasks. This compact snapshot keeps gateway
-/// persistence independent of a second full [`CompletionRequest`] clone. Raw
-/// metadata values are retained so validation and malformed-value warnings keep
-/// the same persistence-gated timing as the request-based helpers.
+/// The durable gateway receives the owned DTO and moves it into canonical shared
+/// provider storage exactly once. This compact snapshot keeps persistence
+/// independent of a second full [`CompletionRequest`] clone. Raw metadata values
+/// are retained so validation and malformed-value warnings keep the same
+/// persistence-gated timing as the request-based helpers.
 #[derive(Debug)]
 struct CompletionAuditContext {
     defer_brain_response: bool,
@@ -215,8 +215,9 @@ impl CompletionAuditContext {
 
     /// Parses the optional validated memory-write barrier.
     ///
-    /// An invalid present barrier remains an error so the enclosing turn is
-    /// rejected, matching [`session_turn_from_completion_request`].
+    /// An invalid present barrier remains an error so memory ingestion is
+    /// skipped after provider dispatch, matching
+    /// [`session_turn_from_completion_request`].
     fn memory_write_barrier(
         &self,
     ) -> moa_core::error::Result<Option<moa_core::types::memory::InformationBarrierId>> {
@@ -287,7 +288,7 @@ impl LLMGatewayImpl {
             resolved.provider,
             DeadlineGuard::from_budget(CancellationToken::new(), budget),
         );
-        let stream = provider.complete(request).await?;
+        let stream = provider.complete(request.into_shared()).await?;
         let response = stream.collect().await?;
         admit_completion_usage(&response, budget)?;
         Ok(response)
@@ -1160,9 +1161,9 @@ mod tests {
     }
 
     #[test]
-    fn completion_audit_context_preserves_malformed_barrier_rejection() {
+    fn completion_audit_context_skips_ingestion_for_malformed_barrier() {
         // Pins: moving only persistence metadata out of the request retains the
-        // same rejection when a validated memory barrier is malformed.
+        // same ingestion skip after dispatch when a memory barrier is malformed.
         let session_id = SessionId::new();
         let mut metadata = HashMap::new();
         metadata.insert(

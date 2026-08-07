@@ -335,7 +335,10 @@ pub(super) async fn run_reporting_applied_serialized(
         .await;
     catalog_lock.close().await;
     unlock_result?;
-    Ok(result?)
+    match result {
+        Ok(applied) => Ok(applied),
+        Err(error) => Err(std::io::Error::other(format!("{error:#}")).into()),
+    }
 }
 
 /// Returns the exact embedded migration labels in version order.
@@ -343,6 +346,25 @@ pub(super) fn expected_migration_labels() -> Vec<String> {
     let mut migrations = embedded_for_cutover_proof::migrations::runner()
         .get_migrations()
         .iter()
+        .map(|migration| (migration.version(), migration.to_string()))
+        .collect::<Vec<_>>();
+    migrations.sort_by_key(|(version, _)| *version);
+    migrations.into_iter().map(|(_, label)| label).collect()
+}
+
+/// Returns the embedded migration labels from one semantic migration onward.
+///
+/// A scenario that applies through the preceding migration and then runs the
+/// public runner to completion applies exactly this contiguous tail. Pinning the
+/// tail rather than a hand-written single label keeps the assertion exact while
+/// staying correct when a later migration is appended to the epoch.
+pub(super) fn expected_migration_labels_from(migration_name: &str) -> Vec<String> {
+    let version = migration_version(migration_name)
+        .unwrap_or_else(|error| panic!("migration `{migration_name}` must be embedded: {error}"));
+    let mut migrations = embedded_for_cutover_proof::migrations::runner()
+        .get_migrations()
+        .iter()
+        .filter(|migration| migration.version() >= version)
         .map(|migration| (migration.version(), migration.to_string()))
         .collect::<Vec<_>>();
     migrations.sort_by_key(|(version, _)| *version);

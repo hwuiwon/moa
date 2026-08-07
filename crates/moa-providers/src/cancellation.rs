@@ -29,10 +29,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionRequest,
-    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
-    types::model::ModelCapabilities, types::resource::DeadlineGuard,
-    types::resource::ResourceBudget,
+    error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::model::ModelCapabilities,
+    types::resource::DeadlineGuard, types::resource::ResourceBudget,
 };
 
 /// Buffered blocks held between the inner provider stream and the caller.
@@ -91,22 +90,11 @@ impl LLMProvider for CancellableLLMProvider {
         self.inner.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.guard.admit()?;
-        // The connection handshake is itself cancellable: a provider that hangs
-        // before returning a stream must not outlive the scope either.
-        let stream = self.guard.run(self.inner.complete(request)).await??;
-        Ok(guarded_stream(stream, self.guard.clone()))
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
         self.guard.admit()?;
         // The shared request remains immutable through the cancellation layer;
         // the inner provider owns any provider-specific transformation.
-        let stream = self
-            .guard
-            .run(self.inner.complete_shared(request))
-            .await??;
+        let stream = self.guard.run(self.inner.complete(request)).await??;
         Ok(guarded_stream(stream, self.guard.clone()))
     }
 }
@@ -227,7 +215,7 @@ mod tests {
             ModelCapabilities::default()
         }
 
-        async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        async fn complete(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
             self.dispatches.fetch_add(1, Ordering::SeqCst);
             let leading_blocks = self.leading_blocks;
             let finished = Arc::clone(&self.producer_finished);
@@ -254,13 +242,6 @@ mod tests {
             });
             Ok(CompletionStream::new(receiver, completion))
         }
-
-        async fn complete_shared(
-            &self,
-            _request: SharedCompletionRequest,
-        ) -> Result<CompletionStream> {
-            self.complete(CompletionRequest::new("shared-test")).await
-        }
     }
 
     struct FinishSentinel(Arc<AtomicUsize>);
@@ -286,7 +267,7 @@ mod tests {
             ModelCapabilities::default()
         }
 
-        async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        async fn complete(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
             self.dispatches.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: "done".to_string(),
@@ -297,13 +278,6 @@ mod tests {
                 duration_ms: 0,
                 thought_signature: None,
             }))
-        }
-
-        async fn complete_shared(
-            &self,
-            _request: SharedCompletionRequest,
-        ) -> Result<CompletionStream> {
-            self.complete(CompletionRequest::new("shared-test")).await
         }
     }
 
@@ -322,7 +296,7 @@ mod tests {
         let provider = CancellableLLMProvider::new(inner, guard.clone());
 
         provider
-            .complete(CompletionRequest::new("first"))
+            .complete(CompletionRequest::new("first").into_shared())
             .await
             .expect("a live scope dispatches")
             .collect()
@@ -333,7 +307,7 @@ mod tests {
         guard.cancel();
         for _ in 0..5 {
             let error = provider
-                .complete(CompletionRequest::new("after cancel"))
+                .complete(CompletionRequest::new("after cancel").into_shared())
                 .await
                 .expect_err("a cancelled scope must refuse");
             assert!(matches!(error, MoaError::Cancelled), "got {error:?}");
@@ -364,7 +338,7 @@ mod tests {
         );
 
         let error = provider
-            .complete(CompletionRequest::new("late"))
+            .complete(CompletionRequest::new("late").into_shared())
             .await
             .expect_err("an expired scope must refuse");
         assert!(
@@ -390,7 +364,7 @@ mod tests {
         let provider = CancellableLLMProvider::new(inner, guard.clone());
 
         let mut stream = provider
-            .complete(CompletionRequest::new("stream"))
+            .complete(CompletionRequest::new("stream").into_shared())
             .await
             .expect("dispatch");
         assert!(matches!(
@@ -442,7 +416,7 @@ mod tests {
         let provider = CancellableLLMProvider::new(inner, guard.clone());
 
         let stream = provider
-            .complete(CompletionRequest::new("stream"))
+            .complete(CompletionRequest::new("stream").into_shared())
             .await
             .expect("dispatch");
 
@@ -491,7 +465,7 @@ mod tests {
         let provider = CancellableLLMProvider::new(inner, guard);
 
         let mut stream = provider
-            .complete(CompletionRequest::new("stream"))
+            .complete(CompletionRequest::new("stream").into_shared())
             .await
             .expect("dispatch");
         assert!(matches!(
@@ -534,7 +508,7 @@ mod tests {
         );
 
         let mut stream = provider
-            .complete(CompletionRequest::new("hello"))
+            .complete(CompletionRequest::new("hello").into_shared())
             .await
             .expect("dispatch");
         let mut blocks = Vec::new();

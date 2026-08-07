@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result as MoaResult, traits::LLMProvider,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionRequestView, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
-    types::completion::StopReason, types::completion::TokenUsage, types::context::ContextMessage,
-    types::identifiers::ModelId, types::model::ModelCapabilities,
+    types::completion::CompletionContent, types::completion::CompletionRequestView,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
+    types::completion::TokenUsage, types::context::ContextMessage, types::identifiers::ModelId,
+    types::model::ModelCapabilities,
 };
 use moa_eval::memory_eval::{
     AnswerJudge, DeterministicJudge, JudgeInput, PairwiseLlmJudge, PairwiseWinner, ProbeType,
@@ -415,15 +415,7 @@ impl LLMProvider for ScriptedJudgeProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> MoaResult<CompletionStream> {
-        self.record_request(&request)?;
-        self.next_response()
-    }
-
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> MoaResult<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> MoaResult<CompletionStream> {
         self.record_request(&request)?;
         self.next_response()
     }

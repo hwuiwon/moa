@@ -143,13 +143,24 @@ impl RateGuard {
         self
     }
 
-    /// Returns whether this guard is held only by its coordination cache.
+    /// Returns whether this cache-owned guard has no live local policy state.
     ///
-    /// The cache uses this to reclaim inactive entries without splitting the
-    /// shared state of guards that are still owned by provider instances or
-    /// in-flight callers.
-    pub(crate) fn is_cache_only(&self) -> bool {
-        Arc::strong_count(&self.inner) == 1
+    /// A guard remains retained while any provider/caller owns it, a cooldown is
+    /// active, or a non-empty retry-budget window has not expired. Reclaiming a
+    /// cache-only guard sooner would let provider-cache churn escape either
+    /// credential-wide control by constructing a fresh local state machine.
+    pub(crate) fn is_reclaimable(&self) -> bool {
+        if Arc::strong_count(&self.inner) != 1 {
+            return false;
+        }
+        let now = Instant::now();
+        let window = self.retry_window();
+        self.with_state(|state| {
+            rotate(state, now, window);
+            let cooldown_live = state.pause_until.is_some_and(|deadline| deadline > now);
+            let retry_window_live = state.requests > 0 || state.retries > 0;
+            !cooldown_live && !retry_window_live
+        })
     }
 
     /// Returns the remaining 429 cooldown for this quota, or `None` when clear.

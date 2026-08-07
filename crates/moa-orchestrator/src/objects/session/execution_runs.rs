@@ -7,7 +7,7 @@ use moa_brain::execution_planning::{
     route_execution,
 };
 use moa_core::traits::{LLMProvider, SessionStore};
-use moa_core::types::completion::{CompletionRequest, CompletionStream, SharedCompletionRequest};
+use moa_core::types::completion::{CompletionStream, SharedCompletionRequest};
 use moa_core::types::execution_planning::{
     ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
     ExecutionRouteSource, ExecutionRouteStage, ExecutionStrategy, execution_planning_dedupe_key,
@@ -41,15 +41,6 @@ impl LLMProvider for TemplateAdmissionPlanner {
     }
 
     async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        Err(MoaError::ProviderError(
-            "external pinned-template admission cannot invoke a planning provider".to_string(),
-        ))
-    }
-
-    async fn complete_shared(
         &self,
         _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

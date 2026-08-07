@@ -1617,7 +1617,8 @@ mod tests {
         types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
         types::agent::LockedToolRef, types::events_stream::EventRecord, types::hands::HandHandle,
         types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
-        types::hands::SandboxTier, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::hands::SandboxTier, types::identifiers::HandProvisioningOperationId,
+        types::identifiers::SessionId, types::identifiers::TenantId,
         types::identifiers::ToolCallId, types::security::SensitivityClass,
         types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
         types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
@@ -1680,6 +1681,7 @@ mod tests {
     #[derive(Default)]
     struct InstallingProvider {
         installed_files: Mutex<Vec<SandboxFile>>,
+        provisioned_hands: Mutex<HashMap<HandProvisioningOperationId, HandHandle>>,
     }
 
     impl InstallingProvider {
@@ -1700,8 +1702,31 @@ mod tests {
             "install-provider"
         }
 
-        async fn provision(&self, _spec: HandSpec) -> moa_core::error::Result<HandHandle> {
-            Ok(HandHandle::docker("install-provider-1"))
+        async fn provision(&self, spec: HandSpec) -> moa_core::error::Result<HandHandle> {
+            let mut hands = self
+                .provisioned_hands
+                .lock()
+                .expect("lock provisioned hands");
+            Ok(hands
+                .entry(spec.provisioning_operation_id)
+                .or_insert_with(|| {
+                    HandHandle::docker(format!(
+                        "install-provider-{}",
+                        spec.provisioning_operation_id
+                    ))
+                })
+                .clone())
+        }
+
+        async fn provisioned_hands(
+            &self,
+            operation_id: HandProvisioningOperationId,
+        ) -> moa_core::error::Result<Vec<HandHandle>> {
+            let hands = self
+                .provisioned_hands
+                .lock()
+                .expect("lock provisioned hands");
+            Ok(hands.get(&operation_id).cloned().into_iter().collect())
         }
 
         async fn execute(

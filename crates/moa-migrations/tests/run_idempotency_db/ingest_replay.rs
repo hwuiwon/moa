@@ -83,7 +83,10 @@ async fn ingest_dedup_requires_a_closed_apply_outcome_db() {
     let outcome = database.finish(outcome).await;
     let (first, column, constraint, historical_outcome) =
         outcome.expect("ingestion outcome migration should apply");
-    assert_eq!(first, vec!["V56__ingest_apply_outcome".to_string()]);
+    assert_eq!(
+        first,
+        expected_migration_labels_from("ingest_apply_outcome")
+    );
     assert_eq!(
         column,
         Some(("text".to_string(), "NO".to_string())),

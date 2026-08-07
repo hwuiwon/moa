@@ -509,14 +509,17 @@ impl ToolRouter {
             .tools
             .get(&request.invocation.name)
             .ok_or_else(|| registry.unknown_tool_error(&request.invocation.name))?;
+        let capability = registered_tool
+            .execution
+            .capability_id(&request.invocation.name);
         match &registered_tool.execution {
             ToolExecution::BuiltIn(tool) => {
-                self.execute_builtin_once(&request, &registered_tool.definition, tool)
+                self.execute_builtin_once(&request, &registered_tool.definition, &capability, tool)
                     .await
             }
             ToolExecution::Hand { routes } => {
                 let route = primary_hand_route(routes)?;
-                self.execute_hand_once(&request, &registered_tool.definition, route)
+                self.execute_hand_once(&request, &registered_tool.definition, &capability, route)
                     .await
             }
             ToolExecution::Mcp {
@@ -539,6 +542,7 @@ impl ToolRouter {
                 self.execute_mcp_once_with_scope(
                     &request,
                     &registered_tool.definition,
+                    &capability,
                     &mut dispatch,
                 )
                 .await
@@ -554,6 +558,7 @@ impl ToolRouter {
         &self,
         request: &AuthorizedToolCall<'_>,
         tool_definition: &ToolDefinition,
+        capability: &ToolCapabilityId,
         tool: &Arc<dyn moa_core::traits::BuiltInTool>,
     ) -> Result<SecuredToolOutput> {
         let memory_tool_executor = self.bindings.memory_tool_executor();
@@ -561,10 +566,11 @@ impl ToolRouter {
             self.bindings.memory_retrieval_executor.read().await.clone();
         let lineage = self.bindings.lineage();
         let session_store = self.bindings.session_store();
+        let tool_call_id = request.tool_call_id.to_string();
         let ctx = moa_core::traits::ToolContext {
             session: request.session,
             caller_identity: request.caller_identity,
-            tool_call_id: request.invocation.id.as_deref(),
+            tool_call_id: Some(&tool_call_id),
             lineage: lineage.as_ref(),
             session_store: session_store.as_deref(),
             cancel_token: request.scope.cancel_token,
@@ -572,7 +578,6 @@ impl ToolRouter {
             memory_tool_executor: memory_tool_executor.as_deref(),
             memory_retrieval_executor: memory_retrieval_executor.as_deref(),
         };
-        let capability = ToolCapabilityId::builtin(&request.invocation.name);
         // Built-ins are in-process, so the scope's own deadline is a real
         // enforcement point: expiry cancels the shared token the tool is holding
         // rather than only dropping this future.
@@ -583,7 +588,7 @@ impl ToolRouter {
             .secure_and_budget(
                 request.session,
                 tool_definition,
-                capability,
+                capability.clone(),
                 request.active_canary,
                 output,
                 None,
@@ -622,6 +627,7 @@ impl ToolRouter {
         &self,
         request: &AuthorizedToolCall<'_>,
         tool_definition: &ToolDefinition,
+        capability: &ToolCapabilityId,
         route: &HandRoute,
     ) -> Result<SecuredToolOutput> {
         // Provisioning is itself paid work — a cold container, a remote
@@ -629,14 +635,9 @@ impl ToolRouter {
         // dispatch entry point, which may have admitted seconds ago.
         request.scope.admit()?;
         let hand = self
-            .get_or_provision_hand_within(
-                route,
-                request.session,
-                request.worker_id,
-                request.scope.budget,
-            )
+            .get_or_provision_hand_within(route, request.session, request.worker_id, request.scope)
             .await?;
-        self.execute_hand_on_handle(request, tool_definition, &route.provider, &hand)
+        self.execute_hand_on_handle(request, tool_definition, capability, &route.provider, &hand)
             .await
     }
 
@@ -648,6 +649,7 @@ impl ToolRouter {
         &self,
         request: &AuthorizedToolCall<'_>,
         tool_definition: &ToolDefinition,
+        capability: &ToolCapabilityId,
         provider: &str,
         hand: &HandHandle,
     ) -> Result<SecuredToolOutput> {
@@ -656,12 +658,21 @@ impl ToolRouter {
             self.hands.providers.get(provider).ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
-        let status = provider_impl.status(hand).await?;
-        if matches!(status, HandStatus::Paused) {
-            provider_impl.resume(hand).await?;
-        }
-        self.install_trusted_files_for_hand(request.session, request.worker_id, provider, hand)
+        let status = self
+            .run_within_scope(request.scope, provider_impl.status(hand))
             .await?;
+        if matches!(status, HandStatus::Paused) {
+            self.run_within_scope(request.scope, provider_impl.resume(hand))
+                .await?;
+        }
+        self.install_trusted_files_for_hand(
+            request.session,
+            request.worker_id,
+            provider,
+            hand,
+            request.scope,
+        )
+        .await?;
 
         let serialized_input = serde_json::to_string(&request.invocation.input)?;
         let output = if provider == DEFAULT_PROVIDER_NAME {
@@ -694,14 +705,11 @@ impl ToolRouter {
             .await?
         };
 
-        // Keyed on the logical tool, not on `provider`: a fallback from one
-        // sandbox provider to another must not mint a second capability identity.
-        let capability = ToolCapabilityId::hand(&request.invocation.name);
         Ok(self
             .secure_and_budget(
                 request.session,
                 tool_definition,
-                capability,
+                capability.clone(),
                 request.active_canary,
                 output,
                 Some(hand_id(hand)),
@@ -713,6 +721,7 @@ impl ToolRouter {
         &self,
         request: &AuthorizedToolCall<'_>,
         tool_definition: &ToolDefinition,
+        capability: &ToolCapabilityId,
         dispatch: &mut McpDispatch<'_>,
     ) -> Result<SecuredToolOutput> {
         const MCP_DISPATCH_METHOD: &str = "tools/call";
@@ -749,13 +758,17 @@ impl ToolRouter {
                 ))
             })?;
             let outbound_payload = serde_json::to_string(&request.invocation.input)?;
-            guard
-                .check(
-                    &server.name,
-                    &server.allowed_data_classes,
-                    &outbound_payload,
-                )
-                .await?;
+            self.run_within_scope(request.scope, async {
+                guard
+                    .check(
+                        &server.name,
+                        &server.allowed_data_classes,
+                        &outbound_payload,
+                    )
+                    .await
+                    .map_err(MoaError::from)
+            })
+            .await?;
             let tool_invocation_id = request.tool_call_id.to_string();
             let output = self
                 .run_within_scope(
@@ -772,12 +785,11 @@ impl ToolRouter {
                 "moa.mcp.latency_ms",
                 started_at.elapsed().as_millis() as i64,
             );
-            let capability = ToolCapabilityId::mcp(server_name, dispatch.remote_tool_name);
             Ok(self
                 .secure_and_budget(
                     request.session,
                     tool_definition,
-                    capability,
+                    capability.clone(),
                     request.active_canary,
                     output,
                     None,
@@ -823,17 +835,28 @@ impl ToolRouter {
         server_name: &str,
         client_route: &McpClientRoute,
         expected_generation: McpRouteGeneration,
+        scope: ToolCallScope<'_>,
     ) -> Result<bool> {
         let server = self
             .mcp
             .server(server_name)
             .ok_or_else(|| MoaError::ProviderError(format!("unknown MCP server: {server_name}")))?;
         let headers = self.mcp.headers_for(&server)?;
-        let mut route = client_route.lock().await;
+        let mut route = self
+            .run_within_scope(scope, async { Ok(client_route.lock().await) })
+            .await?;
+        // The route mutex deliberately remains held through connect/install for
+        // single-flight replacement, but a waiter may have expired while the
+        // winning handshake held it. Re-admit before treating that waiter as a
+        // harmless stale generation.
+        scope.admit()?;
         if route.generation != expected_generation {
             return Ok(false);
         }
-        let client = Arc::new(MCPClient::connect(&server, headers).await?);
+        let client = Arc::new(
+            self.run_within_scope(scope, MCPClient::connect(&server, headers))
+                .await?,
+        );
         route.install(client)?;
         Ok(true)
     }
@@ -888,19 +911,30 @@ pub(super) fn primary_hand_route(routes: &[HandRoute]) -> Result<&HandRoute> {
 mod egress_dispatch_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::{ToolCallScope, connector_runtime_error};
+    use async_trait::async_trait;
 
     use moa_config::McpServerConfig;
-    use moa_core::types::security::SensitivityClass;
+    use moa_core::types::security::{SensitivityClass, ToolCapabilityId};
     use moa_core::{
-        traits::Identity, types::action_policy::ActionClass,
-        types::action_policy::ActionPolicyEffect, types::action_policy::RiskLevel,
-        types::completion::ToolInvocation, types::identifiers::SessionId,
-        types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
-        types::tools::IdempotencyClass, types::tools::ToolDefinition,
-        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicySpec,
+        traits::{BuiltInTool, Identity, ToolContext},
+        types::action_policy::ActionClass,
+        types::action_policy::ActionPolicyEffect,
+        types::action_policy::RiskLevel,
+        types::completion::ToolInvocation,
+        types::identifiers::SessionId,
+        types::identifiers::TenantId,
+        types::identifiers::ToolCallId,
+        types::session::SessionMeta,
+        types::tools::IdempotencyClass,
+        types::tools::ToolDefinition,
+        types::tools::ToolDiffStrategy,
+        types::tools::ToolInputShape,
+        types::tools::ToolOutput,
+        types::tools::ToolPolicySpec,
     };
     use moa_memory_pii::{MockClassifier, PiiResult};
     use moa_security::McpEgressGuard;
@@ -909,6 +943,7 @@ mod egress_dispatch_tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
+    use tokio_util::sync::CancellationToken;
 
     use uuid::Uuid;
 
@@ -998,7 +1033,9 @@ mod egress_dispatch_tests {
     enum TestMcpServerMode {
         CountOnly,
         GateInitialize,
+        GateSecondInitialize,
         BlockToolCall,
+        FailToolCall,
     }
 
     struct TestMcpServer {
@@ -1062,8 +1099,11 @@ mod egress_dispatch_tests {
                     .and_then(serde_json::Value::as_str);
                 let body = match method {
                     Some("initialize") => {
-                        observed_count.fetch_add(1, Ordering::SeqCst);
-                        if matches!(mode, TestMcpServerMode::GateInitialize) {
+                        let initialize_number = observed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        if matches!(mode, TestMcpServerMode::GateInitialize)
+                            || matches!(mode, TestMcpServerMode::GateSecondInitialize)
+                                && initialize_number == 2
+                        {
                             if let Some(seen) = initialize_seen_tx.take() {
                                 let _ = seen.send(());
                             }
@@ -1082,7 +1122,11 @@ mod egress_dispatch_tests {
                                 let _ = release.await;
                             }
                         }
-                        r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#
+                        if matches!(mode, TestMcpServerMode::FailToolCall) {
+                            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"remote failure"}}"#
+                        } else {
+                            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#
+                        }
                     }
                     _ => "{}",
                 };
@@ -1097,12 +1141,17 @@ mod egress_dispatch_tests {
         TestMcpServer {
             url: format!("http://{addr}"),
             initialize_count,
-            initialize_seen: (matches!(mode, TestMcpServerMode::GateInitialize))
-                .then_some(initialize_seen_rx),
+            initialize_seen: matches!(
+                mode,
+                TestMcpServerMode::GateInitialize | TestMcpServerMode::GateSecondInitialize
+            )
+            .then_some(initialize_seen_rx),
             call_seen: (matches!(mode, TestMcpServerMode::BlockToolCall)).then_some(call_seen_rx),
             release: matches!(
                 mode,
-                TestMcpServerMode::GateInitialize | TestMcpServerMode::BlockToolCall
+                TestMcpServerMode::GateInitialize
+                    | TestMcpServerMode::GateSecondInitialize
+                    | TestMcpServerMode::BlockToolCall
             )
             .then_some(release_tx),
             shutdown: Some(shutdown_tx),
@@ -1136,6 +1185,32 @@ mod egress_dispatch_tests {
         );
         router.mcp.servers.insert(server.name.clone(), server);
         router.mcp.set_egress_guard(guard);
+        router
+    }
+
+    fn router_with_registered_mcp_server(
+        server: McpServerConfig,
+        guard: Arc<McpEgressGuard>,
+    ) -> ToolRouter {
+        let mut registry = ToolRegistry::new();
+        let registered_name = registry
+            .register_mcp_tool(
+                SERVER_NAME,
+                crate::adapters::mcp::McpDiscoveredTool {
+                    name: "external_tool".to_string(),
+                    description: "external MCP tool".to_string(),
+                    input_schema: json!({"type": "object"}),
+                },
+            )
+            .expect("register test MCP tool");
+        assert_eq!(registered_name, qualified_tool_name());
+        let mut router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
+        router.mcp.servers.insert(server.name.clone(), server);
+        router.mcp.set_egress_guard(Some(guard));
         router
     }
 
@@ -1229,6 +1304,139 @@ mod egress_dispatch_tests {
             catalog: None,
             scope,
         }
+    }
+
+    struct CapturingToolCallId {
+        seen: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl BuiltInTool for CapturingToolCallId {
+        fn name(&self) -> &'static str {
+            "capture_tool_call_id"
+        }
+
+        fn description(&self) -> &'static str {
+            "captures the router-provided tool call identity"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "additionalProperties": false})
+        }
+
+        fn policy_spec(&self) -> ToolPolicySpec {
+            ToolPolicySpec {
+                risk_level: RiskLevel::Low,
+                default_effect: ActionPolicyEffect::Allow,
+                action_class: ActionClass::Read,
+                input_shape: ToolInputShape::Json,
+                diff_strategy: ToolDiffStrategy::None,
+            }
+        }
+
+        fn idempotency_class(&self) -> IdempotencyClass {
+            IdempotencyClass::Idempotent
+        }
+
+        async fn execute(
+            &self,
+            _input: &serde_json::Value,
+            ctx: &ToolContext<'_>,
+        ) -> moa_core::error::Result<ToolOutput> {
+            *self.seen.lock().expect("lock captured tool-call id") =
+                ctx.tool_call_id.map(str::to_string);
+            Ok(ToolOutput::text("captured", Duration::ZERO))
+        }
+    }
+
+    #[tokio::test]
+    async fn built_in_uses_authorized_tool_call_id_when_provider_id_is_missing_offline() {
+        // Pins: a provider may omit its transcript-level invocation id, but the
+        // built-in must still receive MOA's replay-stable AuthorizedToolCall id.
+        let seen = Arc::new(Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CapturingToolCallId {
+            seen: Arc::clone(&seen),
+        }));
+        let router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
+        let session = session();
+        let caller = identity();
+        let invocation = ToolInvocation {
+            id: None,
+            name: "capture_tool_call_id".to_string(),
+            input: json!({}),
+        };
+        let tool_call_id = ToolCallId(Uuid::from_u128(0xc411));
+
+        let secured = router
+            .execute_authorized(super::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &caller,
+                worker_id: None,
+                invocation: &invocation,
+                tool_call_id,
+                active_canary: None,
+                catalog: None,
+                scope: ToolCallScope::unbounded(),
+            })
+            .await
+            .expect("built-in dispatch should not require a provider invocation id");
+
+        assert_eq!(
+            seen.lock().expect("read captured tool-call id").as_deref(),
+            Some(tool_call_id.to_string().as_str()),
+            "the built-in context must carry the authorized durable identity"
+        );
+        assert_eq!(
+            secured.capability,
+            ToolCapabilityId::builtin("capture_tool_call_id")
+        );
+        assert_eq!(secured.safe_output.to_text(), "captured");
+    }
+
+    #[tokio::test]
+    async fn qualified_mcp_failure_keeps_registry_resolved_capability_offline() {
+        // Pins: the qualified registry name is lookup metadata only. A failed
+        // remote call must keep the same (server, remote tool) capability used
+        // by successful dispatch, or recovery would split one security circuit.
+        let server = spawn_test_mcp_server(TestMcpServerMode::FailToolCall).await;
+        let router = router_with_registered_mcp_server(
+            http_server(server.url.clone(), vec![SensitivityClass::Restricted]),
+            restricted_class_guard(),
+        );
+        let session = session();
+        let caller = identity();
+        let invocation = tool_invocation();
+
+        let secured = router
+            .execute_authorized_with_recovery(super::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &caller,
+                worker_id: None,
+                invocation: &invocation,
+                tool_call_id: ToolCallId(Uuid::from_u128(0xc412)),
+                active_canary: None,
+                catalog: None,
+                scope: ToolCallScope::unbounded(),
+            })
+            .await
+            .expect("MCP recovery should return a classified remote failure");
+
+        assert!(
+            secured.safe_output.is_error,
+            "remote failure must stay an error"
+        );
+        assert_eq!(
+            secured.capability,
+            ToolCapabilityId::mcp(SERVER_NAME, "external_tool"),
+            "recovery must not substitute the qualified registry lookup name"
+        );
+
+        server.shutdown().await;
     }
 
     #[tokio::test]
@@ -1372,8 +1580,18 @@ mod egress_dispatch_tests {
         assert_eq!(initial_generation, 1);
 
         let (first, second) = tokio::join!(
-            router.reconnect_mcp_client(SERVER_NAME, &route, initial_generation),
-            router.reconnect_mcp_client(SERVER_NAME, &route, initial_generation),
+            router.reconnect_mcp_client(
+                SERVER_NAME,
+                &route,
+                initial_generation,
+                ToolCallScope::unbounded(),
+            ),
+            router.reconnect_mcp_client(
+                SERVER_NAME,
+                &route,
+                initial_generation,
+                ToolCallScope::unbounded(),
+            ),
         );
         let replaced = [
             first.expect("first reconnect should classify its outcome"),
@@ -1401,6 +1619,96 @@ mod egress_dispatch_tests {
             "initialization plus one replacement must be the exact handshake count"
         );
         drop(route);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_mcp_reconnect_waiter_stops_before_handshake_completes_offline() {
+        // Pins: a reconnect queued behind the per-route handshake lock still
+        // belongs to its caller's scope. Cancellation must stop that waiter
+        // before the winning reconnect advances the generation and releases it.
+        let mut server = spawn_test_mcp_server(TestMcpServerMode::GateSecondInitialize).await;
+        let router = Arc::new(router_with_mcp_server(
+            http_server(server.url.clone(), Vec::new()),
+            None,
+        ));
+        let route = Arc::new(tokio::sync::Mutex::new(
+            crate::core::registration::McpClientRouteState::empty(),
+        ));
+        let (_, initial_generation) = router
+            .mcp_client(SERVER_NAME, &route)
+            .await
+            .expect("initial MCP connection should succeed");
+        assert_eq!(initial_generation, 1);
+
+        let handshake_router = Arc::clone(&router);
+        let handshake_route = Arc::clone(&route);
+        let handshake = tokio::spawn(async move {
+            handshake_router
+                .reconnect_mcp_client(
+                    SERVER_NAME,
+                    &handshake_route,
+                    initial_generation,
+                    ToolCallScope::unbounded(),
+                )
+                .await
+        });
+        server
+            .initialize_seen
+            .take()
+            .expect("gated server should expose the reconnect handshake barrier")
+            .await
+            .expect("winning reconnect should hold the route handshake lock");
+
+        let cancellation = CancellationToken::new();
+        let waiter_token = cancellation.clone();
+        let waiter_router = Arc::clone(&router);
+        let waiter_route = Arc::clone(&route);
+        let (waiter_started_tx, waiter_started_rx) = oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            let _ = waiter_started_tx.send(());
+            waiter_router
+                .reconnect_mcp_client(
+                    SERVER_NAME,
+                    &waiter_route,
+                    initial_generation,
+                    ToolCallScope::from_tokens(Some(&waiter_token), None),
+                )
+                .await
+        });
+        waiter_started_rx
+            .await
+            .expect("contending reconnect should start");
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        let waiter_result = timeout(Duration::from_millis(250), waiter)
+            .await
+            .expect("cancelled reconnect must not wait for the handshake lock")
+            .expect("contending reconnect task should join");
+        assert!(
+            matches!(waiter_result, Err(moa_core::error::MoaError::Cancelled)),
+            "cancelled reconnect must return MoaError::Cancelled, got {waiter_result:?}"
+        );
+        assert!(
+            !handshake.is_finished(),
+            "the winning reconnect must still hold the handshake barrier"
+        );
+
+        let _ = server
+            .release
+            .take()
+            .expect("gated server should expose its release")
+            .send(());
+        assert!(
+            handshake
+                .await
+                .expect("winning reconnect task should join")
+                .expect("winning reconnect should complete"),
+            "the winning reconnect should install generation 2"
+        );
+        assert_eq!(server.initialize_count.load(Ordering::SeqCst), 2);
 
         server.shutdown().await;
     }
@@ -1434,7 +1742,12 @@ mod egress_dispatch_tests {
             let request =
                 authorized_mcp_call(&session, &caller, &invocation, ToolCallScope::unbounded());
             call_router
-                .execute_mcp_once_with_scope(&request, &definition, &mut dispatch)
+                .execute_mcp_once_with_scope(
+                    &request,
+                    &definition,
+                    &ToolCapabilityId::mcp(SERVER_NAME, "external_tool"),
+                    &mut dispatch,
+                )
                 .await
         });
 
@@ -1491,7 +1804,12 @@ mod egress_dispatch_tests {
         let request =
             authorized_mcp_call(&session, &caller, &invocation, ToolCallScope::unbounded());
         let error = router
-            .execute_mcp_once_with_scope(&request, &definition, &mut dispatch)
+            .execute_mcp_once_with_scope(
+                &request,
+                &definition,
+                &ToolCapabilityId::mcp(SERVER_NAME, "external_tool"),
+                &mut dispatch,
+            )
             .await
             .expect_err("restricted payload to a default-allowlist server must be blocked");
 
@@ -1527,7 +1845,12 @@ mod egress_dispatch_tests {
         let request =
             authorized_mcp_call(&session, &caller, &invocation, ToolCallScope::unbounded());
         let secured = router
-            .execute_mcp_once_with_scope(&request, &definition, &mut dispatch)
+            .execute_mcp_once_with_scope(
+                &request,
+                &definition,
+                &ToolCapabilityId::mcp(SERVER_NAME, "external_tool"),
+                &mut dispatch,
+            )
             .await
             .expect("an allowlisted class must dispatch to the MCP server");
 
@@ -1553,7 +1876,12 @@ mod egress_dispatch_tests {
         let request =
             authorized_mcp_call(&session, &caller, &invocation, ToolCallScope::unbounded());
         let error = router
-            .execute_mcp_once_with_scope(&request, &definition, &mut dispatch)
+            .execute_mcp_once_with_scope(
+                &request,
+                &definition,
+                &ToolCapabilityId::mcp(SERVER_NAME, "external_tool"),
+                &mut dispatch,
+            )
             .await
             .expect_err("MCP dispatch without a guard must fail closed");
 

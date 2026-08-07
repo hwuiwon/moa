@@ -32,6 +32,7 @@ use crate::canonical_json::canonical_json_bytes;
 
 use crate::error::{MoaError, Result};
 use crate::types::action_policy::CallOrigin;
+use crate::types::identifiers::HandProvisioningOperationId;
 use crate::types::resource::ResourceBudget;
 
 /// Sandbox isolation tier for a hand.
@@ -1198,6 +1199,12 @@ fn admit_deadline(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HandSpec {
+    /// Durable identity created before any provider-side provisioning I/O.
+    ///
+    /// Providers attach this identity atomically when creating a resource so
+    /// retries and the durable reaper can discover every resource created by
+    /// the same ambiguous operation.
+    pub provisioning_operation_id: HandProvisioningOperationId,
     /// Required sandbox tier.
     pub sandbox_tier: SandboxTier,
     /// Optional image identifier.
@@ -1219,10 +1226,24 @@ pub struct HandSpec {
     /// or expired run's command keeps executing inside a perfectly healthy
     /// sandbox until the sandbox's own, much longer, lifetime runs out.
     ///
-    /// Defaults to [`ResourceBudget::UNBOUNDED`] so a caller that has no run
-    /// budget states that explicitly rather than by omission.
+    /// For platform provisioning, `deadline` is required and is also the exact
+    /// absolute provisioning deadline persisted on the durable lease before
+    /// provider I/O. The lifecycle bounds the complete `provision` future by
+    /// that value; providers may use the same value for their own request
+    /// timeout, but may never widen it. Direct adapter tests may use an
+    /// unbounded budget because they bypass the durable platform contract.
+    ///
+    /// Defaults to [`ResourceBudget::UNBOUNDED`] for those direct callers.
     #[serde(default)]
     pub budget: ResourceBudget,
+}
+
+impl HandSpec {
+    /// Returns the absolute deadline carried for platform provisioning.
+    #[must_use]
+    pub const fn provisioning_deadline(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.budget.deadline
+    }
 }
 
 /// One trusted file to install into a provisioned sandbox.

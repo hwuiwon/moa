@@ -379,8 +379,11 @@ impl LLMProvider for AuditedProvider {
         self.inner.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        let audited_request = !is_query_rewrite_request(&request);
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        // The audit helpers intentionally consume the concrete request DTO;
+        // materialize only at this test-only inspection boundary.
+        let inspected_request = CompletionRequest::from_view(&request);
+        let audited_request = !is_query_rewrite_request(&inspected_request);
         let turn_index = self.audits.lock().await.len();
         let turn_label = self
             .labels
@@ -392,7 +395,7 @@ impl LLMProvider for AuditedProvider {
                 self.scenario.clone(),
                 turn_label,
                 self.inner.name().to_string(),
-                &request,
+                &inspected_request,
             )
         });
         let response = self.inner.complete(request).await?.collect().await?;
@@ -410,12 +413,6 @@ impl LLMProvider for AuditedProvider {
         }
 
         Ok(CompletionStream::from_response(response))
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
-        // The audit helpers intentionally consume the concrete request DTO;
-        // materialize only at this test-only inspection boundary.
-        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

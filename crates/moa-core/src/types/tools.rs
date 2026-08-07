@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -368,7 +369,7 @@ pub fn write_tool_policy(
 }
 
 /// Standard tool execution result.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
     /// Content blocks for human, UI, and LLM consumption.
     pub content: Vec<ToolContent>,
@@ -380,22 +381,224 @@ pub struct ToolOutput {
     /// [`ToolContent::Json`] block and leaves this field empty. Callers that
     /// need the machine-readable payload should use [`Self::structured_payload`]
     /// so both current and legacy serialized outputs are handled consistently.
-    #[serde(default)]
     pub structured: Option<Value>,
     /// Execution duration.
     pub duration: Duration,
     /// Whether the tool output was truncated before storage or replay.
-    #[serde(default)]
     pub truncated: bool,
     /// Approximate token count before router-level truncation, when truncation occurred.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_output_tokens: Option<u32>,
-    /// Durable artifact reference for oversized successful tool output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Durable artifact reference for oversized tool output, including failures.
     pub artifact: Option<ToolOutputArtifact>,
 }
 
+/// Owned durable shape accepted from current, parent, and transient readers.
+#[derive(Deserialize)]
+struct ToolOutputWire {
+    content: Vec<ToolContentWire>,
+    is_error: bool,
+    #[serde(default)]
+    structured: Option<Value>,
+    duration: Duration,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact: Option<ToolOutputArtifact>,
+}
+
+/// Tool content accepted on the durable wire.
+///
+/// `Process` remains decodable because the immediately preceding revision may
+/// already have journaled it. New writes use only the parent `Text` and `Json`
+/// variants through [`ToolOutput`]'s borrowed serializer.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToolContentWire {
+    Text { text: String },
+    Json { data: Value },
+    Process { output: ProcessOutput },
+}
+
+/// Borrowed durable shape emitted for retained parent readers.
+#[derive(Serialize)]
+struct ToolOutputWireRef<'a> {
+    content: ToolContentWireRef<'a>,
+    is_error: bool,
+    structured: Option<StructuredWireRef<'a>>,
+    duration: &'a Duration,
+    truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<&'a ToolOutputArtifact>,
+}
+
+/// Borrowed content or the only owned compatibility projection: process text.
+enum ToolContentWireRef<'a> {
+    Borrowed(&'a [ToolContent]),
+    RenderedProcess(&'a [String]),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToolContentBlockWireRef<'a> {
+    Text { text: &'a str },
+    Json { data: &'a Value },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum StructuredWireRef<'a> {
+    Json(&'a Value),
+    Process(&'a ProcessOutput),
+}
+
+impl Serialize for ToolContentWireRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let len = match self {
+            Self::Borrowed(content) => content.len(),
+            Self::RenderedProcess(content) => content.len(),
+        };
+        let mut sequence = serializer.serialize_seq(Some(len))?;
+        match self {
+            Self::Borrowed(content) => {
+                for block in *content {
+                    let block = match block {
+                        ToolContent::Text { text } => ToolContentBlockWireRef::Text { text },
+                        ToolContent::Json { data } => ToolContentBlockWireRef::Json { data },
+                        ToolContent::Process { .. } => {
+                            return Err(serde::ser::Error::custom(NONCANONICAL_PROCESS_WIRE_ERROR));
+                        }
+                    };
+                    sequence.serialize_element(&block)?;
+                }
+            }
+            Self::RenderedProcess(content) => {
+                for text in *content {
+                    sequence.serialize_element(&ToolContentBlockWireRef::Text { text })?;
+                }
+            }
+        }
+        sequence.end()
+    }
+}
+
+const NONCANONICAL_PROCESS_WIRE_ERROR: &str =
+    "process ToolOutput must contain exactly one process block and no structured or JSON carrier";
+
+impl Serialize for ToolOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let process = self.process_for_wire().map_err(serde::ser::Error::custom)?;
+        let rendered_process = process.map(ProcessOutput::rendered_blocks);
+        let content = match rendered_process.as_deref() {
+            Some(rendered) => ToolContentWireRef::RenderedProcess(rendered),
+            None => ToolContentWireRef::Borrowed(&self.content),
+        };
+        let structured = match process {
+            Some(output) => Some(StructuredWireRef::Process(output)),
+            None => self.structured_for_wire().map(StructuredWireRef::Json),
+        };
+
+        ToolOutputWireRef {
+            content,
+            is_error: self.is_error,
+            structured,
+            duration: &self.duration,
+            truncated: self.truncated,
+            original_output_tokens: self.original_output_tokens,
+            artifact: self.artifact.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::from_wire(ToolOutputWire::deserialize(deserializer)?))
+    }
+}
+
 impl ToolOutput {
+    fn process_for_wire(&self) -> Result<Option<&ProcessOutput>, &'static str> {
+        let mut processes = self.content.iter().filter_map(|block| match block {
+            ToolContent::Process { output } => Some(output),
+            ToolContent::Text { .. } | ToolContent::Json { .. } => None,
+        });
+        let Some(process) = processes.next() else {
+            return Ok(None);
+        };
+        if self.content.len() != 1 || processes.next().is_some() || self.structured.is_some() {
+            return Err(NONCANONICAL_PROCESS_WIRE_ERROR);
+        }
+        Ok(Some(process))
+    }
+
+    fn structured_for_wire(&self) -> Option<&Value> {
+        self.structured.as_ref().or_else(|| {
+            let mut json_blocks = self.content.iter().filter_map(|block| match block {
+                ToolContent::Json { data } => Some(data),
+                ToolContent::Text { .. } | ToolContent::Process { .. } => None,
+            });
+            let data = json_blocks.next()?;
+            json_blocks.next().is_none().then_some(data)
+        })
+    }
+
+    fn from_wire(wire: ToolOutputWire) -> Self {
+        let mut content = wire
+            .content
+            .into_iter()
+            .map(|block| match block {
+                ToolContentWire::Text { text } => ToolContent::Text { text },
+                ToolContentWire::Json { data } => ToolContent::Json { data },
+                ToolContentWire::Process { output } => ToolContent::Process { output },
+            })
+            .collect::<Vec<_>>();
+        let mut structured = wire.structured;
+
+        let has_tagged_process = content
+            .iter()
+            .any(|block| matches!(block, ToolContent::Process { .. }));
+        if structured.as_ref().is_some_and(|payload| {
+            content
+                .iter()
+                .any(|block| matches!(block, ToolContent::Json { data } if data == payload))
+        }) {
+            // Parent JSON outputs copied the same payload into `content` and
+            // `structured`. Keep the content block as the canonical carrier.
+            structured = None;
+        } else if !has_tagged_process
+            && let Some(process) = structured.as_ref().and_then(legacy_process_output)
+            && legacy_process_matches_wire(&content, wire.is_error, wire.truncated, &process)
+        {
+            // Parent process outputs copied stdout/stderr into rendered text
+            // blocks and an exact three- or five-field structured object.
+            content = vec![ToolContent::Process { output: process }];
+            structured = None;
+        }
+
+        Self {
+            content,
+            is_error: wire.is_error,
+            structured,
+            duration: wire.duration,
+            truncated: wire.truncated,
+            original_output_tokens: wire.original_output_tokens,
+            artifact: wire.artifact,
+        }
+    }
+
     /// Creates a successful text-only tool result.
     pub fn text(text: impl Into<String>, duration: Duration) -> Self {
         Self {
@@ -516,7 +719,7 @@ impl ToolOutput {
         self
     }
 
-    /// Attaches a durable artifact reference for oversized successful output.
+    /// Attaches a durable artifact reference for oversized output.
     #[must_use]
     pub fn with_artifact(mut self, artifact: Option<ToolOutputArtifact>) -> Self {
         self.artifact = artifact;
@@ -630,6 +833,39 @@ impl ToolOutput {
             rendered.join("\n\n")
         }
     }
+}
+
+fn legacy_process_output(value: &Value) -> Option<ProcessOutput> {
+    let object = value.as_object()?;
+    const REQUIRED_KEYS: [&str; 3] = ["stdout", "stderr", "exit_code"];
+    const TRUNCATION_KEYS: [&str; 2] = ["stdout_truncated", "stderr_truncated"];
+    let exact_required = object.len() == REQUIRED_KEYS.len()
+        && REQUIRED_KEYS.iter().all(|key| object.contains_key(*key));
+    let exact_with_truncation = object.len() == REQUIRED_KEYS.len() + TRUNCATION_KEYS.len()
+        && REQUIRED_KEYS.iter().all(|key| object.contains_key(*key))
+        && TRUNCATION_KEYS.iter().all(|key| object.contains_key(*key));
+    if !exact_required && !exact_with_truncation {
+        return None;
+    }
+    ProcessOutput::deserialize(value).ok()
+}
+
+fn legacy_process_matches_wire(
+    content: &[ToolContent],
+    is_error: bool,
+    truncated: bool,
+    process: &ProcessOutput,
+) -> bool {
+    if is_error != (process.exit_code != 0)
+        || truncated != (process.stdout_truncated || process.stderr_truncated)
+    {
+        return false;
+    }
+    let rendered = process.rendered_blocks();
+    content.len() == rendered.len()
+        && content.iter().zip(rendered).all(
+            |(block, rendered)| matches!(block, ToolContent::Text { text } if text == &rendered),
+        )
 }
 
 /// The only shape a classified tool output may travel in.
@@ -876,8 +1112,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ClaimCheck, ToolArtifactByteRange, ToolArtifactStream, ToolCallRequest, ToolContent,
-        ToolOutput,
+        ClaimCheck, ProcessOutput, ToolArtifactByteRange, ToolArtifactStream, ToolCallRequest,
+        ToolContent, ToolOutput,
     };
     use crate::{
         traits::{Identity, IdentityType},
@@ -967,8 +1203,8 @@ mod tests {
 
     #[test]
     fn process_output_has_one_canonical_stream_carrier() {
-        // Pins: process streams are serialized once in ProcessOutput rather than
-        // being copied into both display content and a structured JSON value.
+        // Pins: process streams live once in memory even though the explicit
+        // durable codec materializes the parent-compatible DTO on serialization.
         let output = ToolOutput::from_process(
             "hello\n".to_string(),
             "warning\n".to_string(),
@@ -986,16 +1222,58 @@ mod tests {
         assert!(output.structured_payload().is_none());
 
         let encoded = serde_json::to_value(&output).expect("serialize process output");
-        assert!(encoded["structured"].is_null());
-        let encoded_text = encoded.to_string();
-        assert_eq!(encoded_text.matches("hello\\n").count(), 1);
-        assert_eq!(encoded_text.matches("warning\\n").count(), 1);
+        assert_eq!(encoded["content"][0]["type"], "text");
+        assert_eq!(encoded["structured"]["stdout"], "hello\n");
+        assert_eq!(encoded["structured"]["stderr"], "warning\n");
+        assert!(
+            encoded["content"]
+                .as_array()
+                .expect("wire content array")
+                .iter()
+                .all(|block| block["type"] != "process"),
+            "retained parent readers must never receive the process discriminator"
+        );
 
         let replayed: ToolOutput = serde_json::from_value(encoded).expect("replay process output");
+        assert_eq!(replayed.content.len(), 1);
+        assert!(matches!(replayed.content[0], ToolContent::Process { .. }));
+        assert!(replayed.structured.is_none());
         assert_eq!(replayed.process_stdout(), Some("hello\n"));
         assert_eq!(replayed.process_stderr(), Some("warning\n"));
         assert_eq!(replayed.process_exit_code(), Some(0));
         assert_eq!(replayed.to_text(), "hello\n\nstderr:\nwarning");
+    }
+
+    #[test]
+    fn process_output_decodes_transient_process_wire_shape() {
+        // Pins: the immediately preceding runtime revision briefly emitted the
+        // process discriminator, so current readers must retain that rollout row.
+        let encoded = serde_json::json!({
+            "content": [{
+                "type": "process",
+                "output": {
+                    "stdout": "row from the prior revision\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                    "stdout_truncated": false,
+                    "stderr_truncated": false
+                }
+            }],
+            "is_error": false,
+            "structured": null,
+            "duration": { "secs": 0, "nanos": 1 },
+            "truncated": false
+        });
+
+        let replayed: ToolOutput =
+            serde_json::from_value(encoded).expect("decode transient process wire row");
+
+        assert_eq!(replayed.content.len(), 1);
+        assert_eq!(
+            replayed.process_stdout(),
+            Some("row from the prior revision\n")
+        );
+        assert!(replayed.structured.is_none());
     }
 
     #[test]
@@ -1028,28 +1306,260 @@ mod tests {
         assert!(!output.truncated);
         assert!(output.to_text().contains("2 matches"));
         assert!(output.to_text().contains("\"path\": \"a.txt\""));
+
+        let encoded = serde_json::to_value(&output).expect("serialize JSON output");
+        assert_eq!(encoded["structured"], data);
+        let replayed: ToolOutput = serde_json::from_value(encoded).expect("replay JSON output");
+        assert_eq!(replayed.structured, None);
+        assert_eq!(replayed.structured_payload(), Some(&data));
+    }
+
+    fn legacy_wire(
+        content: &[&str],
+        structured: serde_json::Value,
+        is_error: bool,
+        truncated: bool,
+    ) -> serde_json::Value {
+        let content = content
+            .iter()
+            .map(|text| serde_json::json!({ "type": "text", "text": text }))
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "content": content,
+            "is_error": is_error,
+            "structured": structured,
+            "duration": { "secs": 0, "nanos": 1 },
+            "truncated": truncated
+        })
+    }
+
+    fn assert_rejected_legacy_candidate_is_preserved(label: &str, encoded: serde_json::Value) {
+        let expected_content = encoded["content"]
+            .as_array()
+            .expect("legacy content should be an array")
+            .iter()
+            .map(|block| ToolContent::Text {
+                text: block["text"]
+                    .as_str()
+                    .expect("legacy test content should be text")
+                    .to_string(),
+            })
+            .collect::<Vec<_>>();
+        let expected_structured = encoded["structured"].clone();
+
+        let replayed: ToolOutput = serde_json::from_value(encoded)
+            .unwrap_or_else(|error| panic!("{label}: rejected candidate should decode: {error}"));
+
+        assert_eq!(replayed.content, expected_content, "{label}: content");
+        assert_eq!(
+            replayed.structured,
+            Some(expected_structured),
+            "{label}: structured payload"
+        );
     }
 
     #[test]
-    fn legacy_structured_process_output_still_replays() {
-        // Pins: rows written before ProcessOutput became the canonical carrier
-        // still expose the process accessors during replay.
-        let mut encoded = serde_json::to_value(ToolOutput::text("hello", Duration::from_millis(1)))
-            .expect("serialize legacy-shaped output");
-        encoded["structured"] = serde_json::json!({
-            "stdout": "hello\n",
+    fn legacy_process_three_and_five_key_rows_promote_exactly() {
+        // Pins: exact historical parent rows, including the unavoidable exact
+        // collision with manually authored structured data, become one process carrier.
+        let three_key = legacy_wire(
+            &["hello\n"],
+            serde_json::json!({
+                "stdout": "hello\n",
+                "stderr": "",
+                "exit_code": 0
+            }),
+            false,
+            false,
+        );
+        let replayed: ToolOutput =
+            serde_json::from_value(three_key).expect("decode exact three-key legacy process");
+        assert_eq!(
+            replayed.content,
+            vec![ToolContent::Process {
+                output: ProcessOutput {
+                    stdout: "hello\n".to_string(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                }
+            }]
+        );
+        assert!(replayed.structured.is_none());
+
+        let five_key = legacy_wire(
+            &["out \n", "stderr:\nwarn\t\n", "exit_code: 7"],
+            serde_json::json!({
+                "stdout": "out \n",
+                "stderr": "warn\t\n",
+                "exit_code": 7,
+                "stdout_truncated": false,
+                "stderr_truncated": true
+            }),
+            true,
+            true,
+        );
+        let replayed: ToolOutput =
+            serde_json::from_value(five_key).expect("decode exact five-key legacy process");
+        assert_eq!(replayed.process_stdout(), Some("out \n"));
+        assert_eq!(replayed.process_stderr(), Some("warn\t\n"));
+        assert_eq!(replayed.process_exit_code(), Some(7));
+        assert!(!replayed.process_stdout_truncated());
+        assert!(replayed.process_stderr_truncated());
+        assert!(replayed.structured.is_none());
+    }
+
+    #[test]
+    fn matching_process_like_json_block_keeps_canonical_json_precedence() {
+        // Pins: a tool's canonical JSON remains JSON even when its exact object
+        // and summary happen to collide with the historical process encoding.
+        let data = serde_json::json!({
+            "stdout": "manual\n",
             "stderr": "",
-            "exit_code": 0,
+            "exit_code": 0
+        });
+        let output = ToolOutput::json("manual\n", data.clone(), Duration::from_nanos(1));
+        let expected_content = output.content.clone();
+
+        let encoded = serde_json::to_value(&output).expect("serialize process-like JSON output");
+        let replayed: ToolOutput =
+            serde_json::from_value(encoded).expect("replay process-like JSON output");
+
+        assert_eq!(replayed.content, expected_content);
+        assert!(
+            replayed
+                .content
+                .iter()
+                .all(|block| !matches!(block, ToolContent::Process { .. }))
+        );
+        assert!(replayed.structured.is_none());
+        assert_eq!(replayed.structured_payload(), Some(&data));
+    }
+
+    #[test]
+    fn malformed_legacy_process_candidates_preserve_every_original_carrier() {
+        // Pins: process promotion is an exact historical-row proof, never a
+        // best-effort parse that discards user content or structured metadata.
+        let rendered = ["out \n", "stderr:\nwarn\t\n", "exit_code: 7"];
+        let exact = serde_json::json!({
+            "stdout": "out \n",
+            "stderr": "warn\t\n",
+            "exit_code": 7,
             "stdout_truncated": false,
-            "stderr_truncated": false,
+            "stderr_truncated": true
         });
 
-        let replayed: ToolOutput = serde_json::from_value(encoded).expect("replay legacy output");
-        assert_eq!(replayed.process_stdout(), Some("hello\n"));
-        assert_eq!(replayed.process_stderr(), Some(""));
-        assert_eq!(replayed.process_exit_code(), Some(0));
-        assert!(!replayed.process_stdout_truncated());
-        assert!(!replayed.process_stderr_truncated());
+        let mut extra = exact.clone();
+        extra
+            .as_object_mut()
+            .expect("exact candidate object")
+            .insert("extra".to_string(), serde_json::json!(true));
+        let mut missing = exact.clone();
+        missing
+            .as_object_mut()
+            .expect("exact candidate object")
+            .remove("stderr");
+        let mut mistyped = exact.clone();
+        mistyped["stdout"] = serde_json::json!(42);
+        let mut out_of_range = exact.clone();
+        out_of_range["exit_code"] = serde_json::json!(i64::from(i32::MAX) + 1);
+        let mut partial_truncation_shape = exact.clone();
+        partial_truncation_shape
+            .as_object_mut()
+            .expect("exact candidate object")
+            .remove("stderr_truncated");
+
+        let cases = [
+            ("extra key", legacy_wire(&rendered, extra, true, true)),
+            ("missing key", legacy_wire(&rendered, missing, true, true)),
+            (
+                "mistyped field",
+                legacy_wire(&rendered, mistyped, true, true),
+            ),
+            (
+                "out-of-range exit code",
+                legacy_wire(&rendered, out_of_range, true, true),
+            ),
+            (
+                "partial truncation shape",
+                legacy_wire(&rendered, partial_truncation_shape, true, true),
+            ),
+            (
+                "reordered blocks",
+                legacy_wire(
+                    &[rendered[1], rendered[0], rendered[2]],
+                    exact.clone(),
+                    true,
+                    true,
+                ),
+            ),
+            (
+                "trailing-whitespace mismatch",
+                legacy_wire(
+                    &["out\n", rendered[1], rendered[2]],
+                    exact.clone(),
+                    true,
+                    true,
+                ),
+            ),
+            (
+                "error mismatch",
+                legacy_wire(&rendered, exact.clone(), false, true),
+            ),
+            (
+                "truncation mismatch",
+                legacy_wire(&rendered, exact, true, false),
+            ),
+        ];
+
+        for (label, encoded) in cases {
+            assert_rejected_legacy_candidate_is_preserved(label, encoded);
+        }
+    }
+
+    #[test]
+    fn noncanonical_process_shapes_fail_serialization_without_losing_data() {
+        // Pins: the parent-compatible process projection is lossless only for
+        // exactly one process block, so every mixed or duplicate carrier fails.
+        let canonical = ToolOutput::from_process(
+            "out\n".to_string(),
+            "warn\n".to_string(),
+            0,
+            Duration::from_nanos(1),
+        );
+        let process = canonical.content[0].clone();
+
+        let mut mixed_text = canonical.clone();
+        mixed_text.content.push(ToolContent::Text {
+            text: "unrelated".to_string(),
+        });
+        let mut mixed_json = canonical.clone();
+        mixed_json.content.push(ToolContent::Json {
+            data: serde_json::json!({ "unrelated": true }),
+        });
+        let mut multiple_processes = canonical.clone();
+        multiple_processes.content.push(process);
+        let mut separate_structured = canonical;
+        separate_structured.structured = Some(serde_json::json!({ "unrelated": true }));
+
+        for (label, output) in [
+            ("process plus text", mixed_text),
+            ("process plus JSON", mixed_json),
+            ("multiple processes", multiple_processes),
+            ("process plus structured", separate_structured),
+        ] {
+            let expected = output.clone();
+            let error = serde_json::to_value(&output)
+                .expect_err("noncanonical process output must fail serialization");
+            assert!(
+                error
+                    .to_string()
+                    .contains(super::NONCANONICAL_PROCESS_WIRE_ERROR),
+                "{label}: unexpected serialization error: {error}"
+            );
+            assert_eq!(output, expected, "{label}: serialization mutated output");
+        }
     }
 
     #[test]

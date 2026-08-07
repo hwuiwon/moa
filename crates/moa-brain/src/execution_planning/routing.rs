@@ -132,7 +132,7 @@ pub async fn route_execution(
 
     let request = classifier_request(&input)?;
     let started = Instant::now();
-    let stream = match provider.complete(request).await {
+    let stream = match provider.complete(request.into_shared()).await {
         Ok(stream) => stream,
         Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
         Err(_) => {
@@ -571,20 +571,15 @@ mod tests {
             ModelCapabilities::default()
         }
 
-        async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        async fn complete(
+            &self,
+            request: moa_core::types::completion::SharedCompletionRequest,
+        ) -> Result<CompletionStream> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.requests
                 .lock()
                 .expect("route request journal lock should remain available")
-                .push(request);
-            self.response()
-        }
-
-        async fn complete_shared(
-            &self,
-            _request: moa_core::types::completion::SharedCompletionRequest,
-        ) -> Result<CompletionStream> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
+                .push(CompletionRequest::from_view(&request));
             self.response()
         }
     }

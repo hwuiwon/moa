@@ -55,6 +55,7 @@ fn hand_spec_with_profile(
     capability_revision: &str,
 ) -> moa_core::types::hands::HandSpec {
     moa_core::types::hands::HandSpec {
+        provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,

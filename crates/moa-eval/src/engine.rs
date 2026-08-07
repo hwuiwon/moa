@@ -940,14 +940,6 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
-        ) -> moa_core::error::Result<CompletionStream> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Self::response())
-        }
-
-        async fn complete_shared(
-            &self,
             _request: SharedCompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -978,13 +970,6 @@ mod tests {
         }
 
         async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> moa_core::error::Result<CompletionStream> {
-            self.pending().await
-        }
-
-        async fn complete_shared(
             &self,
             _request: SharedCompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
@@ -1019,7 +1004,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             StdDuration::from_secs(1),
-            provider.complete(CompletionRequest::new("never returns")),
+            provider.complete(CompletionRequest::new("never returns").into_shared()),
         )
         .await
         .expect("the case deadline must stop the pending provider handshake");

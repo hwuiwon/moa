@@ -63,6 +63,11 @@ uuid_id!(
 );
 
 uuid_id!(
+    /// Durable identity for one hand-provisioning operation.
+    pub struct HandProvisioningOperationId
+);
+
+uuid_id!(
     /// Identifier for one durable child-to-parent attention signal.
     pub struct AgentSignalId
 );

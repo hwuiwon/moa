@@ -6,12 +6,11 @@ use async_trait::async_trait;
 use moa_core::transcript::{ProviderEvent, Transcript};
 use moa_core::{
     error::MoaError, error::Result as MoaResult, traits::LLMProvider,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionRequestView, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
-    types::completion::StopReason, types::completion::TokenUsage, types::context::MessageRole,
-    types::identifiers::ModelId, types::model::ModelCapabilities, types::model::TokenPricing,
-    types::model::ToolCallFormat,
+    types::completion::CompletionContent, types::completion::CompletionRequestView,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::completion::StopReason,
+    types::completion::TokenUsage, types::context::MessageRole, types::identifiers::ModelId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
 };
 
 const COMPACTION_MAX_OUTPUT_TOKENS: usize = 700;
@@ -176,15 +175,7 @@ impl LLMProvider for RecordedScriptedProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> MoaResult<CompletionStream> {
-        self.complete_recorded(&request)
-            .map_err(|error| MoaError::ProviderError(error.to_string()))
-    }
-
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> MoaResult<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> MoaResult<CompletionStream> {
         self.complete_recorded(&request)
             .map_err(|error| MoaError::ProviderError(error.to_string()))
     }

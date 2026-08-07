@@ -13,10 +13,9 @@ use moa_config::EnvOverlay;
 use moa_config::MoaConfig;
 use moa_core::{
     traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
-    types::context::ContextMessage, types::identifiers::TenantId, types::model::ModelCapabilities,
-    types::session::SessionMeta,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::context::ContextMessage,
+    types::identifiers::TenantId, types::model::ModelCapabilities, types::session::SessionMeta,
 };
 use moa_providers::resolve_rewriter_provider;
 use tokio::sync::Mutex;
@@ -66,25 +65,10 @@ impl LLMProvider for CapturingProvider {
 
     async fn complete(
         &self,
-        request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let stream = match self.inner.complete(request).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.errors.lock().await.push(error.to_string());
-                return Err(error);
-            }
-        };
-        self.record_stream(stream).await
-    }
-
-    async fn complete_shared(
-        &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let stream = match self.inner.complete_shared(request).await {
+        let stream = match self.inner.complete(request).await {
             Ok(stream) => stream,
             Err(error) => {
                 self.errors.lock().await.push(error.to_string());

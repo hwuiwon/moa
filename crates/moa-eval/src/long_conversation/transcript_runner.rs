@@ -19,14 +19,13 @@ use moa_config::MoaConfig;
 use moa_core::transcript::Transcript;
 use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore,
-    types::completion::CompletionRequest, types::completion::CompletionRequestView,
-    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
-    types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::experience::AttributionSubjectType, types::experience::LearningCandidateSourceRef,
-    types::identifiers::SessionId, types::model::ModelCapabilities,
-    types::resource::ResourceBudget, types::segment_assessment::AssessmentPhase,
-    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
-    types::segment_assessment::SegmentEvidenceKind,
+    types::completion::CompletionRequestView, types::completion::CompletionStream,
+    types::completion::SharedCompletionRequest, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::experience::AttributionSubjectType,
+    types::experience::LearningCandidateSourceRef, types::identifiers::SessionId,
+    types::model::ModelCapabilities, types::resource::ResourceBudget,
+    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
     types::session::SessionMeta,
@@ -1240,16 +1239,6 @@ impl LLMProvider for ObservedRecordedProvider {
     }
 
     async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.record_observation(&request)?;
-        self.recorded
-            .complete_recorded(&request)
-            .map_err(|error| MoaError::ProviderError(error.to_string()))
-    }
-
-    async fn complete_shared(
         &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

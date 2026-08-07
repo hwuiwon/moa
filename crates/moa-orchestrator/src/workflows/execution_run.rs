@@ -586,8 +586,11 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_> {
 
     async fn complete(
         &self,
-        request: CompletionRequest,
+        request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
+        // Restate's JSON transport requires the owned durable DTO. This is the
+        // explicit serialization boundary after in-process shared routing.
+        let request = CompletionRequest::from_view(&request);
         // Amendment generation and its bounded repair are sequential planner calls.
         let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
         let response = crate::restate_identity::replay_safe_request(
@@ -608,16 +611,6 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_> {
         .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
         .into_inner();
         Ok(CompletionStream::from_response(response))
-    }
-
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        // Restate's Json boundary owns a concrete request DTO; materialize it
-        // once at that boundary while preserving shared storage through all
-        // in-process failover providers.
-        self.complete(CompletionRequest::from_view(&request)).await
     }
 }
 

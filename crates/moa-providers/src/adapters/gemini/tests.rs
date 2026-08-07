@@ -119,30 +119,33 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
     let response = provider
-        .complete(CompletionRequest {
-            model: None,
-            messages: vec![
-                ContextMessage::system("Follow the rules."),
-                ContextMessage::user("hello"),
-            ],
-            tools: vec![json!({
-                "name": "file_read",
-                "description": "Read a file",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" }
-                    },
-                    "additionalProperties": false,
-                    "required": ["path"]
-                }
-            })],
-            max_output_tokens: Some(1024),
-            temperature: Some(0.2),
-            response_format: None,
-            native_web_search: Default::default(),
-            metadata: Default::default(),
-        })
+        .complete(
+            CompletionRequest {
+                model: None,
+                messages: vec![
+                    ContextMessage::system("Follow the rules."),
+                    ContextMessage::user("hello"),
+                ],
+                tools: vec![json!({
+                    "name": "file_read",
+                    "description": "Read a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" }
+                        },
+                        "additionalProperties": false,
+                        "required": ["path"]
+                    }
+                })],
+                max_output_tokens: Some(1024),
+                temperature: Some(0.2),
+                response_format: None,
+                native_web_search: Default::default(),
+                metadata: Default::default(),
+            }
+            .into_shared(),
+        )
         .await
         .unwrap()
         .collect()
@@ -326,34 +329,37 @@ async fn gemini_provider_groups_tool_history_and_preserves_thought_signatures() 
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
     let response = provider
-        .complete(CompletionRequest {
-            model: None,
-            messages: vec![
-                ContextMessage::user("write the file"),
-                ContextMessage::assistant_tool_call_with_thought_signature(
-                    ToolInvocation {
-                        id: Some("fc_1".to_string()),
-                        name: "file_write".to_string(),
-                        input: json!({ "path": "notes/today.md" }),
-                    },
-                    "<tool_call />",
-                    Some("sig_fc_1"),
-                ),
-                ContextMessage::tool_result(
-                    "fc_1",
-                    "ok",
-                    Some(vec![ToolContent::Json {
-                        data: json!({ "path": "notes/today.md" }),
-                    }]),
-                ),
-            ],
-            tools: Vec::new(),
-            max_output_tokens: Some(1024),
-            temperature: None,
-            response_format: None,
-            native_web_search: Default::default(),
-            metadata: Default::default(),
-        })
+        .complete(
+            CompletionRequest {
+                model: None,
+                messages: vec![
+                    ContextMessage::user("write the file"),
+                    ContextMessage::assistant_tool_call_with_thought_signature(
+                        ToolInvocation {
+                            id: Some("fc_1".to_string()),
+                            name: "file_write".to_string(),
+                            input: json!({ "path": "notes/today.md" }),
+                        },
+                        "<tool_call />",
+                        Some("sig_fc_1"),
+                    ),
+                    ContextMessage::tool_result(
+                        "fc_1",
+                        "ok",
+                        Some(vec![ToolContent::Json {
+                            data: json!({ "path": "notes/today.md" }),
+                        }]),
+                    ),
+                ],
+                tools: Vec::new(),
+                max_output_tokens: Some(1024),
+                temperature: None,
+                response_format: None,
+                native_web_search: Default::default(),
+                metadata: Default::default(),
+            }
+            .into_shared(),
+        )
         .await
         .unwrap()
         .collect()
@@ -403,7 +409,7 @@ async fn gemini_provider_serializes_google_search_without_functions() {
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
     let response = provider
-        .complete(CompletionRequest::simple("latest news"))
+        .complete(CompletionRequest::simple("latest news").into_shared())
         .await
         .unwrap()
         .collect()
@@ -468,7 +474,7 @@ async fn gemini_provider_streams_tool_calls_and_google_search_updates() {
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
     let response = provider
-        .complete(CompletionRequest::simple("latest news"))
+        .complete(CompletionRequest::simple("latest news").into_shared())
         .await
         .unwrap()
         .collect()

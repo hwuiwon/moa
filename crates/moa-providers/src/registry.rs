@@ -1,7 +1,7 @@
 //! Runtime registry for configured LLM provider families.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use moa_config::MoaConfig;
 use moa_config::QueryRewriteConfig;
@@ -60,10 +60,18 @@ type ProviderCache = Arc<Mutex<ProviderCacheState>>;
 ///
 /// The cache is process-local and providers may be selected by extensible model
 /// ids, so a fixed capacity bounds credential-backed client retention without
-/// imposing a model catalog on routing. Active callers can temporarily prevent
-/// an entry from being evicted; in that case a new provider is returned without
-/// adding another cache-held reference.
+/// imposing a model catalog on routing. Overflow identity is tracked weakly
+/// while callers remain active, so it cannot retain an evicted client by itself.
 const PROVIDER_CACHE_CAPACITY: usize = 128;
+
+/// Maximum number of live raw clients tracked weakly beyond the strong cache.
+///
+/// A weak entry does not retain a provider, but bounding the identity index keeps
+/// adversarial model-id churn from growing process metadata without limit.
+const PROVIDER_OVERFLOW_CAPACITY: usize = 128;
+
+/// Maximum weak entries inspected during one cache miss under overflow pressure.
+const PROVIDER_OVERFLOW_RECLAIM_BATCH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProviderCacheKey {
@@ -76,6 +84,13 @@ struct ProviderCacheKey {
 struct ProviderCacheState {
     entries: HashMap<ProviderCacheKey, ResolvedProvider>,
     recency: VecDeque<ProviderCacheKey>,
+    /// Live providers that could not enter the strong cache because every
+    /// retained entry was active.
+    overflow: HashMap<ProviderCacheKey, Weak<dyn LLMProvider>>,
+    /// Least-to-most-recently accessed overflow identities.
+    overflow_recency: VecDeque<ProviderCacheKey>,
+    /// Next overflow identity considered by bounded dead-entry cleanup.
+    overflow_cleanup_cursor: usize,
 }
 
 impl ProviderCacheState {
@@ -83,39 +98,157 @@ impl ProviderCacheState {
         let provider = self.entries.get(key).cloned();
         if provider.is_some() {
             self.touch(key);
+            return provider;
         }
-        provider
+
+        let provider = self.overflow.get(key).and_then(Weak::upgrade);
+        match provider {
+            Some(provider) => {
+                self.touch_overflow(key);
+                Some(ResolvedProvider {
+                    provider,
+                    model: key.model.clone(),
+                })
+            }
+            None => {
+                if self.overflow.contains_key(key) {
+                    self.remove_overflow(key);
+                }
+                None
+            }
+        }
+    }
+
+    /// Verifies that a previously unseen raw key can be admitted before its
+    /// provider client is constructed.
+    fn admit_new_key(&mut self) -> moa_core::error::Result<()> {
+        if self.entries.len() < PROVIDER_CACHE_CAPACITY
+            || self
+                .entries
+                .values()
+                .any(|resolved| Arc::strong_count(&resolved.provider) == 1)
+        {
+            return Ok(());
+        }
+
+        if self.overflow.len() >= PROVIDER_OVERFLOW_CAPACITY {
+            self.reclaim_dead_overflow(PROVIDER_OVERFLOW_RECLAIM_BATCH);
+        }
+        if self.overflow.len() < PROVIDER_OVERFLOW_CAPACITY {
+            return Ok(());
+        }
+
+        Err(provider_cache_saturated())
     }
 
     fn insert_or_get(
         &mut self,
         key: ProviderCacheKey,
         provider: ResolvedProvider,
-    ) -> ResolvedProvider {
-        if let Some(existing) = self.entries.get(&key).cloned() {
-            self.touch(&key);
-            return existing;
+    ) -> moa_core::error::Result<ResolvedProvider> {
+        if let Some(existing) = self.get(&key) {
+            return Ok(existing);
         }
 
-        while self.entries.len() >= PROVIDER_CACHE_CAPACITY {
-            if !self.evict_inactive() {
-                // Every retained provider is active outside this cache. Do not
-                // evict one and create a second instance for the same live
-                // caller; returning this uncached value keeps the cache bounded
-                // while preserving safe ownership of the active provider.
-                return provider;
+        if self.entries.len() >= PROVIDER_CACHE_CAPACITY && !self.evict_inactive() {
+            if self.overflow.len() >= PROVIDER_OVERFLOW_CAPACITY {
+                self.reclaim_dead_overflow(PROVIDER_OVERFLOW_RECLAIM_BATCH);
             }
+            if self.overflow.len() >= PROVIDER_OVERFLOW_CAPACITY {
+                return Err(provider_cache_saturated());
+            }
+
+            // Every strongly retained provider is active. Track this raw client
+            // weakly so repeated overflow lookups preserve its pacing, cooldown,
+            // and retry identity without retaining it after the caller drops.
+            self.overflow_recency.push_back(key.clone());
+            self.overflow
+                .insert(key, Arc::downgrade(&provider.provider));
+            return Ok(provider);
         }
 
         self.recency.push_back(key.clone());
         let returned = provider.clone();
         self.entries.insert(key, provider);
-        returned
+        Ok(returned)
+    }
+
+    fn reclaim_dead_overflow(&mut self, budget: usize) {
+        let inspections = budget.min(self.overflow_recency.len());
+        for _ in 0..inspections {
+            if self.overflow_recency.is_empty() {
+                self.overflow_cleanup_cursor = 0;
+                return;
+            }
+            if self.overflow_cleanup_cursor >= self.overflow_recency.len() {
+                self.overflow_cleanup_cursor = 0;
+            }
+
+            let Some(key) = self
+                .overflow_recency
+                .get(self.overflow_cleanup_cursor)
+                .cloned()
+            else {
+                return;
+            };
+            let dead = self
+                .overflow
+                .get(&key)
+                .is_none_or(|provider| provider.strong_count() == 0);
+            if dead {
+                self.overflow.remove(&key);
+                self.overflow_recency.remove(self.overflow_cleanup_cursor);
+            } else {
+                self.overflow_cleanup_cursor += 1;
+            }
+        }
+        if self.overflow_cleanup_cursor >= self.overflow_recency.len() {
+            self.overflow_cleanup_cursor = 0;
+        }
+    }
+
+    fn touch_overflow(&mut self, key: &ProviderCacheKey) {
+        let Some(position) = self
+            .overflow_recency
+            .iter()
+            .position(|candidate| candidate == key)
+        else {
+            return;
+        };
+        let Some(key) = self.overflow_recency.remove(position) else {
+            return;
+        };
+        self.adjust_overflow_cursor_after_remove(position);
+        self.overflow_recency.push_back(key);
+    }
+
+    fn remove_overflow(&mut self, key: &ProviderCacheKey) {
+        self.overflow.remove(key);
+        if let Some(position) = self
+            .overflow_recency
+            .iter()
+            .position(|candidate| candidate == key)
+        {
+            self.overflow_recency.remove(position);
+            self.adjust_overflow_cursor_after_remove(position);
+        }
+    }
+
+    fn adjust_overflow_cursor_after_remove(&mut self, position: usize) {
+        if position < self.overflow_cleanup_cursor {
+            self.overflow_cleanup_cursor -= 1;
+        }
+        if self.overflow_cleanup_cursor >= self.overflow_recency.len() {
+            self.overflow_cleanup_cursor = 0;
+        }
     }
 
     fn clear(&mut self) {
         self.entries.clear();
         self.recency.clear();
+        self.overflow.clear();
+        self.overflow_recency.clear();
+        self.overflow_cleanup_cursor = 0;
     }
 
     fn touch(&mut self, key: &ProviderCacheKey) {
@@ -137,6 +270,16 @@ impl ProviderCacheState {
             return false;
         };
         self.entries.remove(&key).is_some()
+    }
+}
+
+fn provider_cache_saturated() -> MoaError {
+    MoaError::RateLimited {
+        retries: 0,
+        message: format!(
+            "raw provider cache saturated with {PROVIDER_CACHE_CAPACITY} strongly retained and \
+             {PROVIDER_OVERFLOW_CAPACITY} weakly indexed live clients"
+        ),
     }
 }
 
@@ -573,12 +716,8 @@ impl ProviderRegistry {
         config: &MoaConfig,
     ) -> moa_core::error::Result<ModelRouter> {
         let main_model = config.model_for_task(ModelTask::MainLoop);
-        // Build the failover chain from raw cached clients, then govern the chain
-        // once. This keeps DLP's transformed request fields shared across every
-        // candidate instead of cloning and tokenizing them at each candidate.
-        let main = self.provider_for_model_raw(Some(main_model))?;
-        let main = self.apply_main_failover_raw(config, main_model, main)?;
-        let main = self.govern(main);
+        let (main_provider_id, main_model_id) = self.resolve_provider_id(Some(main_model))?;
+        let main = self.main_provider_with_failover(config, main_provider_id, &main_model_id)?;
         let auxiliary = config
             .models
             .auxiliary
@@ -588,41 +727,37 @@ impl ProviderRegistry {
         Ok(ModelRouter::new(main, auxiliary))
     }
 
-    /// Wraps the main-loop provider with the configured failover chain, validating
-    /// each fallback at build time.
+    /// Builds one governed main-loop provider from a raw failover chain.
     ///
-    /// A fallback is a HARD config error (fails startup, so operators find out at
+    /// Every main-provider factory and router path calls this helper. Raw cached
+    /// providers form the chain first, then DLP governance is applied exactly
+    /// once around the chain so failover replays one effective transformed view.
+    ///
+    /// A fallback is a hard config error (fails startup, so operators find out at
     /// boot rather than at failover time) when it is not in the model catalog, or
     /// when its capability tier is more than one tier from the primary's (so an
     /// operator cannot, e.g., silently fall a flagship model over to a fast one).
     /// A fallback that validates but whose provider is not configured (missing API
-    /// key) is skipped with a warning rather than failing startup. Returns `main`
-    /// unchanged when no fallbacks are configured.
-    pub(crate) fn apply_main_failover(
+    /// key) is skipped with a warning rather than failing startup.
+    pub(crate) fn main_provider_with_failover(
         &self,
         config: &MoaConfig,
-        primary_model: &str,
-        main: Arc<dyn LLMProvider>,
+        provider_id: ProviderId,
+        primary_model: &ModelId,
     ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
-        self.apply_main_failover_impl(config, primary_model, main, true)
+        let main = self
+            .provider_for_id_raw(provider_id, primary_model)?
+            .provider;
+        let chain = self.build_raw_failover_chain(config, primary_model.as_str(), main)?;
+        Ok(self.govern(chain))
     }
 
-    /// Builds a failover chain from raw cached clients for one outer decorator.
-    fn apply_main_failover_raw(
+    /// Builds the failover chain exclusively from raw cached provider clients.
+    fn build_raw_failover_chain(
         &self,
         config: &MoaConfig,
         primary_model: &str,
         main: Arc<dyn LLMProvider>,
-    ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
-        self.apply_main_failover_impl(config, primary_model, main, false)
-    }
-
-    fn apply_main_failover_impl(
-        &self,
-        config: &MoaConfig,
-        primary_model: &str,
-        main: Arc<dyn LLMProvider>,
-        govern_fallbacks: bool,
     ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
         if config.models.fallback_models.is_empty() {
             return Ok(main);
@@ -656,11 +791,7 @@ impl ProviderRegistry {
             match self
                 .resolve_provider_id(Some(entry))
                 .and_then(|(id, model)| {
-                    let resolved = if govern_fallbacks {
-                        self.provider_for_id(id, &model)?
-                    } else {
-                        self.provider_for_id_raw(id, &model)?
-                    };
+                    let resolved = self.provider_for_id_raw(id, &model)?;
                     Ok((resolved.provider, model))
                 }) {
                 Ok(pair) => fallbacks.push(pair),
@@ -719,7 +850,7 @@ impl ProviderRegistry {
             id,
             model: model.clone(),
         };
-        if let Some(resolved) = self.cached_provider(&cache_key) {
+        if let Some(resolved) = self.cached_provider_or_admit(&cache_key)? {
             return Ok(resolved);
         }
 
@@ -734,7 +865,7 @@ impl ProviderRegistry {
             provider,
             model: model.clone(),
         };
-        Ok(self.cache_provider(cache_key, resolved))
+        self.cache_provider(cache_key, resolved)
     }
 
     fn resolve_requested_model(
@@ -817,19 +948,26 @@ impl ProviderRegistry {
             .insert(id, RegisteredProvider::from_static(descriptor, provider));
     }
 
-    fn cached_provider(&self, key: &ProviderCacheKey) -> Option<ResolvedProvider> {
+    fn cached_provider_or_admit(
+        &self,
+        key: &ProviderCacheKey,
+    ) -> moa_core::error::Result<Option<ResolvedProvider>> {
         let mut cache = self
             .provider_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.get(key)
+        if let Some(provider) = cache.get(key) {
+            return Ok(Some(provider));
+        }
+        cache.admit_new_key()?;
+        Ok(None)
     }
 
     fn cache_provider(
         &self,
         key: ProviderCacheKey,
         provider: ResolvedProvider,
-    ) -> ResolvedProvider {
+    ) -> moa_core::error::Result<ResolvedProvider> {
         let mut cache = match self.provider_cache.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
@@ -1088,10 +1226,9 @@ mod tests {
     use async_trait::async_trait;
     use moa_config::QueryRewriteConfig;
     use moa_core::{
-        traits::LLMProvider, types::completion::CompletionRequest,
-        types::completion::CompletionResponse, types::completion::CompletionStream,
-        types::completion::SharedCompletionRequest, types::completion::StopReason,
-        types::completion::TokenUsage, types::identifiers::ModelId,
+        error::MoaError, traits::LLMProvider, types::completion::CompletionResponse,
+        types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
@@ -1133,7 +1270,7 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
+            _request: SharedCompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: "ok".to_string(),
@@ -1144,13 +1281,6 @@ mod tests {
                 duration_ms: 1,
                 thought_signature: None,
             }))
-        }
-
-        async fn complete_shared(
-            &self,
-            _request: SharedCompletionRequest,
-        ) -> moa_core::error::Result<CompletionStream> {
-            self.complete(CompletionRequest::new("shared-test")).await
         }
     }
 
@@ -1176,6 +1306,37 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries
             .len()
+    }
+
+    fn overflow_len(registry: &ProviderRegistry) -> usize {
+        registry
+            .provider_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .overflow
+            .len()
+    }
+
+    fn overflow_recency_len(registry: &ProviderRegistry) -> usize {
+        registry
+            .provider_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .overflow_recency
+            .len()
+    }
+
+    fn fill_live_strong_cache(
+        registry: &ProviderRegistry,
+        prefix: &str,
+    ) -> Vec<Arc<dyn LLMProvider>> {
+        (0..super::PROVIDER_CACHE_CAPACITY)
+            .map(|index| {
+                registry
+                    .provider_for_model(Some(&format!("gpt-{prefix}-strong-{index}")))
+                    .expect("strong-cache fixture should resolve")
+            })
+            .collect()
     }
 
     #[test]
@@ -1339,6 +1500,201 @@ mod tests {
     }
 
     #[test]
+    fn full_cache_overflow_reuses_one_live_client_and_keeps_strong_cache_bounded() {
+        // Pins: when every bounded-cache entry has an active caller, repeated
+        // and concurrent lookups of one overflow model share its live client
+        // and pacing identity without increasing strong cache retention.
+        const CALLERS: usize = 8;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            provider_descriptor(ProviderId::OpenAI),
+            model_factory(builds.clone()),
+        );
+        let mut active = Vec::with_capacity(super::PROVIDER_CACHE_CAPACITY);
+        for index in 0..super::PROVIDER_CACHE_CAPACITY {
+            active.push(
+                registry
+                    .provider_for_model(Some(&format!("gpt-active-overflow-{index}")))
+                    .expect("each active model should resolve"),
+            );
+        }
+        assert_eq!(cache_len(&registry), super::PROVIDER_CACHE_CAPACITY);
+
+        let overflow = registry
+            .provider_for_model(Some("gpt-overflow-shared"))
+            .expect("overflow model should resolve");
+        let builds_after_overflow = builds.load(Ordering::SeqCst);
+        let registry = Arc::new(registry);
+        let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                registry
+                    .provider_for_model(Some("gpt-overflow-shared"))
+                    .expect("concurrent overflow lookup should resolve")
+            }));
+        }
+        for handle in handles {
+            let resolved = handle
+                .join()
+                .expect("overflow lookup thread should not panic");
+            assert!(
+                Arc::ptr_eq(&overflow, &resolved),
+                "all live overflow lookups must share one client identity"
+            );
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), builds_after_overflow);
+        assert_eq!(cache_len(&registry), super::PROVIDER_CACHE_CAPACITY);
+        assert_eq!(overflow_len(&registry), 1);
+
+        drop(overflow);
+        let builds_before_recreate = builds.load(Ordering::SeqCst);
+        let recreated = registry
+            .provider_for_model(Some("gpt-overflow-shared"))
+            .expect("expired weak overflow entry should be rebuilt");
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            builds_before_recreate + 1,
+            "a dead overflow identity must not retain its client"
+        );
+        assert_eq!(cache_len(&registry), super::PROVIDER_CACHE_CAPACITY);
+        assert_eq!(overflow_len(&registry), 1);
+        drop(recreated);
+        drop(active);
+    }
+
+    #[test]
+    fn strong_cache_hit_does_not_reclaim_dead_overflow() {
+        // Pins: the hot strong-cache path never pays for weak-overflow cleanup;
+        // dead weak metadata is reclaimed only by a weak hit or a pressured miss.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            provider_descriptor(ProviderId::OpenAI),
+            model_factory(builds),
+        );
+        let active = fill_live_strong_cache(&registry, "hot-hit");
+        let overflow = registry
+            .provider_for_model(Some("gpt-hot-hit-dead-overflow"))
+            .expect("overflow fixture should resolve");
+        drop(overflow);
+        assert_eq!(overflow_len(&registry), 1);
+
+        let hot_again = registry
+            .provider_for_model(Some("gpt-hot-hit-strong-0"))
+            .expect("hot strong key should resolve");
+        assert!(Arc::ptr_eq(&active[0], &hot_again));
+        assert_eq!(
+            overflow_len(&registry),
+            1,
+            "a strong hit must leave weak-overflow cleanup untouched"
+        );
+        assert_eq!(overflow_recency_len(&registry), 1);
+    }
+
+    #[test]
+    fn saturated_live_overflow_returns_typed_error_and_preserves_identity() {
+        // Pins: fully live strong and weak capacities reject a new raw key with
+        // a typed transient error, while an existing overflow key keeps exactly
+        // the same provider identity and is never evicted under pressure.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            provider_descriptor(ProviderId::OpenAI),
+            model_factory(builds.clone()),
+        );
+        let strong = fill_live_strong_cache(&registry, "saturated");
+        let overflow: Vec<_> = (0..super::PROVIDER_OVERFLOW_CAPACITY)
+            .map(|index| {
+                registry
+                    .provider_for_model(Some(&format!("gpt-saturated-overflow-{index}")))
+                    .expect("live overflow fixture should resolve")
+            })
+            .collect();
+        assert_eq!(cache_len(&registry), super::PROVIDER_CACHE_CAPACITY);
+        assert_eq!(overflow_len(&registry), super::PROVIDER_OVERFLOW_CAPACITY);
+        let builds_at_capacity = builds.load(Ordering::SeqCst);
+
+        let Err(error) = registry.provider_for_model(Some("gpt-saturated-new-key")) else {
+            panic!("a new raw key must fail while both capacities are fully live");
+        };
+        assert!(
+            matches!(
+                error,
+                MoaError::RateLimited { retries: 0, ref message }
+                    if message.contains("raw provider cache saturated")
+            ),
+            "saturation must use the typed transient provider admission error: {error}"
+        );
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            builds_at_capacity,
+            "known-live saturation must fail before constructing another raw client"
+        );
+
+        let existing = registry
+            .provider_for_model(Some("gpt-saturated-overflow-0"))
+            .expect("an existing overflow identity remains routable at capacity");
+        assert!(
+            Arc::ptr_eq(&overflow[0], &existing),
+            "capacity pressure must not replace a live weak raw identity"
+        );
+        assert_eq!(overflow_len(&registry), super::PROVIDER_OVERFLOW_CAPACITY);
+        assert_eq!(
+            overflow_recency_len(&registry),
+            super::PROVIDER_OVERFLOW_CAPACITY
+        );
+        drop(existing);
+        drop(overflow);
+        drop(strong);
+    }
+
+    #[test]
+    fn pressured_overflow_reclaims_dead_entries_incrementally() {
+        // Pins: one pressured miss performs only the fixed cleanup batch, admits
+        // the new key, and leaves the remaining dead weak metadata for later
+        // amortized passes instead of scanning the complete overflow map.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            provider_descriptor(ProviderId::OpenAI),
+            model_factory(builds),
+        );
+        let strong = fill_live_strong_cache(&registry, "incremental");
+        let overflow: Vec<_> = (0..super::PROVIDER_OVERFLOW_CAPACITY)
+            .map(|index| {
+                registry
+                    .provider_for_model(Some(&format!("gpt-incremental-overflow-{index}")))
+                    .expect("overflow fixture should resolve")
+            })
+            .collect();
+        drop(overflow);
+        assert_eq!(overflow_len(&registry), super::PROVIDER_OVERFLOW_CAPACITY);
+
+        let admitted = registry
+            .provider_for_model(Some("gpt-incremental-admitted"))
+            .expect("bounded dead-entry cleanup should make room");
+        let expected =
+            super::PROVIDER_OVERFLOW_CAPACITY - super::PROVIDER_OVERFLOW_RECLAIM_BATCH + 1;
+        assert_eq!(
+            overflow_len(&registry),
+            expected,
+            "one miss must reclaim exactly one bounded batch before admission"
+        );
+        assert_eq!(overflow_recency_len(&registry), expected);
+        assert!(
+            overflow_len(&registry) > 1,
+            "incremental cleanup must leave uninspected dead entries for later misses"
+        );
+        drop(admitted);
+        drop(strong);
+    }
+
+    #[test]
     fn rewriter_resolution_prefers_openai_nano_model_when_available() {
         // Pins: query rewrite selects by rewriter priority and builds the provider's
         // rewriter model, not the main-loop default model.
@@ -1421,15 +1777,19 @@ mod tests {
         let mut config = moa_config::MoaConfig::default();
         config.models.main = "claude-fable-5".to_string();
         config.models.fallback_models = vec!["claude-opus-4-8".to_string()];
+        let main = provider("claude-fable-5");
         let registry = ProviderRegistry::with_static_providers(
-            Some(provider("claude-fable-5")),
+            Some(main.clone()),
             Some(provider("gpt-5.4")),
             None,
         );
-        let main = provider("claude-fable-5");
 
         let wrapped = registry
-            .apply_main_failover(&config, "claude-fable-5", main.clone())
+            .main_provider_with_failover(
+                &config,
+                ProviderId::Anthropic,
+                &ModelId::new("claude-fable-5"),
+            )
             .expect("an adjacent-tier fallback should be accepted");
 
         assert!(
@@ -1451,8 +1811,11 @@ mod tests {
             None,
         );
 
-        let Err(error) = registry.apply_main_failover(&config, "gpt-5.4", provider("gpt-5.4"))
-        else {
+        let Err(error) = registry.main_provider_with_failover(
+            &config,
+            ProviderId::OpenAI,
+            &ModelId::new("gpt-5.4"),
+        ) else {
             panic!("a two-tier fallback gap must be rejected");
         };
         let message = error.to_string();
@@ -1480,8 +1843,11 @@ mod tests {
         let registry =
             ProviderRegistry::with_static_providers(None, Some(provider("gpt-5.4")), None);
 
-        let Err(error) = registry.apply_main_failover(&config, "gpt-5.4", provider("gpt-5.4"))
-        else {
+        let Err(error) = registry.main_provider_with_failover(
+            &config,
+            ProviderId::OpenAI,
+            &ModelId::new("gpt-5.4"),
+        ) else {
             panic!("an uncatalogued fallback must be rejected");
         };
 

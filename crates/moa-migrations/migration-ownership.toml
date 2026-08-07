@@ -480,6 +480,7 @@ readers = ["moa-skills"]
 name = "hand_leases"
 schema = "moa"
 owner = "moa-hands"
+notes = "V57 adds durable provider-visible provisioning operation identities and handle fencing."
 
 [[table]]
 name = "tenant_sandbox_policy"

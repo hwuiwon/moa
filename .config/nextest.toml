@@ -258,6 +258,11 @@ db-session = { max-threads = 4 }
 # parallelism is safe against the compose Postgres (max_connections = 100).
 db-memory = { max-threads = 4 }
 brain-turn-db = { max-threads = 1 }
+# `claim_expired` is a fleet-wide sweep by design: one call claims every expired
+# hand lease in the database, not only the rows the calling test seeded. Two of
+# these tests running at once steal each other's seeded leases, so this binary
+# takes the shared database one test at a time.
+hand-leases-db = { max-threads = 1 }
 eval-recorded = { max-threads = 1 }
 service-e2e = { max-threads = 1 }
 live-external = { max-threads = 1 }
@@ -265,6 +270,11 @@ live-external = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(/^(brain_turn_artifacts_db|brain_turn_session_search_db)$/)'
 test-group = "brain-turn-db"
+threads-required = 1
+
+[[profile.default.overrides]]
+filter = 'binary(hands_db)'
+test-group = "hand-leases-db"
 threads-required = 1
 
 [[profile.default.overrides]]

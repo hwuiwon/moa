@@ -29,7 +29,6 @@ use moa_core::{
     types::channel::Attachment,
     types::channel::Channel,
     types::completion::CompletionContent,
-    types::completion::CompletionRequest,
     types::completion::CompletionResponse,
     types::completion::CompletionStream,
     types::completion::SharedCompletionRequest,
@@ -665,13 +664,6 @@ impl LLMProvider for TestProvider {
 
     async fn complete(
         &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.next_response()
-    }
-
-    async fn complete_shared(
-        &self,
         _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
         self.next_response()
@@ -765,13 +757,6 @@ impl LLMProvider for RaceMutatingProvider {
     }
 
     async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.next_response().await
-    }
-
-    async fn complete_shared(
         &self,
         _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

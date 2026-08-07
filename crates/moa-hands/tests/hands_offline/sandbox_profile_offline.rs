@@ -57,6 +57,7 @@ fn spec(tier: SandboxTier, profile: SandboxProfile) -> HandSpec {
     )
     .expect("test policy resolution should succeed");
     HandSpec {
+        provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,

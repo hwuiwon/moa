@@ -28,9 +28,9 @@ use crate::types::{
     channel::ChannelAccountId, channel::ChannelCapabilities, channel::ChannelEvent,
     channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
     channel::SessionChannelBinding, channel::SessionChannelBindingId,
-    channel::SessionChannelBindingResolution, completion::CompletionRequest,
-    completion::CompletionStream, completion::SharedCompletionRequest, contact::ContactId,
-    contact::ContactPointId, contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
+    channel::SessionChannelBindingResolution, completion::CompletionStream,
+    completion::SharedCompletionRequest, contact::ContactId, contact::ContactPointId,
+    contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
     contact::StoredSessionAttachment, context::ProcessorOutput, context::WorkingContext,
     credentials::CredentialContext, credentials::CredentialError, credentials::CredentialIdentity,
     credentials::CredentialRef, credentials::CredentialStagingToken,
@@ -40,12 +40,13 @@ use crate::types::{
     experience::LearningCandidate, experience::LearningCandidateStatus,
     experience::LearningCandidateStatusUpdate, experience::TaskStrategySuccessRate,
     hands::HandHandle, hands::HandProviderCapabilities, hands::HandSpec, hands::HandStatus,
-    hands::SandboxFile, identifiers::SegmentId, identifiers::SessionAttachmentId,
-    identifiers::SessionId, identifiers::StoragePartitionId, identifiers::TenantId,
-    identifiers::ToolCallId, learning::LearningEntry, model::ModelCapabilities,
-    segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
-    segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
-    session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
+    hands::SandboxFile, identifiers::HandProvisioningOperationId, identifiers::SegmentId,
+    identifiers::SessionAttachmentId, identifiers::SessionId, identifiers::StoragePartitionId,
+    identifiers::TenantId, identifiers::ToolCallId, learning::LearningEntry,
+    model::ModelCapabilities, segment_assessment::SegmentAssessment,
+    segment_assessment::SegmentBaseline, segment_assessment::SkillResolutionRate,
+    segments::SegmentCompletion, segments::TaskSegment, session::Checkpoint,
+    session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
     session::SessionStatus, session::SessionSummary, snapshot::ContextSnapshot, tools::ToolOutput,
 };
 
@@ -608,8 +609,27 @@ pub trait HandProvider: Send + Sync {
     /// admission refuses anything outside them before provisioning.
     fn capabilities(&self) -> HandProviderCapabilities;
 
-    /// Provisions a new hand from a spec.
+    /// Provisions or resolves the hand identified by the spec's durable operation ID.
+    ///
+    /// Retrying with the same operation ID and the same creation-relevant spec
+    /// must return a resource created for that operation rather than knowingly
+    /// creating another one. Reusing an operation ID with a different
+    /// creation-relevant spec must fail closed.
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle>;
+
+    /// Finds every live hand carrying one durable provisioning operation ID.
+    ///
+    /// This method is required with no default because recovery after an
+    /// ambiguous provider create must not depend on a handle being recorded in
+    /// MOA. Implementations must include all matching live resources, including
+    /// duplicates from providers without atomic idempotency and non-running but
+    /// recoverable states such as paused hands. Consumers must allow the
+    /// provider's bounded consistency grace period before treating an empty
+    /// result as proof that the operation left no resource.
+    async fn provisioned_hands(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<Vec<HandHandle>>;
 
     /// Executes a tool within a provisioned hand.
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput>;
@@ -682,12 +702,8 @@ pub trait LLMProvider: Send + Sync {
     /// Returns the provider model capabilities.
     fn capabilities(&self) -> ModelCapabilities;
 
-    /// Executes a completion request.
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream>;
-
-    /// Executes a request from shared immutable storage without materializing
-    /// a second full request allocation.
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream>;
+    /// Executes a completion from canonical shared immutable request storage.
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream>;
 }
 
 /// Channel-specific messaging adapter.

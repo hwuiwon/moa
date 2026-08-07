@@ -162,12 +162,11 @@ impl LLMProvider for CapturingProvider {
         capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.requests.lock().await.push(request);
-        Ok(Self::response())
-    }
-
-    async fn complete_shared(&self, _request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        self.requests
+            .lock()
+            .await
+            .push(CompletionRequest::from_view(&request));
         Ok(Self::response())
     }
 }
@@ -189,11 +188,7 @@ impl LLMProvider for MemorySearchThenEndProvider {
         capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.complete_view(&request).await
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
         self.complete_view(&request).await
     }
 }

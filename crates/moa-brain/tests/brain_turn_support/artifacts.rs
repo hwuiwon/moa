@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_brain::{TurnResult, run_brain_turn};
-use moa_core::{types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionRequestView, types::completion::CompletionResponse, types::completion::CompletionStream, types::completion::SharedCompletionRequest, events::Event, types::events_stream::EventRange, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation};
+use moa_core::{types::completion::CompletionContent, types::completion::CompletionRequestView, types::completion::CompletionResponse, types::completion::CompletionStream, types::completion::SharedCompletionRequest, events::Event, types::events_stream::EventRange, traits::LLMProvider, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation};
 use moa_config::MoaConfig;
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicies;
@@ -48,11 +48,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.complete_view(&request).await
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {
@@ -198,11 +194,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.complete_view(&request).await
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {

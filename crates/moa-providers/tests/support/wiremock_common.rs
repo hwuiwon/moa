@@ -1,20 +1,23 @@
 //! Shared wiremock helpers for offline provider transport coverage.
 
-use moa_core::{types::completion::CompletionRequest, types::context::ContextMessage};
+use moa_core::{
+    types::completion::{CompletionRequest, SharedCompletionRequest},
+    types::context::ContextMessage,
+};
 use serde_json::json;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Builds a minimal completion request with deterministic output controls.
-pub fn minimal_request(prompt: impl Into<String>) -> CompletionRequest {
+pub fn minimal_request(prompt: impl Into<String>) -> SharedCompletionRequest {
     let mut request = CompletionRequest::simple(prompt);
     request.max_output_tokens = Some(64);
     request.temperature = Some(0.0);
-    request
+    request.into_shared()
 }
 
 /// Builds a completion request that exposes one deterministic function tool.
-pub fn tool_request(prompt: impl Into<String>) -> CompletionRequest {
+pub fn tool_request(prompt: impl Into<String>) -> SharedCompletionRequest {
     CompletionRequest {
         model: None,
         messages: vec![ContextMessage::user(prompt)],
@@ -25,6 +28,7 @@ pub fn tool_request(prompt: impl Into<String>) -> CompletionRequest {
         native_web_search: Default::default(),
         metadata: Default::default(),
     }
+    .into_shared()
 }
 
 fn emit_token_tool() -> serde_json::Value {

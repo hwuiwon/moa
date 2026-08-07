@@ -18,12 +18,11 @@ use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, types::action_policy::ActionRuleScope,
-    types::completion::CompletionRequest, types::completion::CompletionRequestView,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::SharedCompletionRequest, types::completion::StopReason,
-    types::completion::TokenUsage, types::completion::ToolCallContent,
-    types::completion::ToolInvocation, types::identifiers::ToolCallId,
-    types::model::ModelCapabilities,
+    types::completion::CompletionRequestView, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::completion::StopReason, types::completion::TokenUsage,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::ToolCallId, types::model::ModelCapabilities,
 };
 use moa_eval::fixture_ids::tenant_id_from_storage_partition;
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
@@ -1421,13 +1420,6 @@ impl LLMProvider for CompactionAwareRecordedProvider {
     }
 
     async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete_view(&request)
-    }
-
-    async fn complete_shared(
         &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

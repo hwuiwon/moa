@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::{
     events::Event, traits::LLMProvider, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionRequestView,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::SharedCompletionRequest, types::completion::StopReason,
-    types::completion::TokenUsage, types::completion::ToolCallContent,
-    types::completion::ToolInvocation, types::context::MessageRole, types::identifiers::ModelId,
-    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    types::completion::CompletionRequestView, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::completion::StopReason, types::completion::TokenUsage,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::context::MessageRole, types::identifiers::ModelId, types::model::ModelCapabilities,
+    types::model::TokenPricing, types::model::ToolCallFormat,
 };
 use moa_eval::long_conversation::{ScriptedUserScript, run_scenario_with_provider};
 use moa_eval_core::{
@@ -548,13 +548,6 @@ impl LLMProvider for ToolThenFinalProvider {
 
     async fn complete(
         &self,
-        request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete_view(&request)
-    }
-
-    async fn complete_shared(
-        &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
         self.complete_view(&request)
@@ -625,13 +618,6 @@ impl LLMProvider for ClarifyingDisputeProvider {
     }
 
     async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete_view(&request)
-    }
-
-    async fn complete_shared(
         &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
@@ -709,13 +695,6 @@ impl LLMProvider for ResponsivenessClarificationProvider {
     }
 
     async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete_view(&request)
-    }
-
-    async fn complete_shared(
         &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

@@ -687,9 +687,17 @@ async fn bash_success_output_is_truncated_to_router_budget() {
 }
 
 #[tokio::test]
-async fn bash_error_output_is_not_truncated() {
+// Pins: oversized bash failures obey router budgets while retaining error and process metadata.
+async fn bash_error_output_is_bounded_and_preserves_error_metadata() {
     let dir = tempdir().unwrap();
-    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let router = ToolRouter::new_local(dir.path())
+        .await
+        .unwrap()
+        .with_tool_budgets(ToolBudgetConfig {
+            bash_stdout: 64,
+            bash_stderr: 32,
+            ..ToolBudgetConfig::default()
+        });
     let session = session();
 
     let secured_12 = router
@@ -715,11 +723,32 @@ async fn bash_error_output_is_not_truncated() {
     let output = secured_12.safe_output;
 
     let text = output.to_text();
+    let expected_text = format!(
+        "stderr:\n{}\n[... ~19912 chars omitted ...]\n{}\n\nexit_code: 7\n\
+         [output truncated from ~5006 to ~64 tokens]",
+        "e".repeat(35),
+        "e".repeat(53),
+    );
     assert!(output.is_error);
-    assert!(!output.truncated);
-    assert_eq!(output.original_output_tokens, None);
-    assert!(!text.contains("[output truncated from ~"));
-    assert!(approximate_tokens(&text) > 4_000);
+    assert!(output.truncated);
+    assert_eq!(output.original_output_tokens, Some(5_006));
+    assert_eq!(output.process_exit_code(), Some(7));
+    assert_eq!(output.process_stdout(), None);
+    assert_eq!(output.process_stderr(), None);
+    assert!(!output.process_stdout_truncated());
+    assert!(output.process_stderr_truncated());
+    assert_eq!(
+        output.structured.as_ref(),
+        Some(&json!({
+            "exit_code": 7,
+            "stdout_truncated": false,
+            "stderr_truncated": true,
+        }))
+    );
+    assert_eq!(output.artifact, None);
+    assert!(output.duration > Duration::ZERO);
+    assert_eq!(text, expected_text);
+    assert_eq!(approximate_tokens(&text), 47);
 }
 
 #[tokio::test]

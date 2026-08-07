@@ -11,14 +11,14 @@ use moa_config::ToolOutputConfig;
 use moa_core::{
     error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
     types::channel::Channel, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
-    types::completion::TokenUsage, types::events_stream::EventFilter,
-    types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::events_stream::SequenceNum, types::identifiers::BrainId, types::identifiers::ModelId,
-    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
-    types::model::TokenPricing, types::model::ToolCallFormat, types::session::SessionFilter,
-    types::session::SessionMeta, types::session::SessionStatus, types::session::SessionSummary,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::StopReason, types::completion::TokenUsage,
+    types::events_stream::EventFilter, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::events_stream::SequenceNum,
+    types::identifiers::BrainId, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::model::TokenPricing,
+    types::model::ToolCallFormat, types::session::SessionFilter, types::session::SessionMeta,
+    types::session::SessionStatus, types::session::SessionSummary,
     types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION, types::snapshot::ContextSnapshot,
     types::tools::ToolOutput,
 };
@@ -222,11 +222,7 @@ impl LLMProvider for MockLlmProvider {
         capabilities()
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(Self::response_stream())
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         _request: moa_core::types::completion::SharedCompletionRequest,
     ) -> Result<CompletionStream> {

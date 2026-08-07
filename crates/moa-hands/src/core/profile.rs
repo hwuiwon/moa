@@ -224,6 +224,8 @@ pub(crate) mod test_support {
         )
         .expect("test policy resolution should succeed");
         HandSpec {
+            provisioning_operation_id:
+                moa_core::types::identifiers::HandProvisioningOperationId::new(),
             budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
             sandbox_tier: tier,
             image: None,
@@ -293,6 +295,13 @@ mod tests {
             _spec: moa_core::types::hands::HandSpec,
         ) -> Result<moa_core::types::hands::HandHandle> {
             Err(MoaError::Unsupported("test double".to_string()))
+        }
+
+        async fn provisioned_hands(
+            &self,
+            _operation_id: moa_core::types::identifiers::HandProvisioningOperationId,
+        ) -> Result<Vec<moa_core::types::hands::HandHandle>> {
+            Ok(Vec::new())
         }
 
         async fn execute(

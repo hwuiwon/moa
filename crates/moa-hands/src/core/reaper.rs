@@ -10,7 +10,7 @@
 //!
 //! A claimed generation moves to [`HandLeaseStatus::Reaping`], which
 //! provisioning treats as owned. From there it is finalized as `Destroyed` on
-//! success or released back to `Stale` behind a bounded backoff on failure. It
+//! success or released back to `Failed` behind a bounded backoff on failure. It
 //! is never returned to `Active`: a sandbox the reaper decided to destroy is
 //! not a sandbox anyone should get back.
 
@@ -19,15 +19,19 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
+#[cfg(test)]
+use moa_core::types::hands::HandHandle;
 use moa_core::{
-    error::MoaError, error::Result, traits::HandProvider, types::hands::HandHandle,
-    types::identifiers::SessionId,
+    error::MoaError, error::Result, traits::HandProvider,
+    types::identifiers::HandProvisioningOperationId, types::identifiers::SessionId,
 };
 use sqlx::{PgPool, Row};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use super::leases::{LeaseHandle, map_sqlx_error};
+use super::leases::{
+    LeaseHandle, PROVISIONING_EMPTY_CONFIRMATION, PROVISIONING_VISIBILITY_GRACE, map_sqlx_error,
+};
 
 /// One generation the reaper owns and must destroy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,10 +44,14 @@ pub struct ClaimedHandLease {
     pub provider: String,
     /// Fenced generation. Finalization matches on it exactly.
     pub generation: i64,
+    /// Durable provider-visible create identity for this generation.
+    pub provisioning_operation_id: HandProvisioningOperationId,
     /// Unique ownership token for this destroy attempt.
     pub claim_token: Uuid,
-    /// Durable handle to destroy.
-    pub handle: LeaseHandle,
+    /// Durable handle to destroy, when activation recorded one.
+    pub handle: Option<LeaseHandle>,
+    /// Earliest durable time at which an ambiguous create may be reconciled.
+    pub reconcile_not_before: Option<DateTime<Utc>>,
     /// Why this generation was claimed, for telemetry only.
     pub reason: HandLeaseDestroyReason,
     /// Consecutive failed destroy attempts before this one.
@@ -104,6 +112,9 @@ pub trait ExpiredHandLeaseClaims: Send + Sync {
         claimed: &ClaimedHandLease,
         retry_after: Duration,
     ) -> Result<bool>;
+
+    /// Renews one exact reaper claim while provider reconciliation is in flight.
+    async fn renew_claim(&self, claimed: &ClaimedHandLease, claim_ttl: Duration) -> Result<bool>;
 }
 
 /// Postgres-backed claim surface.
@@ -135,24 +146,27 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         let rows = sqlx::query(
             r#"
             WITH claimable AS (
-                SELECT session_id, worker_id, provider, generation
+                SELECT session_id, worker_id, provider, generation,
+                       provisioning_operation_id, status, handle
                 FROM moa.hand_leases
-                WHERE handle IS NOT NULL
-                  AND (
-                        (
-                            status IN ('active', 'provisioning', 'stale', 'failed')
-                            AND (reap_not_before IS NULL OR reap_not_before <= now())
-                            AND (
-                                  (hard_expires_at IS NOT NULL AND hard_expires_at <= now())
-                               OR (idle_expires_at IS NOT NULL AND idle_expires_at <= now())
-                               OR status IN ('stale', 'failed')
-                            )
-                        )
-                     OR (
-                            status = 'reaping'
-                            AND reap_claim_expires_at <= now()
-                        )
-                  )
+                WHERE (
+                        status = 'provisioning'
+                    AND reap_not_before <= now()
+                ) OR (
+                        status = 'failed'
+                    AND reap_not_before <= now()
+                ) OR (
+                        status IN ('active', 'stale')
+                    AND handle IS NOT NULL
+                    AND (
+                           status = 'stale'
+                        OR (hard_expires_at IS NOT NULL AND hard_expires_at <= now())
+                        OR (idle_expires_at IS NOT NULL AND idle_expires_at <= now())
+                    )
+                ) OR (
+                        status = 'reaping'
+                    AND reap_claim_expires_at <= now()
+                )
                 ORDER BY updated_at
                 LIMIT $1
                 FOR UPDATE SKIP LOCKED
@@ -167,9 +181,13 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
               AND lease.worker_id = claimable.worker_id
               AND lease.provider = claimable.provider
               AND lease.generation = claimable.generation
+              AND lease.provisioning_operation_id = claimable.provisioning_operation_id
+              AND lease.status = claimable.status
+              AND lease.handle IS NOT DISTINCT FROM claimable.handle
             RETURNING lease.session_id, lease.worker_id, lease.provider, lease.generation,
-                      lease.handle, lease.hard_expires_at, lease.idle_expires_at,
-                      lease.reap_attempts, lease.reap_claim_token
+                      lease.provisioning_operation_id, lease.handle,
+                      lease.hard_expires_at, lease.idle_expires_at,
+                      lease.reap_not_before, lease.reap_attempts, lease.reap_claim_token
             "#,
         )
         .bind(limit)
@@ -183,20 +201,18 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
             .map(|row| {
                 let handle = row
                     .try_get::<Option<sqlx::types::Json<LeaseHandle>>, _>("handle")
-                    .map_err(map_sqlx_error)?
-                    .ok_or_else(|| {
-                        MoaError::StorageError(
-                            "claimed hand lease lost its handle between select and update"
-                                .to_string(),
-                        )
-                    })?;
+                    .map_err(map_sqlx_error)?;
                 Ok(ClaimedHandLease {
                     session_id: row.try_get("session_id").map_err(map_sqlx_error)?,
                     worker_id: row.try_get("worker_id").map_err(map_sqlx_error)?,
                     provider: row.try_get("provider").map_err(map_sqlx_error)?,
                     generation: row.try_get("generation").map_err(map_sqlx_error)?,
+                    provisioning_operation_id: row
+                        .try_get("provisioning_operation_id")
+                        .map_err(map_sqlx_error)?,
                     claim_token: row.try_get("reap_claim_token").map_err(map_sqlx_error)?,
-                    handle: handle.0,
+                    handle: handle.map(|handle| handle.0),
+                    reconcile_not_before: row.try_get("reap_not_before").map_err(map_sqlx_error)?,
                     reason: HandLeaseDestroyReason::classify(
                         now,
                         row.try_get("hard_expires_at").map_err(map_sqlx_error)?,
@@ -223,14 +239,18 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
               AND worker_id = $2
               AND provider = $3
               AND generation = $4
+              AND provisioning_operation_id = $5
               AND status = 'reaping'
-              AND reap_claim_token = $5
+              AND handle IS NOT DISTINCT FROM $6
+              AND reap_claim_token = $7
             "#,
         )
         .bind(claimed.session_id)
         .bind(&claimed.worker_id)
         .bind(&claimed.provider)
         .bind(claimed.generation)
+        .bind(claimed.provisioning_operation_id)
+        .bind(claimed.handle.clone().map(sqlx::types::Json))
         .bind(claimed.claim_token)
         .execute(&self.pool)
         .await
@@ -244,31 +264,78 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         claimed: &ClaimedHandLease,
         retry_after: Duration,
     ) -> Result<bool> {
-        // Released to `stale`, never to `active`: the sandbox stays fenced off
-        // from reuse while it waits for another destroy attempt.
+        // Released to `failed`, never to `stale` or `active`: request traffic
+        // cannot overwrite the unresolved operation while cleanup backs off.
+        //
+        // The backoff never schedules the next attempt inside the provider
+        // visibility grace. A lease whose idle window is shorter than its
+        // provisioning deadline is reaped while that deadline is still in the
+        // future, and a bare `now() + retry_after` would both violate the
+        // cleanup-schedule invariant and retry before the provider could have
+        // made a late create observable.
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
-            SET status = 'stale',
+            SET status = 'failed',
                 updated_at = now(),
                 reap_attempts = reap_attempts + 1,
-                reap_not_before = now() + make_interval(secs => $5),
+                reap_not_before = GREATEST(
+                    now() + make_interval(secs => $7),
+                    provisioning_deadline_at + make_interval(secs => $9)
+                ),
                 reap_claim_token = NULL,
                 reap_claim_expires_at = NULL
             WHERE session_id = $1
               AND worker_id = $2
               AND provider = $3
               AND generation = $4
+              AND provisioning_operation_id = $5
               AND status = 'reaping'
-              AND reap_claim_token = $6
+              AND handle IS NOT DISTINCT FROM $6
+              AND reap_claim_token = $8
             "#,
         )
         .bind(claimed.session_id)
         .bind(&claimed.worker_id)
         .bind(&claimed.provider)
         .bind(claimed.generation)
+        .bind(claimed.provisioning_operation_id)
+        .bind(claimed.handle.clone().map(sqlx::types::Json))
         .bind(retry_after.as_secs_f64())
         .bind(claimed.claim_token)
+        .bind(PROVISIONING_VISIBILITY_GRACE.as_secs_f64())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
+    async fn renew_claim(&self, claimed: &ClaimedHandLease, claim_ttl: Duration) -> Result<bool> {
+        let affected = sqlx::query(
+            r#"
+            UPDATE moa.hand_leases
+            SET updated_at = now(),
+                reap_claim_expires_at = now() + make_interval(secs => $8)
+            WHERE session_id = $1
+              AND worker_id = $2
+              AND provider = $3
+              AND generation = $4
+              AND provisioning_operation_id = $5
+              AND status = 'reaping'
+              AND handle IS NOT DISTINCT FROM $6
+              AND reap_claim_token = $7
+              AND reap_claim_expires_at > now()
+            "#,
+        )
+        .bind(claimed.session_id)
+        .bind(&claimed.worker_id)
+        .bind(&claimed.provider)
+        .bind(claimed.generation)
+        .bind(claimed.provisioning_operation_id)
+        .bind(claimed.handle.clone().map(sqlx::types::Json))
+        .bind(claimed.claim_token)
+        .bind(claim_ttl.as_secs_f64())
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?
@@ -282,7 +349,11 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
 pub struct HandLeaseReaperConfig {
     /// Delay between sweeps.
     pub interval: Duration,
-    /// Maximum generations claimed in one sweep.
+    /// Maximum generations considered in one sweep.
+    ///
+    /// The reaper additionally caps each database claim to
+    /// `max_destroy_concurrency` so no claimed row waits in an unpolled stream
+    /// without its ownership heartbeat running.
     pub batch_size: i64,
     /// How long one destroy claim remains owned before another replica may recover it.
     pub claim_ttl: Duration,
@@ -343,13 +414,19 @@ impl HandLeaseReaper {
 
     /// Runs one bounded sweep and returns how many generations were destroyed.
     pub async fn sweep(&self) -> Result<usize> {
+        let concurrency = self.config.max_destroy_concurrency.max(1);
+        let claim_limit = self
+            .config
+            .batch_size
+            .min(i64::try_from(concurrency).unwrap_or(i64::MAX))
+            .max(0);
         let claimed = self
             .claims
-            .claim_expired(self.config.batch_size, self.config.claim_ttl)
+            .claim_expired(claim_limit, self.config.claim_ttl)
             .await?;
         let outcomes = stream::iter(claimed)
             .map(|lease| async move {
-                match self.destroy_claimed(&lease).await {
+                match self.destroy_claimed_with_renewal(&lease).await {
                     Ok(()) => {
                         if !self.claims.finalize_destroyed(&lease).await? {
                             tracing::warn!(
@@ -392,7 +469,7 @@ impl HandLeaseReaper {
                     }
                 }
             })
-            .buffer_unordered(self.config.max_destroy_concurrency.max(1))
+            .buffer_unordered(concurrency)
             .collect::<Vec<Result<usize>>>()
             .await;
         let mut destroyed = 0;
@@ -414,7 +491,41 @@ impl HandLeaseReaper {
                     lease.provider
                 ))
             })?;
-        provider.destroy(&hand_handle(lease)).await
+        if let Some(not_before) = lease.reconcile_not_before {
+            let delay = (not_before - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+        }
+        destroy_provisioning_operations(
+            provider.as_ref(),
+            lease.provisioning_operation_id,
+            lease.handle.as_ref(),
+            ProvisioningAbsenceProof::Delayed,
+        )
+        .await
+    }
+
+    async fn destroy_claimed_with_renewal(&self, lease: &ClaimedHandLease) -> Result<()> {
+        let heartbeat = (self.config.claim_ttl / 3).max(Duration::from_millis(1));
+        let mut ticker = tokio::time::interval(heartbeat);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        let cleanup = self.destroy_claimed(lease);
+        tokio::pin!(cleanup);
+        loop {
+            tokio::select! {
+                outcome = &mut cleanup => return outcome,
+                _ = ticker.tick() => {
+                    if !self.claims.renew_claim(lease, self.config.claim_ttl).await? {
+                        return Err(MoaError::StorageError(format!(
+                            "durable hand reaper lost claim renewal for session {} provider {} generation {}",
+                            lease.session_id, lease.provider, lease.generation
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     /// Spawns the sweep loop and returns its join handle.
@@ -436,9 +547,92 @@ impl HandLeaseReaper {
     }
 }
 
-/// Returns the provider handle a claimed lease destroys.
-fn hand_handle(lease: &ClaimedHandLease) -> HandHandle {
-    lease.handle.handle.clone()
+/// Selects how provider absence is proven after destroying an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProvisioningAbsenceProof {
+    /// Accepts one empty enumeration for an explicitly bound durable handle.
+    Immediate,
+    /// Requires two empty enumerations separated by the consistency window.
+    Delayed,
+}
+
+/// Destroys and confirms every resource associated with one lease generation.
+///
+/// The stored handle may belong to the previous generation while the current
+/// provisioning operation is replacing it, so both operation identities are
+/// enumerated. Callers choose whether a known explicit teardown can accept one
+/// empty enumeration or ambiguous cleanup needs delayed confirmation.
+pub(super) async fn destroy_provisioning_operations(
+    provider: &dyn HandProvider,
+    current_operation_id: HandProvisioningOperationId,
+    stored_handle: Option<&LeaseHandle>,
+    absence_proof: ProvisioningAbsenceProof,
+) -> Result<()> {
+    let mut operation_ids = vec![current_operation_id];
+    if let Some(stored_handle) = stored_handle
+        && stored_handle.provisioning_operation_id != current_operation_id
+    {
+        operation_ids.push(stored_handle.provisioning_operation_id);
+    }
+
+    let mut handles = Vec::new();
+    if let Some(stored_handle) = stored_handle {
+        handles.push(stored_handle.handle.clone());
+    }
+    let mut first_error = None;
+    for operation_id in &operation_ids {
+        match provider.provisioned_hands(*operation_id).await {
+            Ok(discovered) => {
+                for handle in discovered {
+                    if !handles.contains(&handle) {
+                        handles.push(handle);
+                    }
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    for handle in &handles {
+        if let Err(error) = provider.destroy(handle).await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    ensure_provisioning_operations_absent(provider, &operation_ids).await?;
+    match absence_proof {
+        ProvisioningAbsenceProof::Immediate => Ok(()),
+        ProvisioningAbsenceProof::Delayed => {
+            tokio::time::sleep(PROVISIONING_EMPTY_CONFIRMATION).await;
+            ensure_provisioning_operations_absent(provider, &operation_ids).await
+        }
+    }
+}
+
+async fn ensure_provisioning_operations_absent(
+    provider: &dyn HandProvider,
+    operation_ids: &[HandProvisioningOperationId],
+) -> Result<()> {
+    for operation_id in operation_ids {
+        let remaining = provider.provisioned_hands(*operation_id).await?;
+        if !remaining.is_empty() {
+            return Err(MoaError::ProviderError(format!(
+                "hand provider {} still reports {} resource(s) for provisioning operation {operation_id} after destroy",
+                provider.provider_name(),
+                remaining.len()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -450,6 +644,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingClaims {
         claimed: Mutex<Vec<ClaimedHandLease>>,
+        limits: Mutex<Vec<i64>>,
         finalized: Mutex<Vec<i64>>,
         released: Mutex<Vec<(i64, Duration)>>,
     }
@@ -458,9 +653,10 @@ mod tests {
     impl ExpiredHandLeaseClaims for RecordingClaims {
         async fn claim_expired(
             &self,
-            _limit: i64,
+            limit: i64,
             _claim_ttl: Duration,
         ) -> Result<Vec<ClaimedHandLease>> {
+            self.limits.lock().expect("limits lock").push(limit);
             Ok(std::mem::take(
                 &mut *self.claimed.lock().expect("claimed lock"),
             ))
@@ -485,6 +681,14 @@ mod tests {
                 .push((claimed.generation, retry_after));
             Ok(true)
         }
+
+        async fn renew_claim(
+            &self,
+            _claimed: &ClaimedHandLease,
+            _claim_ttl: Duration,
+        ) -> Result<bool> {
+            Ok(true)
+        }
     }
 
     struct StubProvider {
@@ -506,6 +710,13 @@ mod tests {
             _spec: moa_core::types::hands::HandSpec,
         ) -> Result<moa_core::types::hands::HandHandle> {
             Err(MoaError::Unsupported("stub".to_string()))
+        }
+
+        async fn provisioned_hands(
+            &self,
+            _operation_id: HandProvisioningOperationId,
+        ) -> Result<Vec<HandHandle>> {
+            Ok(Vec::new())
         }
 
         async fn execute(
@@ -538,13 +749,19 @@ mod tests {
     }
 
     fn claimed(generation: i64, attempts: i32) -> ClaimedHandLease {
+        let provisioning_operation_id = HandProvisioningOperationId::new();
         ClaimedHandLease {
             session_id: SessionId::new(),
             worker_id: String::new(),
             provider: "local".to_string(),
             generation,
+            provisioning_operation_id,
             claim_token: Uuid::new_v4(),
-            handle: LeaseHandle::new(HandHandle::local(std::path::PathBuf::from("/tmp/moa-reap"))),
+            handle: Some(LeaseHandle::new(
+                provisioning_operation_id,
+                HandHandle::local(std::path::PathBuf::from("/tmp/moa-reap")),
+            )),
+            reconcile_not_before: None,
             reason: HandLeaseDestroyReason::HardLifetime,
             attempts,
         }
@@ -566,6 +783,11 @@ mod tests {
         );
 
         assert_eq!(reaper.sweep().await.expect("sweep"), 1);
+        assert_eq!(
+            *claims.limits.lock().expect("limits lock"),
+            vec![4],
+            "one sweep must not claim more rows than it can heartbeat concurrently"
+        );
         assert_eq!(*claims.finalized.lock().expect("finalized lock"), vec![7]);
         assert!(claims.released.lock().expect("released lock").is_empty());
     }

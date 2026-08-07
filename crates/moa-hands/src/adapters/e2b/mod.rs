@@ -5,22 +5,24 @@ mod client;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::{
-    error::MoaError, error::Result, error::ToolFailureClass, traits::HandProvider,
-    types::hands::DeadlineEnforcement, types::hands::EgressMode, types::hands::HandHandle,
-    types::hands::HandProviderCapabilities, types::hands::HandSpec, types::hands::HandStatus,
-    types::hands::ResourceSupport, types::hands::SandboxFile, types::hands::SandboxProfile,
-    types::hands::SandboxTier, types::hands::SandboxTierCapabilities,
-    types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
+    canonical_json::canonical_json_bytes, error::MoaError, error::Result, error::ToolFailureClass,
+    traits::HandProvider, types::hands::DeadlineEnforcement, types::hands::EgressMode,
+    types::hands::HandHandle, types::hands::HandProviderCapabilities, types::hands::HandSpec,
+    types::hands::HandStatus, types::hands::ResourceSupport, types::hands::SandboxFile,
+    types::hands::SandboxProfile, types::hands::SandboxTier, types::hands::SandboxTierCapabilities,
+    types::hands::validate_sandbox_file_path, types::identifiers::HandProvisioningOperationId,
+    types::tools::ToolOutput,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
@@ -47,6 +49,10 @@ const DEFAULT_E2B_TEMPLATE: &str = "base";
 const DEFAULT_ENVD_PORT: u16 = 49983;
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_PROTOCOL_VERSION: &str = "1";
+const E2B_PROVISIONING_OPERATION_METADATA_KEY: &str = "moa_provisioning_operation_id";
+const E2B_PROVISIONING_SPEC_METADATA_KEY: &str = "moa_provisioning_spec_sha256";
+const E2B_SANDBOX_LIST_LIMIT: usize = 100;
+
 #[derive(Debug, Clone)]
 pub(super) struct ConnectedSandbox {
     pub(super) sandbox_domain: String,
@@ -62,6 +68,12 @@ pub struct E2BHandProvider {
     default_template: String,
     sandbox_base_url_override: Option<String>,
     sandboxes: RwLock<HashMap<String, ConnectedSandbox>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProvisionedE2BSandbox {
+    sandbox_id: String,
+    spec_fingerprint: Option<String>,
 }
 
 impl E2BHandProvider {
@@ -135,8 +147,22 @@ impl E2BHandProvider {
         self
     }
 
-    async fn create_sandbox(&self, spec: &HandSpec) -> Result<String> {
-        let translated = E2BProfileFields::translate(spec.effective_profile.profile())?;
+    async fn create_sandbox(
+        &self,
+        spec: &HandSpec,
+        translated: E2BProfileFields,
+        spec_fingerprint: &str,
+    ) -> Result<String> {
+        let metadata = HashMap::from([
+            (
+                E2B_PROVISIONING_OPERATION_METADATA_KEY,
+                spec.provisioning_operation_id.to_string(),
+            ),
+            (
+                E2B_PROVISIONING_SPEC_METADATA_KEY,
+                spec_fingerprint.to_string(),
+            ),
+        ]);
         let response = self
             .client
             .post(format!("{}/sandboxes", self.api_url))
@@ -148,6 +174,7 @@ impl E2BHandProvider {
                 "allow_internet_access": translated.allow_internet_access,
                 "autoPause": true,
                 "autoResume": { "enabled": true },
+                "metadata": metadata,
             }))
             .send()
             .await
@@ -175,6 +202,112 @@ impl E2BHandProvider {
             },
         );
         Ok(sandbox_id)
+    }
+
+    fn provisioning_spec_fingerprint(
+        &self,
+        spec: &HandSpec,
+        translated: E2BProfileFields,
+    ) -> Result<String> {
+        let creation_contract = json!({
+            "templateID": spec.image.as_deref().unwrap_or(&self.default_template),
+            "envVars": spec.env,
+            "timeout": translated.timeout_secs,
+            "secure": true,
+            "allow_internet_access": translated.allow_internet_access,
+            "autoPause": true,
+            "autoResume": { "enabled": true },
+        });
+        let canonical = canonical_json_bytes(&creation_contract).map_err(|error| {
+            MoaError::ProviderError(format!(
+                "failed to canonicalize E2B provisioning spec: {error}"
+            ))
+        })?;
+        Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+    }
+
+    async fn provisioned_sandboxes(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<Vec<ProvisionedE2BSandbox>> {
+        let metadata_query = format!("{E2B_PROVISIONING_OPERATION_METADATA_KEY}={operation_id}");
+        let page_limit = E2B_SANDBOX_LIST_LIMIT.to_string();
+        let mut next_token: Option<String> = None;
+        let mut seen_tokens = HashSet::new();
+        let mut seen_sandbox_ids = HashSet::new();
+        let mut sandboxes = Vec::new();
+
+        loop {
+            let mut url = build_url(
+                &format!("{}/v2/sandboxes", self.api_url),
+                &[
+                    ("metadata", metadata_query.as_str()),
+                    ("limit", page_limit.as_str()),
+                    ("state", "running,paused"),
+                ],
+                "E2B",
+            )?;
+            if let Some(token) = next_token.as_deref() {
+                url.query_pairs_mut().append_pair("nextToken", token);
+            }
+            let response = self.client.get(url).send().await.map_err(|error| {
+                MoaError::ProviderError(format!(
+                    "failed to list E2B provisioning operation sandboxes: {error}"
+                ))
+            })?;
+            if !response.status().is_success() {
+                return Err(http_error(response).await);
+            }
+            let response_next_token = response
+                .headers()
+                .get("x-next-token")
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map(str::trim)
+                        .map(str::to_string)
+                        .map_err(|error| {
+                            MoaError::ProviderError(format!(
+                                "invalid E2B X-Next-Token response header: {error}"
+                            ))
+                        })
+                })
+                .transpose()?
+                .filter(|token| !token.is_empty());
+            let value = expect_success_json(response, "E2B").await?;
+            let page = value.as_array().ok_or_else(|| {
+                MoaError::ProviderError(
+                    "E2B list sandboxes response must be a JSON array".to_string(),
+                )
+            })?;
+
+            for item in page {
+                let sandbox = decode_provisioned_sandbox(item, operation_id)?;
+                if seen_sandbox_ids.insert(sandbox.sandbox_id.clone()) {
+                    sandboxes.push(sandbox);
+                }
+            }
+
+            match response_next_token {
+                Some(token) => {
+                    if !seen_tokens.insert(token.clone()) {
+                        return Err(MoaError::ProviderError(
+                            "E2B sandbox pagination repeated a continuation token".to_string(),
+                        ));
+                    }
+                    next_token = Some(token);
+                }
+                None if page.len() == E2B_SANDBOX_LIST_LIMIT => {
+                    return Err(MoaError::ProviderError(format!(
+                        "E2B returned a full {E2B_SANDBOX_LIST_LIMIT}-sandbox page without an X-Next-Token; refusing to truncate provisioning recovery"
+                    )));
+                }
+                None => break,
+            }
+        }
+
+        sandboxes.sort_unstable_by(|left, right| left.sandbox_id.cmp(&right.sandbox_id));
+        Ok(sandboxes)
     }
 
     async fn connect_sandbox(&self, sandbox_id: &str) -> Result<ConnectedSandbox> {
@@ -413,6 +546,43 @@ fn sandbox_id(handle: &HandHandle) -> Result<&str> {
     }
 }
 
+fn decode_provisioned_sandbox(
+    value: &Value,
+    operation_id: HandProvisioningOperationId,
+) -> Result<ProvisionedE2BSandbox> {
+    let expected_operation_id = operation_id.to_string();
+    let sandbox_id = required_string_field(value, "sandboxID")?.to_string();
+    let metadata = value
+        .get("metadata")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            MoaError::ProviderError(format!(
+                "E2B sandbox `{sandbox_id}` matched operation `{operation_id}` without metadata"
+            ))
+        })?;
+    let actual_operation_id = metadata
+        .get(E2B_PROVISIONING_OPERATION_METADATA_KEY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            MoaError::ProviderError(format!(
+                "E2B sandbox `{sandbox_id}` omitted `{E2B_PROVISIONING_OPERATION_METADATA_KEY}`"
+            ))
+        })?;
+    if actual_operation_id != expected_operation_id.as_str() {
+        return Err(MoaError::ProviderError(format!(
+            "E2B sandbox `{sandbox_id}` returned for operation `{operation_id}` carries operation `{actual_operation_id}`"
+        )));
+    }
+    let spec_fingerprint = metadata
+        .get(E2B_PROVISIONING_SPEC_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(ProvisionedE2BSandbox {
+        sandbox_id,
+        spec_fingerprint,
+    })
+}
+
 /// Revision of the E2B provider's capability declaration.
 pub const E2B_CAPABILITIES_REVISION: &str = "e2b-hands-v1";
 
@@ -517,8 +687,43 @@ impl HandProvider for E2BHandProvider {
                 "E2B provider is reserved for microvm sandboxes".to_string(),
             ));
         }
-        let sandbox_id = self.create_sandbox(&spec).await?;
+        let translated = E2BProfileFields::translate(spec.effective_profile.profile())?;
+        let expected_fingerprint = self.provisioning_spec_fingerprint(&spec, translated)?;
+        let existing = self
+            .provisioned_sandboxes(spec.provisioning_operation_id)
+            .await?;
+        if existing.len() > 1 {
+            return Err(MoaError::ProviderError(format!(
+                "E2B provisioning operation `{}` resolved {} sandboxes; durable reaper cleanup is required",
+                spec.provisioning_operation_id,
+                existing.len()
+            )));
+        }
+        if let Some(existing) = existing.first() {
+            if existing.spec_fingerprint.as_deref() != Some(expected_fingerprint.as_str()) {
+                return Err(MoaError::ProviderError(format!(
+                    "E2B provisioning operation `{}` was reused with a different creation spec",
+                    spec.provisioning_operation_id
+                )));
+            }
+            return Ok(HandHandle::e2b(existing.sandbox_id.clone()));
+        }
+        let sandbox_id = self
+            .create_sandbox(&spec, translated, &expected_fingerprint)
+            .await?;
         Ok(HandHandle::e2b(sandbox_id))
+    }
+
+    async fn provisioned_hands(
+        &self,
+        operation_id: HandProvisioningOperationId,
+    ) -> Result<Vec<HandHandle>> {
+        Ok(self
+            .provisioned_sandboxes(operation_id)
+            .await?
+            .into_iter()
+            .map(|sandbox| HandHandle::e2b(sandbox.sandbox_id))
+            .collect())
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
@@ -679,5 +884,56 @@ impl HandProvider for E2BHandProvider {
             return Ok(());
         }
         Err(http_error(response).await)
+    }
+}
+
+#[cfg(test)]
+mod operation_intent_tests {
+    use moa_core::types::identifiers::HandProvisioningOperationId;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{
+        E2B_PROVISIONING_OPERATION_METADATA_KEY, E2B_PROVISIONING_SPEC_METADATA_KEY,
+        decode_provisioned_sandbox,
+    };
+
+    #[test]
+    fn decodes_operation_identity_and_spec_fingerprint() {
+        // Pins: recovery accepts only resources carrying the exact durable
+        // operation identity returned by E2B's metadata-filtered list API.
+        let operation_id = HandProvisioningOperationId(Uuid::from_u128(0xe2b));
+        let value = json!({
+            "sandboxID": "sandbox-2",
+            "metadata": {
+                (E2B_PROVISIONING_OPERATION_METADATA_KEY): operation_id.to_string(),
+                (E2B_PROVISIONING_SPEC_METADATA_KEY): "sha256:spec",
+            },
+        });
+
+        let decoded = decode_provisioned_sandbox(&value, operation_id)
+            .expect("matching operation metadata should decode");
+
+        assert_eq!(decoded.sandbox_id, "sandbox-2");
+        assert_eq!(decoded.spec_fingerprint.as_deref(), Some("sha256:spec"));
+    }
+
+    #[test]
+    fn rejects_a_list_result_with_a_different_operation_identity() {
+        // Pins: a provider-side filtering error cannot make the reaper destroy
+        // a sandbox belonging to a different durable operation.
+        let operation_id = HandProvisioningOperationId(Uuid::from_u128(0xe2b));
+        let other_operation_id = HandProvisioningOperationId(Uuid::from_u128(0xbad));
+        let value = json!({
+            "sandboxID": "sandbox-other",
+            "metadata": {
+                (E2B_PROVISIONING_OPERATION_METADATA_KEY): other_operation_id.to_string(),
+            },
+        });
+
+        let error = decode_provisioned_sandbox(&value, operation_id)
+            .expect_err("mismatched operation metadata must fail closed");
+
+        assert!(error.to_string().contains(&other_operation_id.to_string()));
     }
 }

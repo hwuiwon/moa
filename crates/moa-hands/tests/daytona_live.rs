@@ -136,6 +136,30 @@ async fn destroy_and_wait(provider: &DaytonaHandProvider, handle: &HandHandle) -
     wait_for_destroyed(provider, handle, Duration::from_secs(30)).await
 }
 
+/// Waits until a durable provisioning operation resolves to no live sandbox.
+///
+/// The list API is only bounded-consistent after a destroy, so a destroyed
+/// sandbox is allowed to linger in the label-filtered listing briefly.
+async fn wait_for_no_provisioned_hands(
+    provider: &DaytonaHandProvider,
+    operation_id: moa_core::types::identifiers::HandProvisioningOperationId,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let discovered = provider.provisioned_hands(operation_id).await?;
+        if discovered.is_empty() {
+            return Ok(());
+        }
+        if started.elapsed() > timeout {
+            return Err(MoaError::ProviderError(format!(
+                "durable provisioning operation `{operation_id}` still resolves to {discovered:?}"
+            )));
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_DAYTONA_TESTS=1 and DAYTONA_API_KEY"]
 async fn daytona_provider_round_trip() {
@@ -277,6 +301,88 @@ async fn daytona_provider_round_trip() {
         Ok(Err(error)) => {
             cleanup_result.expect("sandbox cleanup should succeed after provider failure");
             panic!("live Daytona provider test failed: {error}");
+        }
+        Err(panic) => {
+            cleanup_result.expect("sandbox cleanup should succeed after panic");
+            resume_unwind(panic);
+        }
+    }
+}
+
+// Pins: a live sandbox created under a durable provisioning operation ID is
+// discoverable by that ID through Daytona's real label-filtered list API;
+// re-provisioning the same operation resolves to the same sandbox by its
+// deterministic name instead of leaking a second one; an unrelated operation ID
+// resolves to nothing; and a destroyed sandbox leaves the operation with no live
+// resource. This is the crash-window recovery contract, and only the live API
+// can prove that the label filter and `nextCursor` paging shape are real.
+#[tokio::test]
+#[ignore = "requires MOA_RUN_LIVE_DAYTONA_TESTS=1 and DAYTONA_API_KEY"]
+async fn daytona_provisioning_operation_is_discoverable_and_idempotent() {
+    if !live_daytona_tests_enabled() {
+        return;
+    }
+    require_daytona_credentials();
+
+    let provider = live_provider();
+    let spec = live_hand_spec(moa_core::types::hands::SandboxTier::Container);
+    let operation_id = spec.provisioning_operation_id;
+
+    let handle = provider
+        .provision(spec.clone())
+        .await
+        .expect("failed to provision Daytona sandbox");
+
+    let result = AssertUnwindSafe(async {
+        let discovered = provider.provisioned_hands(operation_id).await?;
+        assert_eq!(
+            discovered,
+            vec![handle.clone()],
+            "the durable operation must resolve to exactly the sandbox it created"
+        );
+
+        // Resolve-before-create must return the live sandbox, so a retry after a
+        // crash between provider create and durable handle persistence cannot
+        // strand a second sandbox under the same operation.
+        let reprovisioned = provider.provision(spec.clone()).await?;
+        assert_eq!(
+            reprovisioned, handle,
+            "re-provisioning one operation must resolve to its existing sandbox"
+        );
+        assert_eq!(
+            provider.provisioned_hands(operation_id).await?,
+            vec![handle.clone()],
+            "re-provisioning must not create a second sandbox for the operation"
+        );
+
+        // An unrelated operation must resolve to nothing. If Daytona ignored or
+        // misparsed the label filter, the live sandbox above would appear here,
+        // so this is what makes the positive match meaningful.
+        let unrelated = provider
+            .provisioned_hands(moa_core::types::identifiers::HandProvisioningOperationId::new())
+            .await?;
+        assert!(
+            unrelated.is_empty(),
+            "an unrelated provisioning operation resolved to {unrelated:?}"
+        );
+
+        Ok::<(), MoaError>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup_result = destroy_and_wait(&provider, &handle).await;
+
+    match result {
+        Ok(Ok(())) => {
+            cleanup_result.expect("sandbox cleanup should succeed");
+            wait_for_no_provisioned_hands(&provider, operation_id, Duration::from_secs(60))
+                .await
+                .expect("a destroyed sandbox must leave the operation with no live resource");
+        }
+        Ok(Err(error)) => {
+            cleanup_result.expect("sandbox cleanup should succeed after provider failure");
+            panic!("live Daytona provisioning operation test failed: {error}");
         }
         Err(panic) => {
             cleanup_result.expect("sandbox cleanup should succeed after panic");
@@ -495,6 +601,7 @@ fn live_hand_spec(tier: moa_core::types::hands::SandboxTier) -> HandSpec {
     )
     .expect("live policy resolution should succeed");
     HandSpec {
+        provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,

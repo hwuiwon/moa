@@ -144,7 +144,7 @@ impl ModelTextClient {
         let response = match timeout(self.timeout, async {
             let stream = self
                 .provider
-                .complete(request)
+                .complete(request.into_shared())
                 .await
                 .map_err(|error| Error::ModelInference(error.to_string()))?;
             stream
@@ -245,16 +245,10 @@ mod tests {
 
         async fn complete(
             &self,
-            request: CompletionRequest,
+            request: SharedCompletionRequest,
         ) -> moa_core::error::Result<CompletionStream> {
-            *self.request.lock().expect("capture request") = Some(request);
-            Ok(self.response_stream())
-        }
-
-        async fn complete_shared(
-            &self,
-            _request: SharedCompletionRequest,
-        ) -> moa_core::error::Result<CompletionStream> {
+            *self.request.lock().expect("capture request") =
+                Some(CompletionRequest::from_view(&request));
             Ok(self.response_stream())
         }
     }

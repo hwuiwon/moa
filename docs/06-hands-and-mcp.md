@@ -93,6 +93,31 @@ Operator MCP and tenant HTTP connectors are separate governed tool backends;
 tool routing depends on their typed boundaries rather than provider-specific
 clients.
 
+### Provisioning operation identity
+
+Every `HandSpec` requires a typed `HandProvisioningOperationId` that the
+durable lease creates and records before the first provider API or local-runtime
+call. The same claim records an absolute provisioning deadline and a
+`reap_not_before` time strictly after that deadline plus the provider-visibility
+grace. Platform-created specs carry the absolute deadline through
+`budget.deadline`, and the platform bounds the complete provider create future
+by it. A provider may enforce a shorter internal timeout but may never widen the
+durable deadline. `HandProvider::provision` is idempotent for that operation identity and
+the same creation-relevant spec: a replay resolves a resource already carrying
+the identity when possible, while reuse with a different spec or profile
+identity fails closed. Providers attach the identity as part of resource
+creation, never as a second mutation after creation.
+
+`HandProvider::provisioned_hands` is required with no default body and returns
+every live resource carrying an operation identity. The return type is a list,
+not an optional single handle, because provider APIs without an atomic
+idempotency key can expose duplicates after an ambiguous create. Enumeration
+includes recoverable non-running resources such as paused hands and follows any
+provider pagination. The durable reaper cannot claim an ambiguous create before
+its persisted reconciliation time. It destroys every returned handle, confirms
+an empty observation, waits the explicit confirmation interval while renewing
+the exact reaper claim, and confirms emptiness again before finalization.
+
 `HandProvider::install_files` is the trusted setup path for files the runtime
 must place in a sandbox before model-visible execution. MOA uses it to
 materialize selected skill packages under `.moa/skills/<skill>/...`.
@@ -229,6 +254,16 @@ orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
 leases for every worker scope rather than only handles cached in the current
 process.
 
+The provisioning claim atomically records a fresh operation ID, absolute create
+deadline, and later reconciliation time with its lease generation before
+calling the provider. A successfully recorded handle retains
+the operation ID that created it. If a process exits after provider creation but
+before handle activation, the lease therefore still names the external
+operation; the reaper enumerates and destroys every matching provider resource
+without relying on process memory or a recorded handle. A replacement
+generation receives a different operation ID, so an older resource remains
+independently discoverable and cannot be mistaken for the replacement.
+
 A lease persists the exact profile, its identity hash, all five source
 revisions, the capability revision, a renewable `idle_expires_at`, and an
 immutable `hard_expires_at`. `NULL` on either deadline means that dimension was
@@ -249,13 +284,23 @@ never send another request. `HandLeaseReaper` is that owner. It is started by
 `runtime::jobs::start_hand_lease_reaper` before the orchestrator accepts
 traffic — startup fails outright if no hand provider is registered — and sweeps
 independently of traffic. It claims bounded batches with `FOR UPDATE ... SKIP
-LOCKED` so competing replicas take disjoint work. Each claim has a UUID owner
-token and expiry, so another replica can reclaim it after a crash. Destruction
-runs with bounded concurrency (four by default); finalize and retry updates
+LOCKED` so competing replicas take disjoint work. A sweep claims no more rows
+than its destruction concurrency, so every claimed row begins polling and
+heartbeating immediately. Each claim has a UUID owner token and expiry, so
+another replica can reclaim it after a crash. Long provider reconciliation
+renews that exact generation/operation/handle/token claim before it expires.
+Destruction runs with bounded concurrency (four by default); finalize and retry updates
 must match both the claimed generation and owner token. A failed destroy
-releases the generation back to `stale` behind exponential backoff, never to
-`active`: a sandbox the reaper decided to destroy is not one anyone should get
-back.
+leaves the generation reaper-owned as `failed` behind exponential backoff,
+never `stale` or `active`: a sandbox or unresolved provisioning operation the
+reaper decided to destroy is not one request traffic should get back. Claims
+include abandoned provisioning rows whose handle is still null; the reaper
+resolves both the current operation ID and any operation ID retained by a prior
+stored handle, deduplicates all discovered handles, and finalizes only after
+every resource has been reconciled and two empty provider observations are
+separated by the explicit confirmation interval. V57 also rejects generation
+rotation unless the operation ID and provisioning deadline rotate with it, so
+an already-running pre-V57 writer fails before creating an uncorrelated hand.
 
 ### Isolated Sandbox Ownership
 

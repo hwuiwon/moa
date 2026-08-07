@@ -516,7 +516,40 @@ pub struct KnowledgeService {
     lineage_clickhouse: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
 }
 
+/// Named dependencies for the single `KnowledgeService` initialization path.
+struct KnowledgeServiceDependencies {
+    repository: KnowledgeRepositorySource,
+    discovery: Arc<dyn KnowledgeDiscoveryStore>,
+    providers: Arc<dyn KnowledgeProviderResolver>,
+    credentials: Arc<dyn KnowledgeCredentialStore>,
+    connector_connections: Option<Arc<dyn KnowledgeConnectorConnections>>,
+    ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
+    max_preview_chars: usize,
+}
+
 impl KnowledgeService {
+    fn from_dependencies(dependencies: KnowledgeServiceDependencies) -> Self {
+        let KnowledgeServiceDependencies {
+            repository,
+            discovery,
+            providers,
+            credentials,
+            connector_connections,
+            ingestion_runner,
+            max_preview_chars,
+        } = dependencies;
+        Self {
+            repository,
+            discovery,
+            providers,
+            credentials,
+            connector_connections,
+            ingestion_runner,
+            max_preview_chars,
+            lineage_clickhouse: None,
+        }
+    }
+
     /// Creates a knowledge service with explicit dependencies for tests or alternate runtimes.
     #[must_use]
     pub fn new(
@@ -527,21 +560,15 @@ impl KnowledgeService {
         ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
         max_preview_chars: usize,
     ) -> Self {
-        Self {
-            repository: KnowledgeRepositorySource::Fixed {
-                connection: repository.connection,
-                sync: repository.sync,
-                ingestion: repository.ingestion,
-                event: repository.event,
-            },
+        Self::from_dependencies(KnowledgeServiceDependencies {
+            repository: KnowledgeRepositorySource::fixed(repository),
             discovery,
             providers,
             credentials,
             connector_connections: None,
             ingestion_runner,
             max_preview_chars,
-            lineage_clickhouse: None,
-        }
+        })
     }
 
     /// Creates a knowledge service with explicit repository and connector ports.
@@ -555,21 +582,15 @@ impl KnowledgeService {
         max_preview_chars: usize,
         connector_connections: Arc<dyn KnowledgeConnectorConnections>,
     ) -> Self {
-        Self {
-            repository: KnowledgeRepositorySource::Fixed {
-                connection: repository.connection,
-                sync: repository.sync,
-                ingestion: repository.ingestion,
-                event: repository.event,
-            },
+        Self::from_dependencies(KnowledgeServiceDependencies {
+            repository: KnowledgeRepositorySource::fixed(repository),
             discovery,
             providers,
             credentials,
             connector_connections: Some(connector_connections),
             ingestion_runner,
             max_preview_chars,
-            lineage_clickhouse: None,
-        }
+        })
     }
 
     /// Creates a knowledge service backed by tenant-scoped Postgres repositories.
@@ -582,7 +603,7 @@ impl KnowledgeService {
         max_preview_chars: usize,
     ) -> Self {
         let discovery = Arc::new(PostgresKnowledgeDiscoveryStore::new(pool.clone()));
-        Self {
+        Self::from_dependencies(KnowledgeServiceDependencies {
             repository: KnowledgeRepositorySource::Postgres { pool },
             discovery,
             providers,
@@ -590,8 +611,7 @@ impl KnowledgeService {
             connector_connections: None,
             ingestion_runner,
             max_preview_chars,
-            lineage_clickhouse: None,
-        }
+        })
     }
 
     /// Creates a tenant-scoped Postgres knowledge service with connector support.
@@ -605,7 +625,7 @@ impl KnowledgeService {
         connector_connections: Arc<dyn KnowledgeConnectorConnections>,
     ) -> Self {
         let discovery = Arc::new(PostgresKnowledgeDiscoveryStore::new(pool.clone()));
-        Self {
+        Self::from_dependencies(KnowledgeServiceDependencies {
             repository: KnowledgeRepositorySource::Postgres { pool },
             discovery,
             providers,
@@ -613,8 +633,7 @@ impl KnowledgeService {
             connector_connections: Some(connector_connections),
             ingestion_runner,
             max_preview_chars,
-            lineage_clickhouse: None,
-        }
+        })
     }
 
     /// Creates the config-backed production knowledge application service.
@@ -923,6 +942,15 @@ enum KnowledgeRepositorySource {
 }
 
 impl KnowledgeRepositorySource {
+    fn fixed(repository: KnowledgeRepositoryCapabilities) -> Self {
+        Self::Fixed {
+            connection: repository.connection,
+            sync: repository.sync,
+            ingestion: repository.ingestion,
+            event: repository.event,
+        }
+    }
+
     fn connection(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeConnectionRepository> {
         match self {
             Self::Fixed { connection, .. } => connection.clone(),

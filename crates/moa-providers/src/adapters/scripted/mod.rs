@@ -636,12 +636,7 @@ impl LLMProvider for ScriptedProvider {
         self.capabilities.clone()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        let effective_model = request.model.as_ref();
-        self.complete_request(&request, effective_model).await
-    }
-
-    async fn complete_shared(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
         self.complete_request(&request, request.model()).await
     }
 }
@@ -741,7 +736,7 @@ mod tests {
     /// Drains a completion stream and returns its aggregated assistant text.
     async fn complete_text(provider: &ScriptedProvider, request: CompletionRequest) -> String {
         provider
-            .complete(request)
+            .complete(request.into_shared())
             .await
             .expect("scripted completion")
             .collect()
@@ -891,7 +886,7 @@ mod tests {
             completions.push(tokio::spawn(async move {
                 let request = user_request(&format!("concurrent-request-{index:02}"));
                 provider
-                    .complete(request)
+                    .complete(request.into_shared())
                     .await
                     .expect("open concurrent scripted completion")
                     .collect()
@@ -941,7 +936,7 @@ mod tests {
             .push_text("must remain queued");
 
         let error = provider
-            .complete(user_request("cannot journal"))
+            .complete(user_request("cannot journal").into_shared())
             .await
             .expect_err("opening a directory as the journal must fail");
         assert!(
@@ -1050,7 +1045,7 @@ mod tests {
 
         for attempt in 0..2 {
             let error = provider
-                .complete(user_request("flaky prompt"))
+                .complete(user_request("flaky prompt").into_shared())
                 .await
                 .expect_err("first two attempts should fail");
             assert!(
@@ -1072,7 +1067,7 @@ mod tests {
         );
 
         let mut stream = provider
-            .complete(user_request("abort now"))
+            .complete(user_request("abort now").into_shared())
             .await
             .expect("stream opens before the abort");
         let first = stream.next().await.expect("first block present");
@@ -1094,7 +1089,7 @@ mod tests {
 
         let started = tokio::time::Instant::now();
         let mut stream = provider
-            .complete(user_request("timed prompt"))
+            .complete(user_request("timed prompt").into_shared())
             .await
             .expect("stream opens");
         let first = stream.next().await.expect("first block");

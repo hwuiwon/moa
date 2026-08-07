@@ -1227,7 +1227,7 @@ async fn tenant_connector_use_grants_enforce_same_tenant_rls_and_restrict_deleti
 
     assert_eq!(
         first,
-        vec!["V51__connector_connection_use_grants".to_string()]
+        expected_migration_labels_from("connector_connection_use_grants")
     );
     assert!(second.is_empty(), "V51 replay must be a no-op: {second:?}");
     assert_eq!(
@@ -2037,7 +2037,7 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
     assert!(incompatible_error.contains("incompatible connector parent"));
     assert_eq!(
         first,
-        vec!["V52__knowledge_connection_parent_constraint".to_string()]
+        expected_migration_labels_from("knowledge_connection_parent_constraint")
     );
     assert!(second.is_empty(), "V52 replay must be a no-op: {second:?}");
     assert_eq!(

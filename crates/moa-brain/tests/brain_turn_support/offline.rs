@@ -77,11 +77,7 @@ impl LLMProvider for MockLlmProvider {
         }
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(Self::response())
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         _request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {
@@ -128,12 +124,7 @@ impl LLMProvider for CapturingTextLlmProvider {
         MockLlmProvider.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.requests.lock().await.push(request);
-        Ok(self.response())
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {
@@ -189,12 +180,7 @@ impl LLMProvider for PartialUsageToolLlmProvider {
         MockLlmProvider.capabilities()
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        self.requests.lock().await.push(());
-        Ok(self.response())
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         _request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {
@@ -264,11 +250,7 @@ impl LLMProvider for SubMicroToolLoopLlmProvider {
         capabilities
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        self.complete_response().await
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         _request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {
@@ -299,12 +281,7 @@ impl LLMProvider for CappedOutputLlmProvider {
         capabilities
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        self.requests.lock().await.push(request);
-        Ok(Self::response())
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {
@@ -362,7 +339,8 @@ impl LLMProvider for ToolLoopLlmProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -404,12 +382,6 @@ impl LLMProvider for ToolLoopLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 struct PolicyBlockedToolLlmProvider {
@@ -444,7 +416,8 @@ impl LLMProvider for PolicyBlockedToolLlmProvider {
         MockLlmProvider.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -490,12 +463,6 @@ impl LLMProvider for PolicyBlockedToolLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 #[derive(Default)]
@@ -530,7 +497,8 @@ impl LLMProvider for LargeToolOutputLlmProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -575,12 +543,6 @@ impl LLMProvider for LargeToolOutputLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 #[derive(Default)]
@@ -615,7 +577,8 @@ impl LLMProvider for OpenAiToolLoopLlmProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -664,12 +627,6 @@ impl LLMProvider for OpenAiToolLoopLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 #[derive(Default)]
@@ -704,7 +661,8 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -758,12 +716,6 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 #[derive(Default)]
@@ -781,7 +733,8 @@ impl LLMProvider for CanaryLeakLlmProvider {
         MockLlmProvider.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             let canary = request
@@ -832,12 +785,6 @@ impl LLMProvider for CanaryLeakLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 #[derive(Default)]
@@ -855,7 +802,8 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
         MockLlmProvider.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+    async fn complete(&self, request: SharedCompletionRequest) -> Result<CompletionStream> {
+        let request = CompletionRequest::from_view(&request);
         let mut requests = self.requests.lock().await;
         let response = if requests.is_empty() {
             CompletionResponse {
@@ -913,12 +861,6 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
         Ok(CompletionStream::from_response(response))
     }
 
-    async fn complete_shared(
-        &self,
-        request: SharedCompletionRequest,
-    ) -> Result<CompletionStream> {
-        self.complete(CompletionRequest::from_view(&request)).await
-    }
 }
 
 struct ProviderToolResultTurnLlm;
@@ -953,11 +895,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
         MockLlmProvider.capabilities()
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
-        Ok(Self::response())
-    }
-
-    async fn complete_shared(
+    async fn complete(
         &self,
         _request: SharedCompletionRequest,
     ) -> Result<CompletionStream> {

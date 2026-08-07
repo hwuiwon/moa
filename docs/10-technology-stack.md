@@ -66,11 +66,13 @@ those instances explicitly rather than installing process globals.
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
-`moa-migrations` owns the fresh-install-only, contiguous 54-file PostgreSQL
+`moa-migrations` owns the fresh-install-only, contiguous 57-file PostgreSQL
 chain and the central table-ownership manifest. The current 143 table
 families span 148 `CREATE TABLE` declarations and map one-to-one to 143
 ownership entries. `cargo run -p xtask --locked -- check-migrations` enforces
-this contract.
+this contract. V57 adds provider-visible hand operation identities, absolute
+create deadlines, delayed reconciliation, and a database generation-rotation
+guard that rejects pre-V57 writers before provider I/O.
 
 ## External Services
 

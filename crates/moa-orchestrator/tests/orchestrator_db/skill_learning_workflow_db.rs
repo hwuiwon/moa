@@ -14,10 +14,9 @@ use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore as _,
     types::action_policy::ActionRuleScope, types::channel::Attachment, types::channel::Channel,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::SharedCompletionRequest, types::completion::StopReason,
-    types::completion::TokenUsage, types::contact::SessionActorRef,
+    types::completion::CompletionContent, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::SharedCompletionRequest,
+    types::completion::StopReason, types::completion::TokenUsage, types::contact::SessionActorRef,
     types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
     types::experience::LearningProposalKind, types::experience::LearningRiskClass,
@@ -751,13 +750,6 @@ impl LLMProvider for NeverCalledProvider {
 
     async fn complete(
         &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        panic!("learning must make zero provider calls when evidence is refused");
-    }
-
-    async fn complete_shared(
-        &self,
         _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
         panic!("learning must make zero provider calls when evidence is refused");
@@ -992,13 +984,6 @@ impl LLMProvider for TestProvider {
     }
 
     async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        self.complete_response().await
-    }
-
-    async fn complete_shared(
         &self,
         _request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {

@@ -376,7 +376,7 @@ async fn call_initial_provider(
     ordinal: u8,
 ) -> Result<ProviderCall> {
     let started = Instant::now();
-    let response = match provider.complete(completion_request).await {
+    let response = match provider.complete(completion_request.into_shared()).await {
         Ok(stream) => match stream.collect().await {
             Ok(response) => response,
             Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
@@ -1055,7 +1055,7 @@ async fn call_amendment_provider(
     ordinal: u8,
 ) -> Result<AmendmentProviderCall> {
     let started = Instant::now();
-    let response = match provider.complete(completion).await {
+    let response = match provider.complete(completion.into_shared()).await {
         Ok(stream) => match stream.collect().await {
             Ok(response) => response,
             Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
