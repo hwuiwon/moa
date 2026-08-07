@@ -1,0 +1,10 @@
+# LaTeX build artifacts (regenerable; main.pdf is kept intentionally)
+main.aux
+main.log
+main.out
+main.blg
+main.bbl
+*.synctex.gz
+
+# Harness build artifacts
+experiments/oracle_study/target/

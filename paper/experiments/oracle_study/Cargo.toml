@@ -1,0 +1,20 @@
+[package]
+name = "oracle_study"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+moa-core = { path = "../../../crates/moa-core" }
+moa-skills = { path = "../../../crates/moa-skills" }
+moa-eval-core = { path = "../../../crates/moa-eval/core" }
+moa-memory-pii = { path = "../../../crates/moa-memory/pii" }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v7", "v4"] }
+chrono = "0.4"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[profile.dev]
+debug = 0

@@ -1,0 +1,122 @@
+{
+  "e1_oracle_kinds": {
+    "grounded_facts": 250,
+    "keywords": 50
+  },
+  "e1_by_carried_facts": {
+    "0": {
+      "keywords": 50
+    },
+    "1": {
+      "grounded_facts": 50
+    },
+    "2": {
+      "grounded_facts": 50
+    },
+    "3": {
+      "grounded_facts": 50
+    },
+    "4": {
+      "grounded_facts": 50
+    },
+    "5": {
+      "grounded_facts": 50
+    }
+  },
+  "e1_facts_per_case": {
+    "grounded_facts:1": 50,
+    "grounded_facts:2": 55,
+    "grounded_facts:3": 15,
+    "grounded_facts:4": 48,
+    "grounded_facts:5": 82,
+    "keywords:5": 50
+  },
+  "e1_fact_types": {
+    "currency": 200,
+    "number_unit": 250,
+    "other": 177,
+    "percent": 129,
+    "ref_token": 11,
+    "uuid": 40
+  },
+  "e1_determinism": {
+    "identical": 300,
+    "total": 300
+  },
+  "e1b_substring_false_grounding": {
+    "false_grounded": 0,
+    "total": 200
+  },
+  "e1c_punctuation_extension_false_grounding": {
+    "bare_number_decimal": {
+      "false_grounded": 50,
+      "total": 50
+    },
+    "currency_cents": {
+      "false_grounded": 50,
+      "total": 50
+    },
+    "number_unit_hyphen": {
+      "false_grounded": 50,
+      "total": 50
+    },
+    "path_prefix": {
+      "false_grounded": 50,
+      "total": 50
+    },
+    "ref_token_suffix": {
+      "false_grounded": 50,
+      "total": 50
+    },
+    "url_prefix": {
+      "false_grounded": 50,
+      "total": 50
+    }
+  },
+  "e2_grounded_oracle": {
+    "exact": {
+      "gate_failures": 0,
+      "total": 200
+    },
+    "fabricate_facts": {
+      "gate_failures": 200,
+      "total": 200
+    },
+    "omit_facts": {
+      "gate_failures": 200,
+      "total": 200
+    },
+    "paraphrase_keep_facts": {
+      "gate_failures": 15,
+      "total": 200
+    }
+  },
+  "e3_keyword_oracle": {
+    "exact": {
+      "gate_failures": 0,
+      "total": 200
+    },
+    "fabricate_facts": {
+      "gate_failures": 200,
+      "total": 200
+    },
+    "omit_facts": {
+      "gate_failures": 200,
+      "total": 200
+    },
+    "paraphrase_keep_facts": {
+      "gate_failures": 200,
+      "total": 200
+    }
+  },
+  "e4_action_assertions": {
+    "dropped_tool": {
+      "gate_failures": 200,
+      "total": 200
+    },
+    "reordered_and_repeated": {
+      "gate_failures": 0,
+      "total": 200
+    }
+  }
+}
