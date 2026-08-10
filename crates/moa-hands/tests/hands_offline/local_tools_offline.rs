@@ -12,7 +12,7 @@ async fn file_read_reads_written_content() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -29,7 +29,7 @@ async fn file_read_reads_written_content() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -57,7 +57,7 @@ async fn str_replace_updates_only_the_target_region() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -78,7 +78,7 @@ async fn str_replace_updates_only_the_target_region() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "str_replace".to_string(),
@@ -107,7 +107,7 @@ async fn str_replace_updates_only_the_target_region() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -139,7 +139,7 @@ async fn file_write_overwrite_returns_compact_diff() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -173,7 +173,7 @@ async fn file_write_overwrite_returns_compact_diff() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -207,7 +207,7 @@ async fn file_search_finds_files_by_glob() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -224,7 +224,7 @@ async fn file_search_finds_files_by_glob() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -242,7 +242,7 @@ async fn file_search_finds_files_by_glob() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -278,7 +278,7 @@ async fn file_search_skips_git_directory_contents() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -296,7 +296,7 @@ async fn file_search_skips_git_directory_contents() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -318,38 +318,41 @@ async fn file_search_skips_git_directory_contents() {
 }
 
 #[tokio::test]
-async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
+async fn file_search_skips_python_virtualenvs_in_active_workspace() {
+    // Pins: default search exclusions apply to files authored in the active workspace.
     let dir = tempdir().unwrap();
-    let workspace_root = dir.path().join("workspace-root");
-    tokio::fs::create_dir_all(workspace_root.join(".venv/lib"))
-        .await
-        .unwrap();
-    tokio::fs::create_dir_all(workspace_root.join("server/core"))
-        .await
-        .unwrap();
-    tokio::fs::write(
-        workspace_root.join(".venv/lib/ignored.py"),
-        "print('ignore')",
-    )
-    .await
-    .unwrap();
-    tokio::fs::write(workspace_root.join("server/core/views.py"), "print('keep')")
-        .await
-        .unwrap();
-
     let router = ToolRouter::new_local(dir.path().join("sandboxes"))
         .await
         .unwrap();
     let session = session();
-    router
-        .remember_workspace_root(session.tenant_id, workspace_root)
-        .await;
+    for (path, content) in [
+        (".venv/lib/ignored.py", "print('ignore')"),
+        ("server/core/views.py", "print('keep')"),
+    ] {
+        router
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                workspace_scope: Some(&workspace_scope(&session)),
+                invocation: &ToolInvocation {
+                    id: None,
+                    name: "file_write".to_string(),
+                    input: json!({ "path": path, "content": content }),
+                },
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
+            .await
+            .unwrap();
+    }
 
     let secured_7 = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -371,38 +374,42 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
 }
 
 #[tokio::test]
-async fn file_search_respects_moaignore_in_remembered_workspace() {
+async fn file_search_respects_moaignore_in_active_workspace() {
+    // Pins: `.moaignore` changes authored after workspace activation affect the next search.
     let dir = tempdir().unwrap();
-    let workspace_root = dir.path().join("workspace-root");
-    tokio::fs::create_dir_all(workspace_root.join("data"))
-        .await
-        .unwrap();
-    tokio::fs::create_dir_all(workspace_root.join("src"))
-        .await
-        .unwrap();
-    tokio::fs::write(workspace_root.join(".moaignore"), "data\n")
-        .await
-        .unwrap();
-    tokio::fs::write(workspace_root.join("data/fixtures.json"), "{}")
-        .await
-        .unwrap();
-    tokio::fs::write(workspace_root.join("src/lib.rs"), "pub fn demo() {}")
-        .await
-        .unwrap();
-
     let router = ToolRouter::new_local(dir.path().join("sandboxes"))
         .await
         .unwrap();
     let session = session();
-    router
-        .remember_workspace_root(session.tenant_id, workspace_root)
-        .await;
+    for (path, content) in [
+        (".moaignore", "data\n"),
+        ("data/fixtures.json", "{}"),
+        ("src/lib.rs", "pub fn demo() {}"),
+    ] {
+        router
+            .execute_authorized(moa_hands::AuthorizedToolCall {
+                session: &session,
+                caller_identity: &identity(),
+                workspace_scope: Some(&workspace_scope(&session)),
+                invocation: &ToolInvocation {
+                    id: None,
+                    name: "file_write".to_string(),
+                    input: json!({ "path": path, "content": content }),
+                },
+                tool_call_id: ToolCallId::new(),
+                active_canary: None,
+                catalog: None,
+                scope: moa_hands::ToolCallScope::unbounded(),
+            })
+            .await
+            .unwrap();
+    }
 
     let secured_8 = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -434,7 +441,7 @@ async fn file_search_truncates_pathological_match_sets() {
             .execute_authorized(moa_hands::AuthorizedToolCall {
                 session: &session,
                 caller_identity: &identity(),
-                worker_id: None,
+                workspace_scope: Some(&workspace_scope(&session)),
                 invocation: &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
@@ -456,7 +463,7 @@ async fn file_search_truncates_pathological_match_sets() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -509,7 +516,7 @@ async fn file_operations_reject_path_traversal() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -630,7 +637,7 @@ async fn bash_captures_stdout_and_stderr() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -661,7 +668,7 @@ async fn bash_success_output_is_truncated_to_router_budget() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -704,7 +711,7 @@ async fn bash_error_output_is_bounded_and_preserves_error_metadata() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -765,7 +772,7 @@ async fn file_read_within_budget_is_not_router_truncated() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -783,7 +790,7 @@ async fn file_read_within_budget_is_not_router_truncated() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -824,7 +831,7 @@ async fn file_read_budget_override_truncates_large_results() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -842,7 +849,7 @@ async fn file_read_budget_override_truncates_large_results() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -876,7 +883,7 @@ async fn bash_respects_timeout() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -916,7 +923,7 @@ async fn local_bash_hard_cancel_kills_running_process() {
                 .execute_authorized(moa_hands::AuthorizedToolCall {
                     session: &session,
                     caller_identity: &identity(),
-                    worker_id: None,
+                    workspace_scope: Some(&workspace_scope(&session)),
                     invocation: &invocation,
                     tool_call_id: ToolCallId::new(),
                     active_canary: None,
@@ -941,10 +948,9 @@ async fn local_provider_installs_skill_package_files() {
     let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
         .await
         .unwrap();
-    let handle = provider
-        .provision(hand_spec(SandboxTier::Local))
-        .await
-        .unwrap();
+    let spec = hand_spec(SandboxTier::Local);
+    let operation_id = spec.provisioning_operation_id;
+    let handle = provider.provision(spec).await.unwrap();
     let sandbox_dir = match &handle {
         moa_core::types::hands::HandHandle::Local { sandbox_dir } => sandbox_dir.clone(),
         other => panic!("expected local hand, got {other:?}"),
@@ -969,12 +975,23 @@ async fn local_provider_installs_skill_package_files() {
         .await
         .unwrap();
 
+    let lease = provider
+        .lease_handle(operation_id, &handle)
+        .await
+        .expect("serialize local trusted-root metadata");
+    let trusted_root = lease
+        .provider_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("trusted_root"))
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+        .expect("local lease should carry a separate trusted root");
     let skill_md =
-        tokio::fs::read_to_string(sandbox_dir.join(".moa/skills/package-skill/SKILL.md"))
+        tokio::fs::read_to_string(trusted_root.join(".moa/skills/package-skill/SKILL.md"))
             .await
             .unwrap();
     assert_eq!(skill_md, "skill body");
-    let script = sandbox_dir.join(".moa/skills/package-skill/scripts/run.sh");
+    let script = trusted_root.join(".moa/skills/package-skill/scripts/run.sh");
     assert_eq!(
         tokio::fs::read_to_string(&script).await.unwrap(),
         "#!/bin/sh\necho ok\n"
@@ -991,6 +1008,74 @@ async fn local_provider_installs_skill_package_files() {
             .mode();
         assert_ne!(mode & 0o111, 0);
     }
+
+    assert!(
+        !sandbox_dir
+            .join(".moa/skills/package-skill/SKILL.md")
+            .exists(),
+        "trusted package bytes must not be written into the mutable checkpoint root"
+    );
+    let archive =
+        moa_hands::core::sandbox_workspace::checkpoint::archive::build_checkpoint_archive(
+            &sandbox_dir,
+            moa_hands::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
+        )
+        .await
+        .expect("archive mutable root");
+    assert!(
+        archive
+            .manifest
+            .entries
+            .iter()
+            .all(|entry| !entry.path.starts_with(".moa/skills/")),
+        "portable checkpoint manifest must exclude trusted skill bytes"
+    );
+
+    let governed = provider
+        .execute(
+            &handle,
+            "file_read",
+            r#"{"path":"./.moa/skills/package-skill/SKILL.md"}"#,
+        )
+        .await
+        .expect("governed file_read should resolve current trusted package");
+    assert!(governed.to_text().contains("skill body"));
+
+    let executed = provider
+        .execute(
+            &handle,
+            "bash",
+            r#"{"cmd":".moa/skills/package-skill/scripts/run.sh"}"#,
+        )
+        .await
+        .expect("canonical trusted skill command should execute outside the mutable root");
+    assert_eq!(executed.to_text().trim(), "ok");
+    assert!(
+        !executed
+            .to_text()
+            .contains(&trusted_root.to_string_lossy().to_string()),
+        "provider-internal trusted root must not appear in public output"
+    );
+
+    for invalid_command in [
+        ".moa/skills/package-skill/../scripts/run.sh",
+        ".moa/skills/package-skill/scripts/run.sh; touch injected",
+        ".moa/skills/package-skill/scripts/run.sh | tee injected",
+    ] {
+        let error = provider
+            .execute(
+                &handle,
+                "bash",
+                &json!({ "cmd": invalid_command }).to_string(),
+            )
+            .await
+            .expect_err("noncanonical trusted skill command must fail closed");
+        assert!(error.to_string().contains("one canonical"));
+    }
+    assert!(
+        !sandbox_dir.join("injected").exists(),
+        "rejected control operators must not execute in the mutable root"
+    );
 
     let error = provider
         .install_files(
@@ -1069,7 +1154,7 @@ async fn execute_authorized_rejects_unregistered_tool_name() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "does_not_exist".to_string(),

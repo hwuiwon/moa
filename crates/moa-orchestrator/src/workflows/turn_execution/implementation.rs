@@ -17,8 +17,8 @@ use moa_wire::turn::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, Tu
 use restate_sdk::prelude::*;
 
 use super::{
-    TurnExecution, execute_turn_inside_workflow, notify_session_of_outcome, parse_session_id,
-    parse_turn_id, run_post_outcome_assessment,
+    TurnExecution, execute_turn_inside_workflow, parse_session_id, parse_turn_id,
+    reporting::notify_session_of_outcome, run_post_outcome_assessment,
 };
 use crate::{
     brain_bridge::TurnRequestPreparer,

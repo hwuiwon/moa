@@ -19,9 +19,12 @@ use observability::{deserialize_optional_headers, deserialize_optional_nonempty}
 use providers::{deserialize_optional_list, deserialize_optional_provider_ids};
 
 use super::{
-    AsyncAuthzKind, AuthProviderKind, AuthzEngine, KmsProviderKind, McpServerConfig, MoaConfig,
-    OAuthClientConfig, OtlpProtocol, RuntimeCacheBackend, SandboxPolicyConfig, SecurityProfile,
-    SessionAttachmentBackend, SessionBlobBackend,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, CheckpointBucketVersioningPolicy,
+    CloudHandProviderAccountConfig, DaytonaStorageAccountConfig, KmsProviderKind,
+    LocalHandProviderAccountConfig, McpServerConfig, MoaConfig, OAuthClientConfig,
+    ObjectStoreBackend, ObjectStoreCredentialMode, OtlpProtocol, RuntimeCacheBackend,
+    SandboxPolicyConfig, SandboxWorkspaceCanaryConfig, SandboxWorkspaceMode,
+    SandboxWorkspaceQuotaRouteConfig, SecurityProfile, SessionBlobBackend,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -50,6 +53,12 @@ pub struct EnvOverlay {
     /// `MOA_SANDBOX_POLICY_JSON`.
     #[serde(deserialize_with = "deserialize_optional_sandbox_policy")]
     pub sandbox_policy_json: Option<SandboxPolicyConfig>,
+    /// `MOA_SANDBOX_WORKSPACE_CANARY_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_sandbox_workspace_canary")]
+    pub sandbox_workspace_canary_json: Option<SandboxWorkspaceCanaryConfig>,
+    /// `MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_sandbox_workspace_quota_routes")]
+    pub sandbox_workspace_quota_routes_json: Option<Vec<SandboxWorkspaceQuotaRouteConfig>>,
     /// `MOA_LLM_DLP_TOKENIZE_ENABLED`.
     pub llm_dlp_tokenize_enabled: Option<bool>,
     /// `MOA_MODELS_MAIN`.
@@ -165,6 +174,8 @@ pub struct EnvOverlay {
     pub database_url: Option<String>,
     /// `MOA_DATABASE_ADMIN_URL`.
     pub database_admin_url: Option<String>,
+    /// `MOA_DATABASE_MAINTENANCE_URL`.
+    pub database_maintenance_url: Option<String>,
     /// `MOA_DATABASE_SCHEMA`.
     pub database_schema: Option<String>,
     /// `MOA_DATABASE_MAX_CONNECTIONS`.
@@ -248,6 +259,8 @@ pub struct EnvOverlay {
     pub authz_openfga_store_id: Option<String>,
     /// `MOA_AUTHZ_OPENFGA_MODEL_ID`.
     pub authz_openfga_model_id: Option<String>,
+    /// `MOA_AUTHZ_OPENFGA_MODEL_VERSION`.
+    pub authz_openfga_model_version: Option<u32>,
     /// `MOA_AUTHZ_OPENFGA_TIMEOUT_MS`.
     pub authz_openfga_timeout_ms: Option<u64>,
     /// `MOA_KMS_PROVIDER`.
@@ -286,6 +299,9 @@ pub struct EnvOverlay {
     pub local_sandbox_dir: Option<String>,
     /// `MOA_LOCAL_MEMORY_DIR`.
     pub local_memory_dir: Option<String>,
+    /// `MOA_LOCAL_PROVIDER_ACCOUNT_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_local_provider_account")]
+    pub local_provider_account_json: Option<LocalHandProviderAccountConfig>,
     /// `MOA_MEMORY_EMBEDDING_MODEL`.
     pub memory_embedding_model: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODEL`.
@@ -392,20 +408,14 @@ pub struct EnvOverlay {
     /// `MOA_CLOUD_HANDS_FALLBACK_PROVIDERS`.
     #[serde(deserialize_with = "deserialize_optional_list")]
     pub cloud_hands_fallback_providers: Option<Vec<String>>,
-    /// `MOA_CLOUD_HANDS_DAYTONA_API_KEY`.
-    pub cloud_hands_daytona_api_key: Option<String>,
-    /// `MOA_CLOUD_HANDS_DAYTONA_API_URL`.
-    pub cloud_hands_daytona_api_url: Option<String>,
-    /// `MOA_CLOUD_HANDS_DAYTONA_DEFAULT_IMAGE`.
-    pub cloud_hands_daytona_default_image: Option<String>,
-    /// `MOA_CLOUD_HANDS_E2B_API_KEY`.
-    pub cloud_hands_e2b_api_key: Option<String>,
-    /// `MOA_CLOUD_HANDS_E2B_API_URL`.
-    pub cloud_hands_e2b_api_url: Option<String>,
-    /// `MOA_CLOUD_HANDS_E2B_DOMAIN`.
-    pub cloud_hands_e2b_domain: Option<String>,
-    /// `MOA_CLOUD_HANDS_E2B_TEMPLATE`.
-    pub cloud_hands_e2b_template: Option<String>,
+    /// `MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_cloud_hand_provider_accounts")]
+    pub cloud_hands_provider_accounts_json: Option<Vec<CloudHandProviderAccountConfig>>,
+    /// `MOA_DAYTONA_STORAGE_ACCOUNTS_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_daytona_storage_accounts")]
+    pub daytona_storage_accounts_json: Option<Vec<DaytonaStorageAccountConfig>>,
+    /// `MOA_DAYTONA_STORAGE_CONSISTENCY_WINDOW_SECONDS`.
+    pub daytona_storage_consistency_window_seconds: Option<u64>,
     /// `MOA_MESSAGING_SLACK_TOKEN`.
     pub messaging_slack_token: Option<String>,
     /// `MOA_MESSAGING_SLACK_APP_TOKEN`.
@@ -436,30 +446,82 @@ pub struct EnvOverlay {
     pub session_blob_backend: Option<SessionBlobBackend>,
     /// `MOA_SESSION_BLOB_DIR`.
     pub session_blob_dir: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_BACKEND`.
-    pub session_attachment_backend: Option<SessionAttachmentBackend>,
     /// `MOA_SESSION_ATTACHMENT_BUCKET`.
     pub session_attachment_bucket: Option<String>,
     /// `MOA_SESSION_ATTACHMENT_PREFIX`.
     pub session_attachment_prefix: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_REGION`.
-    pub session_attachment_region: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_ENDPOINT`.
-    pub session_attachment_endpoint: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID`.
-    pub session_attachment_access_key_id: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY`.
-    pub session_attachment_secret_access_key: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_ALLOW_HTTP`.
-    pub session_attachment_allow_http: Option<bool>,
-    /// `MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE`.
-    pub session_attachment_virtual_hosted_style: Option<bool>,
-    /// `MOA_SESSION_ATTACHMENT_GCP_SERVICE_ACCOUNT_PATH`.
-    pub session_attachment_gcp_service_account_path: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_GCP_SERVICE_ACCOUNT_KEY`.
-    pub session_attachment_gcp_service_account_key: Option<String>,
-    /// `MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH`.
-    pub session_attachment_gcp_application_credentials_path: Option<String>,
+    /// `MOA_OBJECT_STORE_BACKEND`.
+    pub object_store_backend: Option<ObjectStoreBackend>,
+    /// `MOA_OBJECT_STORE_CREDENTIAL_MODE`.
+    pub object_store_credential_mode: Option<ObjectStoreCredentialMode>,
+    /// `MOA_OBJECT_STORE_REGION`.
+    pub object_store_region: Option<String>,
+    /// `MOA_OBJECT_STORE_ENDPOINT`.
+    pub object_store_endpoint: Option<String>,
+    /// `MOA_OBJECT_STORE_ACCESS_KEY_ID`.
+    pub object_store_access_key_id: Option<String>,
+    /// `MOA_OBJECT_STORE_SECRET_ACCESS_KEY`.
+    pub object_store_secret_access_key: Option<String>,
+    /// `MOA_OBJECT_STORE_ALLOW_HTTP`.
+    pub object_store_allow_http: Option<bool>,
+    /// `MOA_OBJECT_STORE_VIRTUAL_HOSTED_STYLE`.
+    pub object_store_virtual_hosted_style: Option<bool>,
+    /// `MOA_OBJECT_STORE_GCP_SERVICE_ACCOUNT_PATH`.
+    pub object_store_gcp_service_account_path: Option<String>,
+    /// `MOA_OBJECT_STORE_GCP_SERVICE_ACCOUNT_KEY`.
+    pub object_store_gcp_service_account_key: Option<String>,
+    /// `MOA_OBJECT_STORE_GCP_APPLICATION_CREDENTIALS_PATH`.
+    pub object_store_gcp_application_credentials_path: Option<String>,
+    /// `MOA_SANDBOX_CHECKPOINT_ENABLED`.
+    pub sandbox_checkpoint_enabled: Option<bool>,
+    /// `MOA_SANDBOX_CHECKPOINT_BUCKET`.
+    pub sandbox_checkpoint_bucket: Option<String>,
+    /// `MOA_SANDBOX_CHECKPOINT_PREFIX`.
+    pub sandbox_checkpoint_prefix: Option<String>,
+    /// `MOA_SANDBOX_CHECKPOINT_BUCKET_VERSIONING`.
+    pub sandbox_checkpoint_bucket_versioning: Option<CheckpointBucketVersioningPolicy>,
+    /// `MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_MAXIMUM_AGE_SECONDS`.
+    pub sandbox_checkpoint_versioning_observation_maximum_age_seconds: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_TIMEOUT_SECONDS`.
+    pub sandbox_checkpoint_versioning_observation_timeout_seconds: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_RETAINED_ANCESTOR_COUNT`.
+    pub sandbox_checkpoint_retained_ancestor_count: Option<u32>,
+    /// `MOA_SANDBOX_CHECKPOINT_MINIMUM_AGE_SECONDS`.
+    pub sandbox_checkpoint_minimum_age_seconds: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_GC_BATCH_SIZE`.
+    pub sandbox_checkpoint_gc_batch_size: Option<u32>,
+    /// `MOA_SANDBOX_CHECKPOINT_CLAIM_TTL_SECONDS`.
+    pub sandbox_checkpoint_claim_ttl_seconds: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_RETRY_BACKOFF_SECONDS`.
+    pub sandbox_checkpoint_retry_backoff_seconds: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_DELETION_MAX_OBJECTS`.
+    pub sandbox_checkpoint_deletion_max_objects: Option<usize>,
+    /// `MOA_SANDBOX_CHECKPOINT_DELETION_MAX_BYTES`.
+    pub sandbox_checkpoint_deletion_max_bytes: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_ABSENCE_WINDOW_SECONDS`.
+    pub sandbox_checkpoint_absence_window_seconds: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_MAX_ENTRIES`.
+    pub sandbox_checkpoint_max_entries: Option<usize>,
+    /// `MOA_SANDBOX_CHECKPOINT_MAX_PATH_DEPTH`.
+    pub sandbox_checkpoint_max_path_depth: Option<usize>,
+    /// `MOA_SANDBOX_CHECKPOINT_MAX_FILE_BYTES`.
+    pub sandbox_checkpoint_max_file_bytes: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_MAX_TOTAL_BYTES`.
+    pub sandbox_checkpoint_max_total_bytes: Option<u64>,
+    /// `MOA_SANDBOX_CHECKPOINT_MAX_CHUNK_BYTES`.
+    pub sandbox_checkpoint_max_chunk_bytes: Option<usize>,
+    /// `MOA_SANDBOX_CHECKPOINT_MAX_COMPRESSED_CHUNK_BYTES`.
+    pub sandbox_checkpoint_max_compressed_chunk_bytes: Option<usize>,
+    /// `MOA_SANDBOX_WORKSPACE_MODE`.
+    pub sandbox_workspace_mode: Option<SandboxWorkspaceMode>,
+    /// `MOA_SANDBOX_WORKSPACE_OPERATION_RETENTION_SECONDS`.
+    pub sandbox_workspace_operation_retention_seconds: Option<u64>,
+    /// `MOA_SANDBOX_WORKSPACE_MAXIMUM_OPERATION_SECONDS`.
+    pub sandbox_workspace_maximum_operation_seconds: Option<u64>,
+    /// `MOA_SANDBOX_WORKSPACE_RECONCILIATION_CLAIM_TTL_SECONDS`.
+    pub sandbox_workspace_reconciliation_claim_ttl_seconds: Option<u64>,
+    /// `MOA_SANDBOX_WORKSPACE_REAPER_HEARTBEAT_MAXIMUM_AGE_SECONDS`.
+    pub sandbox_workspace_reaper_heartbeat_maximum_age_seconds: Option<u64>,
     /// `MOA_RUNTIME_CACHE_BACKEND`.
     pub runtime_cache_backend: Option<RuntimeCacheBackend>,
     /// `MOA_RUNTIME_CACHE_REDIS_URL`.
@@ -819,6 +881,32 @@ fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
     if field == "sandbox_policy_json" {
         return Some(vec!["sandbox_policy".to_string()]);
     }
+    if field == "sandbox_workspace_canary_json" {
+        return Some(vec!["sandbox_workspaces".to_string(), "canary".to_string()]);
+    }
+    if field == "sandbox_workspace_quota_routes_json" {
+        return Some(vec![
+            "sandbox_workspaces".to_string(),
+            "quota_routes".to_string(),
+        ]);
+    }
+    if field == "local_provider_account_json" {
+        return Some(vec!["local".to_string(), "provider_account".to_string()]);
+    }
+    if field == "cloud_hands_provider_accounts_json" {
+        return Some(vec![
+            "cloud".to_string(),
+            "hands".to_string(),
+            "provider_accounts".to_string(),
+        ]);
+    }
+    if field == "daytona_storage_accounts_json" {
+        return Some(vec![
+            "cloud".to_string(),
+            "daytona_storage".to_string(),
+            "accounts".to_string(),
+        ]);
+    }
     providers::exact_overlay_path(field)
         .or_else(|| security::exact_overlay_path(field))
         .or_else(|| messaging::exact_overlay_path(field))
@@ -849,6 +937,51 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_optional_json(deserializer, "MOA_SANDBOX_POLICY_JSON")
+}
+
+fn deserialize_optional_sandbox_workspace_canary<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<SandboxWorkspaceCanaryConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_SANDBOX_WORKSPACE_CANARY_JSON")
+}
+
+fn deserialize_optional_local_provider_account<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<LocalHandProviderAccountConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_LOCAL_PROVIDER_ACCOUNT_JSON")
+}
+
+fn deserialize_optional_sandbox_workspace_quota_routes<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<SandboxWorkspaceQuotaRouteConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON")
+}
+
+fn deserialize_optional_cloud_hand_provider_accounts<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<CloudHandProviderAccountConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON")
+}
+
+fn deserialize_optional_daytona_storage_accounts<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<DaytonaStorageAccountConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_DAYTONA_STORAGE_ACCOUNTS_JSON")
 }
 
 fn deserialize_optional_json<'de, D, T>(

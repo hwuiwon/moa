@@ -169,7 +169,7 @@ async fn deployment_credentials_authenticate_the_full_mcp_exchange_offline() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: Some("provider-transcript-id".to_string()),
                 name: moa_hands::mcp_tool_reference("secure-api", "ping"),
@@ -256,7 +256,7 @@ async fn cancellation_stops_an_in_flight_authenticated_mcp_call_offline() {
         router.execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: Some("provider-transcript-cancel".to_string()),
                 name: moa_hands::mcp_tool_reference("slow-api", "wait"),
@@ -344,7 +344,7 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: Some("reviewed-provider-call-bad".to_string()),
                 name: moa_hands::mcp_tool_reference("filings", "lookup_filing"),
@@ -379,7 +379,7 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: Some("reviewed-provider-call-good".to_string()),
                 name: moa_hands::mcp_tool_reference("filings", "lookup_filing"),
@@ -505,7 +505,7 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: None,
                 name: moa_hands::mcp_tool_reference("http-api", "explode"),
@@ -682,7 +682,7 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: None,
                 name: moa_hands::mcp_tool_reference("sse-api", "sse_echo"),
@@ -1474,7 +1474,7 @@ async fn dispatching_a_connectors_published_name_says_which_reference_to_use_off
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: None,
                 // The name the SERVER publishes — not the registered reference.
@@ -1504,7 +1504,7 @@ async fn dispatching_a_connectors_published_name_says_which_reference_to_use_off
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: None,
                 name: "no_such_tool_anywhere".to_string(),

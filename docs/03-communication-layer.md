@@ -128,7 +128,12 @@ This avoids losing information when a client disconnects or a messaging process 
 - execution-run start, aggregate progress, exact input requests, and terminal status
 - status snapshots from the Restate-backed orchestrator
 
-Clients choose their own verbosity, but durable events are the source of truth.
+Clients choose their own verbosity, but durable events are the source of truth
+for conversation history. They are not the byte store for arbitrary sandbox
+files. A successful mutating `ToolResult` is appended only after the
+independently owned `SandboxWorkspace` commit barrier publishes a verified
+portable checkpoint. Compute status and workspace retention remain separate;
+see [Sandbox Workspaces](25-sandbox-workspaces.md).
 Browser chat clients send user text and their contact token through
 `POST /v1/sessions/{session_id}/messages`. The edge injects the path session id
 and forwards admission/progress reads through the `Contacts` service, which

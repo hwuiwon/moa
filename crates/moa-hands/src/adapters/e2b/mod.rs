@@ -1,34 +1,60 @@
 //! E2B-backed hand provider for microVM execution.
 
 mod client;
+mod storage;
+mod workspace;
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_config::MoaConfig;
+use moa_config::CloudHandProviderKind;
+use moa_core::types::identifiers::WorkspaceCheckpointId;
+use moa_core::types::sandbox_workspace::{
+    DurabilityClass, ProviderAccountStorageInventory, ProviderInventoryOwner,
+    ProviderInventoryResource, ProviderInventoryResourceKind, ProviderStorageKind,
+    ProviderStorageRef, TenantStoragePurgeRequest, WorkspaceAttachRequest,
+    WorkspaceCheckpointPublication, WorkspaceCheckpointPublishRequest,
+    WorkspaceConfirmedDisposition, WorkspaceOperationKind, WorkspaceOperationOutcome,
+    WorkspacePostCommitState, WorkspaceReconcileRequest, WorkspaceRestoreRequest,
+    WorkspaceRevisionRef, WorkspaceStorageDeleteRequest, WorkspaceStorageOperation,
+    WorkspaceStorageOperationResult, WorkspaceStoragePrepareRequest,
+};
 use moa_core::{
-    canonical_json::canonical_json_bytes, error::MoaError, error::Result, error::ToolFailureClass,
-    traits::HandProvider, types::hands::DeadlineEnforcement, types::hands::EgressMode,
-    types::hands::HandHandle, types::hands::HandProviderCapabilities, types::hands::HandSpec,
-    types::hands::HandStatus, types::hands::ResourceSupport, types::hands::SandboxFile,
-    types::hands::SandboxProfile, types::hands::SandboxTier, types::hands::SandboxTierCapabilities,
-    types::hands::validate_sandbox_file_path, types::identifiers::HandProvisioningOperationId,
+    canonical_json::canonical_json_bytes,
+    error::MoaError,
+    error::Result,
+    error::ToolFailureClass,
+    traits::{HandProvider, SandboxStorageProvider},
+    types::hands::DeadlineEnforcement,
+    types::hands::EgressMode,
+    types::hands::HandHandle,
+    types::hands::HandProviderCapabilities,
+    types::hands::HandSpec,
+    types::hands::HandStatus,
+    types::hands::ResourceSupport,
+    types::hands::SandboxFile,
+    types::hands::SandboxProfile,
+    types::hands::SandboxTier,
+    types::hands::SandboxTierCapabilities,
+    types::hands::validate_sandbox_file_path,
+    types::identifiers::HandProvisioningOperationId,
     types::tools::ToolOutput,
 };
 use reqwest::header::CONTENT_TYPE;
+use secrecy::SecretString;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
 use tokio::time::Instant;
 
 use crate::adapters::http_util::{
-    build_url, expect_success, expect_success_json, http_error, required_string_field,
+    build_url, expect_success_json, http_error, required_string_field,
 };
+use crate::adapters::trusted_command::{resolve_provider_file_path, resolve_trusted_skill_command};
 use crate::tools::edit_output::{
     ExistingFileContent, build_file_write_output, build_text_edit_output,
 };
@@ -38,12 +64,16 @@ use crate::tools::sandbox_descriptor::{
 use crate::tools::str_replace::plan_str_replace;
 use crate::tools::{bash, file_outline, file_read, grep};
 
-use client::{
-    default_headers, encode_connect_request, envd_headers, parse_e2b_connect_stream, shell_escape,
+use crate::core::provider_credentials::{
+    ProviderCredentialSource, ProviderEndpoint, ProviderHttpAttempt, ProviderSandboxAttempt,
 };
+use crate::core::sandbox_workspace::checkpoint::revision::{
+    next_workspace_revision, required_current_revision,
+};
+use crate::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore;
+use client::{encode_connect_request, envd_headers, parse_e2b_connect_stream, shell_escape};
 
 const E2B_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
-const DEFAULT_E2B_API_URL: &str = "https://api.e2b.dev";
 const DEFAULT_E2B_DOMAIN: &str = "e2b.app";
 const DEFAULT_E2B_TEMPLATE: &str = "base";
 const DEFAULT_ENVD_PORT: u16 = 49983;
@@ -51,23 +81,40 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const E2B_PROVISIONING_OPERATION_METADATA_KEY: &str = "moa_provisioning_operation_id";
 const E2B_PROVISIONING_SPEC_METADATA_KEY: &str = "moa_provisioning_spec_sha256";
+const E2B_BINDING_METADATA_KEY: &str = "moa_workspace_binding_sha256";
+const E2B_TENANT_METADATA_KEY: &str = "moa_tenant_id";
+const E2B_WORKSPACE_METADATA_KEY: &str = "moa_workspace_id";
+const E2B_PROVIDER_ACCOUNT_METADATA_KEY: &str = "moa_provider_account_id";
+const E2B_PROVIDER_ACCOUNT_GENERATION_METADATA_KEY: &str = "moa_provider_account_generation";
+const E2B_WRITER_EPOCH_METADATA_KEY: &str = "moa_writer_epoch";
+const E2B_INSTANCE_GENERATION_METADATA_KEY: &str = "moa_instance_generation";
 const E2B_SANDBOX_LIST_LIMIT: usize = 100;
+const E2B_TRUSTED_ROOT: &str = "/opt/moa/trusted";
+const E2B_RESET_TRUSTED_ROOT: &str = "if install -d -m 700 /opt/moa/trusted 2>/dev/null; then :; else sudo -n install -d -m 700 -o \"$(id -u)\" -g \"$(id -g)\" /opt/moa/trusted; fi && find /opt/moa/trusted -mindepth 1 -delete";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct ConnectedSandbox {
     pub(super) sandbox_domain: String,
-    pub(super) envd_access_token: String,
+    pub(super) envd_access_token: SecretString,
     pub(super) _envd_version: String,
+}
+
+impl std::fmt::Debug for ConnectedSandbox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectedSandbox")
+            .field("sandbox_domain", &"[REDACTED]")
+            .field("envd_access_token", &"[REDACTED]")
+            .field("envd_version", &self._envd_version)
+            .finish()
+    }
 }
 
 /// E2B cloud hand provider for microVM-backed execution.
 pub struct E2BHandProvider {
-    client: reqwest::Client,
-    api_url: String,
-    sandbox_domain: String,
-    default_template: String,
+    credentials: Arc<dyn ProviderCredentialSource>,
     sandbox_base_url_override: Option<String>,
-    sandboxes: RwLock<HashMap<String, ConnectedSandbox>>,
+    checkpoint_store: Option<Arc<CheckpointObjectStore>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,67 +123,51 @@ struct ProvisionedE2BSandbox {
     spec_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum E2BSandboxState {
+    Running,
+    Paused,
+    Provisioning,
+}
+
+#[derive(Debug)]
+struct InspectedE2BSandbox {
+    state: E2BSandboxState,
+    connected: Option<ConnectedSandbox>,
+}
+
 impl E2BHandProvider {
-    /// Creates a new E2B provider from an API key.
-    pub fn new(api_key: impl Into<String>) -> Result<Self> {
-        Self::with_api_url(
-            api_key,
-            DEFAULT_E2B_API_URL,
-            DEFAULT_E2B_DOMAIN,
-            DEFAULT_E2B_TEMPLATE,
-        )
-    }
-
-    /// Creates an E2B provider from the loaded MOA config.
-    pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        let hands = config
-            .cloud
-            .hands
-            .as_ref()
-            .ok_or_else(|| MoaError::ConfigError("missing [cloud.hands] config".to_string()))?;
-        let api_key = hands
-            .e2b_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                MoaError::MissingEnvironmentVariable("MOA_CLOUD_HANDS_E2B_API_KEY".to_string())
-            })?
-            .to_string();
-        Self::with_api_url(
-            api_key,
-            hands.e2b_api_url.as_deref().unwrap_or(DEFAULT_E2B_API_URL),
-            hands.e2b_domain.as_deref().unwrap_or(DEFAULT_E2B_DOMAIN),
-            hands
-                .e2b_template
-                .as_deref()
-                .unwrap_or(DEFAULT_E2B_TEMPLATE),
-        )
-    }
-
-    /// Creates a provider with explicit API URL, domain, and template overrides.
-    pub fn with_api_url(
-        api_key: impl Into<String>,
-        api_url: impl Into<String>,
-        sandbox_domain: impl Into<String>,
-        default_template: impl Into<String>,
-    ) -> Result<Self> {
-        let api_key = api_key.into();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_COMMAND_TIMEOUT)
-            .default_headers(default_headers(&api_key)?)
-            .build()
-            .map_err(|error| {
-                MoaError::ProviderError(format!("failed to build E2B client: {error}"))
-            })?;
-        Ok(Self {
-            client,
-            api_url: api_url.into().trim_end_matches('/').to_string(),
-            sandbox_domain: sandbox_domain.into(),
-            default_template: default_template.into(),
+    /// Creates a provider backed by rotating persisted-account credentials.
+    #[must_use]
+    pub fn new(credentials: Arc<dyn ProviderCredentialSource>) -> Self {
+        Self {
+            credentials,
             sandbox_base_url_override: None,
-            sandboxes: RwLock::new(HashMap::new()),
-        })
+            checkpoint_store: None,
+        }
+    }
+
+    /// Installs durable encrypted portable-checkpoint storage.
+    #[must_use]
+    pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointObjectStore>) -> Self {
+        self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
+    async fn api_attempt(
+        &self,
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+        provider_account_generation: u64,
+    ) -> Result<ProviderHttpAttempt> {
+        self.credentials
+            .resolve_attempt(
+                provider_account_id,
+                provider_account_generation,
+                CloudHandProviderKind::E2b,
+                ProviderEndpoint::Api,
+                DEFAULT_COMMAND_TIMEOUT,
+            )
+            .await
     }
 
     /// Overrides the computed envd sandbox base URL. Intended for tests and local proxies.
@@ -149,10 +180,12 @@ impl E2BHandProvider {
 
     async fn create_sandbox(
         &self,
+        attempt: &ProviderHttpAttempt,
         spec: &HandSpec,
         translated: E2BProfileFields,
         spec_fingerprint: &str,
     ) -> Result<String> {
+        let binding_fingerprint = workspace_binding_fingerprint(&spec.workspace)?;
         let metadata = HashMap::from([
             (
                 E2B_PROVISIONING_OPERATION_METADATA_KEY,
@@ -162,18 +195,44 @@ impl E2BHandProvider {
                 E2B_PROVISIONING_SPEC_METADATA_KEY,
                 spec_fingerprint.to_string(),
             ),
+            (E2B_BINDING_METADATA_KEY, binding_fingerprint),
+            (
+                E2B_TENANT_METADATA_KEY,
+                spec.workspace.tenant_id.to_string(),
+            ),
+            (
+                E2B_WORKSPACE_METADATA_KEY,
+                spec.workspace.workspace_id.to_string(),
+            ),
+            (
+                E2B_PROVIDER_ACCOUNT_METADATA_KEY,
+                spec.workspace.provider_account_id.to_string(),
+            ),
+            (
+                E2B_PROVIDER_ACCOUNT_GENERATION_METADATA_KEY,
+                spec.workspace.provider_account_generation.to_string(),
+            ),
+            (
+                E2B_WRITER_EPOCH_METADATA_KEY,
+                spec.workspace.writer_epoch.to_string(),
+            ),
+            (
+                E2B_INSTANCE_GENERATION_METADATA_KEY,
+                spec.workspace.instance_generation.to_string(),
+            ),
         ]);
-        let response = self
-            .client
-            .post(format!("{}/sandboxes", self.api_url))
+        let response = attempt
+            .client()
+            .post(format!("{}/sandboxes", attempt.origin()))
+            .header("X-API-KEY", attempt.credential())
             .json(&json!({
-                "templateID": spec.image.clone().unwrap_or_else(|| self.default_template.clone()),
+                "templateID": spec.image.clone().unwrap_or_else(|| attempt.default_runtime().unwrap_or(DEFAULT_E2B_TEMPLATE).to_string()),
                 "envVars": spec.env,
                 "timeout": translated.timeout_secs,
                 "secure": true,
                 "allow_internet_access": translated.allow_internet_access,
-                "autoPause": true,
-                "autoResume": { "enabled": true },
+                "autoPause": false,
+                "autoResume": { "enabled": false },
                 "metadata": metadata,
             }))
             .send()
@@ -189,18 +248,6 @@ impl E2BHandProvider {
                 MoaError::ProviderError("E2B create sandbox response missing sandboxID".to_string())
             })?
             .to_string();
-        self.sandboxes.write().await.insert(
-            sandbox_id.clone(),
-            ConnectedSandbox {
-                sandbox_domain: value
-                    .get("domain")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&self.sandbox_domain)
-                    .to_string(),
-                envd_access_token: required_string_field(&value, "envdAccessToken")?.to_string(),
-                _envd_version: required_string_field(&value, "envdVersion")?.to_string(),
-            },
-        );
         Ok(sandbox_id)
     }
 
@@ -208,15 +255,18 @@ impl E2BHandProvider {
         &self,
         spec: &HandSpec,
         translated: E2BProfileFields,
+        default_template: &str,
     ) -> Result<String> {
         let creation_contract = json!({
-            "templateID": spec.image.as_deref().unwrap_or(&self.default_template),
+            "templateID": spec.image.as_deref().unwrap_or(default_template),
             "envVars": spec.env,
             "timeout": translated.timeout_secs,
             "secure": true,
             "allow_internet_access": translated.allow_internet_access,
-            "autoPause": true,
-            "autoResume": { "enabled": true },
+            "autoPause": false,
+            "autoResume": { "enabled": false },
+            "workspaceBinding": spec.workspace,
+            "filesystem": spec.filesystem,
         });
         let canonical = canonical_json_bytes(&creation_contract).map_err(|error| {
             MoaError::ProviderError(format!(
@@ -228,6 +278,7 @@ impl E2BHandProvider {
 
     async fn provisioned_sandboxes(
         &self,
+        attempt: &ProviderHttpAttempt,
         operation_id: HandProvisioningOperationId,
     ) -> Result<Vec<ProvisionedE2BSandbox>> {
         let metadata_query = format!("{E2B_PROVISIONING_OPERATION_METADATA_KEY}={operation_id}");
@@ -239,7 +290,7 @@ impl E2BHandProvider {
 
         loop {
             let mut url = build_url(
-                &format!("{}/v2/sandboxes", self.api_url),
+                &format!("{}/v2/sandboxes", attempt.origin()),
                 &[
                     ("metadata", metadata_query.as_str()),
                     ("limit", page_limit.as_str()),
@@ -250,11 +301,17 @@ impl E2BHandProvider {
             if let Some(token) = next_token.as_deref() {
                 url.query_pairs_mut().append_pair("nextToken", token);
             }
-            let response = self.client.get(url).send().await.map_err(|error| {
-                MoaError::ProviderError(format!(
-                    "failed to list E2B provisioning operation sandboxes: {error}"
-                ))
-            })?;
+            let response = attempt
+                .client()
+                .get(url)
+                .header("X-API-KEY", attempt.credential())
+                .send()
+                .await
+                .map_err(|error| {
+                    MoaError::ProviderError(format!(
+                        "failed to list E2B provisioning operation sandboxes: {error}"
+                    ))
+                })?;
             if !response.status().is_success() {
                 return Err(http_error(response).await);
             }
@@ -310,10 +367,18 @@ impl E2BHandProvider {
         Ok(sandboxes)
     }
 
-    async fn connect_sandbox(&self, sandbox_id: &str) -> Result<ConnectedSandbox> {
-        let response = self
-            .client
-            .post(format!("{}/sandboxes/{sandbox_id}/connect", self.api_url))
+    async fn connect_running_sandbox(
+        &self,
+        attempt: &ProviderHttpAttempt,
+        sandbox_id: &str,
+    ) -> Result<ConnectedSandbox> {
+        let response = attempt
+            .client()
+            .post(format!(
+                "{}/sandboxes/{sandbox_id}/connect",
+                attempt.origin()
+            ))
+            .header("X-API-KEY", attempt.credential())
             .json(&json!({
                 "timeout": DEFAULT_COMMAND_TIMEOUT.as_secs(),
             }))
@@ -323,27 +388,133 @@ impl E2BHandProvider {
                 MoaError::ProviderError(format!("failed to connect E2B sandbox: {error}"))
             })?;
         let value = expect_success_json(response, "E2B").await?;
+        if value
+            .get("sandboxID")
+            .and_then(Value::as_str)
+            .is_some_and(|observed| observed != sandbox_id)
+        {
+            return Err(MoaError::ProviderError(
+                "E2B connect returned a different sandbox identity".to_string(),
+            ));
+        }
         let sandbox = ConnectedSandbox {
             sandbox_domain: value
                 .get("domain")
                 .and_then(Value::as_str)
-                .unwrap_or(&self.sandbox_domain)
+                .or_else(|| attempt.sandbox_domain())
+                .unwrap_or(DEFAULT_E2B_DOMAIN)
                 .to_string(),
-            envd_access_token: required_string_field(&value, "envdAccessToken")?.to_string(),
+            envd_access_token: SecretString::from(
+                required_string_field(&value, "envdAccessToken")?.to_string(),
+            ),
             _envd_version: required_string_field(&value, "envdVersion")?.to_string(),
         };
-        self.sandboxes
-            .write()
-            .await
-            .insert(sandbox_id.to_string(), sandbox.clone());
         Ok(sandbox)
     }
 
-    async fn connected_sandbox(&self, sandbox_id: &str) -> Result<ConnectedSandbox> {
-        if let Some(sandbox) = self.sandboxes.read().await.get(sandbox_id).cloned() {
-            return Ok(sandbox);
+    async fn inspect_sandbox(
+        &self,
+        attempt: &ProviderHttpAttempt,
+        sandbox_id: &str,
+        expected_account: (moa_core::types::identifiers::ProviderAccountId, u64),
+        expected_binding: Option<&moa_core::types::sandbox_workspace::WorkspaceBinding>,
+    ) -> Result<Option<InspectedE2BSandbox>> {
+        let response = attempt
+            .client()
+            .get(format!("{}/sandboxes/{sandbox_id}", attempt.origin()))
+            .header("X-API-KEY", attempt.credential())
+            .send()
+            .await
+            .map_err(|error| {
+                MoaError::ProviderError(format!("failed to inspect E2B sandbox: {error}"))
+            })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
         }
-        self.connect_sandbox(sandbox_id).await
+        let value = expect_success_json(response, "E2B").await?;
+        if value
+            .get("sandboxID")
+            .and_then(Value::as_str)
+            .is_some_and(|observed| observed != sandbox_id)
+        {
+            return Err(MoaError::ProviderError(
+                "E2B inspection returned a different sandbox identity".to_string(),
+            ));
+        }
+        let metadata = value
+            .get("metadata")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                MoaError::ProviderError(
+                    "E2B sandbox is missing MOA workspace ownership metadata".to_string(),
+                )
+            })?;
+        verify_workspace_metadata(
+            metadata,
+            expected_account.0,
+            expected_account.1,
+            expected_binding,
+        )?;
+
+        let state = match required_string_field(&value, "state")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "running" | "started" => E2BSandboxState::Running,
+            "paused" | "stopped" => E2BSandboxState::Paused,
+            "provisioning" | "starting" => E2BSandboxState::Provisioning,
+            other => {
+                return Err(MoaError::ProviderError(format!(
+                    "E2B sandbox is in unsupported state `{other}`"
+                )));
+            }
+        };
+        let connected = value
+            .get("envdAccessToken")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(|token| ConnectedSandbox {
+                sandbox_domain: value
+                    .get("domain")
+                    .and_then(Value::as_str)
+                    .filter(|domain| !domain.is_empty())
+                    .or_else(|| attempt.sandbox_domain())
+                    .unwrap_or(DEFAULT_E2B_DOMAIN)
+                    .to_string(),
+                envd_access_token: SecretString::from(token.to_string()),
+                _envd_version: value
+                    .get("envdVersion")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        Ok(Some(InspectedE2BSandbox { state, connected }))
+    }
+
+    async fn running_sandbox(
+        &self,
+        attempt: &ProviderHttpAttempt,
+        sandbox_id: &str,
+        expected_account: (moa_core::types::identifiers::ProviderAccountId, u64),
+        expected_binding: Option<&moa_core::types::sandbox_workspace::WorkspaceBinding>,
+    ) -> Result<ConnectedSandbox> {
+        let inspection = self
+            .inspect_sandbox(attempt, sandbox_id, expected_account, expected_binding)
+            .await?
+            .ok_or_else(|| MoaError::HttpStatus {
+                status: 404,
+                retry_after: None,
+                message: "E2B sandbox is absent".to_string(),
+            })?;
+        if inspection.state != E2BSandboxState::Running {
+            return Err(MoaError::ProviderError(
+                "E2B sandbox is not running; fresh-compute recovery is required".to_string(),
+            ));
+        }
+        match inspection.connected {
+            Some(connected) => Ok(connected),
+            None => self.connect_running_sandbox(attempt, sandbox_id).await,
+        }
     }
 
     fn envd_url(&self, sandbox_id: &str, sandbox: &ConnectedSandbox) -> String {
@@ -358,19 +529,17 @@ impl E2BHandProvider {
 
     async fn execute_bash(
         &self,
+        attempt: &ProviderSandboxAttempt,
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         cmd: &str,
         timeout: Duration,
     ) -> Result<ToolOutput> {
         let started_at = Instant::now();
-        let url = format!(
-            "{}/process.Process/Start",
-            self.envd_url(sandbox_id, sandbox)
-        );
+        let url = format!("{}/process.Process/Start", attempt.origin());
         tokio::time::timeout(timeout, async {
-            let response = self
-                .client
+            let response = attempt
+                .client()
                 .post(url)
                 .headers(envd_headers(sandbox_id, sandbox)?)
                 .header(CONTENT_TYPE, "application/connect+json")
@@ -405,20 +574,47 @@ impl E2BHandProvider {
         })?
     }
 
+    async fn run_checked_command(
+        &self,
+        attempt: &ProviderSandboxAttempt,
+        sandbox_id: &str,
+        sandbox: &ConnectedSandbox,
+        operation: &'static str,
+        command: &str,
+    ) -> Result<()> {
+        let output = self
+            .execute_bash(
+                attempt,
+                sandbox_id,
+                sandbox,
+                command,
+                DEFAULT_COMMAND_TIMEOUT,
+            )
+            .await?;
+        if output.is_error {
+            return Err(MoaError::ProviderError(format!(
+                "E2B workspace filesystem operation {operation} failed with exit code {:?}",
+                output.process_exit_code()
+            )));
+        }
+        Ok(())
+    }
+
     async fn read_file(
         &self,
+        attempt: &ProviderSandboxAttempt,
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         path: &str,
     ) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let url = build_url(
-            &format!("{}/files", self.envd_url(sandbox_id, sandbox)),
+            &format!("{}/files", attempt.origin()),
             &[("path", path)],
             "E2B",
         )?;
-        let response = self
-            .client
+        let response = attempt
+            .client()
             .get(url)
             .headers(envd_headers(sandbox_id, sandbox)?)
             .send()
@@ -439,24 +635,36 @@ impl E2BHandProvider {
 
     async fn write_file(
         &self,
+        attempt: &ProviderSandboxAttempt,
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         path: &str,
+        remote_path: &str,
         content: &str,
     ) -> Result<ToolOutput> {
-        let existing = match self.read_file(sandbox_id, sandbox, path).await {
+        let existing = match self
+            .read_file(attempt, sandbox_id, sandbox, remote_path)
+            .await
+        {
             Ok(output) => ExistingFileContent::Text(output.to_text()),
             Err(MoaError::HttpStatus { status: 404, .. }) => ExistingFileContent::Missing,
             Err(error) => return Err(error),
         };
         let duration = self
-            .upload_file(sandbox_id, sandbox, path, content.as_bytes())
+            .upload_file(
+                attempt,
+                sandbox_id,
+                sandbox,
+                remote_path,
+                content.as_bytes(),
+            )
             .await?;
         Ok(build_file_write_output(path, &existing, content, duration))
     }
 
     async fn upload_file(
         &self,
+        attempt: &ProviderSandboxAttempt,
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         path: &str,
@@ -464,12 +672,12 @@ impl E2BHandProvider {
     ) -> Result<Duration> {
         let started_at = Instant::now();
         let url = build_url(
-            &format!("{}/files", self.envd_url(sandbox_id, sandbox)),
+            &format!("{}/files", attempt.origin()),
             &[("path", path)],
             "E2B",
         )?;
-        let response = self
-            .client
+        let response = attempt
+            .client()
             .post(url)
             .headers(envd_headers(sandbox_id, sandbox)?)
             .header(CONTENT_TYPE, "application/octet-stream")
@@ -485,12 +693,14 @@ impl E2BHandProvider {
 
     async fn chmod_file(
         &self,
+        attempt: &ProviderSandboxAttempt,
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         path: &str,
     ) -> Result<()> {
         let output = self
             .execute_bash(
+                attempt,
                 sandbox_id,
                 sandbox,
                 &format!("chmod 755 {}", shell_escape(path)),
@@ -508,12 +718,17 @@ impl E2BHandProvider {
 
     async fn str_replace_file(
         &self,
+        attempt: &ProviderSandboxAttempt,
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         path: &str,
+        remote_path: &str,
         input: &str,
     ) -> Result<ToolOutput> {
-        let existing_content = match self.read_file(sandbox_id, sandbox, path).await {
+        let existing_content = match self
+            .read_file(attempt, sandbox_id, sandbox, remote_path)
+            .await
+        {
             Ok(output) => Some(output.to_text()),
             Err(MoaError::HttpStatus { status: 404, .. }) => None,
             Err(error) => return Err(error),
@@ -521,9 +736,10 @@ impl E2BHandProvider {
         let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
         let duration = self
             .upload_file(
+                attempt,
                 sandbox_id,
                 sandbox,
-                path,
+                remote_path,
                 planned.updated_content.as_bytes(),
             )
             .await?;
@@ -539,11 +755,90 @@ impl E2BHandProvider {
 /// Extracts the sandbox id from an E2B hand handle.
 fn sandbox_id(handle: &HandHandle) -> Result<&str> {
     match handle {
-        HandHandle::E2B { sandbox_id } => Ok(sandbox_id.as_str()),
+        HandHandle::E2B { sandbox_id, .. } => Ok(sandbox_id.as_str()),
         _ => Err(MoaError::Unsupported(
             "non-E2B hand handle passed to E2BHandProvider".to_string(),
         )),
     }
+}
+
+fn cloud_account(
+    handle: &HandHandle,
+) -> Result<(moa_core::types::identifiers::ProviderAccountId, u64)> {
+    handle.provider_account().ok_or_else(|| {
+        MoaError::Unsupported("non-E2B hand handle passed to E2BHandProvider".to_string())
+    })
+}
+
+fn workspace_binding_fingerprint(
+    binding: &moa_core::types::sandbox_workspace::WorkspaceBinding,
+) -> Result<String> {
+    let canonical = canonical_json_bytes(binding).map_err(|error| {
+        MoaError::ProviderError(format!(
+            "failed to canonicalize E2B workspace binding: {error}"
+        ))
+    })?;
+    Ok(hex::encode(Sha256::digest(canonical)))
+}
+
+fn required_metadata<'a>(
+    metadata: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            MoaError::ProviderError(format!(
+                "E2B sandbox is missing required MOA metadata `{key}`"
+            ))
+        })
+}
+
+fn verify_workspace_metadata(
+    metadata: &serde_json::Map<String, Value>,
+    provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+    provider_account_generation: u64,
+    expected_binding: Option<&moa_core::types::sandbox_workspace::WorkspaceBinding>,
+) -> Result<()> {
+    if required_metadata(metadata, E2B_PROVIDER_ACCOUNT_METADATA_KEY)?
+        != provider_account_id.to_string()
+        || required_metadata(metadata, E2B_PROVIDER_ACCOUNT_GENERATION_METADATA_KEY)?
+            != provider_account_generation.to_string()
+    {
+        return Err(MoaError::ProviderError(
+            "E2B sandbox provider-account metadata does not match its persisted handle".to_string(),
+        ));
+    }
+    let binding_hash = required_metadata(metadata, E2B_BINDING_METADATA_KEY)?;
+    let tenant = required_metadata(metadata, E2B_TENANT_METADATA_KEY)?;
+    let workspace = required_metadata(metadata, E2B_WORKSPACE_METADATA_KEY)?;
+    let writer_epoch = required_metadata(metadata, E2B_WRITER_EPOCH_METADATA_KEY)?;
+    let instance_generation = required_metadata(metadata, E2B_INSTANCE_GENERATION_METADATA_KEY)?;
+    if binding_hash.len() != 64
+        || !binding_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || tenant.parse::<uuid::Uuid>().is_err()
+        || workspace.parse::<uuid::Uuid>().is_err()
+        || writer_epoch.parse::<u64>().is_err()
+        || instance_generation.parse::<u64>().is_err()
+    {
+        return Err(MoaError::ProviderError(
+            "E2B sandbox carries malformed MOA workspace metadata".to_string(),
+        ));
+    }
+    if let Some(binding) = expected_binding
+        && (binding_hash != workspace_binding_fingerprint(binding)?
+            || tenant != binding.tenant_id.to_string()
+            || workspace != binding.workspace_id.to_string()
+            || writer_epoch != binding.writer_epoch.to_string()
+            || instance_generation != binding.instance_generation.to_string())
+    {
+        return Err(MoaError::ProviderError(
+            "E2B sandbox workspace metadata does not match the durable binding".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_provisioned_sandbox(
@@ -687,10 +982,21 @@ impl HandProvider for E2BHandProvider {
                 "E2B provider is reserved for microvm sandboxes".to_string(),
             ));
         }
+        if spec.filesystem.mutable_root != std::path::Path::new(storage::E2B_DATA_ROOT) {
+            return Err(MoaError::ValidationError(format!(
+                "E2B mutable root must be {} so checkpoint export cannot include trusted or runtime state",
+                storage::E2B_DATA_ROOT
+            )));
+        }
+        let account_id = spec.workspace.provider_account_id;
+        let account_generation = spec.workspace.provider_account_generation;
+        let attempt = self.api_attempt(account_id, account_generation).await?;
         let translated = E2BProfileFields::translate(spec.effective_profile.profile())?;
-        let expected_fingerprint = self.provisioning_spec_fingerprint(&spec, translated)?;
+        let default_template = attempt.default_runtime().unwrap_or(DEFAULT_E2B_TEMPLATE);
+        let expected_fingerprint =
+            self.provisioning_spec_fingerprint(&spec, translated, default_template)?;
         let existing = self
-            .provisioned_sandboxes(spec.provisioning_operation_id)
+            .provisioned_sandboxes(&attempt, spec.provisioning_operation_id)
             .await?;
         if existing.len() > 1 {
             return Err(MoaError::ProviderError(format!(
@@ -706,29 +1012,64 @@ impl HandProvider for E2BHandProvider {
                     spec.provisioning_operation_id
                 )));
             }
-            return Ok(HandHandle::e2b(existing.sandbox_id.clone()));
+            return Ok(HandHandle::e2b(
+                existing.sandbox_id.clone(),
+                account_id,
+                account_generation,
+            ));
         }
         let sandbox_id = self
-            .create_sandbox(&spec, translated, &expected_fingerprint)
+            .create_sandbox(&attempt, &spec, translated, &expected_fingerprint)
             .await?;
-        Ok(HandHandle::e2b(sandbox_id))
+        Ok(HandHandle::e2b(sandbox_id, account_id, account_generation))
     }
 
     async fn provisioned_hands(
         &self,
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+        provider_account_generation: u64,
         operation_id: HandProvisioningOperationId,
     ) -> Result<Vec<HandHandle>> {
+        let attempt = self
+            .api_attempt(provider_account_id, provider_account_generation)
+            .await?;
         Ok(self
-            .provisioned_sandboxes(operation_id)
+            .provisioned_sandboxes(&attempt, operation_id)
             .await?
             .into_iter()
-            .map(|sandbox| HandHandle::e2b(sandbox.sandbox_id))
+            .map(|sandbox| {
+                HandHandle::e2b(
+                    sandbox.sandbox_id,
+                    provider_account_id,
+                    provider_account_generation,
+                )
+            })
             .collect())
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
         let sandbox_id = sandbox_id(handle)?;
-        let sandbox = self.connected_sandbox(sandbox_id).await?;
+        let (account_id, account_generation) = cloud_account(handle)?;
+        let api_attempt = self.api_attempt(account_id, account_generation).await?;
+        let sandbox = self
+            .running_sandbox(
+                &api_attempt,
+                sandbox_id,
+                (account_id, account_generation),
+                None,
+            )
+            .await?;
+        let envd_origin = self.envd_url(sandbox_id, &sandbox);
+        let sandbox_attempt = self
+            .credentials
+            .admit_sandbox_attempt(
+                account_id,
+                account_generation,
+                CloudHandProviderKind::E2b,
+                &envd_origin,
+                DEFAULT_COMMAND_TIMEOUT,
+            )
+            .await?;
         let payload: Value = serde_json::from_str(input)?;
         match supported_capability_for_tool(tool, E2B_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
@@ -738,38 +1079,73 @@ impl HandProvider for E2BHandProvider {
                 // budget are absent here. Opting E2B into `execute_bounded` is
                 // what would carry them.
                 let timeout = params.timeout(DEFAULT_COMMAND_TIMEOUT, None, None);
-                self.execute_bash(sandbox_id, &sandbox, &params.cmd, timeout)
-                    .await
+                let trusted = resolve_trusted_skill_command(&params.cmd, E2B_TRUSTED_ROOT)?;
+                let command = trusted
+                    .as_ref()
+                    .map_or_else(|| params.cmd.clone(), |command| command.shell_token());
+                let mut output = self
+                    .execute_bash(&sandbox_attempt, sandbox_id, &sandbox, &command, timeout)
+                    .await?;
+                if let Some(command) = trusted {
+                    command.redact_output(&mut output);
+                }
+                Ok(output)
             }
             Some(SandboxToolCapability::Grep) => {
                 let command = grep::remote_shell_command(input, "/")?;
-                self.execute_bash(sandbox_id, &sandbox, &command, DEFAULT_COMMAND_TIMEOUT)
-                    .await
+                self.execute_bash(
+                    &sandbox_attempt,
+                    sandbox_id,
+                    &sandbox,
+                    &command,
+                    DEFAULT_COMMAND_TIMEOUT,
+                )
+                .await
             }
             Some(SandboxToolCapability::FileOutline) => {
                 let path = required_string_field(&payload, "path")?;
-                let content = self.read_file(sandbox_id, &sandbox, path).await?.to_text();
+                let remote_path =
+                    resolve_provider_file_path(path, storage::E2B_DATA_ROOT, E2B_TRUSTED_ROOT)?;
+                let content = self
+                    .read_file(&sandbox_attempt, sandbox_id, &sandbox, &remote_path)
+                    .await?
+                    .to_text();
                 file_outline::execute_with_content(input, path, &content)
             }
             Some(SandboxToolCapability::FileRead) => {
                 let path = required_string_field(&payload, "path")?;
-                let content = self.read_file(sandbox_id, &sandbox, path).await?.to_text();
+                let remote_path =
+                    resolve_provider_file_path(path, storage::E2B_DATA_ROOT, E2B_TRUSTED_ROOT)?;
+                let content = self
+                    .read_file(&sandbox_attempt, sandbox_id, &sandbox, &remote_path)
+                    .await?
+                    .to_text();
                 file_read::execute_with_content(input, path, &content)
             }
             Some(SandboxToolCapability::StrReplace) => {
+                let path = required_string_field(&payload, "path")?;
+                let remote_path =
+                    resolve_provider_file_path(path, storage::E2B_DATA_ROOT, E2B_TRUSTED_ROOT)?;
                 self.str_replace_file(
+                    &sandbox_attempt,
                     sandbox_id,
                     &sandbox,
-                    required_string_field(&payload, "path")?,
+                    path,
+                    &remote_path,
                     input,
                 )
                 .await
             }
             Some(SandboxToolCapability::FileWrite) => {
+                let path = required_string_field(&payload, "path")?;
+                let remote_path =
+                    resolve_provider_file_path(path, storage::E2B_DATA_ROOT, E2B_TRUSTED_ROOT)?;
                 self.write_file(
+                    &sandbox_attempt,
                     sandbox_id,
                     &sandbox,
-                    required_string_field(&payload, "path")?,
+                    path,
+                    &remote_path,
                     required_string_field(&payload, "content")?,
                 )
                 .await
@@ -777,6 +1153,7 @@ impl HandProvider for E2BHandProvider {
             Some(SandboxToolCapability::FileSearch) => {
                 let pattern = shell_escape(required_string_field(&payload, "pattern")?);
                 self.execute_bash(
+                    &sandbox_attempt,
                     sandbox_id,
                     &sandbox,
                     &format!("find / -name {pattern} -print 2>/dev/null || true"),
@@ -790,13 +1167,49 @@ impl HandProvider for E2BHandProvider {
 
     async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
         let sandbox_id = sandbox_id(handle)?;
-        let sandbox = self.connected_sandbox(sandbox_id).await?;
+        let (account_id, account_generation) = cloud_account(handle)?;
+        let api_attempt = self.api_attempt(account_id, account_generation).await?;
+        let sandbox = self
+            .running_sandbox(
+                &api_attempt,
+                sandbox_id,
+                (account_id, account_generation),
+                None,
+            )
+            .await?;
+        let envd_origin = self.envd_url(sandbox_id, &sandbox);
+        let sandbox_attempt = self
+            .credentials
+            .admit_sandbox_attempt(
+                account_id,
+                account_generation,
+                CloudHandProviderKind::E2b,
+                &envd_origin,
+                DEFAULT_COMMAND_TIMEOUT,
+            )
+            .await?;
+        self.run_checked_command(
+            &sandbox_attempt,
+            sandbox_id,
+            &sandbox,
+            "reset_trusted_root",
+            E2B_RESET_TRUSTED_ROOT,
+        )
+        .await?;
         for file in files {
             validate_sandbox_file_path(&file.path)?;
-            self.upload_file(sandbox_id, &sandbox, &file.path, &file.content)
-                .await?;
+            let trusted_path = format!("{E2B_TRUSTED_ROOT}/{}", file.path);
+            self.upload_file(
+                &sandbox_attempt,
+                sandbox_id,
+                &sandbox,
+                &trusted_path,
+                &file.content,
+            )
+            .await?;
             if file.executable {
-                self.chmod_file(sandbox_id, &sandbox, &file.path).await?;
+                self.chmod_file(&sandbox_attempt, sandbox_id, &sandbox, &trusted_path)
+                    .await?;
             }
         }
         Ok(())
@@ -815,75 +1228,80 @@ impl HandProvider for E2BHandProvider {
     async fn health_check(&self, handle: &HandHandle) -> Result<bool> {
         Ok(matches!(
             self.status(handle).await?,
-            HandStatus::Running | HandStatus::Paused | HandStatus::Provisioning
+            HandStatus::Running | HandStatus::Provisioning
         ))
     }
 
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
         let sandbox_id = sandbox_id(handle)?;
-        let response = self
-            .client
-            .get(format!("{}/sandboxes/{sandbox_id}", self.api_url))
-            .send()
-            .await
-            .map_err(|error| {
-                MoaError::ProviderError(format!("failed to inspect E2B sandbox: {error}"))
-            })?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(HandStatus::Destroyed);
-        }
-        let value = expect_success_json(response, "E2B").await?;
-        let state = value
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("running")
-            .to_ascii_lowercase();
-        Ok(match state.as_str() {
-            "running" | "started" => HandStatus::Running,
-            "paused" | "stopped" => HandStatus::Stopped,
-            "provisioning" | "starting" => HandStatus::Provisioning,
-            "ended" | "deleted" => HandStatus::Destroyed,
-            "error" => HandStatus::Failed,
-            _ => HandStatus::Running,
-        })
+        let (account_id, account_generation) = cloud_account(handle)?;
+        let attempt = self.api_attempt(account_id, account_generation).await?;
+        Ok(
+            match self
+                .inspect_sandbox(&attempt, sandbox_id, (account_id, account_generation), None)
+                .await?
+            {
+                None => HandStatus::Destroyed,
+                Some(inspection) => match inspection.state {
+                    E2BSandboxState::Running => HandStatus::Running,
+                    E2BSandboxState::Paused => HandStatus::Stopped,
+                    E2BSandboxState::Provisioning => HandStatus::Provisioning,
+                },
+            },
+        )
     }
 
-    async fn pause(&self, handle: &HandHandle) -> Result<()> {
-        let sandbox_id = sandbox_id(handle)?;
-        let response = self
-            .client
-            .post(format!("{}/sandboxes/{sandbox_id}/pause", self.api_url))
-            .json(&json!({}))
-            .send()
-            .await
-            .map_err(|error| {
-                MoaError::ProviderError(format!("failed to pause E2B sandbox: {error}"))
-            })?;
-        expect_success(response).await?;
-        Ok(())
+    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "E2B pause retains process memory and is not a filesystem persistence primitive"
+                .to_string(),
+        ))
     }
 
-    async fn resume(&self, handle: &HandHandle) -> Result<()> {
-        let sandbox_id = sandbox_id(handle)?;
-        let _ = self.connect_sandbox(sandbox_id).await?;
-        Ok(())
+    async fn resume(&self, _handle: &HandHandle) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "E2B resume restores process memory; MOA recovers workspaces into fresh compute"
+                .to_string(),
+        ))
     }
 
     async fn destroy(&self, handle: &HandHandle) -> Result<()> {
         let sandbox_id = sandbox_id(handle)?;
-        let response = self
-            .client
-            .delete(format!("{}/sandboxes/{sandbox_id}", self.api_url))
+        let (account_id, account_generation) = cloud_account(handle)?;
+        let attempt = self.api_attempt(account_id, account_generation).await?;
+        if self
+            .inspect_sandbox(&attempt, sandbox_id, (account_id, account_generation), None)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let response = attempt
+            .client()
+            .delete(format!("{}/sandboxes/{sandbox_id}", attempt.origin()))
+            .header("X-API-KEY", attempt.credential())
             .send()
             .await
             .map_err(|error| {
                 MoaError::ProviderError(format!("failed to destroy E2B sandbox: {error}"))
             })?;
         if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
-            self.sandboxes.write().await.remove(sandbox_id);
             return Ok(());
         }
         Err(http_error(response).await)
+    }
+}
+
+fn confirmed_storage_result(
+    storage: Option<ProviderStorageRef>,
+    disposition: WorkspaceConfirmedDisposition,
+) -> WorkspaceStorageOperationResult {
+    WorkspaceStorageOperationResult {
+        outcome: WorkspaceOperationOutcome::Confirmed,
+        confirmed_disposition: Some(disposition),
+        storage,
+        checkpoint_publication: None,
+        post_commit_state: None,
     }
 }
 
@@ -894,8 +1312,11 @@ mod operation_intent_tests {
     use uuid::Uuid;
 
     use super::{
+        E2B_BINDING_METADATA_KEY, E2B_INSTANCE_GENERATION_METADATA_KEY,
+        E2B_PROVIDER_ACCOUNT_GENERATION_METADATA_KEY, E2B_PROVIDER_ACCOUNT_METADATA_KEY,
         E2B_PROVISIONING_OPERATION_METADATA_KEY, E2B_PROVISIONING_SPEC_METADATA_KEY,
-        decode_provisioned_sandbox,
+        E2B_TENANT_METADATA_KEY, E2B_WORKSPACE_METADATA_KEY, E2B_WRITER_EPOCH_METADATA_KEY,
+        decode_provisioned_sandbox, verify_workspace_metadata, workspace_binding_fingerprint,
     };
 
     #[test]
@@ -935,5 +1356,37 @@ mod operation_intent_tests {
             .expect_err("mismatched operation metadata must fail closed");
 
         assert!(error.to_string().contains(&other_operation_id.to_string()));
+    }
+
+    #[test]
+    fn rejects_workspace_metadata_from_a_different_writer_generation() {
+        // Pins: exact-handle GET inspection cannot authorize an E2B sandbox
+        // carrying a stale writer/instance binding.
+        let binding = crate::core::profile::test_support::hand_spec(
+            moa_core::types::hands::SandboxTier::MicroVM,
+            moa_core::types::hands::SandboxProfile::unrestricted(),
+        )
+        .workspace;
+        let mut stale = binding.clone();
+        stale.writer_epoch += 1;
+        let metadata = serde_json::json!({
+            (E2B_BINDING_METADATA_KEY): workspace_binding_fingerprint(&stale).expect("fingerprint"),
+            (E2B_TENANT_METADATA_KEY): stale.tenant_id.to_string(),
+            (E2B_WORKSPACE_METADATA_KEY): stale.workspace_id.to_string(),
+            (E2B_PROVIDER_ACCOUNT_METADATA_KEY): stale.provider_account_id.to_string(),
+            (E2B_PROVIDER_ACCOUNT_GENERATION_METADATA_KEY): stale.provider_account_generation.to_string(),
+            (E2B_WRITER_EPOCH_METADATA_KEY): stale.writer_epoch.to_string(),
+            (E2B_INSTANCE_GENERATION_METADATA_KEY): stale.instance_generation.to_string(),
+        });
+
+        let error = verify_workspace_metadata(
+            metadata.as_object().expect("metadata object"),
+            binding.provider_account_id,
+            binding.provider_account_generation,
+            Some(&binding),
+        )
+        .expect_err("stale writer generation must be fenced");
+
+        assert!(error.to_string().contains("durable binding"));
     }
 }

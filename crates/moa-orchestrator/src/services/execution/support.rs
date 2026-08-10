@@ -554,6 +554,26 @@ pub(super) fn send_run_wake(
     .send();
 }
 
+/// Joins the run wake handoff before an externally visible mutation returns.
+pub(super) async fn call_run_wake(
+    ctx: &Context<'_>,
+    run_uid: uuid::Uuid,
+    wake_epoch: u64,
+    reason: ExecutionRunWakeReason,
+) -> Result<(), HandlerError> {
+    crate::restate_identity::replay_safe_request(
+        ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
+            .wake(Json::from(ExecutionRunWakeRequest {
+                run_uid,
+                wake_epoch,
+                reason,
+            })),
+    )
+    .call()
+    .await
+    .map_err(HandlerError::from)
+}
+
 pub(super) fn invalid_execution_request(message: impl Into<String>) -> HandlerError {
     TerminalError::new_with_code(400, message.into()).into()
 }

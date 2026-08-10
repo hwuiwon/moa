@@ -1882,6 +1882,7 @@ async fn cleanup_task_hands(
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<ToolExecutorClient>()
             .release_execution_task_hands(Json::from(ReleaseExecutionTaskHandsRequest {
+                tenant_id: run.tenant_id,
                 session_id: run.session_id,
                 run_uid: run.run_uid,
                 task_id: task.task_id,

@@ -2679,7 +2679,7 @@ mod tests {
                 .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
                     session: &session,
                     caller_identity: &identity,
-                    worker_id: None,
+                    workspace_scope: None,
                     invocation: &connector_invocation(),
                     tool_call_id: moa_core::types::identifiers::ToolCallId::new(),
                     active_canary: None,
@@ -2712,7 +2712,7 @@ mod tests {
             .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
                 session: &production,
                 caller_identity: &identity,
-                worker_id: None,
+                workspace_scope: None,
                 invocation: &connector_invocation(),
                 tool_call_id: moa_core::types::identifiers::ToolCallId::new(),
                 active_canary: None,

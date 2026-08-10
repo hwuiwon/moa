@@ -19,6 +19,8 @@ use moa_core::{
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewStatus,
     types::identifiers::ModelId, types::observability::genai_operation_name,
     types::observability::genai_provider_name, types::provider::ModelTier,
+    types::sandbox_workspace::SandboxWorkspaceState,
+    types::sandbox_workspace::WorkspaceCapacityDimension,
 };
 
 // Sub-10ms buckets exist because turn steps like snapshot_load and
@@ -44,6 +46,206 @@ const GENAI_CLIENT_OPERATION_DURATION_METRIC: &str = "gen_ai.client.operation.du
 const GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC: &str = "gen_ai.client.operation.time_to_first_chunk";
 const OTEL_METRIC_EXPORT_INTERVAL_ENV: &str = "OTEL_METRIC_EXPORT_INTERVAL";
 const DEFAULT_OTLP_METRIC_EXPORT_INTERVAL: Duration = Duration::from_secs(120);
+
+/// Bounded sandbox-provider classes permitted on workspace metric labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxWorkspaceProviderKind {
+    /// Local development provider.
+    Local,
+    /// Daytona cloud provider.
+    Daytona,
+    /// E2B cloud provider.
+    E2b,
+    /// Any provider outside the currently supported bounded set.
+    Other,
+}
+
+impl SandboxWorkspaceProviderKind {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Daytona => "daytona",
+            Self::E2b => "e2b",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Bounded durable workspace lifecycle operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxWorkspaceLifecycleOperation {
+    /// Create durable workspace state.
+    Create,
+    /// Attach compute to durable state.
+    Attach,
+    /// Commit the writable state.
+    Commit,
+    /// Create an immutable checkpoint.
+    Checkpoint,
+    /// Restore state into fresh compute.
+    Restore,
+    /// Delete durable workspace state.
+    Delete,
+    /// Reconcile an ambiguous provider outcome.
+    Reconcile,
+    /// Purge all state owned by a deleted tenant.
+    Purge,
+    /// Apply checkpoint retention and garbage collection.
+    Retention,
+}
+
+impl SandboxWorkspaceLifecycleOperation {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Attach => "attach",
+            Self::Commit => "commit",
+            Self::Checkpoint => "checkpoint",
+            Self::Restore => "restore",
+            Self::Delete => "delete",
+            Self::Reconcile => "reconcile",
+            Self::Purge => "purge",
+            Self::Retention => "retention",
+        }
+    }
+}
+
+/// Bounded terminal outcomes for sandbox workspace operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxWorkspaceMetricResult {
+    /// The operation completed and its durable result was verified.
+    Succeeded,
+    /// The operation failed without an ambiguous provider result.
+    Failed,
+    /// Admission or policy rejected the operation before provider I/O.
+    Rejected,
+    /// Provider I/O may have happened and requires reconciliation.
+    Ambiguous,
+}
+
+impl SandboxWorkspaceMetricResult {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Rejected => "rejected",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+/// Bounded operations that transfer or remove portable checkpoint bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxWorkspaceCheckpointOperation {
+    /// Publish a new portable checkpoint.
+    Create,
+    /// Restore a portable checkpoint into fresh compute.
+    Restore,
+    /// Delete checkpoint objects after a retention or purge claim.
+    Delete,
+}
+
+impl SandboxWorkspaceCheckpointOperation {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Restore => "restore",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Bounded durable storage-resource states for fleet metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxStorageResourceMetricState {
+    /// Creation intent exists but external creation is not verified.
+    Creating,
+    /// Durable storage exists without an attached writer.
+    Ready,
+    /// Storage is attached to exactly one fenced writer.
+    Attached,
+    /// Deletion is fenced and in progress.
+    Deleting,
+    /// External absence is verified.
+    Deleted,
+    /// Provider inventory cannot yet prove presence or absence.
+    Unknown,
+    /// The resource is durably failed and needs operator action.
+    Failed,
+}
+
+impl SandboxStorageResourceMetricState {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Ready => "ready",
+            Self::Attached => "attached",
+            Self::Deleting => "deleting",
+            Self::Deleted => "deleted",
+            Self::Unknown => "unknown",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Bounded quota admission decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxWorkspaceQuotaDecision {
+    /// Capacity was reserved and work may proceed.
+    Admitted,
+    /// Capacity was unavailable and the operation was rejected.
+    Rejected,
+}
+
+impl SandboxWorkspaceQuotaDecision {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Bounded provider-inventory drift classifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxWorkspaceInventoryDrift {
+    /// A provider-owned resource has no matching durable MOA row.
+    Unknown,
+    /// More than one provider resource claims the same durable identity.
+    Duplicate,
+    /// The provider-account generation differs from the durable binding.
+    WrongAccount,
+    /// Verified ownership metadata names a different MOA workspace.
+    WrongOwner,
+    /// A durable resource row has no matching provider resource.
+    Missing,
+}
+
+impl SandboxWorkspaceInventoryDrift {
+    /// Returns the stable low-cardinality label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Duplicate => "duplicate",
+            Self::WrongAccount => "wrong_account",
+            Self::WrongOwner => "wrong_owner",
+            Self::Missing => "missing",
+        }
+    }
+}
 
 /// Exact duration buckets for service latency histograms.
 const SERVICE_DURATION_SECONDS_BUCKETS: &[f64] = &[
@@ -421,6 +623,14 @@ const HISTOGRAM_BOUNDARIES: &[(&str, &[f64])] = &[
         SERVICE_DURATION_SECONDS_BUCKETS,
     ),
     (
+        "moa_sandbox_workspace_lifecycle_duration_seconds",
+        SERVICE_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_sandbox_workspace_checkpoint_duration_seconds",
+        SERVICE_DURATION_SECONDS_BUCKETS,
+    ),
+    (
         "moa_tool_call_duration_seconds",
         SERVICE_DURATION_SECONDS_BUCKETS,
     ),
@@ -700,6 +910,140 @@ pub fn record_sandbox_provision_duration(provider: &str, tier: &str, duration: D
         "tier" => tier.to_string()
     )
     .record(duration.as_secs_f64());
+}
+
+/// Records one durable sandbox workspace lifecycle outcome and its latency.
+pub fn record_sandbox_workspace_lifecycle(
+    provider: SandboxWorkspaceProviderKind,
+    operation: SandboxWorkspaceLifecycleOperation,
+    result: SandboxWorkspaceMetricResult,
+    duration: Duration,
+) {
+    counter!(
+        "moa_sandbox_workspace_lifecycle_total",
+        "provider_kind" => provider.as_str(),
+        "operation" => operation.as_str(),
+        "result" => result.as_str()
+    )
+    .increment(1);
+    histogram!(
+        "moa_sandbox_workspace_lifecycle_duration_seconds",
+        "provider_kind" => provider.as_str(),
+        "operation" => operation.as_str(),
+        "result" => result.as_str()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Sets the fleet count for one durable workspace state and provider class.
+pub fn record_sandbox_workspace_state(
+    provider: SandboxWorkspaceProviderKind,
+    state: SandboxWorkspaceState,
+    count: u64,
+) {
+    gauge!(
+        "moa_sandbox_workspace_state",
+        "provider_kind" => provider.as_str(),
+        "state" => state.as_str()
+    )
+    .set(count as f64);
+}
+
+/// Sets the fleet count for one provider storage-resource state.
+pub fn record_sandbox_storage_resource_state(
+    provider: SandboxWorkspaceProviderKind,
+    state: SandboxStorageResourceMetricState,
+    count: u64,
+) {
+    gauge!(
+        "moa_sandbox_workspace_storage_resource_state",
+        "provider_kind" => provider.as_str(),
+        "state" => state.as_str()
+    )
+    .set(count as f64);
+}
+
+/// Records one workspace capacity admission decision.
+pub fn record_sandbox_workspace_quota_decision(
+    dimension: WorkspaceCapacityDimension,
+    decision: SandboxWorkspaceQuotaDecision,
+) {
+    counter!(
+        "moa_sandbox_workspace_quota_decisions_total",
+        "dimension" => dimension.as_str(),
+        "decision" => decision.as_str()
+    )
+    .increment(1);
+}
+
+/// Sets fleet quota utilization for one capacity dimension.
+///
+/// Callers must aggregate across tenants before recording. Per-tenant values are
+/// intentionally not accepted because a shared unlabeled gauge would otherwise
+/// expose only the last tenant observed while tenant labels would be unbounded.
+pub fn record_sandbox_workspace_quota_utilization(
+    dimension: WorkspaceCapacityDimension,
+    ratio: f64,
+) {
+    gauge!(
+        "moa_sandbox_workspace_quota_utilization_ratio",
+        "dimension" => dimension.as_str()
+    )
+    .set(ratio.clamp(0.0, 1.0));
+}
+
+/// Sets the current supervised workspace-reaper health snapshot.
+pub fn record_sandbox_workspace_reaper(
+    ready: bool,
+    heartbeat_age: Duration,
+    backlog: u64,
+    oldest_work_age: Duration,
+) {
+    gauge!("moa_sandbox_workspace_reaper_ready").set(if ready { 1.0 } else { 0.0 });
+    gauge!("moa_sandbox_workspace_reaper_heartbeat_age_seconds").set(heartbeat_age.as_secs_f64());
+    gauge!("moa_sandbox_workspace_reaper_backlog").set(backlog as f64);
+    gauge!("moa_sandbox_workspace_reaper_oldest_work_age_seconds")
+        .set(oldest_work_age.as_secs_f64());
+}
+
+/// Records checkpoint bytes and latency for one bounded lifecycle outcome.
+pub fn record_sandbox_workspace_checkpoint(
+    provider: SandboxWorkspaceProviderKind,
+    operation: SandboxWorkspaceCheckpointOperation,
+    result: SandboxWorkspaceMetricResult,
+    bytes: u64,
+    duration: Duration,
+) {
+    if bytes > 0 {
+        counter!(
+            "moa_sandbox_workspace_checkpoint_bytes_total",
+            "provider_kind" => provider.as_str(),
+            "operation" => operation.as_str(),
+            "result" => result.as_str()
+        )
+        .increment(bytes);
+    }
+    histogram!(
+        "moa_sandbox_workspace_checkpoint_duration_seconds",
+        "provider_kind" => provider.as_str(),
+        "operation" => operation.as_str(),
+        "result" => result.as_str()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Sets unresolved provider-inventory findings for one bounded classification.
+pub fn record_sandbox_workspace_inventory_drift(
+    provider: SandboxWorkspaceProviderKind,
+    classification: SandboxWorkspaceInventoryDrift,
+    count: u64,
+) {
+    gauge!(
+        "moa_sandbox_workspace_inventory_drift",
+        "provider_kind" => provider.as_str(),
+        "classification" => classification.as_str()
+    )
+    .set(count as f64);
 }
 
 /// Records one appended session event, labeled by event type.
@@ -1064,6 +1408,58 @@ fn register_metric_descriptions() {
         "moa_sandbox_provision_seconds",
         "Sandbox provisioning duration in seconds."
     );
+    describe_counter!(
+        "moa_sandbox_workspace_lifecycle_total",
+        "Durable sandbox workspace lifecycle outcomes by bounded provider class, operation, and result."
+    );
+    describe_histogram!(
+        "moa_sandbox_workspace_lifecycle_duration_seconds",
+        "Durable sandbox workspace lifecycle latency in seconds by bounded provider class, operation, and result."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_state",
+        "Current durable sandbox workspaces by bounded provider class and lifecycle state."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_storage_resource_state",
+        "Current provider storage resources by bounded provider class and durable state."
+    );
+    describe_counter!(
+        "moa_sandbox_workspace_quota_decisions_total",
+        "Workspace capacity admission decisions by bounded dimension and result."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_quota_utilization_ratio",
+        "Fleet workspace capacity utilization ratio by bounded dimension."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_reaper_ready",
+        "Whether the supervised workspace reaper is healthy on this service replica."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_reaper_heartbeat_age_seconds",
+        "Age in seconds of the supervised workspace reaper heartbeat."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_reaper_backlog",
+        "Workspace reaper rows awaiting maintenance on this service replica."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_reaper_oldest_work_age_seconds",
+        "Age in seconds of the oldest workspace reaper item."
+    );
+    describe_counter!(
+        "moa_sandbox_workspace_checkpoint_bytes_total",
+        "Portable checkpoint bytes processed by bounded provider class, operation, and result."
+    );
+    describe_histogram!(
+        "moa_sandbox_workspace_checkpoint_duration_seconds",
+        "Portable checkpoint operation latency in seconds by bounded provider class, operation, and result."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_inventory_drift",
+        "Unresolved provider inventory findings by bounded provider class and classification."
+    );
     describe_histogram!(
         "moa_cache_hit_rate",
         "Ratio of cached input tokens to total input tokens for one request."
@@ -1191,6 +1587,8 @@ mod tests {
             "moa_retrieval_leg_seconds",
             "moa_retrieval_rrf_rerank_seconds",
             "moa_sandbox_provision_seconds",
+            "moa_sandbox_workspace_checkpoint_duration_seconds",
+            "moa_sandbox_workspace_lifecycle_duration_seconds",
             "moa_session_event_append_phase_seconds",
             "moa_tool_call_duration_seconds",
             "moa_turn_latency_seconds",

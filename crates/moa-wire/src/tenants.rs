@@ -28,6 +28,8 @@ pub enum TenantPurgeStatus {
     Pending,
     /// External vector rows were removed before relational source rows disappeared.
     VectorsPurged,
+    /// Sandbox compute, provider storage, and checkpoint objects were proven absent.
+    SandboxWorkspacesPurged,
     /// Every stored credential version and its permitted audit projection are gone.
     ///
     /// Credentials are swept before relational deletion because they grant live

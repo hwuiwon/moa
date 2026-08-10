@@ -217,6 +217,11 @@ fn recorded_provider_handles_compaction_requests_without_advancing_transcript_cu
             .iter()
             .any(|event| matches!(event, ProviderEvent::TextDelta { .. }))
     );
+    assert!(compaction_events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::Usage { usage }
+            if usage.input_tokens_uncached > 0 && usage.output_tokens > 0
+    )));
     assert_eq!(first_events, first);
     assert_eq!(provider.cursor().expect("cursor"), 1);
 }
@@ -427,17 +432,24 @@ async fn long_test_case_dispatches_to_run_scenario_with_provider() {
     )
     .expect("engine");
     let provider = Arc::new(RecordedScriptedProvider::new(transcript));
-    let run = engine
-        .run_suite_with_provider(
-            &suite,
-            &[AgentConfig {
-                name: "long-agent".to_string(),
-                ..AgentConfig::default()
-            }],
-            provider,
-        )
-        .await
-        .expect("run suite");
+    // Poll the complete engine and brain pipeline from a scheduler task. In debug builds, polling
+    // that chain inline on libtest's 2 MiB thread can exhaust the stack before the first retrieval
+    // query, which makes this dispatch contract depend on the test harness's stack size.
+    let run = tokio::spawn(async move {
+        engine
+            .run_suite_with_provider(
+                &suite,
+                &[AgentConfig {
+                    name: "long-agent".to_string(),
+                    ..AgentConfig::default()
+                }],
+                provider,
+            )
+            .await
+    })
+    .await
+    .expect("long eval task must not panic or be cancelled")
+    .expect("run suite");
 
     assert_eq!(run.results.len(), 1);
     assert_eq!(run.results[0].status, EvalStatus::Passed);

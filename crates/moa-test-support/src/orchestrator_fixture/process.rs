@@ -5,7 +5,7 @@ pub(super) use crate::process::TestChildGuard as ChildGuard;
 pub(super) use crate::process::terminate_child;
 
 const ORCHESTRATOR_FIXTURE_FEATURES: &str =
-    "provider-overrides,integration,execution-planning-failpoints";
+    "provider-overrides,integration,execution-planning-failpoints,sandbox-workspace-failpoints";
 const ORCHESTRATOR_FIXTURE_TARGET_DIR: &str = "orchestrator-fixture-failpoints";
 
 /// Immutable, fixture-owned copy of the selected orchestrator executable.
@@ -270,6 +270,7 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
     let mut command = Command::new(config.binary);
     command
         .env_remove("MOA_MCP_SERVERS_JSON")
+        .env_remove("MOA_DATABASE_MAINTENANCE_URL")
         .env_remove("MOA_PROVIDERS_OVERRIDE")
         .env_remove("MOA_SCRIPTED_PROVIDER_REQUEST_LOG")
         .env_remove("MOA_OBSERVABILITY_SERVICE_NAME")

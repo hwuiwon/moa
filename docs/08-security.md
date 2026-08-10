@@ -49,6 +49,14 @@ OpenFGA is the default authorization engine. Handlers must call
 transactional outbox is the only supported way to synchronize product state and
 OpenFGA tuples.
 
+`SandboxWorkspace` is a tenant-owned resource. Every list, get, attach,
+checkpoint, restore, and delete authorizes before its protected read and derives
+tenant plus worker/execution-task scope from verified durable state. A local
+lifecycle/delete fence is checked on every operation in addition to OpenFGA, so
+a short positive-cache lifetime cannot reopen a deleting workspace. Provider
+identifiers, paths, labels, and object keys are never authorization tokens. See
+[Sandbox Workspaces](25-sandbox-workspaces.md).
+
 Workspace admins are first-class OpenFGA super-admin principals:
 `workspace#admin` inherits into `tenant#admin` for every tenant attached to the
 workspace, and `tenant#admin` inherits into `tenant#operator`. Handlers still
@@ -247,19 +255,23 @@ host tier can enforce no network posture at all, so it admits only
 `Unrestricted` — a deployment that needs deny-all egress must not route to host
 hands. See `docs/06-hands-and-mcp.md` for the full effective-profile contract.
 
-Every sandbox is ephemeral by default, and that is now enforced rather than
-assumed. Each lease carries an immutable hard maximum lifetime that renewal
-cannot extend, and the durable hand-lease reaper destroys expired, idle, and
-abandoned sandboxes without waiting for traffic that may never arrive. Durable
-state belongs in the session event log, memory, artifacts, or approved external
-systems, not in a leftover container.
+Every sandbox compute instance is ephemeral by default, and that is enforced
+rather than assumed. Each lease carries an immutable hard maximum lifetime that
+renewal cannot extend, and the durable hand-lease reaper destroys expired, idle,
+and abandoned compute without waiting for traffic that may never arrive.
+Tenant-created filesystem state is different: an independently retained
+`SandboxWorkspace` stores only its filesystem-only mutable root through
+encrypted, verified portable checkpoints. Restate/session state and a leftover
+container do not make arbitrary files durable.
 
-The root coordinator is sandbox-free, and each worker owns one isolated
-sandbox keyed by `worker_id` (lease key `(session_id, worker_id,
-provider)`). Parallel workers therefore do not share a compute environment, so
-one delegated task's untrusted code or files cannot reach a sibling's sandbox. A
-worker's sandbox is released when it self-cleans, and any remainder is released
-at session teardown.
+The root coordinator is sandbox-free. Each worker or sandbox-using execution
+task owns one typed workspace and one writable attachment under independent
+writer and compute-instance fences. Parallel owners therefore do not share a
+compute environment or workspace root. Self-cleanup checkpoints according to
+policy and releases compute without deleting retained workspace state. The
+architecture and runtime have no session-level workspace admission: sandbox
+dispatch requires a typed worker or execution-task owner and rejects its
+absence before workspace reads or provider I/O.
 
 Conversational workers are available only as interactive delegation in `act`;
 they are not the bulk DAG primitive. Sandbox-using `ExecutionTask` instances
@@ -267,6 +279,18 @@ receive equivalent isolation under a stable run/task identity and generation
 fence. Execution maps submit every budget-admitted logical task without an
 application fan-out cap; provider pacing and governed capability or hand
 capacity control physical pressure.
+
+Only the reserved mutable tenant-data root is checkpointed. Trusted files,
+credentials, tokens, authorization, policy, runtime controls, network state,
+and process memory stay outside it and are rebuilt from current authority after
+restore. Provider working state is never committed by itself. Mutating tool
+success is durable only after quiescence, bounded encrypted checkpoint upload,
+manifest/digest verification, and a fenced head compare-and-set. Daytona uses
+tenant-dedicated volumes with opaque workspace subpaths as working state; E2B
+exports the reserved root, publishes a portable checkpoint, and kills compute
+because its public pause and snapshot contracts retain process memory;
+local/Docker uses isolated scratch. All use the portable checkpoint as recovery
+authority.
 
 ## Prompt Injection Defenses
 

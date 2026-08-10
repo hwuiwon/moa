@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,7 +9,8 @@ use moa_core::{
     types::action_policy::RiskLevel, types::completion::ToolInvocation, types::hands::HandHandle,
     types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxTier,
     types::identifiers::HandProvisioningOperationId, types::identifiers::SessionId,
-    types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::sandbox_workspace::SandboxWorkspaceScope, types::session::SessionMeta,
     types::tools::IdempotencyClass, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
     types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
@@ -124,6 +125,8 @@ impl HandProvider for MockHandProvider {
 
     async fn provisioned_hands(
         &self,
+        _provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+        _provider_account_generation: u64,
         operation_id: HandProvisioningOperationId,
     ) -> Result<Vec<HandHandle>> {
         let state = self.state.lock().expect("lock mock provider state");
@@ -268,11 +271,21 @@ async fn router_with_providers_and_routes(
 fn session() -> SessionMeta {
     let identity = identity();
     SessionMeta {
-        id: SessionId::new(),
+        id: SessionId(uuid::Uuid::from_u128(
+            0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c323,
+        )),
         tenant_id: identity.tenant_id,
         ..SessionMeta::default()
     }
 }
+
+static WORKSPACE_SCOPE: LazyLock<SandboxWorkspaceScope> =
+    LazyLock::new(|| SandboxWorkspaceScope::Worker {
+        session_id: SessionId(uuid::Uuid::from_u128(
+            0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c323,
+        )),
+        worker_id: "recovery-worker".to_string(),
+    });
 
 fn identity() -> moa_core::traits::Identity {
     moa_core::traits::Identity {
@@ -328,7 +341,7 @@ async fn recovery_retries_retryable_failures_up_to_three_attempts() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -381,7 +394,7 @@ async fn cancellation_during_retry_backoff_stops_recovery_offline() {
     let call = router.execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
         session: &session,
         caller_identity: &caller,
-        worker_id: None,
+        workspace_scope: Some(&WORKSPACE_SCOPE),
         invocation: &invocation,
         tool_call_id: ToolCallId::new(),
         active_canary: None,
@@ -434,7 +447,7 @@ async fn recovery_reprovisions_and_succeeds_after_transient_sandbox_death() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -477,7 +490,7 @@ async fn recovery_returns_fatal_failures_immediately() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -523,7 +536,7 @@ async fn recovery_propagates_budget_exhaustion_from_hand_execution() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -567,7 +580,7 @@ async fn recovery_propagates_budget_exhaustion_from_health_check() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -621,7 +634,7 @@ async fn recovery_caps_reprovision_attempts_per_session() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -664,7 +677,7 @@ async fn recovery_does_not_retry_non_idempotent_execution_failure() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -710,7 +723,7 @@ async fn recovery_does_not_reprovision_non_idempotent_execution_failure() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -755,7 +768,7 @@ async fn recovery_reprovisions_non_idempotent_before_execution() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -778,7 +791,7 @@ async fn recovery_reprovisions_non_idempotent_before_execution() {
 }
 
 #[tokio::test]
-async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
+async fn durable_workspace_does_not_fallback_when_primary_fails_before_execution() {
     let primary = Arc::new(MockHandProvider::new(
         "primary-cloud",
         MockProviderState {
@@ -820,11 +833,11 @@ async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
     )
     .await;
 
-    let secured_8 = router
+    let error = router
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -832,24 +845,19 @@ async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
             scope: crate::core::ToolCallScope::unbounded(),
         })
         .await
-        .expect("fallback route should return a tool output");
+        .expect_err("a durable workspace must not cross provider boundaries");
 
-    let _hand_id = secured_8.hand_id.clone();
-
-    let output = secured_8.safe_output;
-
-    assert!(!output.is_error);
-    assert_eq!(output.to_text(), "fallback ran");
+    assert!(matches!(error, MoaError::ProviderError(message) if message == "connection refused"));
     let primary = primary.snapshot();
     let fallback = fallback.snapshot();
     assert_eq!(primary.provision_calls, 1);
     assert_eq!(primary.execute_calls, 0);
-    assert_eq!(fallback.provision_calls, 1);
-    assert_eq!(fallback.execute_calls, 1);
+    assert_eq!(fallback.provision_calls, 0);
+    assert_eq!(fallback.execute_calls, 0);
 }
 
 #[tokio::test]
-async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
+async fn durable_workspace_retries_idempotent_tools_without_cross_provider_fallback() {
     let primary = Arc::new(MockHandProvider::new(
         "primary-idempotent",
         MockProviderState {
@@ -899,7 +907,7 @@ async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -907,16 +915,18 @@ async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
             scope: crate::core::ToolCallScope::unbounded(),
         })
         .await
-        .expect("idempotent fallback route should return a tool output");
+        .expect("the pinned provider should satisfy its retry");
 
     let _hand_id = secured_9.hand_id.clone();
 
     let output = secured_9.safe_output;
 
     assert!(!output.is_error);
-    assert_eq!(output.to_text(), "idempotent fallback");
-    assert_eq!(primary.snapshot().execute_calls, 1);
-    assert_eq!(fallback.snapshot().execute_calls, 1);
+    assert_eq!(output.to_text(), "ok");
+    assert_eq!(primary.snapshot().execute_calls, 2);
+    let fallback = fallback.snapshot();
+    assert_eq!(fallback.provision_calls, 0);
+    assert_eq!(fallback.execute_calls, 0);
 }
 
 #[tokio::test]
@@ -969,7 +979,7 @@ async fn recovery_does_not_fallback_after_non_idempotent_execution_failure() {
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -996,7 +1006,7 @@ async fn recovery_does_not_fallback_after_non_idempotent_execution_failure() {
 }
 
 #[tokio::test]
-async fn recovery_prefers_successful_fallback_for_same_scope() {
+async fn durable_workspace_never_marks_a_fallback_provider_sticky() {
     let primary = Arc::new(MockHandProvider::new(
         "primary-once",
         MockProviderState {
@@ -1039,11 +1049,11 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
     .await;
     let session = session();
 
-    let secured_11 = router
+    let error = router
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -1051,16 +1061,14 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
             scope: crate::core::ToolCallScope::unbounded(),
         })
         .await
-        .expect("first call should use fallback");
+        .expect_err("the first call must preserve the pinned provider failure");
+    assert!(matches!(error, MoaError::ProviderError(message) if message == "connection refused"));
 
-    let _first_hand_id = secured_11.hand_id.clone();
-
-    let first_output = secured_11.safe_output;
     let secured_12 = router
         .execute_authorized_with_recovery(crate::core::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&WORKSPACE_SCOPE),
             invocation: &bash_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -1068,14 +1076,13 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
             scope: crate::core::ToolCallScope::unbounded(),
         })
         .await
-        .expect("second call should prefer the proven fallback");
+        .expect("the second call may retry the same pinned provider");
     let _second_hand_id = secured_12.hand_id.clone();
     let second_output = secured_12.safe_output;
 
-    assert_eq!(first_output.to_text(), "first fallback");
     assert_eq!(second_output.to_text(), "ok");
-    assert_eq!(primary.snapshot().provision_calls, 1);
+    assert_eq!(primary.snapshot().provision_calls, 2);
     let fallback = fallback.snapshot();
-    assert_eq!(fallback.provision_calls, 1);
-    assert_eq!(fallback.execute_calls, 2);
+    assert_eq!(fallback.provision_calls, 0);
+    assert_eq!(fallback.execute_calls, 0);
 }

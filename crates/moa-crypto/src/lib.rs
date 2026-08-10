@@ -59,6 +59,7 @@
 #![deny(missing_docs)]
 
 mod aead;
+pub mod chunked;
 pub mod envelope;
 pub mod error;
 pub mod key_wrap;

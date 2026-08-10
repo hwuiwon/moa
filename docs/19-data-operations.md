@@ -193,6 +193,136 @@ scores. A superseding case may replace one only when it exercises the same
 production path and strictly contains the old failure condition; record that
 relationship in the scenario comment.
 
+## Sandbox Workspace Operations
+
+Postgres is the ownership and lifecycle authority for durable sandbox
+workspaces. Provider inventory, mutable volumes, compute instances, and portable
+checkpoint objects are external evidence that maintenance must reconcile to the
+durable tenant/workspace/account-generation fences; none of them grants access
+on its own. Operators must not repair workspace rows, clear operation fences, or
+delete provider resources with ad hoc SQL or provider-console actions.
+
+The `MOA Sandbox Workspace Fleet` dashboard and
+`ops/prometheus/alerts/sandbox-workspaces.yaml` cover lifecycle counts and
+latency, durable workspace/resource states, quota decisions and fleet
+utilization, reaper health/backlog, checkpoint bytes and latency, and provider
+inventory drift. Metric dimensions are closed vocabularies: `provider_kind`,
+`operation`, `result`, `state`, `dimension`, `decision`, and `classification`.
+Tenant, user, workspace, checkpoint, provider-account, and raw provider-resource
+identities are trace fields or protected database evidence, never metric labels.
+Paths, object keys, wrapped keys, credentials, file names, and file content must
+not enter metric labels, dashboard legends, alert annotations, or public status
+responses.
+
+When investigating an incident, correlate a bounded metric series to a request
+or workspace only after moving to protected traces and tenant-scoped repository
+reads. Do not paste raw provider inventory, signed ownership markers, archive
+manifests, checkpoint paths, or credential errors into tickets or chat tools.
+
+### Workspace Rollout And Rollback
+
+The deployment starts with `MOA_SANDBOX_WORKSPACE_MODE=disabled`. Apply V58 and
+OpenFGA v7 while dark, drain legacy hands, then select `maintenance` only after
+configuring durable Postgres KMS, external checkpoint storage, provider-account
+bootstrap mappings, bounded retention/quotas, and the canary route. Maintenance
+must become ready and converge reconciliation/alerts before changing to
+`admit`. Admission is limited to the configured account generation/cell and
+tenant allowlist; expand by changing deployment configuration, never through a
+request field or provider/model output.
+
+Rollback is `admit` to `maintenance`. This stops new admission and writer claims
+while retaining deletion, retention, reconciliation, purge, and the supervised
+reaper. Confirm every operation and attachment is terminal or reconcilable and
+provider inventory has converged before considering `disabled`. Do not use
+disabled as an emergency stop while durable work remains; use the local access
+and writer fences while maintenance drains.
+
+Tenant offboarding is unavailable in `disabled`: the purge workflow refuses at
+`Pending`, before deleting vectors or relational rows, because only the
+maintenance coordinator can prove provider-side absence. Enable `maintenance`,
+complete external-first purge, and drain all durable state before returning dark.
+
+### Workspace Reaper Failure
+
+`MOASandboxWorkspaceReaperUnready` or
+`MOASandboxWorkspaceReaperHeartbeatStale` means the supervised maintenance job
+on at least one serving replica is unhealthy. Readiness must remove that replica
+from service and an unexpected job exit is process-fatal. Check, in order:
+
+1. replica readiness and the reaper's bounded unready reason/task result;
+2. `moa_sandbox_workspace_reaper_heartbeat_age_seconds`, backlog, and oldest-work
+   age across replicas;
+3. Postgres, checkpoint object-store, KMS, and provider-account reachability;
+4. durable operation/retry fences through tenant-scoped repository or admin
+   surfaces; and
+5. provider status after the durable evidence has identified the affected
+   bounded provider class.
+
+Restart only after preserving Postgres, object-store, and provider state. A
+restart reclaims expired durable work; it is not permission to retry an
+ambiguous external mutation manually. During rollback, move admission to
+maintenance mode first and keep the coordinator/reaper running until backlog
+and inventory findings converge. Never switch directly to disabled mode while
+durable work remains.
+
+### Workspace Maintenance Backlog
+
+`MOASandboxWorkspaceReaperBacklogAge` means retention, deletion, absence proof,
+or reconciliation is not converging. Split the dashboard by bounded lifecycle
+operation and provider class, then inspect the oldest durable claim. Common
+causes are a provider outage, a partial checkpoint upload, an expired deletion
+claim, bucket-versioning drift, or an inventory finding waiting for quarantine
+review.
+
+Do not shorten claim TTLs below the configured retry/heartbeat window and do not
+clear claims by hand. Expired claims are reclaimable; stale claimants are fenced
+from finalization. A provider outage must leave purge incomplete and resources
+inaccessible, not discard the durable finding or relational ownership record.
+
+### Workspace Capacity Pressure
+
+`MOASandboxWorkspaceQuotaNearCapacity` reports fleet-level utilization by
+capacity dimension. Confirm provider-observed usage, durable reservations, and
+configured limits together before raising a limit. A reservation may be pending
+provider visibility, so adding observed usage and reservations without applying
+the provider-specific no-double-count rule overstates pressure.
+
+Quota rejections are expected at a hard limit and execute no provider mutation.
+Investigate sustained rejection rates for the affected dimension. For Daytona
+volumes, preserve one tenant-dedicated resource per tenant/account generation
+and security class; do not pool tenant subpaths to work around account limits.
+
+### Portable Checkpoint Failures
+
+`MOASandboxWorkspaceCheckpointFailures` reports failed or ambiguous create,
+restore, or delete operations. The last verified committed revision remains the
+authority. Check object-store/KMS reachability, bounded archive limits, manifest
+digest verification, and the exact durable operation fence. Never restore from
+a partial upload or a provider-native snapshot in place of the portable
+checkpoint authority.
+
+The checkpoint bucket must use the configured, verified versioning policy. MOA
+currently requires a bucket whose provider reports versioning was never enabled;
+enabled or suspended buckets retain historical bytes and are unsupported. An
+unknown or changed policy fails startup/purge closed. Absence requires bounded enumeration
+of the exact checkpoint prefix and two separated empty observations whose
+inventory digest remains unchanged; a missing manifest alone proves nothing.
+
+### Provider Inventory Drift
+
+`MOASandboxWorkspaceInventoryDrift` is critical because provider inventory and
+durable MOA ownership disagree. The maintenance coordinator compares only
+provider-verified MOA ownership metadata with persisted storage/hand rows.
+Unknown, duplicate, wrong-account, wrong-owner, and missing classifications are
+written to the maintenance-only finding ledger and quarantined.
+
+Never auto-delete a finding. Establish the persisted provider account and
+generation, verify signed/encrypted ownership metadata, inspect every matching
+durable workspace/storage/hand row, and obtain two-empty external absence proof
+before resolving it. If ownership remains ambiguous, keep the resource
+quarantined and access-fenced. Resolution must preserve first/last-seen time,
+evidence digest, and resolution audit data.
+
 ## Graph Changelog Replication
 
 `moa.graph_changelog` is the immutable outbox for graph-memory mutations.

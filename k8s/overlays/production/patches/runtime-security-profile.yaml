@@ -10,6 +10,44 @@ data:
   MOA_SECURITY_PROFILE: cloud
   MOA_PERMISSIONS_DEFAULT_EFFECT: deny
   MOA_CLOUD_HANDS_DEFAULT_PROVIDER: e2b
+  # Production first starts maintenance owners while admission stays dark.
+  # Switching to `admit` is a later atomic rollout step after readiness proves
+  # the exact provider account, bucket, quotas, and reaper heartbeat.
+  MOA_SANDBOX_WORKSPACE_MODE: maintenance
+  MOA_SANDBOX_WORKSPACE_OPERATION_RETENTION_SECONDS: "604800"
+  MOA_SANDBOX_WORKSPACE_MAXIMUM_OPERATION_SECONDS: "86400"
+  MOA_SANDBOX_WORKSPACE_RECONCILIATION_CLAIM_TTL_SECONDS: "60"
+  MOA_SANDBOX_WORKSPACE_REAPER_HEARTBEAT_MAXIMUM_AGE_SECONDS: "60"
+  MOA_AUTHZ_OPENFGA_MODEL_VERSION: "7"
+  MOA_AUTHZ_OPENFGA_URL: openfga-url-render-input
+  MOA_AUTHZ_OPENFGA_STORE_ID: openfga-store-render-input
+  MOA_AUTHZ_OPENFGA_MODEL_ID: openfga-model-render-input
+  MOA_OBJECT_STORE_BACKEND: gcs
+  MOA_OBJECT_STORE_CREDENTIAL_MODE: workload_identity
+  MOA_OBJECT_STORE_ALLOW_HTTP: "false"
+  MOA_SANDBOX_CHECKPOINT_BUCKET: sandbox-checkpoint-bucket-render-input
+  MOA_SANDBOX_CHECKPOINT_PREFIX: sandbox-checkpoint-prefix-render-input
+  MOA_SANDBOX_CHECKPOINT_BUCKET_VERSIONING: unversioned_required
+  MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_MAXIMUM_AGE_SECONDS: "60"
+  MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_TIMEOUT_SECONDS: "10"
+  # Non-secret persisted-account/isolation-cell mapping. The account UUID and
+  # generation must match the maintenance-seeded sandbox_provider_accounts row.
+  MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON: >-
+    [{"provider_account_id":"5df222fb-c303-5ae4-a494-8ae4de622e2d",
+    "generation":111111,"provider":"e2b","isolation_cell":"sandbox-cell-render-input",
+    "api_origin":"https://api.e2b.dev","toolbox_origin":null,
+    "sandbox_domain":"e2b.app","default_runtime":"base",
+    "project_fingerprint":"sandbox-project-fingerprint-render-input",
+    "credential":{"path":"/var/run/secrets/moa-hand-providers/e2b","owner_uid":10001}}]
+  MOA_SANDBOX_WORKSPACE_CANARY_JSON: >-
+    {"provider_account_id":"5df222fb-c303-5ae4-a494-8ae4de622e2d",
+    "provider_account_generation":111111,"isolation_cell":"sandbox-cell-render-input",
+    "tenant_allowlist":["ae88b9a9-35e8-5ce4-a4de-8f5172c17115"]}
+  MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON: >-
+    [{"tenant_id":"ae88b9a9-35e8-5ce4-a4de-8f5172c17115",
+    "provider_account_id":"5df222fb-c303-5ae4-a494-8ae4de622e2d",
+    "provider_account_generation":111111,"max_workspaces":10,
+    "max_active_hands":2,"max_checkpoints":100,"max_logical_bytes":10737418240}]
   # E2B fixes resource sizing in its template, so those dimensions remain
   # explicitly unbounded. It can enforce deny-all egress and the hard lifetime;
   # MOA's durable reaper enforces the idle deadline.

@@ -247,6 +247,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
         llm_provider: llm.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router),
+        workspace_scope: None,
     })
     .await
     .unwrap();
@@ -348,6 +349,7 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
         llm_provider: llm.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router.clone()),
+        workspace_scope: None,
     })
     .await
     .unwrap();
@@ -379,6 +381,7 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
         llm_provider: llm.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router),
+        workspace_scope: None,
     })
     .await
     .unwrap();

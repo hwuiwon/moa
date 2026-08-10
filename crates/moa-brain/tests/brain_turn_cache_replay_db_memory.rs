@@ -14,13 +14,15 @@ use moa_core::{
     error::Result, events::Event, session_replay::TurnReplayCounters,
     session_replay::TurnReplaySnapshot, session_replay::scope_turn_replay_counters,
     traits::SessionStore, types::completion::CompletionRequest, types::completion::TokenUsage,
-    types::contact::ContactId, types::contact::ContactRef,
+    types::completion::ToolInvocation, types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
-    types::model::ToolCallFormat, types::session::SessionMeta, types::tools::ToolOutput,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::model::ModelCapabilities,
+    types::model::TokenPricing, types::model::ToolCallFormat,
+    types::sandbox_workspace::SandboxWorkspaceScope, types::session::SessionMeta,
+    types::tools::ToolOutput,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{AuthorizedToolCall, ToolCallScope, ToolRouter};
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
 use moa_security::ActionPolicies;
 use moa_test_support::postgres::bootstrap_test_db;
@@ -67,27 +69,6 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
 
     let root = TempDir::new()?;
     let workspace = root.path().join("workspace");
-    tokio::fs::create_dir_all(&workspace).await?;
-    tokio::fs::create_dir_all(workspace.join(".venv")).await?;
-    tokio::fs::create_dir_all(workspace.join("ignored_dir")).await?;
-
-    tokio::fs::write(workspace.join("auth.rs"), build_auth_source()).await?;
-    tokio::fs::write(
-        workspace.join("lib.rs"),
-        "pub fn issue_refresh_token(user_id: &str) -> String {\n    format!(\"rt-{user_id}\")\n}\n",
-    )
-    .await?;
-    tokio::fs::write(
-        workspace.join(".venv/junk.py"),
-        "refresh_token = issue_refresh_token('poison')\n",
-    )
-    .await?;
-    tokio::fs::write(
-        workspace.join("ignored_dir/ghost.rs"),
-        "pub const GHOST: &str = \"issue_refresh_token\";\n",
-    )
-    .await?;
-    tokio::fs::write(workspace.join(".gitignore"), "ignored_dir/\n").await?;
 
     let mut config = moa_config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
@@ -108,6 +89,10 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
         ..SessionMeta::default()
     };
     let session_id = session_store.create_session(session.clone()).await?;
+    let workspace_scope = SandboxWorkspaceScope::Worker {
+        session_id,
+        worker_id: "brain-turn-cache-replay-worker".to_string(),
+    };
     allow_cache_replay_bash(&session_store, tenant_id).await?;
 
     let router = Arc::new(
@@ -120,6 +105,32 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     router
         .remember_workspace_root(tenant_id, workspace.clone())
         .await;
+    for (path, content) in [
+        ("auth.rs", build_auth_source()),
+        (
+            "lib.rs",
+            "pub fn issue_refresh_token(user_id: &str) -> String {\n    format!(\"rt-{user_id}\")\n}\n"
+                .to_string(),
+        ),
+        (
+            ".venv/junk.py",
+            "refresh_token = issue_refresh_token('poison')\n".to_string(),
+        ),
+        (
+            "ignored_dir/ghost.rs",
+            "pub const GHOST: &str = \"issue_refresh_token\";\n".to_string(),
+        ),
+        (".gitignore", "ignored_dir/\n".to_string()),
+    ] {
+        write_fixture_file(
+            &router,
+            &session,
+            &workspace_scope,
+            path,
+            content,
+        )
+        .await?;
+    }
 
     let provider = Arc::new(build_scripted_provider());
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
@@ -179,6 +190,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
                 llm_provider: provider.clone(),
                 pipeline: &pipeline,
                 tool_router: Some(router.clone()),
+                workspace_scope: Some(workspace_scope.clone()),
             }),
         )
         .await?;
@@ -214,7 +226,20 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
         "every provider request should emit one CacheReport event"
     );
 
-    let auth_content = tokio::fs::read_to_string(workspace.join("auth.rs")).await?;
+    let auth_read = execute_fixture_tool(
+        &router,
+        &session,
+        &workspace_scope,
+        "file_read",
+        json!({ "path": "auth.rs", "start_line": 121, "end_line": 123 }),
+    )
+    .await?;
+    assert!(
+        !auth_read.is_error,
+        "typed workspace read failed: {}",
+        auth_read.to_text()
+    );
+    let auth_content = numbered_file_read_content(&auth_read);
     assert!(!auth_content.contains(OLD_SNIPPET));
     assert!(auth_content.contains(NEW_SNIPPET));
     assert_eq!(auth_content.matches(NEW_SNIPPET).count(), 1);
@@ -430,6 +455,70 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     assert_turn_latency_spans(&span_recorder);
 
     Ok(())
+}
+
+async fn write_fixture_file(
+    router: &ToolRouter,
+    session: &SessionMeta,
+    workspace_scope: &SandboxWorkspaceScope,
+    path: &str,
+    content: String,
+) -> Result<()> {
+    let output = execute_fixture_tool(
+        router,
+        session,
+        workspace_scope,
+        "file_write",
+        json!({ "path": path, "content": content }),
+    )
+    .await?;
+    if output.is_error {
+        return Err(moa_core::error::MoaError::ToolError(format!(
+            "cache replay fixture failed to write {path}: {}",
+            output.to_text()
+        )));
+    }
+    Ok(())
+}
+
+async fn execute_fixture_tool(
+    router: &ToolRouter,
+    session: &SessionMeta,
+    workspace_scope: &SandboxWorkspaceScope,
+    tool_name: &str,
+    input: Value,
+) -> Result<ToolOutput> {
+    let invocation = ToolInvocation {
+        id: None,
+        name: tool_name.to_string(),
+        input,
+    };
+    let caller_identity = test_identity(session.tenant_id);
+    let output = router
+        .execute_authorized(AuthorizedToolCall {
+            session,
+            caller_identity: &caller_identity,
+            workspace_scope: Some(workspace_scope),
+            invocation: &invocation,
+            tool_call_id: ToolCallId::new(),
+            active_canary: None,
+            catalog: None,
+            scope: ToolCallScope::unbounded(),
+        })
+        .await?;
+    Ok(output.safe_output)
+}
+
+fn numbered_file_read_content(output: &ToolOutput) -> String {
+    output
+        .to_text()
+        .lines()
+        .filter_map(|line| {
+            let (line_number, content) = line.split_once('\t')?;
+            line_number.parse::<usize>().ok().map(|_| content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn test_identity(tenant_id: TenantId) -> moa_core::traits::Identity {

@@ -1,27 +1,63 @@
 //! Daytona-backed hand provider for cloud container execution.
 
+pub mod storage;
+mod volume;
+mod workspace;
+
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeSet, HashSet};
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_config::MoaConfig;
+use moa_config::CloudHandProviderKind;
 use moa_core::{
-    canonical_json::canonical_json_bytes, error::MoaError, error::Result, error::ToolFailureClass,
-    error::classify_tool_error, traits::HandProvider, types::hands::DeadlineEnforcement,
-    types::hands::EgressMode, types::hands::HandHandle, types::hands::HandProviderCapabilities,
-    types::hands::HandSpec, types::hands::HandStatus, types::hands::ResourceSupport,
-    types::hands::SandboxFile, types::hands::SandboxProfile, types::hands::SandboxTier,
-    types::hands::SandboxTierCapabilities, types::hands::validate_sandbox_file_path,
-    types::identifiers::HandProvisioningOperationId, types::tools::ToolOutput,
+    canonical_json::canonical_json_bytes,
+    error::MoaError,
+    error::Result,
+    error::ToolFailureClass,
+    error::classify_tool_error,
+    traits::HandProvider,
+    traits::SandboxStorageProvider,
+    types::hands::DeadlineEnforcement,
+    types::hands::EgressMode,
+    types::hands::HandHandle,
+    types::hands::HandProviderCapabilities,
+    types::hands::HandSpec,
+    types::hands::HandStatus,
+    types::hands::ResourceSupport,
+    types::hands::SandboxFile,
+    types::hands::SandboxProfile,
+    types::hands::SandboxTier,
+    types::hands::SandboxTierCapabilities,
+    types::hands::validate_sandbox_file_path,
+    types::identifiers::{HandProvisioningOperationId, WorkspaceCheckpointId},
+    types::sandbox_workspace::{
+        ProviderAccountStorageInventory, ProviderInventoryResource, ProviderInventoryResourceKind,
+        ProviderStorageRef, TenantStoragePurgeRequest, WorkspaceAttachRequest,
+        WorkspaceCheckpointPublication, WorkspaceCheckpointPublishRequest,
+        WorkspacePostCommitState, WorkspaceReconcileRequest, WorkspaceRestoreRequest,
+        WorkspaceRevisionRef, WorkspaceStorageDeleteRequest, WorkspaceStorageOperationResult,
+        WorkspaceStoragePrepareRequest,
+    },
+    types::tools::ToolOutput,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::adapters::http_util::{
     build_url, expect_success, expect_success_json, http_error, required_string_field,
+};
+use crate::adapters::trusted_command::{resolve_provider_file_path, resolve_trusted_skill_command};
+use crate::core::provider_credentials::{
+    ProviderCredentialSource, ProviderEndpoint, ProviderHttpAttempt,
+};
+use crate::core::sandbox_workspace::checkpoint::revision::{
+    next_workspace_revision, required_current_revision,
 };
 use crate::tools::edit_output::{
     ExistingFileContent, build_file_write_output, build_text_edit_output,
@@ -33,8 +69,6 @@ use crate::tools::str_replace::plan_str_replace;
 use crate::tools::{bash, file_outline, file_read, grep};
 
 const DAYTONA_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
-const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
-const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io/toolbox";
 const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/workspace:latest";
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const DESTROY_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -45,6 +79,13 @@ const PROVISION_RESOLVE_ATTEMPTS: usize = 15;
 const SANDBOX_LIST_PAGE_LIMIT: &str = "100";
 const PROVISIONING_OPERATION_LABEL: &str = "moa_provisioning_operation_id";
 const PROVISIONING_SPEC_LABEL: &str = "moa_provisioning_spec_sha256";
+const WORKSPACE_ID_LABEL: &str = "moa_workspace_id";
+const TENANT_OWNER_LABEL: &str = "moa_tenant_owner_sha256";
+const DAYTONA_TRUSTED_ROOT: &str = "/opt/moa/trusted";
+const DAYTONA_PREPARE_MUTABLE_ROOT: &str = "if test -d /workspace && test -w /workspace; then :; elif install -d -m 700 /workspace 2>/dev/null && test -w /workspace; then :; else sudo -n install -d -m 700 -o \"$(id -u)\" -g \"$(id -g)\" /workspace; fi";
+const DAYTONA_RESET_TRUSTED_ROOT: &str = "if install -d -m 700 /opt/moa/trusted 2>/dev/null; then :; else sudo -n install -d -m 700 -o \"$(id -u)\" -g \"$(id -g)\" /opt/moa/trusted; fi && find /opt/moa/trusted -mindepth 1 -delete";
+const WRITER_EPOCH_LABEL: &str = "moa_writer_epoch";
+const INSTANCE_GENERATION_LABEL: &str = "moa_instance_generation";
 const NON_DESTROYED_SANDBOX_STATES: &[&str] = &[
     "creating",
     "restoring",
@@ -89,6 +130,8 @@ impl DaytonaProvisioningIdentity {
             "image": image,
             "env": spec.env,
             "autoStopInterval": auto_stop_minutes,
+            "workspaceBinding": spec.workspace,
+            "filesystem": spec.filesystem,
         });
         let canonical = canonical_json_bytes(&fingerprint_payload).map_err(|error| {
             MoaError::ProviderError(format!(
@@ -104,106 +147,110 @@ impl DaytonaProvisioningIdentity {
     }
 }
 
-/// Optional Daytona organization id, resolved from the environment once.
-static DAYTONA_ORGANIZATION_ID: LazyLock<Option<String>> =
-    LazyLock::new(|| std::env::var("DAYTONA_ORGANIZATION_ID").ok());
-
 /// Daytona cloud hand provider.
 #[derive(Clone)]
 pub struct DaytonaHandProvider {
-    client: reqwest::Client,
-    api_url: String,
-    toolbox_url: String,
-    default_image: String,
+    credentials: Arc<dyn ProviderCredentialSource>,
+    storage: Option<Arc<storage::DaytonaStorageDependencies>>,
 }
 
 impl DaytonaHandProvider {
-    /// Creates a new Daytona provider from an API key.
-    pub fn new(api_key: impl Into<String>) -> Result<Self> {
-        Self::with_urls(
-            api_key,
-            DEFAULT_DAYTONA_API_URL,
-            DEFAULT_DAYTONA_TOOLBOX_URL,
-        )
-    }
-
-    /// Creates a Daytona provider from the loaded MOA config.
-    pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        let hands = config
-            .cloud
-            .hands
-            .as_ref()
-            .ok_or_else(|| MoaError::ConfigError("missing [cloud.hands] config".to_string()))?;
-        let api_key = hands
-            .daytona_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                MoaError::MissingEnvironmentVariable("MOA_CLOUD_HANDS_DAYTONA_API_KEY".to_string())
-            })?
-            .to_string();
-        let mut provider = Self::with_urls(
-            api_key,
-            hands
-                .daytona_api_url
-                .as_deref()
-                .unwrap_or(DEFAULT_DAYTONA_API_URL),
-            DEFAULT_DAYTONA_TOOLBOX_URL,
-        )?;
-        if let Some(image) = &hands.daytona_default_image {
-            provider.default_image = image.clone();
+    /// Creates a provider backed by rotating persisted-account credentials.
+    #[must_use]
+    pub fn new(credentials: Arc<dyn ProviderCredentialSource>) -> Self {
+        Self {
+            credentials,
+            storage: None,
         }
-        Ok(provider)
     }
 
-    /// Creates a provider with explicit API and toolbox URLs.
-    pub fn with_urls(
-        api_key: impl Into<String>,
-        api_url: impl Into<String>,
-        toolbox_url: impl Into<String>,
+    /// Creates a Daytona provider with every durable persistent-workspace owner.
+    pub fn new_with_storage(
+        credentials: Arc<dyn ProviderCredentialSource>,
+        storage: storage::DaytonaStorageDependencies,
     ) -> Result<Self> {
-        let api_key = api_key.into();
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_COMMAND_TIMEOUT)
-            .default_headers(default_headers(&api_key)?)
-            .build()
-            .map_err(|error| {
-                MoaError::ProviderError(format!("failed to build Daytona client: {error}"))
-            })?;
+        storage.validate()?;
         Ok(Self {
-            client,
-            api_url: api_url.into().trim_end_matches('/').to_string(),
-            toolbox_url: toolbox_url.into().trim_end_matches('/').to_string(),
-            default_image: DEFAULT_DAYTONA_IMAGE.to_string(),
+            credentials,
+            storage: Some(Arc::new(storage)),
         })
+    }
+
+    async fn attempt(
+        &self,
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+        provider_account_generation: u64,
+        endpoint: ProviderEndpoint,
+    ) -> Result<ProviderHttpAttempt> {
+        self.credentials
+            .resolve_attempt(
+                provider_account_id,
+                provider_account_generation,
+                CloudHandProviderKind::Daytona,
+                endpoint,
+                DEFAULT_COMMAND_TIMEOUT,
+            )
+            .await
     }
 
     async fn create_workspace(
         &self,
+        attempt: &ProviderHttpAttempt,
         spec: &HandSpec,
         image: &str,
         auto_stop_minutes: u64,
         identity: &DaytonaProvisioningIdentity,
+        storage: Option<&ProviderStorageRef>,
     ) -> Result<String> {
         let spec_fingerprint = identity.spec_fingerprint.as_deref().ok_or_else(|| {
             MoaError::ProviderError(
                 "Daytona provisioning identity is missing its spec fingerprint".to_string(),
             )
         })?;
-        let response = self
-            .client
-            .post(format!("{}/sandbox", self.api_url))
-            .json(&json!({
-                "name": identity.sandbox_name,
-                "image": image,
-                "env": spec.env,
-                "autoStopInterval": auto_stop_minutes,
-                "labels": {
-                    (PROVISIONING_OPERATION_LABEL): identity.operation_id.as_str(),
-                    (PROVISIONING_SPEC_LABEL): spec_fingerprint,
-                },
-            }))
+        let mut body = json!({
+            "name": identity.sandbox_name,
+            "image": image,
+            "env": spec.env,
+            "autoStopInterval": auto_stop_minutes,
+            "labels": {
+                (PROVISIONING_OPERATION_LABEL): identity.operation_id.as_str(),
+                (PROVISIONING_SPEC_LABEL): spec_fingerprint,
+                (WORKSPACE_ID_LABEL): spec.workspace.workspace_id.to_string(),
+                (TENANT_OWNER_LABEL): opaque_tenant_owner(&spec.workspace),
+                (WRITER_EPOCH_LABEL): spec.workspace.writer_epoch.to_string(),
+                (INSTANCE_GENERATION_LABEL): spec.workspace.instance_generation.to_string(),
+            },
+        });
+        if let Some(storage) = storage {
+            let locator = storage.workspace_locator.as_deref().ok_or_else(|| {
+                MoaError::ValidationError(
+                    "Daytona tenant volume is missing its opaque workspace subpath".to_string(),
+                )
+            })?;
+            storage::validate_workspace_subpath(locator)?;
+            let mount_path = spec.filesystem.mutable_root.to_str().ok_or_else(|| {
+                MoaError::ValidationError(
+                    "Daytona mutable root must be a valid UTF-8 sandbox path".to_string(),
+                )
+            })?;
+            validate_daytona_mount_path(mount_path)?;
+            let body = body.as_object_mut().ok_or_else(|| {
+                MoaError::ProviderError("Daytona sandbox request body is not an object".to_string())
+            })?;
+            body.insert(
+                "volumes".to_string(),
+                serde_json::to_value([volume::DaytonaSandboxVolumeMount {
+                    volume_id: &storage.resource_id,
+                    mount_path,
+                    subpath: locator,
+                }])?,
+            );
+        }
+        let response = attempt
+            .client()
+            .post(format!("{}/api/sandbox", attempt.origin()))
+            .bearer_auth(attempt.credential())
+            .json(&body)
             .send()
             .await
             .map_err(|error| {
@@ -214,11 +261,81 @@ impl DaytonaHandProvider {
         extract_workspace_id(&value)
     }
 
+    async fn provisioning_storage(&self, spec: &HandSpec) -> Result<Option<ProviderStorageRef>> {
+        let Some(dependencies) = self.storage.as_deref() else {
+            return Ok(None);
+        };
+        let operation = moa_core::types::sandbox_workspace::WorkspaceStorageOperation {
+            operation_id: moa_core::types::identifiers::WorkspaceOperationId(
+                spec.provisioning_operation_id.0,
+            ),
+            kind: moa_core::types::sandbox_workspace::WorkspaceOperationKind::Attach,
+            binding: spec.workspace.clone(),
+            deadline: spec.budget.deadline.unwrap_or_else(chrono::Utc::now),
+            request_hash: spec.effective_profile.profile_hash().to_string(),
+        };
+        self.mutable_storage_for_operation(dependencies, &operation)
+            .await
+            .map(Some)
+    }
+
+    async fn mutable_storage_for_operation(
+        &self,
+        dependencies: &storage::DaytonaStorageDependencies,
+        operation: &moa_core::types::sandbox_workspace::WorkspaceStorageOperation,
+    ) -> Result<ProviderStorageRef> {
+        let account = dependencies
+            .config
+            .account(operation.binding.provider_account_id)
+            .ok_or_else(|| {
+                MoaError::ConfigError(
+                    "Daytona workspace account has no configured storage security class"
+                        .to_string(),
+                )
+            })?;
+        let generation =
+            i64::try_from(operation.binding.provider_account_generation).map_err(|_| {
+                MoaError::ValidationError(
+                    "Daytona provider-account generation overflows bigint".to_string(),
+                )
+            })?;
+        let resource = dependencies
+            .storage_resources
+            .live_tenant_volume(
+                operation.binding.tenant_id,
+                operation.binding.provider_account_id,
+                generation,
+                &account.security_class,
+            )
+            .await?
+            .ok_or_else(|| {
+                MoaError::StorageError(
+                    "Daytona hand provisioning requires a pre-admitted tenant volume".to_string(),
+                )
+            })?;
+        if !matches!(
+            resource.state,
+            crate::core::sandbox_workspace::storage_resources::StorageResourceState::Ready
+                | crate::core::sandbox_workspace::storage_resources::StorageResourceState::Attached
+        ) {
+            return Err(MoaError::StorageError(
+                "Daytona tenant volume is not ready for a writable mount".to_string(),
+            ));
+        }
+        let volume_id = resource.provider_reference.ok_or_else(|| {
+            MoaError::StorageError(
+                "Daytona ready tenant volume has no verified provider id".to_string(),
+            )
+        })?;
+        storage::mutable_storage_reference(operation, volume_id)
+    }
+
     async fn resolve_workspace(
         &self,
+        attempt: &ProviderHttpAttempt,
         identity: &DaytonaProvisioningIdentity,
     ) -> Result<Option<String>> {
-        let workspace_ids = self.provisioned_workspace_ids(identity).await?;
+        let workspace_ids = self.provisioned_workspace_ids(attempt, identity).await?;
         match workspace_ids.as_slice() {
             [] => Ok(None),
             [workspace_id] => Ok(Some(workspace_id.clone())),
@@ -232,6 +349,7 @@ impl DaytonaHandProvider {
 
     async fn provisioned_workspace_ids(
         &self,
+        attempt: &ProviderHttpAttempt,
         identity: &DaytonaProvisioningIdentity,
     ) -> Result<Vec<String>> {
         let label_filter = serde_json::to_string(&json!({
@@ -255,10 +373,20 @@ impl DaytonaHandProvider {
             if let Some(cursor) = cursor.as_deref() {
                 query.push(("cursor", cursor));
             }
-            let url = build_url(&format!("{}/sandbox", self.api_url), &query, "Daytona")?;
-            let response = self.client.get(url).send().await.map_err(|error| {
-                MoaError::ProviderError(format!("failed to list Daytona sandboxes: {error}"))
-            })?;
+            let url = build_url(
+                &format!("{}/api/sandbox", attempt.origin()),
+                &query,
+                "Daytona",
+            )?;
+            let response = attempt
+                .client()
+                .get(url)
+                .bearer_auth(attempt.credential())
+                .send()
+                .await
+                .map_err(|error| {
+                    MoaError::ProviderError(format!("failed to list Daytona sandboxes: {error}"))
+                })?;
             let page = expect_success_json(response, "Daytona").await?;
             let items = page.get("items").and_then(Value::as_array).ok_or_else(|| {
                 MoaError::ProviderError(
@@ -274,10 +402,14 @@ impl DaytonaHandProvider {
                             "Daytona sandbox list item is missing its state".to_string(),
                         )
                     })?;
-                if state == "destroyed" {
+                let normalized_state = state.to_ascii_lowercase();
+                if matches!(
+                    normalized_state.as_str(),
+                    "destroyed" | "deleted" | "archived"
+                ) {
                     continue;
                 }
-                if !NON_DESTROYED_SANDBOX_STATES.contains(&state) {
+                if !NON_DESTROYED_SANDBOX_STATES.contains(&normalized_state.as_str()) {
                     return Err(MoaError::ProviderError(format!(
                         "Daytona sandbox list item has unsupported non-terminal state `{state}`"
                     )));
@@ -322,16 +454,17 @@ impl DaytonaHandProvider {
 
     async fn resolve_workspace_with_retries(
         &self,
+        attempt: &ProviderHttpAttempt,
         identity: &DaytonaProvisioningIdentity,
         expected_workspace_id: Option<&str>,
     ) -> Result<Option<String>> {
         let started_at = Instant::now();
-        for attempt in 0..PROVISION_RESOLVE_ATTEMPTS {
+        for resolution_attempt in 0..PROVISION_RESOLVE_ATTEMPTS {
             let Some(remaining) = PROVISION_RESOLVE_TIMEOUT.checked_sub(started_at.elapsed())
             else {
                 return Ok(None);
             };
-            let workspace_id = timeout(remaining, self.resolve_workspace(identity))
+            let workspace_id = timeout(remaining, self.resolve_workspace(attempt, identity))
                 .await
                 .map_err(|_| provision_resolution_timeout_error(identity))??;
             if let Some(workspace_id) = workspace_id {
@@ -344,7 +477,7 @@ impl DaytonaHandProvider {
                 }
                 return Ok(Some(workspace_id));
             }
-            if attempt + 1 == PROVISION_RESOLVE_ATTEMPTS {
+            if resolution_attempt + 1 == PROVISION_RESOLVE_ATTEMPTS {
                 break;
             }
             let Some(remaining) = PROVISION_RESOLVE_TIMEOUT.checked_sub(started_at.elapsed())
@@ -358,6 +491,7 @@ impl DaytonaHandProvider {
 
     async fn wait_until_workspace_absent(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_lookup: &str,
         started_at: Instant,
     ) -> Result<()> {
@@ -365,8 +499,13 @@ impl DaytonaHandProvider {
             let remaining = remaining_destroy_time(started_at, workspace_lookup)?;
             let response = timeout(
                 remaining,
-                self.client
-                    .get(format!("{}/sandbox/{workspace_lookup}", self.api_url))
+                attempt
+                    .client()
+                    .get(format!(
+                        "{}/api/sandbox/{workspace_lookup}",
+                        attempt.origin()
+                    ))
+                    .bearer_auth(attempt.credential())
                     .send(),
             )
             .await
@@ -393,14 +532,17 @@ impl DaytonaHandProvider {
 
     async fn workspace_deletion_lookup(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_id: &str,
         started_at: Instant,
     ) -> Result<Option<String>> {
         let remaining = remaining_destroy_time(started_at, workspace_id)?;
         let response = timeout(
             remaining,
-            self.client
-                .get(format!("{}/sandbox/{workspace_id}", self.api_url))
+            attempt
+                .client()
+                .get(format!("{}/api/sandbox/{workspace_id}", attempt.origin()))
+                .bearer_auth(attempt.credential())
                 .send(),
         )
         .await
@@ -428,6 +570,7 @@ impl DaytonaHandProvider {
 
     async fn execute_command(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_id: &str,
         command: &str,
         cwd: Option<&str>,
@@ -435,12 +578,14 @@ impl DaytonaHandProvider {
     ) -> Result<ToolOutput> {
         let timeout_secs = timeout.map(|timeout| timeout.as_secs());
         let started_at = Instant::now();
-        let response = self
-            .client
+        let response = attempt
+            .client()
             .post(format!(
-                "{}/{}/process/execute",
-                self.toolbox_url, workspace_id
+                "{}/toolbox/{}/process/execute",
+                attempt.origin(),
+                workspace_id
             ))
+            .bearer_auth(attempt.credential())
             .json(&json!({
                 "command": command,
                 "cwd": cwd,
@@ -468,16 +613,59 @@ impl DaytonaHandProvider {
         ))
     }
 
-    async fn read_file(&self, workspace_id: &str, path: &str) -> Result<ToolOutput> {
+    async fn prepare_mutable_root(&self, handle: &HandHandle) -> Result<()> {
+        self.resume(handle).await?;
+        let workspace_id = handle.daytona_id()?;
+        let (provider_account_id, provider_account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(
+                provider_account_id,
+                provider_account_generation,
+                ProviderEndpoint::Toolbox,
+            )
+            .await?;
+        let output = self
+            .execute_command(
+                &attempt,
+                workspace_id,
+                DAYTONA_PREPARE_MUTABLE_ROOT,
+                None,
+                Some(DEFAULT_COMMAND_TIMEOUT),
+            )
+            .await?;
+        if output.is_error {
+            return Err(MoaError::ProviderError(
+                "Daytona could not prepare the mutable sandbox root".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        attempt: &ProviderHttpAttempt,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let url = build_url(
-            &format!("{}/{}/files/download", self.toolbox_url, workspace_id),
+            &format!(
+                "{}/toolbox/{}/files/download",
+                attempt.origin(),
+                workspace_id
+            ),
             &[("path", path)],
             "Daytona",
         )?;
-        let response = self.client.get(url).send().await.map_err(|error| {
-            MoaError::ProviderError(format!("failed to read Daytona file: {error}"))
-        })?;
+        let response = attempt
+            .client()
+            .get(url)
+            .bearer_auth(attempt.credential())
+            .send()
+            .await
+            .map_err(|error| {
+                MoaError::ProviderError(format!("failed to read Daytona file: {error}"))
+            })?;
         if !response.status().is_success() {
             return Err(http_error(response).await);
         }
@@ -491,30 +679,33 @@ impl DaytonaHandProvider {
 
     async fn write_file(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_id: &str,
         path: &str,
+        remote_path: &str,
         content: &str,
     ) -> Result<ToolOutput> {
-        let existing = match self.read_file(workspace_id, path).await {
+        let existing = match self.read_file(attempt, workspace_id, remote_path).await {
             Ok(output) => ExistingFileContent::Text(output.to_text()),
             Err(MoaError::HttpStatus { status: 404, .. }) => ExistingFileContent::Missing,
             Err(error) => return Err(error),
         };
         let duration = self
-            .upload_file(workspace_id, path, content.as_bytes())
+            .upload_file(attempt, workspace_id, remote_path, content.as_bytes())
             .await?;
         Ok(build_file_write_output(path, &existing, content, duration))
     }
 
     async fn upload_file(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_id: &str,
         path: &str,
         content: &[u8],
     ) -> Result<Duration> {
         let started_at = Instant::now();
         let url = build_url(
-            &format!("{}/{}/files/upload", self.toolbox_url, workspace_id),
+            &format!("{}/toolbox/{}/files/upload", attempt.origin(), workspace_id),
             &[("path", path)],
             "Daytona",
         )?;
@@ -527,9 +718,10 @@ impl DaytonaHandProvider {
                     MoaError::ValidationError(format!("invalid Daytona upload MIME type: {error}"))
                 })?,
         );
-        let response = self
-            .client
+        let response = attempt
+            .client()
             .post(url)
+            .bearer_auth(attempt.credential())
             .multipart(form)
             .send()
             .await
@@ -540,10 +732,21 @@ impl DaytonaHandProvider {
         Ok(started_at.elapsed())
     }
 
-    async fn chmod_file(&self, workspace_id: &str, path: &str) -> Result<()> {
+    async fn chmod_file(
+        &self,
+        attempt: &ProviderHttpAttempt,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<()> {
         let command = format!("chmod 755 {}", shell_quote(path));
         let output = self
-            .execute_command(workspace_id, &command, None, Some(Duration::from_secs(30)))
+            .execute_command(
+                attempt,
+                workspace_id,
+                &command,
+                None,
+                Some(Duration::from_secs(30)),
+            )
             .await?;
         if output.is_error {
             return Err(MoaError::ProviderError(format!(
@@ -556,18 +759,25 @@ impl DaytonaHandProvider {
 
     async fn str_replace_file(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_id: &str,
         path: &str,
+        remote_path: &str,
         input: &str,
     ) -> Result<ToolOutput> {
-        let existing_content = match self.read_file(workspace_id, path).await {
+        let existing_content = match self.read_file(attempt, workspace_id, remote_path).await {
             Ok(output) => Some(output.to_text()),
             Err(MoaError::HttpStatus { status: 404, .. }) => None,
             Err(error) => return Err(error),
         };
         let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
         let duration = self
-            .upload_file(workspace_id, path, planned.updated_content.as_bytes())
+            .upload_file(
+                attempt,
+                workspace_id,
+                remote_path,
+                planned.updated_content.as_bytes(),
+            )
             .await?;
         Ok(build_text_edit_output(
             path,
@@ -577,16 +787,27 @@ impl DaytonaHandProvider {
         ))
     }
 
-    async fn search_files(&self, workspace_id: &str, pattern: &str) -> Result<ToolOutput> {
+    async fn search_files(
+        &self,
+        attempt: &ProviderHttpAttempt,
+        workspace_id: &str,
+        pattern: &str,
+    ) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let url = build_url(
-            &format!("{}/{}/files/search", self.toolbox_url, workspace_id),
+            &format!("{}/toolbox/{}/files/search", attempt.origin(), workspace_id),
             &[("path", "/"), ("pattern", pattern)],
             "Daytona",
         )?;
-        let response = self.client.get(url).send().await.map_err(|error| {
-            MoaError::ProviderError(format!("failed to search Daytona files: {error}"))
-        })?;
+        let response = attempt
+            .client()
+            .get(url)
+            .bearer_auth(attempt.credential())
+            .send()
+            .await
+            .map_err(|error| {
+                MoaError::ProviderError(format!("failed to search Daytona files: {error}"))
+            })?;
         let value = expect_success_json(response, "Daytona").await?;
         Ok(ToolOutput::json(
             serde_json::to_string_pretty(&value)?,
@@ -598,6 +819,7 @@ impl DaytonaHandProvider {
     /// Routes one already-parsed tool invocation to its Daytona toolbox call.
     async fn dispatch_tool(
         &self,
+        attempt: &ProviderHttpAttempt,
         workspace_id: &str,
         tool: &str,
         input: &str,
@@ -610,44 +832,76 @@ impl DaytonaHandProvider {
                 // `timeout` it is handed, so an unvalidated read here would
                 // reinstate the unbounded timeout on the Daytona route alone.
                 let params = bash::BashToolInput::parse(input)?;
-                self.execute_command(
-                    workspace_id,
-                    &params.cmd,
-                    None,
-                    params.timeout_secs.map(|timeout| timeout.duration()),
-                )
-                .await
+                let trusted = resolve_trusted_skill_command(&params.cmd, DAYTONA_TRUSTED_ROOT)?;
+                let command = trusted
+                    .as_ref()
+                    .map_or_else(|| params.cmd.clone(), |command| command.shell_token());
+                let mut output = self
+                    .execute_command(
+                        attempt,
+                        workspace_id,
+                        &command,
+                        None,
+                        params.timeout_secs.map(|timeout| timeout.duration()),
+                    )
+                    .await?;
+                if let Some(command) = trusted {
+                    command.redact_output(&mut output);
+                }
+                Ok(output)
             }
             Some(SandboxToolCapability::Grep) => {
                 let command = grep::remote_shell_command(input, "/")?;
-                self.execute_command(workspace_id, &command, None, None)
+                self.execute_command(attempt, workspace_id, &command, None, None)
                     .await
             }
             Some(SandboxToolCapability::FileOutline) => {
                 let path = required_string_field(payload, "path")?;
-                let content = self.read_file(workspace_id, path).await?.to_text();
+                let remote_path =
+                    resolve_provider_file_path(path, "/workspace", DAYTONA_TRUSTED_ROOT)?;
+                let content = self
+                    .read_file(attempt, workspace_id, &remote_path)
+                    .await?
+                    .to_text();
                 file_outline::execute_with_content(input, path, &content)
             }
             Some(SandboxToolCapability::FileRead) => {
                 let path = required_string_field(payload, "path")?;
-                let content = self.read_file(workspace_id, path).await?.to_text();
+                let remote_path =
+                    resolve_provider_file_path(path, "/workspace", DAYTONA_TRUSTED_ROOT)?;
+                let content = self
+                    .read_file(attempt, workspace_id, &remote_path)
+                    .await?
+                    .to_text();
                 file_read::execute_with_content(input, path, &content)
             }
             Some(SandboxToolCapability::StrReplace) => {
-                self.str_replace_file(workspace_id, required_string_field(payload, "path")?, input)
+                let path = required_string_field(payload, "path")?;
+                let remote_path =
+                    resolve_provider_file_path(path, "/workspace", DAYTONA_TRUSTED_ROOT)?;
+                self.str_replace_file(attempt, workspace_id, path, &remote_path, input)
                     .await
             }
             Some(SandboxToolCapability::FileWrite) => {
+                let path = required_string_field(payload, "path")?;
+                let remote_path =
+                    resolve_provider_file_path(path, "/workspace", DAYTONA_TRUSTED_ROOT)?;
                 self.write_file(
+                    attempt,
                     workspace_id,
-                    required_string_field(payload, "path")?,
+                    path,
+                    &remote_path,
                     required_string_field(payload, "content")?,
                 )
                 .await
             }
             Some(SandboxToolCapability::FileSearch) => {
-                self.search_files(workspace_id, required_string_field(payload, "pattern")?)
-                    .await
+                self.search_files(
+                    attempt,
+                    workspace_id,
+                    required_string_field(payload, "pattern")?,
+                )
+                .await
             }
             None => Err(unsupported_tool("Daytona", tool)),
         }
@@ -750,50 +1004,103 @@ impl HandProvider for DaytonaHandProvider {
                 "use the E2B provider for microvm sandboxes".to_string(),
             ));
         }
-        let image = spec
-            .image
-            .clone()
-            .unwrap_or_else(|| self.default_image.clone());
+        if spec.filesystem.mutable_root != std::path::Path::new("/workspace") {
+            return Err(MoaError::ValidationError(
+                "Daytona mutable root must be /workspace so volume mounts and checkpoints cannot include trusted or runtime state"
+                    .to_string(),
+            ));
+        }
+        let account_id = spec.workspace.provider_account_id;
+        let account_generation = spec.workspace.provider_account_generation;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Api)
+            .await?;
+        let image = spec.image.clone().unwrap_or_else(|| {
+            attempt
+                .default_runtime()
+                .unwrap_or(DEFAULT_DAYTONA_IMAGE)
+                .to_string()
+        });
         let auto_stop_minutes = daytona_auto_stop_minutes(spec.effective_profile.profile())?;
         let identity = DaytonaProvisioningIdentity::for_spec(&spec, &image, auto_stop_minutes)?;
-        if let Some(workspace_id) = self.resolve_workspace(&identity).await? {
-            return Ok(HandHandle::daytona(workspace_id));
-        }
-
-        match self
-            .create_workspace(&spec, &image, auto_stop_minutes, &identity)
-            .await
+        let workspace_storage = self.provisioning_storage(&spec).await?;
+        let workspace_id = if let Some(workspace_id) =
+            self.resolve_workspace(&attempt, &identity).await?
         {
-            Ok(created_workspace_id) => self
-                .resolve_workspace_with_retries(&identity, Some(&created_workspace_id))
-                .await?
-                .map(HandHandle::daytona)
-                .ok_or_else(|| provision_resolution_timeout_error(&identity)),
-            Err(create_error) => match self.resolve_workspace_with_retries(&identity, None).await {
-                Ok(Some(workspace_id)) => Ok(HandHandle::daytona(workspace_id)),
-                Ok(None) => Err(create_error),
-                Err(resolve_error) => Err(MoaError::ProviderError(format!(
-                    "Daytona sandbox creation failed ({create_error}); resolving the durable operation also failed ({resolve_error})"
-                ))),
-            },
-        }
+            workspace_id
+        } else {
+            match self
+                .create_workspace(
+                    &attempt,
+                    &spec,
+                    &image,
+                    auto_stop_minutes,
+                    &identity,
+                    workspace_storage.as_ref(),
+                )
+                .await
+            {
+                Ok(created_workspace_id) => self
+                    .resolve_workspace_with_retries(
+                        &attempt,
+                        &identity,
+                        Some(&created_workspace_id),
+                    )
+                    .await?
+                    .ok_or_else(|| provision_resolution_timeout_error(&identity))?,
+                Err(create_error) => match self
+                    .resolve_workspace_with_retries(&attempt, &identity, None)
+                    .await
+                {
+                    Ok(Some(workspace_id)) => workspace_id,
+                    Ok(None) => return Err(create_error),
+                    Err(resolve_error) => {
+                        return Err(MoaError::ProviderError(format!(
+                            "Daytona sandbox creation failed ({create_error}); resolving the durable operation also failed ({resolve_error})"
+                        )));
+                    }
+                },
+            }
+        };
+        let handle = HandHandle::daytona(workspace_id, account_id, account_generation);
+        self.prepare_mutable_root(&handle).await?;
+        Ok(handle)
     }
 
     async fn provisioned_hands(
         &self,
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+        provider_account_generation: u64,
         operation_id: HandProvisioningOperationId,
     ) -> Result<Vec<HandHandle>> {
+        let attempt = self
+            .attempt(
+                provider_account_id,
+                provider_account_generation,
+                ProviderEndpoint::Api,
+            )
+            .await?;
         let identity = DaytonaProvisioningIdentity::for_operation(operation_id);
         Ok(self
-            .provisioned_workspace_ids(&identity)
+            .provisioned_workspace_ids(&attempt, &identity)
             .await?
             .into_iter()
-            .map(HandHandle::daytona)
+            .map(|workspace_id| {
+                HandHandle::daytona(
+                    workspace_id,
+                    provider_account_id,
+                    provider_account_generation,
+                )
+            })
             .collect())
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
         let workspace_id = handle.daytona_id()?;
+        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
+            .await?;
         let payload: Value = serde_json::from_str(input)?;
         // Attempt the tool directly rather than resuming on every call. The
         // sandbox is only probed and resumed after a failure, and only when it is
@@ -801,14 +1108,17 @@ impl HandProvider for DaytonaHandProvider {
         // path free of a status()+resume() round trip while still recovering a
         // sandbox that auto-stopped between calls without risking a double run.
         match self
-            .dispatch_tool(workspace_id, tool, input, &payload)
+            .dispatch_tool(&attempt, workspace_id, tool, input, &payload)
             .await
         {
             Ok(output) => Ok(output),
             Err(error) => match self.status(handle).await {
                 Ok(HandStatus::Stopped | HandStatus::Paused) => {
                     self.resume(handle).await?;
-                    self.dispatch_tool(workspace_id, tool, input, &payload)
+                    let attempt = self
+                        .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
+                        .await?;
+                    self.dispatch_tool(&attempt, workspace_id, tool, input, &payload)
                         .await
                 }
                 _ => Err(error),
@@ -819,12 +1129,32 @@ impl HandProvider for DaytonaHandProvider {
     async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
         let workspace_id = handle.daytona_id()?;
         self.resume(handle).await?;
+        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
+            .await?;
+        let reset = self
+            .execute_command(
+                &attempt,
+                workspace_id,
+                DAYTONA_RESET_TRUSTED_ROOT,
+                None,
+                Some(DEFAULT_COMMAND_TIMEOUT),
+            )
+            .await?;
+        if reset.is_error {
+            return Err(MoaError::ProviderError(
+                "Daytona could not reset the trusted sandbox root".to_string(),
+            ));
+        }
         for file in files {
             validate_sandbox_file_path(&file.path)?;
-            self.upload_file(workspace_id, &file.path, &file.content)
+            let trusted_path = format!("{DAYTONA_TRUSTED_ROOT}/{}", file.path);
+            self.upload_file(&attempt, workspace_id, &trusted_path, &file.content)
                 .await?;
             if file.executable {
-                self.chmod_file(workspace_id, &file.path).await?;
+                self.chmod_file(&attempt, workspace_id, &trusted_path)
+                    .await?;
             }
         }
         Ok(())
@@ -849,9 +1179,14 @@ impl HandProvider for DaytonaHandProvider {
 
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
         let workspace_id = handle.daytona_id()?;
-        let response = self
-            .client
-            .get(format!("{}/sandbox/{workspace_id}", self.api_url))
+        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Api)
+            .await?;
+        let response = attempt
+            .client()
+            .get(format!("{}/api/sandbox/{workspace_id}", attempt.origin()))
+            .bearer_auth(attempt.credential())
             .send()
             .await
             .map_err(|error| {
@@ -878,9 +1213,17 @@ impl HandProvider for DaytonaHandProvider {
 
     async fn pause(&self, handle: &HandHandle) -> Result<()> {
         let workspace_id = handle.daytona_id()?;
-        let response = self
-            .client
-            .post(format!("{}/sandbox/{workspace_id}/stop", self.api_url))
+        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Api)
+            .await?;
+        let response = attempt
+            .client()
+            .post(format!(
+                "{}/api/sandbox/{workspace_id}/stop",
+                attempt.origin()
+            ))
+            .bearer_auth(attempt.credential())
             .send()
             .await
             .map_err(|error| {
@@ -896,9 +1239,17 @@ impl HandProvider for DaytonaHandProvider {
         if matches!(status, HandStatus::Running | HandStatus::Provisioning) {
             return Ok(());
         }
-        let response = self
-            .client
-            .post(format!("{}/sandbox/{workspace_id}/start", self.api_url))
+        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Api)
+            .await?;
+        let response = attempt
+            .client()
+            .post(format!(
+                "{}/api/sandbox/{workspace_id}/start",
+                attempt.origin()
+            ))
+            .bearer_auth(attempt.credential())
             .send()
             .await
             .map_err(|error| {
@@ -910,9 +1261,13 @@ impl HandProvider for DaytonaHandProvider {
 
     async fn destroy(&self, handle: &HandHandle) -> Result<()> {
         let workspace_id = handle.daytona_id()?;
+        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+        let attempt = self
+            .attempt(account_id, account_generation, ProviderEndpoint::Api)
+            .await?;
         let started_at = Instant::now();
         let Some(workspace_lookup) = self
-            .workspace_deletion_lookup(workspace_id, started_at)
+            .workspace_deletion_lookup(&attempt, workspace_id, started_at)
             .await?
         else {
             return Ok(());
@@ -921,8 +1276,10 @@ impl HandProvider for DaytonaHandProvider {
             let remaining = remaining_destroy_time(started_at, workspace_id)?;
             let response = timeout(
                 remaining,
-                self.client
-                    .delete(format!("{}/sandbox/{workspace_id}", self.api_url))
+                attempt
+                    .client()
+                    .delete(format!("{}/api/sandbox/{workspace_id}", attempt.origin()))
+                    .bearer_auth(attempt.credential())
                     .send(),
             )
             .await
@@ -935,7 +1292,7 @@ impl HandProvider for DaytonaHandProvider {
             }
             if response.status().is_success() {
                 return self
-                    .wait_until_workspace_absent(&workspace_lookup, started_at)
+                    .wait_until_workspace_absent(&attempt, &workspace_lookup, started_at)
                     .await;
             }
             if response.status() == reqwest::StatusCode::CONFLICT {
@@ -966,25 +1323,113 @@ impl HandProvider for DaytonaHandProvider {
     }
 }
 
-fn default_headers(api_key: &str) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|error| {
-            MoaError::ValidationError(format!("invalid Daytona API key header: {error}"))
-        })?,
-    );
-    if let Some(org_id) = DAYTONA_ORGANIZATION_ID.as_ref() {
-        headers.insert(
-            "X-Daytona-Organization-ID",
-            HeaderValue::from_str(org_id).map_err(|error| {
-                MoaError::ValidationError(format!(
-                    "invalid Daytona organization header value: {error}"
-                ))
-            })?,
-        );
+fn cloud_account(
+    handle: &HandHandle,
+    provider: &str,
+) -> Result<(moa_core::types::identifiers::ProviderAccountId, u64)> {
+    handle.provider_account().ok_or_else(|| {
+        MoaError::ValidationError(format!(
+            "non-{provider} hand handle passed to {provider} provider"
+        ))
+    })
+}
+
+fn opaque_tenant_owner(binding: &moa_core::types::sandbox_workspace::WorkspaceBinding) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"moa/daytona/tenant-owner/v1\0");
+    digest.update(binding.tenant_id.0.as_bytes());
+    digest.update(binding.provider_account_id.0.as_bytes());
+    digest.update(binding.provider_account_generation.to_be_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn tenant_volume_name(
+    tenant_id: moa_core::types::identifiers::TenantId,
+    provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+    security_class: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"moa/daytona/tenant-volume/v1\0");
+    digest.update(tenant_id.0.as_bytes());
+    digest.update(provider_account_id.0.as_bytes());
+    digest.update(security_class.as_bytes());
+    format!("moa-tv-{}", &hex::encode(digest.finalize())[..40])
+}
+
+fn enforce_volume_headroom(observed: usize, ceiling: usize, headroom: usize) -> Result<()> {
+    let admitted = observed
+        .checked_add(headroom)
+        .and_then(|used| used.checked_add(1))
+        .is_some_and(|next| next <= ceiling);
+    if !admitted {
+        return Err(MoaError::ProviderError(
+            "Daytona tenant-volume admission exhausted configured organization headroom"
+                .to_string(),
+        ));
     }
-    Ok(headers)
+    Ok(())
+}
+
+fn verify_request_resources(
+    operation: &moa_core::types::sandbox_workspace::WorkspaceStorageOperation,
+    hand: Option<&HandHandle>,
+    storage: Option<&ProviderStorageRef>,
+) -> Result<()> {
+    if operation.request_hash.trim().is_empty() {
+        return Err(MoaError::ValidationError(
+            "Daytona operation does not match its workspace account fence".to_string(),
+        ));
+    }
+    if let Some((account, generation)) = hand.and_then(HandHandle::provider_account)
+        && (account != operation.binding.provider_account_id
+            || generation != operation.binding.provider_account_generation)
+    {
+        return Err(MoaError::ValidationError(
+            "Daytona hand does not match its workspace account fence".to_string(),
+        ));
+    }
+    if let Some(storage) = storage {
+        use moa_core::types::sandbox_workspace::ProviderStorageKind;
+
+        let locator_matches = match storage.kind {
+            ProviderStorageKind::MutableFilesystem => {
+                storage.workspace_locator.as_deref()
+                    == Some(storage::workspace_subpath(operation).as_str())
+                    || (operation.kind
+                        == moa_core::types::sandbox_workspace::WorkspaceOperationKind::Delete
+                        && storage.workspace_locator.is_none())
+            }
+            ProviderStorageKind::PortableCheckpoint => storage.workspace_locator.is_none(),
+        };
+        if storage.provider_account_id != operation.binding.provider_account_id
+            || storage.provider_account_generation != operation.binding.provider_account_generation
+            || !locator_matches
+        {
+            return Err(MoaError::ValidationError(
+                "Daytona storage does not match its workspace binding".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_daytona_mount_path(path: &str) -> Result<()> {
+    const FORBIDDEN: &[&str] = &[
+        "/proc", "/sys", "/dev", "/boot", "/etc", "/bin", "/sbin", "/lib", "/lib64",
+    ];
+    if !path.starts_with('/')
+        || path == "/"
+        || path.contains("//")
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+        || FORBIDDEN
+            .iter()
+            .any(|root| path == *root || path.starts_with(&format!("{root}/")))
+    {
+        return Err(MoaError::ValidationError(
+            "Daytona volume mount path is not a safe dedicated data root".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn extract_workspace_id(value: &Value) -> Result<String> {
@@ -1152,202 +1597,5 @@ fn status_label(status: Option<HandStatus>) -> &'static str {
         Some(HandStatus::Destroyed) => "destroyed",
         Some(HandStatus::Failed) => "failed",
         None => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use moa_core::{traits::HandProvider, types::hands::SandboxProfile, types::hands::SandboxTier};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
-
-    use super::{
-        DEFAULT_DAYTONA_IMAGE, DaytonaHandProvider, DaytonaProvisioningIdentity,
-        PROVISIONING_OPERATION_LABEL, PROVISIONING_SPEC_LABEL, daytona_auto_stop_minutes,
-        daytona_sandbox_name,
-    };
-
-    async fn read_request(socket: &mut TcpStream) -> String {
-        let mut request = Vec::new();
-        loop {
-            let mut chunk = [0_u8; 4096];
-            let bytes = socket.read(&mut chunk).await.unwrap();
-            if bytes == 0 {
-                break;
-            }
-            request.extend_from_slice(&chunk[..bytes]);
-            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-            else {
-                continue;
-            };
-            let body_start = header_end + 4;
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or_default();
-            if request.len() >= body_start + content_length {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&request).to_string()
-    }
-
-    #[tokio::test]
-    async fn provisions_executes_and_destroys_workspace() {
-        let spec = crate::core::profile::test_support::hand_spec(
-            SandboxTier::Container,
-            SandboxProfile::unrestricted(),
-        );
-        let operation_id = spec.provisioning_operation_id;
-        let sandbox_name = daytona_sandbox_name(operation_id);
-        let auto_stop_minutes =
-            daytona_auto_stop_minutes(spec.effective_profile.profile()).unwrap();
-        let spec_fingerprint =
-            DaytonaProvisioningIdentity::for_spec(&spec, DEFAULT_DAYTONA_IMAGE, auto_stop_minutes)
-                .unwrap()
-                .spec_fingerprint
-                .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let seen_server = seen.clone();
-        let created = Arc::new(AtomicBool::new(false));
-        let created_server = created.clone();
-        let deleted = Arc::new(AtomicBool::new(false));
-        let deleted_server = deleted.clone();
-        let sandbox_name_server = sandbox_name.clone();
-        let spec_fingerprint_server = spec_fingerprint.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                let seen = seen_server.clone();
-                let created = created_server.clone();
-                let deleted = deleted_server.clone();
-                let sandbox_name = sandbox_name_server.clone();
-                let spec_fingerprint = spec_fingerprint_server.clone();
-                tokio::spawn(async move {
-                    let request = read_request(&mut socket).await;
-                    let first_line = request.lines().next().unwrap_or_default().to_string();
-                    seen.lock().await.push(first_line.clone());
-                    let (status, body) = if first_line.starts_with("POST /api/sandbox ") {
-                        if request.contains(&format!("\"name\":\"{sandbox_name}\""))
-                            && request.contains(PROVISIONING_OPERATION_LABEL)
-                            && request.contains(&operation_id.to_string())
-                            && request.contains(PROVISIONING_SPEC_LABEL)
-                            && request.contains(&spec_fingerprint)
-                        {
-                            created.store(true, Ordering::SeqCst);
-                            (
-                                "200 OK",
-                                format!(
-                                    r#"{{"id":"sbx-123","name":"{sandbox_name}","state":"started"}}"#
-                                ),
-                            )
-                        } else {
-                            (
-                                "400 Bad Request",
-                                r#"{"error":"missing durable identity"}"#.to_string(),
-                            )
-                        }
-                    } else if first_line.starts_with("GET /api/sandbox?") {
-                        if created.load(Ordering::SeqCst) && !deleted.load(Ordering::SeqCst) {
-                            (
-                                "200 OK",
-                                format!(
-                                    r#"{{"items":[{{"id":"sbx-123","name":"{sandbox_name}","labels":{{"{PROVISIONING_OPERATION_LABEL}":"{operation_id}","{PROVISIONING_SPEC_LABEL}":"{spec_fingerprint}"}},"state":"paused"}}],"nextCursor":null}}"#
-                                ),
-                            )
-                        } else {
-                            ("200 OK", r#"{"items":[],"nextCursor":null}"#.to_string())
-                        }
-                    } else if first_line.starts_with(&format!("GET /api/sandbox/{sandbox_name} ")) {
-                        if created.load(Ordering::SeqCst) && !deleted.load(Ordering::SeqCst) {
-                            (
-                                "200 OK",
-                                format!(
-                                    r#"{{"id":"sbx-123","name":"{sandbox_name}","labels":{{"{PROVISIONING_OPERATION_LABEL}":"{operation_id}","{PROVISIONING_SPEC_LABEL}":"{spec_fingerprint}"}},"state":"started"}}"#
-                                ),
-                            )
-                        } else {
-                            ("404 Not Found", r#"{"error":"not found"}"#.to_string())
-                        }
-                    } else if first_line.starts_with("GET /api/sandbox/sbx-123 ") {
-                        if deleted.load(Ordering::SeqCst) {
-                            ("404 Not Found", r#"{"error":"not found"}"#.to_string())
-                        } else {
-                            (
-                                "200 OK",
-                                format!(
-                                    r#"{{"id":"sbx-123","name":"{sandbox_name}","state":"stopped"}}"#
-                                ),
-                            )
-                        }
-                    } else if first_line.starts_with("POST /api/sandbox/sbx-123/start ") {
-                        ("200 OK", r#"{"ok":true}"#.to_string())
-                    } else if first_line.starts_with("POST /toolbox/sbx-123/process/execute ") {
-                        ("200 OK", r#"{"exitCode":0,"result":"hello\n"}"#.to_string())
-                    } else if first_line.starts_with("DELETE /api/sandbox/sbx-123 ") {
-                        deleted.store(true, Ordering::SeqCst);
-                        ("200 OK", r#"{"ok":true}"#.to_string())
-                    } else {
-                        ("404 Not Found", r#"{"error":"unexpected"}"#.to_string())
-                    };
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                });
-            }
-        });
-
-        let provider = DaytonaHandProvider::with_urls(
-            "test-key",
-            format!("http://{addr}/api"),
-            format!("http://{addr}/toolbox"),
-        )
-        .unwrap();
-        let handle = provider.provision(spec.clone()).await.unwrap();
-
-        assert_eq!(provider.provision(spec).await.unwrap(), handle);
-
-        assert_eq!(
-            provider.provisioned_hands(operation_id).await.unwrap(),
-            vec![handle.clone()]
-        );
-
-        let output = provider
-            .execute(&handle, "bash", r#"{"cmd":"echo hello"}"#)
-            .await
-            .unwrap();
-        assert_eq!(output.process_stdout(), Some("hello\n"));
-
-        provider.destroy(&handle).await.unwrap();
-
-        let seen = seen.lock().await.join("\n");
-        assert!(seen.contains("GET /api/sandbox?"));
-        assert!(seen.contains(&format!("GET /api/sandbox/{sandbox_name} ")));
-        assert!(seen.contains("POST /api/sandbox "));
-        assert!(seen.contains("POST /toolbox/sbx-123/process/execute "));
-        assert!(seen.contains("DELETE /api/sandbox/sbx-123 "));
-        assert!(seen.contains("GET /api/sandbox/sbx-123 "));
-        assert_eq!(
-            seen.lines()
-                .filter(|line| line.starts_with("POST /api/sandbox "))
-                .count(),
-            1
-        );
     }
 }

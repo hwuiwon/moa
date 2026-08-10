@@ -26,6 +26,7 @@ use moa_core::{
     types::hands::SandboxPolicySnapshot,
     types::hands::SandboxTier,
     types::identifiers::ConnectorConnectionId,
+    types::sandbox_workspace::WorkspaceEffect,
     types::security::ToolCapabilityId,
     types::tools::IdempotencyClass,
     types::tools::ToolDefinition,
@@ -385,6 +386,7 @@ pub(super) struct RegisteredTool {
     pub(super) definition: ToolDefinition,
     pub(super) execution: ToolExecution,
     pub(super) mcp_client_route: Option<McpClientRoute>,
+    pub(super) workspace_effect: Option<WorkspaceEffect>,
 }
 
 impl RegisteredTool {
@@ -393,6 +395,7 @@ impl RegisteredTool {
             definition: tool.definition(),
             execution: ToolExecution::BuiltIn(tool),
             mcp_client_route: None,
+            workspace_effect: None,
         }
     }
 
@@ -417,6 +420,7 @@ impl RegisteredTool {
                 routes: vec![HandRoute::local()],
             },
             mcp_client_route: None,
+            workspace_effect: Some(WorkspaceEffect::MayWrite),
         }
     }
 
@@ -427,6 +431,7 @@ impl RegisteredTool {
                 routes: vec![HandRoute::local()],
             },
             mcp_client_route: None,
+            workspace_effect: Some(descriptor.workspace_effect),
         }
     }
 
@@ -481,6 +486,7 @@ impl RegisteredTool {
                 schema_hash,
             },
             mcp_client_route: Some(client_route),
+            workspace_effect: None,
         })
     }
 }
@@ -691,6 +697,7 @@ impl ToolRegistry {
                 definition,
                 execution,
                 mcp_client_route: None,
+                workspace_effect: None,
             },
         );
         self.default_loadout.push(name.clone());
@@ -798,6 +805,15 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| &tool.definition)
     }
 
+    /// Returns the durable workspace effect for a sandbox-backed tool.
+    ///
+    /// `None` means the tool is not a sandbox filesystem operation. Sandbox
+    /// descriptors always return `Some`, including read-only tools.
+    #[must_use]
+    pub fn workspace_effect(&self, name: &str) -> Option<WorkspaceEffect> {
+        self.tools.get(name).and_then(|tool| tool.workspace_effect)
+    }
+
     /// Returns registered definitions with their executable owners in stable name order.
     pub fn capability_registrations(&self) -> Vec<(ToolDefinition, ToolExecution)> {
         let mut registrations = self
@@ -889,6 +905,7 @@ fn default_budget_for_tool(tool_name: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use moa_core::types::sandbox_workspace::WorkspaceEffect;
     use serde_json::json;
 
     use crate::adapters::mcp::McpDiscoveredTool;
@@ -1009,6 +1026,27 @@ mod tests {
                 "bash",
             ],
             "default local loadout order changed"
+        );
+    }
+
+    #[test]
+    fn default_registry_preserves_every_descriptor_workspace_effect() {
+        // Pins: descriptor effects survive registration and are available to
+        // the dispatch commit barrier without provider-name branching.
+        let registry = ToolRegistry::default_local();
+
+        for descriptor in sandbox_tool_descriptors() {
+            assert_eq!(
+                registry.workspace_effect(descriptor.name),
+                Some(descriptor.workspace_effect),
+                "{} lost its workspace effect during registration",
+                descriptor.name
+            );
+        }
+        assert_eq!(registry.workspace_effect("memory_remember"), None);
+        assert_eq!(
+            registry.workspace_effect("file_read"),
+            Some(WorkspaceEffect::ReadOnly)
         );
     }
 

@@ -99,7 +99,7 @@ the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 | AWS S3 or GCS | Session attachment byte storage in cloud |
 | Turbopuffer | Cloud vector backend for storage partitions configured away from local pgvector |
 | LLM provider | Model calls and optional embeddings |
-| Hand provider | Runtime-configured local, Daytona, or E2B execution |
+| Hand provider | Runtime-configured local, Daytona, or E2B execution; E2B durability is MOA-owned portable checkpoints plus fresh-compute restore, never pause/resume, snapshots, or volumes |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
 | Debezium + Kafka-compatible broker | Optional graph changelog CDC for audit export, bridge sync, and cache invalidation |
 
@@ -108,12 +108,12 @@ the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 | Service | Purpose |
 |---|---|
 | Neon branching | Database checkpoint/rollback support |
-| External secret manager | Deployment-time injection for provider/operator secrets; tenant connector credential series remain in the Postgres/KMS-backed `CredentialVault` |
+| External secret manager | Read-only, atomically rotated provider-account credential files for deployment-owned sandbox/operator secrets; tenant connector credential series remain in the Postgres/KMS-backed `CredentialVault` |
 | Grafana/Loki/Tempo/Mimir stack | Logs, metrics, and traces. MOA pushes all three signals over OTLP to one collector base URL and exposes no scrape port; `MOA_METRICS_EXPORTER=prometheus` is a development-only mode |
 | Messaging platforms | Slack adapter |
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
 | Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
-| RustFS | Local S3-compatible attachment storage for docker-compose development |
+| RustFS | Digest-pinned, PVC/volume-backed local S3-compatible storage for session attachments and encrypted sandbox checkpoints; absent from production |
 
 ## ClickHouse Analytics: Supported, Not Deployed
 
@@ -239,6 +239,11 @@ MOA_DATABASE_URL=postgres://runtime-role@... MOA_DATABASE_ADMIN_URL=postgres://m
 Run `migrate` as a distinct deployment phase before any runtime replica. The
 default orchestrator command opens only `MOA_DATABASE_URL`, validates the exact
 complete embedded history, and fails closed without executing migration DDL.
+Sandbox workspace `maintenance` and `admit` additionally require the
+`moa-postgres-maintenance/url` Secret as `MOA_DATABASE_MAINTENANCE_URL`. That
+login is a member only of the NOLOGIN `moa_workspace_maintenance` role; it is
+not the runtime or migration owner. The coordinator verifies membership before
+using the pool, and ordinary request handlers never receive it.
 
 ## Configuration
 
@@ -291,7 +296,13 @@ Implemented architectural pillars:
 - Reviewed custom connectors use one HTTP-only artifact contract; code-owned
   Nango/Merge parents remain actionless and internal to knowledge linking.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
-- Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness. A lease carries the exact sandbox policy identity it was provisioned under plus a renewable idle deadline and an immutable hard deadline, and an independent durable reaper destroys expired generations with `SKIP LOCKED` claims rather than waiting for traffic.
+- Postgres hand leases for cross-pod ephemeral compute binding and cleanup, plus
+  Postgres-backed claim-check blobs for event replay. A hand lease carries the
+  exact sandbox policy identity it was provisioned under, a renewable idle
+  deadline, and an immutable hard deadline; an independent durable reaper
+  destroys expired compute generations with `SKIP LOCKED` claims rather than
+  waiting for traffic. A hand lease, claim-check blob, session event, or Restate
+  journal does not persist arbitrary sandbox files.
 - Redis-backed runtime cache for the production orchestrator; the in-memory implementation is limited to isolated non-orchestrator tests and embeddings.
 - Provider coordination bounds every runtime-cache operation at 250ms before
   applying its configured fail-closed or bounded-degraded policy. Shared
@@ -351,11 +362,13 @@ MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
 MOA_SESSION_ATTACHMENT_REGION=us-east-1
 MOA_SESSION_ATTACHMENT_ALLOW_HTTP=false
 
-# GCS alternative
-MOA_SESSION_ATTACHMENT_BACKEND=gcs
+# GCS alternative using deployment workload identity
+MOA_OBJECT_STORE_BACKEND=gcs
+MOA_OBJECT_STORE_CREDENTIAL_MODE=workload_identity
 MOA_SESSION_ATTACHMENT_BUCKET=moa-session-attachments
 MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
-MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH=/var/run/secrets/gcp/application-default.json
+MOA_SANDBOX_CHECKPOINT_BUCKET=moa-workspace-checkpoints
+MOA_SANDBOX_CHECKPOINT_PREFIX=workspace-checkpoints/v1
 ```
 
 Optional hand and messaging settings depend on the chosen deployment:
@@ -363,8 +376,7 @@ Optional hand and messaging settings depend on the chosen deployment:
 ```bash
 MOA_CLOUD_HANDS_DEFAULT_PROVIDER=daytona
 MOA_CLOUD_HANDS_FALLBACK_PROVIDERS=e2b
-MOA_CLOUD_HANDS_DAYTONA_API_KEY=...
-MOA_CLOUD_HANDS_E2B_API_KEY=...
+MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON='[{"provider_account_id":"...","generation":1,"provider":"daytona","isolation_cell":"daytona-cell-a","api_origin":"https://api.daytona.io","toolbox_origin":"https://proxy-api.daytona.io","project_fingerprint":"daytona:organization:cell-a","credential":{"path":"/var/run/moa/provider-credentials/daytona","owner_uid":10001}}]'
 SLACK_BOT_TOKEN=...
 SLACK_APP_TOKEN=...
 MOA_MESSAGING_EMAIL_FROM="MOA <no-reply@example.com>"
@@ -379,9 +391,11 @@ endpoint. Process readiness checks Postgres, KMS, and the optional lineage
 writer only. RestateDeployment status is the registration gate; edge startup
 calls the side-effect-free public `Health/check` Restate handler.
 
-Provider registration is deployment-static. `ProviderRegistry` is built at
-startup from `MoaConfig` and directly injected provider API keys; changing provider
-availability requires a rollout unless a future shared provider store is added.
+Provider-account registration is deployment-static. The orchestrator builds a
+non-secret account map from `MoaConfig`, then reads the selected account's
+root-owned projected credential file for every admitted provider attempt.
+Rotating a file takes effect without a process restart; changing account
+availability, generation, or endpoint policy requires a rollout.
 
 Kubernetes routing is non-sticky. Correctness-sensitive state must be stored in
 Postgres, Restate, or Redis-backed `RuntimeCacheStore`. The orchestrator rejects
@@ -394,21 +408,29 @@ Durable main-agent/worker coordination keeps working across non-sticky
 replicas because all of its correctness state lives in Restate VO/workflow state
 and Postgres, never in process memory or Redis:
 
-- **Restate + Postgres are required for correctness.** Child attention signals,
+- **Restate + Postgres are required for coordination correctness.** Child attention signals,
   guarded parent resume, terminal results, heartbeat-stale detection, narration
   scheduling, and self-cleanup are all driven by `Session`/`Worker` VO state,
   Restate awakeables/delayed self-calls, and idempotent Postgres event appends
   (the `session_event_dedupe` guard). Any orchestrator replica can pick up the
-  next message or fired tick.
+  next message or fired tick. This durability does not extend to arbitrary files
+  inside sandbox compute.
 - **Redis is runtime cache only**, never a correctness owner for signals, resume,
   or terminal results.
-- **Coordinator/worker/sandbox topology.** The root coordinator
-  (`Session`/`TurnExecution`) is sandbox-free; each worker owns one ephemeral
-  sandbox keyed `(session_id, worker_id, provider)` in `moa.hand_leases`,
-  released on worker self-cleanup. Sandboxes are refreshable: durable state
-  lives in the event log and object store, and a crashed sandbox is reprovisioned
-  under a new lease generation. RestateDeployment readiness, rather than an
-  Admin API call from each replica, gates registered service traffic.
+- **Coordinator/owner/workspace topology.** The root coordinator
+  (`Session`/`TurnExecution`) is sandbox-free. Only a worker or sandbox-using
+  execution task owns a durable, tenant-scoped `SandboxWorkspace`; there is no
+  session-level workspace admission. Each owner may attach one ephemeral hand
+  under independent workspace-writer and compute-instance fences. Worker/task
+  self-cleanup releases compute without deleting independently retained
+  workspace state. Postgres owns workspace metadata and checkpoint references;
+  provider/object storage owns working and committed bytes. Session events and
+  Restate journals cannot reconstruct arbitrary task-created files. The
+  canonical lifecycle, commit barrier, provider binding, and purge contract is
+  [Sandbox Workspaces](25-sandbox-workspaces.md). Sandbox dispatch requires the
+  typed owner and rejects its absence before workspace reads or provider I/O.
+  RestateDeployment readiness, rather than an Admin API call from each replica,
+  gates registered service traffic.
 
 Durable execution runs use a separate topology. `ExecutionRun` and
 `ExecutionTask` workflows recover from Postgres execution rows plus Restate

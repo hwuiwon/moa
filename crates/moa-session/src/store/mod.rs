@@ -95,7 +95,8 @@ pub use session_records::SessionCreateOutcome;
 
 fn local_rustfs_config() -> MoaConfig {
     let mut config = MoaConfig::default();
-    config.session.attachments = SessionAttachmentStorageConfig::local_rustfs();
+    config.session.attachments = SessionAttachmentStorageConfig::default();
+    config.object_store = moa_config::ObjectStoreConfig::local_rustfs();
     config
 }
 

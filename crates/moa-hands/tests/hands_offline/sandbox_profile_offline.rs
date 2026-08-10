@@ -2,8 +2,13 @@
 //! translate-or-reject behavior.
 
 use std::num::{NonZeroU32, NonZeroU64};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::sync::Arc;
 
-use moa_config::{CloudHandsConfig, MoaConfig, SandboxProfileConfig, SecurityProfile};
+use moa_config::{
+    CloudHandProviderAccountConfig, CloudHandProviderKind, CloudHandsConfig, MoaConfig,
+    ProviderSecretFileSelector, SandboxProfileConfig, SecurityProfile,
+};
 use moa_core::types::action_policy::CallOrigin;
 use moa_core::{
     error::MoaError,
@@ -14,7 +19,9 @@ use moa_core::{
         resolve_effective_sandbox_profile,
     },
 };
+use moa_crypto::LocalKmsProvider;
 use moa_hands::{LocalHandProvider, ToolRouter, deployment_sandbox_policy, route_sandbox_policy};
+use object_store::memory::InMemory;
 use tempfile::tempdir;
 
 fn seconds(value: u64) -> LifetimeLimit {
@@ -58,12 +65,30 @@ fn spec(tier: SandboxTier, profile: SandboxProfile) -> HandSpec {
     .expect("test policy resolution should succeed");
     HandSpec {
         provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
+        workspace: workspace_binding(),
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,
         env: std::collections::HashMap::new(),
-        workspace_mount: None,
+        filesystem: moa_core::types::sandbox_workspace::SandboxFilesystemLayout::standard(),
         effective_profile,
+    }
+}
+
+fn workspace_binding() -> moa_core::types::sandbox_workspace::WorkspaceBinding {
+    moa_core::types::sandbox_workspace::WorkspaceBinding {
+        tenant_id: moa_core::types::identifiers::TenantId::new(),
+        scope: moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+            session_id: moa_core::types::identifiers::SessionId::new(),
+            worker_id: "sandbox-profile-worker".to_string(),
+        },
+        workspace_id: moa_core::types::identifiers::SandboxWorkspaceId::new(),
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId::new(),
+        provider_account_generation: 1,
+        durability_class: moa_core::types::sandbox_workspace::DurabilityClass::PortableFilesystem,
+        writer_epoch: 1,
+        instance_generation: 1,
+        current_revision: None,
     }
 }
 
@@ -228,7 +253,6 @@ async fn cloud_profile_refuses_the_built_in_local_development_sandbox_policy_off
     config.permissions.default_effect = moa_core::types::action_policy::ActionPolicyEffect::Deny;
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("e2b".to_string()),
-        e2b_api_key: Some("MOA_TEST_E2B_KEY".to_string()),
         ..CloudHandsConfig::default()
     });
 
@@ -253,9 +277,55 @@ async fn cloud_profile_refuses_the_built_in_local_development_sandbox_policy_off
         idle_timeout: seconds(300),
         max_lifetime: seconds(3600),
     };
-    ToolRouter::from_config(&config, None, Some(std::sync::Arc::new(NoRules)))
-        .await
-        .expect("an authored deployment sandbox policy lets the cloud router construct");
+    let credential_dir = tempdir().expect("provider credential tempdir");
+    let credential_path = credential_dir.path().join("e2b");
+    std::fs::write(&credential_path, "MOA_TEST_E2B_KEY").expect("write provider credential");
+    std::fs::set_permissions(&credential_path, std::fs::Permissions::from_mode(0o400))
+        .expect("chmod provider credential");
+    let owner_uid = std::fs::metadata(&credential_path)
+        .expect("provider credential metadata")
+        .uid();
+    config
+        .cloud
+        .hands
+        .as_mut()
+        .expect("cloud hands config")
+        .provider_accounts = vec![CloudHandProviderAccountConfig {
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId::new(),
+        generation: 1,
+        provider: CloudHandProviderKind::E2b,
+        isolation_cell: "offline-test".to_string(),
+        api_origin: "https://api.e2b.dev".to_string(),
+        toolbox_origin: None,
+        sandbox_domain: Some("e2b.app".to_string()),
+        default_runtime: Some("base".to_string()),
+        project_fingerprint: None,
+        credential: ProviderSecretFileSelector {
+            path: credential_path,
+            owner_uid,
+        },
+    }];
+    let checkpoint_store = Arc::new(
+        moa_hands::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore::new(
+            Arc::new(InMemory::new()),
+            Arc::new(LocalKmsProvider::new()),
+            "sandbox-profile-offline/checkpoints",
+            moa_hands::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
+            moa_hands::core::sandbox_workspace::checkpoint::store::ObservedCheckpointBucketVersioning::Unversioned,
+        )
+        .expect("offline checkpoint store should construct"),
+    );
+    ToolRouter::from_config_with_checkpoint_store(
+        &config,
+        None,
+        Some(Arc::new(NoRules)),
+        Some(checkpoint_store),
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("an authored deployment sandbox policy lets the cloud router construct");
 }
 
 #[test]

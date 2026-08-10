@@ -25,10 +25,14 @@ use moa_core::types::hands::{
     BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
     SandboxPolicySnapshot, SandboxProfile, SandboxTier,
 };
-use moa_core::types::identifiers::{SessionId, TenantId};
+use moa_core::types::identifiers::{
+    ProviderAccountId, SandboxWorkspaceId, SessionId, TenantId, WorkspaceCheckpointId,
+    WorkspaceOperationId,
+};
 use moa_hands::PostgresTenantSandboxPolicyStore;
 use moa_hands::core::leases::{
-    HandLeasePolicy, HandLeaseProvisionRequest, HandLeaseStatus, HandLeaseStore, LeaseHandle,
+    HandLeaseActivateRequest, HandLeasePolicy, HandLeaseProvisionRequest, HandLeaseRenewRequest,
+    HandLeaseStatus, HandLeaseStore, HandLeaseWorkspaceAttachment, LeaseHandle,
     PostgresHandLeaseStore,
 };
 use moa_hands::core::reaper::{ExpiredHandLeaseClaims, PostgresExpiredHandLeaseClaims};
@@ -36,10 +40,7 @@ use moa_hands::{TenantSandboxPolicyStore, deployment_sandbox_policy};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-fn database_url() -> String {
-    std::env::var("MOA_DATABASE_URL")
-        .expect("MOA_DATABASE_URL must point at the local compose Postgres for _db tests")
-}
+use super::{database_url, seed_session};
 
 async fn pool() -> PgPool {
     PgPoolOptions::new()
@@ -48,6 +49,86 @@ async fn pool() -> PgPool {
         .connect(&database_url())
         .await
         .expect("test Postgres should be reachable")
+}
+
+async fn seed_workspace(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    session_id: SessionId,
+) -> (HandLeaseWorkspaceAttachment, ProviderAccountId) {
+    let provider_account_id = ProviderAccountId::new();
+    let workspace_id = SandboxWorkspaceId::new();
+    sqlx::query(
+        "INSERT INTO moa.sandbox_provider_accounts (\
+             provider_account_id, provider, isolation_cell, organization_fingerprint\
+         ) VALUES ($1, 'local', $2, $3)",
+    )
+    .bind(provider_account_id)
+    .bind(format!("lease-reaper-{workspace_id}"))
+    .bind(format!("lease-reaper-org-{workspace_id}"))
+    .execute(pool)
+    .await
+    .expect("seed provider account");
+    sqlx::query(
+        "INSERT INTO moa.sandbox_workspaces (\
+             workspace_id, tenant_id, scope_kind, scope_session_id, scope_worker_id,\
+             provider, provider_account_id, provider_account_generation, durability_class,\
+             lifecycle_state, writer_epoch, instance_generation\
+         ) VALUES ($1, $2, 'worker', $3, 'worker', 'local', $4, 1, 'portable_filesystem',\
+                   'active', 1, 1)",
+    )
+    .bind(workspace_id)
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(provider_account_id)
+    .execute(pool)
+    .await
+    .expect("seed sandbox workspace");
+    (
+        HandLeaseWorkspaceAttachment::new(workspace_id, 1, 1, None)
+            .expect("seeded attachment validates"),
+        provider_account_id,
+    )
+}
+
+async fn cleanup_session_fixture(
+    pool: &PgPool,
+    session_id: SessionId,
+    workspace_id: SandboxWorkspaceId,
+    provider_account_id: ProviderAccountId,
+) {
+    let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "UPDATE moa.sandbox_workspaces \
+         SET current_checkpoint_id = NULL, current_checkpoint_generation = 0 \
+         WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .execute(pool)
+    .await;
+    let _ = sqlx::query("DELETE FROM moa.sandbox_workspace_checkpoints WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM moa.sandbox_workspace_operations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM moa.sandbox_workspaces WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM moa.sandbox_provider_accounts WHERE provider_account_id = $1")
+        .bind(provider_account_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM public.sessions WHERE id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await;
 }
 
 fn seconds(value: u64) -> LifetimeLimit {
@@ -80,16 +161,23 @@ fn lease_policy(idle: LifetimeLimit, hard: LifetimeLimit) -> HandLeasePolicy {
 }
 
 /// Seeds one active lease with a live handle and an already-expired hard deadline.
-async fn seed_expired_active_lease(pool: &PgPool, session_id: SessionId, tenant_id: TenantId) {
+async fn seed_expired_active_lease(
+    pool: &PgPool,
+    session_id: SessionId,
+    tenant_id: TenantId,
+) -> (SandboxWorkspaceId, ProviderAccountId) {
+    seed_session(pool, session_id, tenant_id).await;
+    let (attachment, provider_account_id) = seed_workspace(pool, tenant_id, session_id).await;
     let store = PostgresHandLeaseStore::new(pool.clone());
     let policy = lease_policy(seconds(60), seconds(120));
     let claim = store
         .claim_for_provisioning(HandLeaseProvisionRequest {
             session_id,
-            worker_id: "",
+            worker_id: "worker",
             tenant_id,
             provider: "local",
             tier: SandboxTier::Local,
+            attachment: attachment.clone(),
             policy: &policy,
             caller_deadline: None,
         })
@@ -97,18 +185,20 @@ async fn seed_expired_active_lease(pool: &PgPool, session_id: SessionId, tenant_
         .expect("claim provisioning")
         .expect("claim is owned");
     store
-        .activate(
+        .activate(HandLeaseActivateRequest {
+            tenant_id,
             session_id,
-            "",
-            "local",
-            claim.generation,
-            LeaseHandle::new(
+            worker_id: "worker",
+            provider: "local",
+            generation: claim.generation,
+            handle: LeaseHandle::new(
                 claim.provisioning_operation_id,
                 moa_core::types::hands::HandHandle::local(std::path::PathBuf::from(
                     "/tmp/moa-reaper-db",
                 )),
             ),
-        )
+            attachment: attachment.clone(),
+        })
         .await
         .expect("activate lease");
     // Push both deadlines into the past so the sandbox is destroyable now,
@@ -123,6 +213,7 @@ async fn seed_expired_active_lease(pool: &PgPool, session_id: SessionId, tenant_
     .execute(pool)
     .await
     .expect("expire the seeded lease");
+    (attachment.workspace_id, provider_account_id)
 }
 
 async fn lease_status(pool: &PgPool, session_id: SessionId) -> String {
@@ -144,8 +235,9 @@ async fn competing_replicas_claim_disjoint_generations_without_new_traffic_db() 
     let pool = pool().await;
     let tenant_id = TenantId::new();
     let sessions = [SessionId::new(), SessionId::new(), SessionId::new()];
+    let mut fixtures = Vec::new();
     for session_id in sessions {
-        seed_expired_active_lease(&pool, session_id, tenant_id).await;
+        fixtures.push(seed_expired_active_lease(&pool, session_id, tenant_id).await);
     }
 
     let left = PostgresExpiredHandLeaseClaims::new(pool.clone());
@@ -212,13 +304,38 @@ async fn competing_replicas_claim_disjoint_generations_without_new_traffic_db() 
             "destroyed",
             "the generation this test claimed must finalize as destroyed"
         );
+        let workspace_state = sqlx::query_scalar::<_, String>(
+            "SELECT lifecycle_state FROM moa.sandbox_workspaces \
+             WHERE tenant_id = $1 AND scope_session_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read workspace state after compute finalization");
+        assert_eq!(
+            workspace_state, "ready",
+            "safe compute destruction must leave the retained workspace ready, not falsely active"
+        );
+        let attachment_cleared = sqlx::query_scalar::<_, bool>(
+            "SELECT workspace_id IS NULL \
+                    AND workspace_writer_epoch IS NULL \
+                    AND workspace_instance_generation IS NULL \
+                    AND restored_checkpoint_id IS NULL \
+             FROM moa.hand_leases WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read terminal hand attachment");
+        assert!(
+            attachment_cleared,
+            "workspace transition and terminal attachment clearing must commit together"
+        );
     }
 
-    for session_id in sessions {
-        let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
-            .bind(session_id)
-            .execute(&pool)
-            .await;
+    for (session_id, (workspace_id, provider_account_id)) in sessions.into_iter().zip(fixtures) {
+        cleanup_session_fixture(&pool, session_id, workspace_id, provider_account_id).await;
     }
     pool.close().await;
 }
@@ -232,7 +349,9 @@ async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
     // the reaper already decided to destroy.
     let pool = pool().await;
     let session_id = SessionId::new();
-    seed_expired_active_lease(&pool, session_id, TenantId::new()).await;
+    let tenant_id = TenantId::new();
+    let (workspace_id, provider_account_id) =
+        seed_expired_active_lease(&pool, session_id, tenant_id).await;
 
     let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
     let claimed = claims
@@ -284,10 +403,7 @@ async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
         "a released generation must not be re-claimed before its backoff elapses"
     );
 
-    let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
-        .bind(session_id)
-        .execute(&pool)
-        .await;
+    cleanup_session_fixture(&pool, session_id, workspace_id, provider_account_id).await;
     pool.close().await;
 }
 
@@ -299,7 +415,9 @@ async fn expired_reaper_claim_is_recovered_and_the_old_owner_is_fenced_db() {
     // owner's late finalization cannot delete that newer claim.
     let pool = pool().await;
     let session_id = SessionId::new();
-    seed_expired_active_lease(&pool, session_id, TenantId::new()).await;
+    let tenant_id = TenantId::new();
+    let (workspace_id, provider_account_id) =
+        seed_expired_active_lease(&pool, session_id, tenant_id).await;
 
     let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
     let first = claims
@@ -362,10 +480,239 @@ async fn expired_reaper_claim_is_recovered_and_the_old_owner_is_fenced_db() {
     );
     assert_eq!(lease_status(&pool, session_id).await, "destroyed");
 
-    let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
-        .bind(session_id)
-        .execute(&pool)
-        .await;
+    cleanup_session_fixture(&pool, session_id, workspace_id, provider_account_id).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the local compose Postgres via MOA_DATABASE_URL"]
+async fn stale_reaper_claim_cannot_release_or_finalize_a_newer_attachment_db() {
+    // Pins: all four workspace-attachment columns are part of the reaper CAS.
+    // If a replacement attachment supersedes the captured epochs, the stale
+    // owner cannot renew, release, or finalize it; the exact current owner can
+    // finalize compute cleanup and clears the terminal lease attachment.
+    let pool = pool().await;
+    let session_id = SessionId::new();
+    let tenant_id = TenantId::new();
+    let (workspace_id, provider_account_id) =
+        seed_expired_active_lease(&pool, session_id, tenant_id).await;
+
+    let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
+    let stale = claims
+        .claim_expired(64, Duration::from_secs(300))
+        .await
+        .expect("claim expired leases")
+        .into_iter()
+        .find(|claim| claim.session_id == session_id)
+        .expect("the seeded lease is claimable");
+    let original = stale
+        .attachment
+        .as_ref()
+        .expect("active lease claim carries its exact workspace attachment");
+    assert_eq!(original.workspace_id, workspace_id);
+
+    let newer_writer_epoch = original.workspace_writer_epoch + 1;
+    let newer_instance_generation = original.workspace_instance_generation + 1;
+    let commit_operation_id = WorkspaceOperationId::new();
+    let checkpoint_id = WorkspaceCheckpointId::new();
+    sqlx::query(
+        "INSERT INTO moa.sandbox_workspace_operations (\
+             operation_id, tenant_id, workspace_id, provider_account_id,\
+             provider_account_generation, operation_kind, request_hash,\
+             expected_writer_epoch, expected_instance_generation,\
+             expected_checkpoint_generation, deadline_at, reconcile_not_before,\
+             outcome_class, confirmed_disposition\
+         ) VALUES (\
+             $1, $2, $3, $4, 1, 'commit', $5, $6, $7, 0,\
+             now() + interval '1 minute', now() + interval '2 minutes',\
+             'confirmed', 'resource_present'\
+         )",
+    )
+    .bind(commit_operation_id)
+    .bind(tenant_id)
+    .bind(workspace_id)
+    .bind(provider_account_id)
+    .bind(format!("reaper-new-head-{checkpoint_id}"))
+    .bind(newer_writer_epoch)
+    .bind(newer_instance_generation)
+    .execute(&pool)
+    .await
+    .expect("seed the newer committed-head operation");
+    sqlx::query(
+        "INSERT INTO moa.sandbox_workspace_checkpoints (\
+             checkpoint_id, tenant_id, workspace_id, generation,\
+             source_writer_epoch, source_instance_generation,\
+             source_checkpoint_generation, object_reference, manifest_digest,\
+             logical_bytes, operation_id, lifecycle_state, verified_at\
+         ) VALUES ($1, $2, $3, 1, $4, $5, 0, $6, $7, 1, $8, 'available', now())",
+    )
+    .bind(checkpoint_id)
+    .bind(tenant_id)
+    .bind(workspace_id)
+    .bind(newer_writer_epoch)
+    .bind(newer_instance_generation)
+    .bind(format!("reaper/checkpoints/{checkpoint_id}"))
+    .bind(format!("digest-{checkpoint_id}"))
+    .bind(commit_operation_id)
+    .execute(&pool)
+    .await
+    .expect("seed the newer verified checkpoint head");
+    let newer = HandLeaseWorkspaceAttachment::new(
+        workspace_id,
+        newer_writer_epoch,
+        newer_instance_generation,
+        Some(checkpoint_id),
+    )
+    .expect("newer attachment validates");
+    sqlx::query(
+        "UPDATE moa.hand_leases \
+         SET workspace_writer_epoch = $2, workspace_instance_generation = $3, \
+             restored_checkpoint_id = $4 \
+         WHERE session_id = $1 AND status = 'reaping'",
+    )
+    .bind(session_id)
+    .bind(newer.workspace_writer_epoch)
+    .bind(newer.workspace_instance_generation)
+    .bind(newer.restored_checkpoint_id)
+    .execute(&pool)
+    .await
+    .expect("simulate a newer attachment replacing the captured fences");
+    sqlx::query(
+        "UPDATE moa.sandbox_workspaces \
+         SET writer_epoch = $2, instance_generation = $3, \
+             current_checkpoint_id = $4, current_checkpoint_generation = 1 \
+         WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .bind(newer.workspace_writer_epoch)
+    .bind(newer.workspace_instance_generation)
+    .bind(newer.restored_checkpoint_id)
+    .execute(&pool)
+    .await
+    .expect("advance the durable workspace to the newer attachment and head");
+
+    assert!(
+        !claims
+            .renew_claim(&stale, Duration::from_secs(300))
+            .await
+            .expect("stale renewal is a fenced no-op"),
+        "a stale claim must not renew ownership over a newer attachment"
+    );
+    assert!(
+        !claims
+            .release_for_retry(&stale, Duration::from_secs(120))
+            .await
+            .expect("stale retry release is a fenced no-op"),
+        "a stale claim must not release a newer attachment"
+    );
+    assert!(
+        !claims
+            .finalize_destroyed(&stale)
+            .await
+            .expect("stale finalization is a fenced no-op"),
+        "a stale claim must not finalize a newer attachment"
+    );
+
+    let live = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<WorkspaceCheckpointId>,
+        ),
+    >(
+        "SELECT status, workspace_writer_epoch, workspace_instance_generation, \
+                restored_checkpoint_id \
+         FROM moa.hand_leases WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the still-fenced newer attachment");
+    assert_eq!(
+        live,
+        (
+            "reaping".to_string(),
+            Some(newer.workspace_writer_epoch),
+            Some(newer.workspace_instance_generation),
+            newer.restored_checkpoint_id,
+        ),
+        "all stale operations must leave the newer attachment untouched"
+    );
+
+    let ambiguous_operation_id = WorkspaceOperationId::new();
+    sqlx::query(
+        "INSERT INTO moa.sandbox_workspace_operations (\
+             operation_id, tenant_id, workspace_id, provider_account_id,\
+             provider_account_generation, operation_kind, request_hash,\
+             expected_writer_epoch, expected_instance_generation,\
+             expected_checkpoint_generation, deadline_at, reconcile_not_before,\
+             outcome_class\
+         ) VALUES (\
+             $1, $2, $3, $4, 1, 'restore', $5, $6, $7, 1,\
+             now() + interval '1 minute', now() + interval '2 minutes', 'unknown'\
+         )",
+    )
+    .bind(ambiguous_operation_id)
+    .bind(tenant_id)
+    .bind(workspace_id)
+    .bind(provider_account_id)
+    .bind(format!("reaper-ambiguous-restore-{ambiguous_operation_id}"))
+    .bind(newer.workspace_writer_epoch)
+    .bind(newer.workspace_instance_generation)
+    .execute(&pool)
+    .await
+    .expect("seed an ambiguous operation on the current attachment");
+
+    let mut current = stale;
+    current.attachment = Some(newer.clone());
+    assert!(
+        claims
+            .finalize_destroyed(&current)
+            .await
+            .expect("current exact claim finalizes"),
+        "the exact attachment owner should finalize compute cleanup"
+    );
+    let terminal = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<SandboxWorkspaceId>,
+            Option<i64>,
+            Option<i64>,
+            Option<moa_core::types::identifiers::WorkspaceCheckpointId>,
+        ),
+    >(
+        "SELECT status, workspace_id, workspace_writer_epoch, \
+                workspace_instance_generation, restored_checkpoint_id \
+         FROM moa.hand_leases WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read finalized lease");
+    assert_eq!(terminal, ("destroyed".to_string(), None, None, None, None));
+    let workspace = sqlx::query_as::<_, (String, i64, i64, Option<WorkspaceCheckpointId>)>(
+        "SELECT lifecycle_state, writer_epoch, instance_generation, current_checkpoint_id \
+         FROM moa.sandbox_workspaces WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read workspace after exact compute finalization");
+    assert_eq!(
+        workspace,
+        (
+            "reconciling".to_string(),
+            newer.workspace_writer_epoch,
+            newer.workspace_instance_generation,
+            newer.restored_checkpoint_id,
+        ),
+        "ambiguous work must retain the exact newer head and move only lifecycle to reconciling"
+    );
+
+    cleanup_session_fixture(&pool, session_id, workspace_id, provider_account_id).await;
     pool.close().await;
 }
 
@@ -378,14 +725,18 @@ async fn renewal_cannot_push_idle_past_the_hard_deadline_in_postgres_db() {
     let pool = pool().await;
     let store = PostgresHandLeaseStore::new(pool.clone());
     let session_id = SessionId::new();
+    let tenant_id = TenantId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    let (attachment, provider_account_id) = seed_workspace(&pool, tenant_id, session_id).await;
     let policy = lease_policy(seconds(60), seconds(120));
     let claim = store
         .claim_for_provisioning(HandLeaseProvisionRequest {
             session_id,
-            worker_id: "",
-            tenant_id: TenantId::new(),
+            worker_id: "worker",
+            tenant_id,
             provider: "local",
             tier: SandboxTier::Local,
+            attachment: attachment.clone(),
             policy: &policy,
             caller_deadline: None,
         })
@@ -394,38 +745,42 @@ async fn renewal_cannot_push_idle_past_the_hard_deadline_in_postgres_db() {
         .expect("claim is owned");
     let hard_deadline = claim.hard_expires_at.expect("bounded hard deadline");
     store
-        .activate(
+        .activate(HandLeaseActivateRequest {
+            tenant_id,
             session_id,
-            "",
-            "local",
-            claim.generation,
-            LeaseHandle::new(
+            worker_id: "worker",
+            provider: "local",
+            generation: claim.generation,
+            handle: LeaseHandle::new(
                 claim.provisioning_operation_id,
                 moa_core::types::hands::HandHandle::local(std::path::PathBuf::from(
                     "/tmp/moa-renew-db",
                 )),
             ),
-        )
+            attachment: attachment.clone(),
+        })
         .await
         .expect("activate lease");
 
     let greedy = chrono::Utc::now() + chrono::Duration::hours(24);
     assert!(
         store
-            .renew_active(
+            .renew_active(HandLeaseRenewRequest {
+                tenant_id,
                 session_id,
-                "",
-                "local",
-                claim.generation,
-                claim.provisioning_operation_id,
-                greedy,
-            )
+                worker_id: "worker",
+                provider: "local",
+                generation: claim.generation,
+                provisioning_operation_id: claim.provisioning_operation_id,
+                attachment: attachment.clone(),
+                idle_expires_at: greedy,
+            })
             .await
             .expect("renewal inside the hard lifetime succeeds")
     );
 
     let renewed = store
-        .get(session_id, "", "local")
+        .get(tenant_id, session_id, "worker", "local")
         .await
         .expect("load renewed lease")
         .expect("lease exists");
@@ -441,10 +796,13 @@ async fn renewal_cannot_push_idle_past_the_hard_deadline_in_postgres_db() {
     );
     assert_eq!(renewed.status, HandLeaseStatus::Active);
 
-    let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
-        .bind(session_id)
-        .execute(&pool)
-        .await;
+    cleanup_session_fixture(
+        &pool,
+        session_id,
+        attachment.workspace_id,
+        provider_account_id,
+    )
+    .await;
     pool.close().await;
 }
 
@@ -530,8 +888,9 @@ async fn a_claim_in_flight_on_one_replica_does_not_block_another_replicas_sweep_
     let pool = pool().await;
     let tenant_id = TenantId::new();
     let sessions = [SessionId::new(), SessionId::new()];
+    let mut fixtures = Vec::new();
     for session_id in sessions {
-        seed_expired_active_lease(&pool, session_id, tenant_id).await;
+        fixtures.push(seed_expired_active_lease(&pool, session_id, tenant_id).await);
     }
 
     // Hold row locks on exactly this test's leases, standing in for a replica
@@ -560,11 +919,8 @@ async fn a_claim_in_flight_on_one_replica_does_not_block_another_replicas_sweep_
     );
 
     holder.rollback().await.expect("release the held locks");
-    for session_id in sessions {
-        let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
-            .bind(session_id)
-            .execute(&pool)
-            .await;
+    for (session_id, (workspace_id, provider_account_id)) in sessions.into_iter().zip(fixtures) {
+        cleanup_session_fixture(&pool, session_id, workspace_id, provider_account_id).await;
     }
     pool.close().await;
 }

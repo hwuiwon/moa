@@ -37,6 +37,7 @@ pub(super) fn optional_section_seed(path: &[&str]) -> Option<Value> {
             "preshared_key": "",
             "store_id": "",
             "model_id": "",
+            "model_version": 0,
             "timeout_ms": 2000,
         })),
         _ => None,
@@ -160,6 +161,7 @@ impl EnvOverlay {
             self.authz_openfga_preshared_key.is_some(),
             self.authz_openfga_store_id.is_some(),
             self.authz_openfga_model_id.is_some(),
+            self.authz_openfga_model_version.is_some(),
             self.authz_openfga_timeout_ms.is_some(),
         ]) {
             return Ok(());

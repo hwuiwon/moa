@@ -11,7 +11,8 @@ use crate::connector::{
 };
 use crate::document::ArtifactKind;
 
-use super::{ValidationReport, is_json_pointer, require_non_empty};
+use super::json::is_json_pointer;
+use super::{ValidationReport, require_non_empty};
 
 const MAX_CONNECTOR_ACTIONS: usize = 64;
 

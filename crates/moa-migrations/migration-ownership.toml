@@ -480,7 +480,63 @@ readers = ["moa-skills"]
 name = "hand_leases"
 schema = "moa"
 owner = "moa-hands"
-notes = "V57 adds durable provider-visible provisioning operation identities and handle fencing."
+notes = "V58 adds forced tenant RLS, immutable tenant ownership, composite session tenancy, and workspace attachment fences."
+
+[[table]]
+name = "sandbox_provider_accounts"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+notes = "Maintenance-only deployment provider-account and isolation-cell capacity identity; contains no credentials."
+
+[[table]]
+name = "sandbox_provider_inventory_findings"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+notes = "Global maintenance-only quarantine ledger keyed by provider account generation and opaque resource fingerprint; intentionally excluded from tenant purge."
+
+[[table]]
+name = "sandbox_workspaces"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator", "moa-edge"]
+
+[[table]]
+name = "sandbox_tenant_capacity_limits"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_workspace_operations"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_workspace_checkpoints"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_workspace_grants"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_storage_resources"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_capacity_reservations"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
 
 [[table]]
 name = "tenant_sandbox_policy"
@@ -724,11 +780,17 @@ schema = "moa"
 owner = "moa-orchestrator"
 
 [[table]]
+name = "tenant_purge_learning_source_delete_claims"
+schema = "moa"
+owner = "moa-orchestrator"
+notes = "Owner-only, transaction-scoped row capabilities for normalized-source purge DELETEs; registered as retained control residue and required to be empty after each batch."
+
+[[table]]
 name = "tenant_purge_catalog"
 schema = "moa"
 owner = "moa-orchestrator"
 readers = ["moa-migrations"]
-notes = "Closed 133-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
+notes = "Closed 142-table tenant-offboarding residue catalog with dependency order, scope derivation mode, and bounded action mode."
 
 [[table]]
 name = "tenant_user_invitations"

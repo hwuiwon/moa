@@ -66,6 +66,7 @@ impl SessionStatusMigrator for SessionStatusMigratorImpl {
         ctx: ObjectContext<'_>,
         request: Json<SessionStatusIdleMigrationRequest>,
     ) -> Result<Json<SessionStatusIdleMigrationResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         let session_id = parse_session_key(ctx.key())?;
         let request = request.into_inner();
         if request.session_id != session_id {

@@ -276,6 +276,7 @@ fn has_authz_boundary(body: &str) -> bool {
         "require_contact_session_permission",
         "require_contact_agent_permission",
         "require_scim_admin",
+        "journal_context_authz",
     ]
     .iter()
     .any(|needle| body.contains(needle))

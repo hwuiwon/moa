@@ -10,7 +10,8 @@ use std::sync::Arc;
 use moa_core::{
     error::MoaError, error::Result, traits::Identity, traits::LLMProvider, traits::LineageHandle,
     traits::NullLineageHandle, traits::SessionStore, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::resource::ResourceBudget, types::session::SessionSignal,
+    types::identifiers::SessionId, types::resource::ResourceBudget,
+    types::sandbox_workspace::SandboxWorkspaceScope, types::session::SessionSignal,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -53,6 +54,8 @@ pub struct BrainTurnRequest<'a> {
     pub pipeline: &'a ContextPipeline,
     /// Optional tool router for tool-capable turns.
     pub tool_router: Option<Arc<ToolRouter>>,
+    /// Verified durable workspace owner for sandbox tools, absent for sandbox-free turns.
+    pub workspace_scope: Option<SandboxWorkspaceScope>,
 }
 
 /// Mutable live-signal state for streamed orchestration, when present.

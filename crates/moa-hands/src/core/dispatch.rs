@@ -7,10 +7,20 @@ use moa_connectors::executor::{
     ConnectorActionInvocation, ConnectorInvocationCompletionTicket, SecuredConnectorOutputMetadata,
 };
 use moa_core::{
-    error::MoaError, error::Result, traits::Identity, types::completion::ToolInvocation,
-    types::hands::HandHandle, types::hands::HandStatus, types::identifiers::ToolCallId,
-    types::resource::DeadlineGuard, types::security::ToolCapabilityId, types::session::SessionMeta,
-    types::tools::SecuredToolOutput, types::tools::ToolDefinition, types::tools::ToolOutput,
+    error::MoaError,
+    error::Result,
+    traits::Identity,
+    types::completion::ToolInvocation,
+    types::hands::HandHandle,
+    types::hands::HandStatus,
+    types::identifiers::ToolCallId,
+    types::resource::DeadlineGuard,
+    types::sandbox_workspace::{SandboxWorkspaceScope, WorkspaceEffect},
+    types::security::ToolCapabilityId,
+    types::session::SessionMeta,
+    types::tools::SecuredToolOutput,
+    types::tools::ToolDefinition,
+    types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
 use moa_security::{OutputClassification, classify_tool_output};
@@ -43,8 +53,12 @@ pub struct AuthorizedToolCall<'a> {
     pub session: &'a SessionMeta,
     /// Authenticated caller whose delegated rights govern the dispatch.
     pub caller_identity: &'a Identity,
-    /// Worker-owned hand scope, or `None` for the coordinator/session scope.
-    pub worker_id: Option<&'a str>,
+    /// Typed durable workspace owner, absent only for non-sandbox tools.
+    ///
+    /// A sandbox route rejects `None` before workspace reads or provider I/O;
+    /// bare coordinator/session workspace ownership is intentionally
+    /// unrepresentable.
+    pub workspace_scope: Option<&'a SandboxWorkspaceScope>,
     /// Tool invocation being dispatched.
     pub invocation: &'a ToolInvocation,
     /// Replay-stable durable tool-call identity.
@@ -55,6 +69,53 @@ pub struct AuthorizedToolCall<'a> {
     pub catalog: Option<&'a ToolCatalogSnapshot>,
     /// Cancellation and resource budget governing every dispatch stage.
     pub scope: ToolCallScope<'a>,
+}
+
+/// Journal-safe result of a command step whose workspace publication is separate.
+///
+/// The secured output can be recorded by the durable caller before it starts the
+/// checkpoint step. `workspace_commit_required` is true only when a sandbox
+/// command actually returned and its declared workspace effect is
+/// [`WorkspaceEffect::MayWrite`]; recovery-created failures never request a
+/// checkpoint.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferredWorkspaceToolOutput {
+    /// Classified, budgeted output safe to store in the durable runtime journal.
+    pub output: SecuredToolOutput,
+    /// Whether the caller must durably publish the workspace before returning output.
+    pub workspace_commit_required: bool,
+}
+
+impl std::ops::Deref for DeferredWorkspaceToolOutput {
+    type Target = SecuredToolOutput;
+
+    fn deref(&self) -> &Self::Target {
+        &self.output
+    }
+}
+
+/// Commit-only continuation for a mutable sandbox result already journaled by the caller.
+///
+/// It deliberately carries no caller-supplied provider, workspace, hand, or
+/// catalog identifiers. The router resolves those from the verified session and
+/// typed scope, while `tool_call_id` selects the deterministic persisted commit.
+#[derive(Clone, Copy)]
+pub struct JournaledWorkspaceCommit<'a> {
+    /// Session whose tenant owns the durable workspace.
+    pub session: &'a SessionMeta,
+    /// Typed durable owner journaled with the command step.
+    pub workspace_scope: &'a SandboxWorkspaceScope,
+    /// Replay-stable tool call that owns the deterministic commit operation.
+    pub tool_call_id: ToolCallId,
+    /// Fresh bounded budget owned by the durable commit step.
+    pub scope: ToolCallScope<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspaceCommitMode {
+    Inline,
+    Deferred,
 }
 
 impl<'a> AuthorizedToolCall<'a> {
@@ -417,9 +478,9 @@ impl ToolRouter {
 
     /// Executes an already-authorized tool invocation with retry and recovery enabled.
     ///
-    /// `request.worker_id` selects the hand scope: `None` provisions the
-    /// session-level coordinator hand; `Some(id)` provisions and reuses a hand
-    /// owned exclusively by that worker.
+    /// `request.workspace_scope` selects the typed worker or execution-task
+    /// owner whose hand may be provisioned or reused. An absent scope is valid
+    /// only for non-sandbox tools and is rejected before sandbox lifecycle work.
     pub async fn execute_authorized_with_recovery(
         &self,
         request: AuthorizedToolCall<'_>,
@@ -442,6 +503,48 @@ impl ToolRouter {
         &self,
         request: AuthorizedToolCall<'_>,
     ) -> Result<SecuredToolOutput> {
+        self.execute_authorized_with_recovery_from_catalog_mode(
+            request,
+            WorkspaceCommitMode::Inline,
+        )
+        .await
+        .map(|result| result.output)
+    }
+
+    /// Executes the command step while deferring any mutable-workspace publication.
+    ///
+    /// Durable orchestrators must journal the returned secured output, run
+    /// [`ToolRouter::commit_authorized_workspace_after_tool`] as a second durable
+    /// step when requested, and expose the output only after that step succeeds.
+    pub async fn execute_authorized_with_recovery_deferred_workspace_commit(
+        &self,
+        request: AuthorizedToolCall<'_>,
+    ) -> Result<DeferredWorkspaceToolOutput> {
+        request.scope.admit()?;
+        match request.catalog {
+            Some(catalog) => {
+                self.execute_authorized_with_recovery_from_catalog_mode(
+                    request.with_catalog(catalog),
+                    WorkspaceCommitMode::Deferred,
+                )
+                .await
+            }
+            None => {
+                let catalog = self.activated_catalog();
+                self.execute_authorized_with_recovery_from_catalog_mode(
+                    request.with_catalog(&catalog),
+                    WorkspaceCommitMode::Deferred,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn execute_authorized_with_recovery_from_catalog_mode(
+        &self,
+        request: AuthorizedToolCall<'_>,
+        workspace_commit_mode: WorkspaceCommitMode,
+    ) -> Result<DeferredWorkspaceToolOutput> {
         let Some(catalog) = request.catalog else {
             return Err(MoaError::ConfigError(
                 "authorized recovery call is missing its catalog selection".to_string(),
@@ -482,7 +585,9 @@ impl ToolRouter {
                 &registered_tool.execution,
                 &moa_core::types::action_policy::ActionPolicyEffect::Allow,
             );
-            let result = self.execute_authorized_with_recovery_inner(request).await;
+            let result = self
+                .execute_authorized_with_recovery_inner(request, workspace_commit_mode)
+                .await;
             record_tool_execution_result(
                 &tool_span,
                 &request.invocation.name,
@@ -518,6 +623,12 @@ impl ToolRouter {
                     .await
             }
             ToolExecution::Hand { routes } => {
+                if request.workspace_scope.is_none() {
+                    return Err(MoaError::PermissionDenied(
+                        "sandbox tools require a typed worker or execution-task workspace scope"
+                            .to_string(),
+                    ));
+                }
                 let route = primary_hand_route(routes)?;
                 self.execute_hand_once(&request, &registered_tool.definition, &capability, route)
                     .await
@@ -634,11 +745,22 @@ impl ToolRouter {
         // workspace — so the scope is re-checked here rather than only at the
         // dispatch entry point, which may have admitted seconds ago.
         request.scope.admit()?;
+        let workspace_scope = request.workspace_scope.ok_or_else(|| {
+            MoaError::PermissionDenied("sandbox tools require a typed workspace scope".to_string())
+        })?;
         let hand = self
-            .get_or_provision_hand_within(route, request.session, request.worker_id, request.scope)
+            .get_or_provision_hand_within(route, request.session, workspace_scope, request.scope)
             .await?;
-        self.execute_hand_on_handle(request, tool_definition, capability, &route.provider, &hand)
-            .await
+        self.execute_hand_on_handle(
+            request,
+            tool_definition,
+            capability,
+            &route.provider,
+            &hand,
+            WorkspaceCommitMode::Inline,
+        )
+        .await
+        .map(|result| result.output)
     }
 
     /// Executes a tool on an already-provisioned hand handle.
@@ -652,7 +774,8 @@ impl ToolRouter {
         capability: &ToolCapabilityId,
         provider: &str,
         hand: &HandHandle,
-    ) -> Result<SecuredToolOutput> {
+        workspace_commit_mode: WorkspaceCommitMode,
+    ) -> Result<DeferredWorkspaceToolOutput> {
         request.scope.admit()?;
         let provider_impl =
             self.hands.providers.get(provider).ok_or_else(|| {
@@ -665,9 +788,13 @@ impl ToolRouter {
             self.run_within_scope(request.scope, provider_impl.resume(hand))
                 .await?;
         }
+        let workspace_scope = request.workspace_scope.ok_or_else(|| {
+            MoaError::PermissionDenied("sandbox tools require a typed workspace scope".to_string())
+        })?;
+        let lease_scope = super::lifecycle::workspace_lease_scope(workspace_scope);
         self.install_trusted_files_for_hand(
             request.session,
-            request.worker_id,
+            Some(lease_scope.as_str()),
             provider,
             hand,
             request.scope,
@@ -705,7 +832,38 @@ impl ToolRouter {
             .await?
         };
 
-        Ok(self
+        let workspace_effect = request
+            .catalog
+            .and_then(|catalog| catalog.registry.workspace_effect(&request.invocation.name))
+            .ok_or_else(|| {
+                MoaError::ConfigError(format!(
+                    "sandbox tool {} has no declared workspace effect",
+                    request.invocation.name
+                ))
+            })?;
+        if workspace_effect == WorkspaceEffect::MayWrite
+            && workspace_commit_mode == WorkspaceCommitMode::Inline
+            && let Err(error) = self
+                .commit_workspace_after_tool(
+                    request.session,
+                    workspace_scope,
+                    request.tool_call_id,
+                    provider,
+                    hand,
+                    request.scope,
+                )
+                .await
+        {
+            return Err(match error {
+                MoaError::Cancelled | MoaError::BudgetExhausted(_) => error,
+                MoaError::ExternalEffectUnknownOutcome { .. } => error,
+                _ => MoaError::ExternalEffectUnknownOutcome {
+                    operation_id: format!("workspace-tool-call:{}", request.tool_call_id),
+                },
+            });
+        }
+
+        let output = self
             .secure_and_budget(
                 request.session,
                 tool_definition,
@@ -714,7 +872,12 @@ impl ToolRouter {
                 output,
                 Some(hand_id(hand)),
             )
-            .await)
+            .await;
+        Ok(DeferredWorkspaceToolOutput {
+            output,
+            workspace_commit_required: workspace_effect == WorkspaceEffect::MayWrite
+                && workspace_commit_mode == WorkspaceCommitMode::Deferred,
+        })
     }
 
     pub(super) async fn execute_mcp_once_with_scope(
@@ -1297,7 +1460,7 @@ mod egress_dispatch_tests {
         super::AuthorizedToolCall {
             session,
             caller_identity,
-            worker_id: None,
+            workspace_scope: None,
             invocation,
             tool_call_id: ToolCallId(Uuid::from_u128(0x0f01)),
             active_canary: None,
@@ -1376,7 +1539,7 @@ mod egress_dispatch_tests {
             .execute_authorized(super::AuthorizedToolCall {
                 session: &session,
                 caller_identity: &caller,
-                worker_id: None,
+                workspace_scope: None,
                 invocation: &invocation,
                 tool_call_id,
                 active_canary: None,
@@ -1416,7 +1579,7 @@ mod egress_dispatch_tests {
             .execute_authorized_with_recovery(super::AuthorizedToolCall {
                 session: &session,
                 caller_identity: &caller,
-                worker_id: None,
+                workspace_scope: None,
                 invocation: &invocation,
                 tool_call_id: ToolCallId(Uuid::from_u128(0xc412)),
                 active_canary: None,

@@ -11,6 +11,7 @@ auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
 # Deterministic execution-planning fault hooks used only by service E2E fixtures.
 execution-planning-failpoints = ["moa-session/failpoints"]
+sandbox-workspace-failpoints = ["moa-hands/sandbox-workspace-failpoints"]
 slack = ["moa-messaging/slack"]
 postmark = ["moa-messaging/postmark"]
 twilio = ["moa-messaging/twilio"]
@@ -113,6 +114,7 @@ clickhouse = { workspace = true, features = ["test-util"] }
 moa-analytics-export = { workspace = true }
 moa-eval-core.workspace = true
 moa-test-support = { workspace = true, features = ["connector-api-fixture", "orchestrator-fixture"] }
+object_store.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
 

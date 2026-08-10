@@ -3,6 +3,8 @@
 use moa_core::error::{MoaError, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::ObjectStoreLocationConfig;
+
 /// Supported claim-check blob storage backends.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,99 +16,29 @@ pub enum SessionBlobBackend {
     Postgres,
 }
 
-/// Supported object stores for user-visible session attachments.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionAttachmentBackend {
-    /// Store attachment bytes in an S3-compatible object store.
-    #[default]
-    S3,
-    /// Store attachment bytes in Google Cloud Storage.
-    Gcs,
-}
-
 /// Object storage configuration for user-visible session attachments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionAttachmentStorageConfig {
-    /// Object store backend.
-    pub backend: SessionAttachmentBackend,
-    /// Bucket that stores attachment objects.
-    pub bucket: String,
-    /// Prefix used for all MOA attachment objects in the bucket.
-    pub prefix: String,
-    /// AWS/S3-compatible region.
-    pub region: Option<String>,
-    /// Optional S3-compatible endpoint. Local compose sets this to RustFS.
-    pub endpoint: Option<String>,
-    /// Optional explicit S3 access key.
-    pub access_key_id: Option<String>,
-    /// Optional explicit S3 secret key.
-    pub secret_access_key: Option<String>,
-    /// Allows HTTP endpoints for local S3-compatible development.
-    pub allow_http: bool,
-    /// Uses virtual-hosted-style S3 requests when true.
-    pub virtual_hosted_style: bool,
-    /// Optional GCS service account file path.
-    pub gcp_service_account_path: Option<String>,
-    /// Optional inline GCS service account JSON.
-    pub gcp_service_account_key: Option<String>,
-    /// Optional GCS application credentials file path.
-    pub gcp_application_credentials_path: Option<String>,
+    /// Owner-specific bucket and namespace within the shared object store.
+    pub storage: ObjectStoreLocationConfig,
 }
 
 impl Default for SessionAttachmentStorageConfig {
     fn default() -> Self {
         Self {
-            backend: SessionAttachmentBackend::S3,
-            bucket: "moa-session-attachments".to_string(),
-            prefix: "session-attachments".to_string(),
-            region: Some("us-east-1".to_string()),
-            endpoint: None,
-            access_key_id: None,
-            secret_access_key: None,
-            allow_http: false,
-            virtual_hosted_style: false,
-            gcp_service_account_path: None,
-            gcp_service_account_key: None,
-            gcp_application_credentials_path: None,
+            storage: ObjectStoreLocationConfig {
+                bucket: "moa-session-attachments".to_string(),
+                prefix: "session-attachments".to_string(),
+            },
         }
     }
 }
 
 impl SessionAttachmentStorageConfig {
-    /// Returns the local RustFS configuration used by compose-backed development tests.
-    pub fn local_rustfs() -> Self {
-        Self {
-            endpoint: Some("http://127.0.0.1:9000".to_string()),
-            access_key_id: Some("moaadmin".to_string()),
-            secret_access_key: Some("moa-local-dev-secret".to_string()),
-            allow_http: true,
-            ..Self::default()
-        }
-    }
-
     /// Validates attachment object storage.
     pub fn validate(&self) -> Result<()> {
-        if self.bucket.trim().is_empty() {
-            return Err(MoaError::ConfigError(
-                "session.attachments.bucket is required".to_string(),
-            ));
-        }
-
-        if self.allow_http
-            && !self
-                .endpoint
-                .as_deref()
-                .is_some_and(is_local_attachment_endpoint)
-        {
-            return Err(MoaError::ConfigError(
-                "session.attachments.allow_http is only allowed for local attachment endpoints"
-                    .to_string(),
-            ));
-        }
-
-        Ok(())
+        self.storage.validate("session.attachments.storage")
     }
 }
 
@@ -167,18 +99,6 @@ impl SessionConfig {
     }
 }
 
-fn is_local_attachment_endpoint(endpoint: &str) -> bool {
-    url::Url::parse(endpoint)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .is_some_and(|host| {
-            matches!(
-                host.as_str(),
-                "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "rustfs"
-            )
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,10 +148,8 @@ mod tests {
         // Pins: config defaults do not point cloud deployments at a pod-local endpoint.
         let config = SessionConfig::default();
 
-        assert_eq!(config.attachments.backend, SessionAttachmentBackend::S3);
-        assert_eq!(config.attachments.bucket, "moa-session-attachments");
-        assert_eq!(config.attachments.endpoint, None);
-        assert!(!config.attachments.allow_http);
+        assert_eq!(config.attachments.storage.bucket, "moa-session-attachments");
+        assert_eq!(config.attachments.storage.prefix, "session-attachments");
         config
             .validate()
             .expect("default S3 attachment settings should be valid");
@@ -239,31 +157,13 @@ mod tests {
 
     #[test]
     fn local_rustfs_attachment_storage_is_explicit() {
-        // Pins: local RustFS is a deliberate local-dev config, not a cloud default.
-        let config = SessionAttachmentStorageConfig::local_rustfs();
+        // Pins: attachment config owns only its bucket namespace; transport is shared.
+        let config = SessionAttachmentStorageConfig::default();
 
-        assert_eq!(config.endpoint.as_deref(), Some("http://127.0.0.1:9000"));
-        assert!(config.allow_http);
+        assert_eq!(config.storage.bucket, "moa-session-attachments");
+        assert_eq!(config.storage.prefix, "session-attachments");
         config
             .validate()
-            .expect("local RustFS attachment config should be valid");
-    }
-
-    #[test]
-    fn attachment_storage_rejects_remote_http_endpoint() {
-        // Pins: plaintext attachment endpoints are only acceptable for local RustFS.
-        let config = SessionAttachmentStorageConfig {
-            endpoint: Some("http://object-store.internal:9000".to_string()),
-            allow_http: true,
-            ..SessionAttachmentStorageConfig::default()
-        };
-        let error = config
-            .validate()
-            .expect_err("remote HTTP attachment endpoint should fail");
-
-        assert_eq!(
-            error.to_string(),
-            "configuration error: session.attachments.allow_http is only allowed for local attachment endpoints"
-        );
+            .expect("attachment namespace should be valid");
     }
 }

@@ -9,23 +9,13 @@ use moa_core::{
     types::hands::HandStatus, types::tools::ToolOutput,
 };
 use reqwest::header::{HeaderMap, HeaderValue};
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
 
 use super::{ConnectedSandbox, DEFAULT_ENVD_PORT};
 
 const CONNECT_COMPRESSED_FLAG: u8 = 0b0000_0001;
 pub(super) const CONNECT_END_STREAM_FLAG: u8 = 0b0000_0010;
-
-pub(super) fn default_headers(api_key: &str) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-API-KEY",
-        HeaderValue::from_str(api_key).map_err(|error| {
-            MoaError::ValidationError(format!("invalid E2B API key header: {error}"))
-        })?,
-    );
-    Ok(headers)
-}
 
 pub(super) fn envd_headers(sandbox_id: &str, sandbox: &ConnectedSandbox) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
@@ -43,8 +33,8 @@ pub(super) fn envd_headers(sandbox_id: &str, sandbox: &ConnectedSandbox) -> Resu
     );
     headers.insert(
         "X-Access-Token",
-        HeaderValue::from_str(&sandbox.envd_access_token).map_err(|error| {
-            MoaError::ValidationError(format!("invalid E2B access token header: {error}"))
+        HeaderValue::from_str(sandbox.envd_access_token.expose_secret()).map_err(|_| {
+            MoaError::ValidationError("invalid E2B access token header".to_string())
         })?,
     );
     Ok(headers)

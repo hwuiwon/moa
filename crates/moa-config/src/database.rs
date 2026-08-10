@@ -17,6 +17,8 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Optional direct/admin database URL for explicit migration and maintenance commands.
     pub admin_url: Option<String>,
+    /// Dedicated least-privilege URL for cross-tenant workspace maintenance only.
+    pub maintenance_url: Option<String>,
     /// Optional already-provisioned Postgres schema for runtime queries.
     ///
     /// When set, session-store construction binds runtime queries to this
@@ -46,6 +48,7 @@ impl Default for DatabaseConfig {
         Self {
             url: BUILTIN_DEV_DATABASE_URL.to_string(),
             admin_url: None,
+            maintenance_url: None,
             schema: None,
             max_connections: 20,
             background_max_connections: 2,
@@ -70,6 +73,12 @@ impl DatabaseConfig {
     /// Returns the direct/admin database URL, falling back to the runtime URL when unset.
     pub fn admin_url(&self) -> &str {
         self.admin_url.as_deref().unwrap_or(&self.url)
+    }
+
+    /// Returns the dedicated workspace-maintenance URL when configured.
+    #[must_use]
+    pub fn maintenance_url(&self) -> Option<&str> {
+        self.maintenance_url.as_deref()
     }
 }
 

@@ -9,6 +9,13 @@ for sessions, events, memory, analytics, learning, lineage, and audit. Restate
 owns orchestration state: queues, workflow progress, awakeables, retries, and
 handler journals.
 
+Restate does not own arbitrary sandbox filesystem bytes and cannot make them
+durable merely because a session or workflow is durable. Sandbox compute is
+ephemeral; `SandboxWorkspace` rows and portable checkpoint bytes have separate
+Postgres and provider/object-store owners. Restate journals the authorized,
+generation-fenced lifecycle calls described in
+[Sandbox Workspaces](25-sandbox-workspaces.md).
+
 This document defines how MOA maps product concepts to Restate primitives and
 what must stay out of Restate state.
 
@@ -35,6 +42,7 @@ product database.
 | Execution run | Workflow plus `moa.execution_run` | `run_uid` |
 | Execution task | Workflow plus `moa.execution_task` | stable hash of `(run_uid, node_id, item_key)` |
 | Execution compensation | Workflow plus `moa.execution_compensation` | stable compensation registration ID |
+| Sandbox workspace lifecycle | `moa-hands` application/repository boundary called from Restate handlers/workflows, plus Postgres rows | `workspace_id` with writer and instance generations |
 | Tool execution | Service | none |
 | LLM call | Service | none |
 | Graph-memory ingestion | Virtual Object plus Postgres ingestion claim rows | ingestion key |
@@ -200,13 +208,24 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Graph memory, vectors, changelog | Postgres |
 | Learning log | Postgres |
 | Security events | Postgres |
-| Hand leases and sandbox binding | Postgres `moa.hand_leases`, keyed `(session_id, worker_id, provider)` |
+| Ephemeral hand leases and compute binding | Postgres `moa.hand_leases`, attached to a typed worker/execution-task workspace and fenced independently from workspace revision |
+| Workspace ownership, lifecycle, writer/instance fences, checkpoint head, operations, grants, capacity, retention, delete fence | Postgres `moa.sandbox_workspace*` rows owned by `moa-hands` repositories |
+| Active mutable workspace bytes | Selected provider working storage; never the committed revision |
+| Portable committed checkpoint bytes | Durable S3-compatible object storage; references/digests in Postgres, bytes outside Restate/session state |
 | Runtime cache/pacing/message refs | Required Redis-compatible Valkey; process-local memory is limited to isolated non-orchestrator tests |
 | Handler journal | Restate |
 
 If a user, admin, customer, or audit export needs to query it later, store it
 in Postgres. If only the in-flight handler needs it to recover, Restate state
 is appropriate.
+
+The only workspace owners are `Worker { session_id, worker_id }` and
+`ExecutionTask { run_id, task_id }`. A coordinator or bare session cannot admit
+one. Sandbox dispatch enforces that contract before workspace reads or provider
+I/O. `moa-orchestrator` owns authentication, authorization, and the Restate
+durability boundary around workspace calls; `moa-hands` owns the lifecycle,
+repositories, operation/capacity ledgers, checkpoint logic, and provider
+adapters.
 
 Kubernetes request routing is non-sticky. A follow-up request may land on any
 edge or orchestrator replica, so Restate handler state cannot be replaced by
@@ -292,9 +311,11 @@ by a generation counter so superseded ticks no-op:
   exempt (`awaiting_input`), so it is never flagged stale while legitimately
   waiting.
 - **Self-cleanup** — `Worker::cleanup`, a generation-guarded delayed self-call
-  scheduled after the child reports terminal. It releases the child's own sandbox,
-  removes itself from the parent's fan-out, and clears VO state; a follow-up that
-  arrives during the grace window revives the child instead.
+  scheduled after the child reports terminal. It checkpoints according to
+  policy, releases the child's ephemeral compute attachment, retains the durable
+  workspace/reconciliation owner independently, removes itself from the
+  parent's fan-out, and clears VO state; a follow-up that arrives during the
+  grace window revives the child instead.
 
 ### Guarded parent resume
 
@@ -405,6 +426,11 @@ Code inside Restate handlers must keep replay safety in mind:
   to everything downstream, so nothing re-reads it on a later attempt.
 - Do not perform direct network or filesystem side effects in replay-sensitive
   sections unless they are journaled.
+- Journaling a sandbox command does not journal its filesystem effects. A
+  `MayWrite` call becomes successful only after the `moa-hands` commit barrier
+  quiesces the writer, publishes/verifies an immutable portable checkpoint, and
+  compare-and-set advances the workspace head. Ambiguous outcomes remain
+  `reconciling` and do not fall back to an empty provider.
 
 ## Action Reviews
 
@@ -593,3 +619,6 @@ awakeables plus parent-cached terminal results instead of status polling.
 7. Product-visible events, execution state, learning, memory, lineage, and audit stay in
    Postgres.
 8. Gateways and clients can always rebuild visible state from Postgres records.
+9. Sandbox compute is ephemeral. Durable filesystem state belongs to a
+   worker-owned or execution-task-owned `SandboxWorkspace`; provider/object
+   storage owns bytes, while Restate owns only its replayable lifecycle calls.

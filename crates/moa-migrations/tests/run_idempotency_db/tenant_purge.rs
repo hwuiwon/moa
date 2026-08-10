@@ -709,7 +709,7 @@ async fn seed_tenant_purge_activated_release_chain(
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
-    // Pins: a pristine final schema persists exactly 134 purge stages, installs
+    // Pins: a pristine final schema persists exactly 142 purge stages, installs
     // statement fences, and advances a real purge in fixed-size batches.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -1308,7 +1308,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
             true,
         )
     );
-    assert_eq!(catalog_count, 134);
+    assert_eq!(catalog_count, 142);
     assert_eq!(
         trigger_kinds,
         vec![
@@ -1413,5 +1413,418 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
         ordinary_activation_delete_sqlstate.as_deref(),
         Some("P0001"),
         "ordinary callers must not bypass the activation audit's append-only guard"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn sandbox_workspace_purge_catalog_db() {
+    // Pins: V58 extends the current 134-stage catalog to exactly 142 with all
+    // workspace rows fenced and checkpoint head/parent ordering encoded in the
+    // bounded owner-only purge function.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let tenant_id = uuid::Uuid::new_v4();
+    let operation_id = format!("sandbox-workspace-purge-{tenant_id}");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect sandbox purge maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create sandbox purge throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let catalog_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM moa.tenant_purge_catalog")
+                .fetch_one(&target)
+                .await?;
+        let workspace_stages: Vec<(String, String)> = sqlx::query_as(
+            "SELECT stage_name, action_mode FROM moa.tenant_purge_catalog \
+             WHERE stage_name = ANY($1) ORDER BY stage_order",
+        )
+        .bind(vec![
+            "moa.sandbox_workspace_grants",
+            "moa.sandbox_capacity_reservations",
+            "moa.sandbox_workspace_checkpoints",
+            "moa.sandbox_storage_resources",
+            "moa.sandbox_workspace_operations",
+            "moa.sandbox_workspaces",
+            "moa.sandbox_tenant_capacity_limits",
+            "moa.tenant_purge_learning_source_delete_claims",
+        ])
+        .fetch_all(&target)
+        .await?;
+        let fence_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.triggers \
+             WHERE event_object_schema = 'moa' \
+               AND event_object_table = ANY($1) \
+               AND trigger_name IN ( \
+                   'moa_tenant_purge_fence_insert', \
+                   'moa_tenant_purge_fence_update' \
+               )",
+        )
+        .bind(vec![
+            "sandbox_tenant_capacity_limits",
+            "sandbox_workspaces",
+            "sandbox_workspace_operations",
+            "sandbox_workspace_checkpoints",
+            "sandbox_workspace_grants",
+            "sandbox_storage_resources",
+            "sandbox_capacity_reservations",
+        ])
+        .fetch_one(&target)
+        .await?;
+        let global_catalog_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.tenant_purge_catalog \
+             WHERE stage_name IN ( \
+                 'moa.sandbox_provider_accounts', \
+                 'moa.sandbox_provider_inventory_findings' \
+             )",
+        )
+        .fetch_one(&target)
+        .await?;
+        let purge_definition: String = sqlx::query_scalar(
+            "SELECT pg_get_functiondef('moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE)",
+        )
+        .fetch_one(&target)
+        .await?;
+        let checkpoint_columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = 'moa' \
+               AND table_name = 'sandbox_workspace_checkpoints' \
+               AND column_name = ANY($1) ORDER BY column_name",
+        )
+        .bind(vec![
+            "gc_claim_token",
+            "gc_claim_expires_at",
+            "gc_attempts",
+            "gc_retry_not_before",
+            "deletion_absence_observation_count",
+            "deletion_inventory_digest",
+            "deleted_at",
+        ])
+        .fetch_all(&target)
+        .await?;
+
+        sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+            .bind(tenant_id)
+            .bind(&operation_id)
+            .execute(&target)
+            .await?;
+        let fenced_insert =
+            sqlx::query("INSERT INTO moa.sandbox_tenant_capacity_limits (tenant_id) VALUES ($1)")
+                .bind(tenant_id)
+                .execute(&target)
+                .await
+                .expect_err("workspace table inserts must stop behind tenant destruction fence");
+        let fenced_sqlstate = fenced_insert
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()));
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            first,
+            second,
+            catalog_count,
+            workspace_stages,
+            fence_count,
+            global_catalog_count,
+            purge_definition,
+            checkpoint_columns,
+            fenced_sqlstate,
+        ))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+    let (
+        first,
+        second,
+        catalog_count,
+        workspace_stages,
+        fence_count,
+        global_catalog_count,
+        purge_definition,
+        checkpoint_columns,
+        fenced_sqlstate,
+    ) = outcome.expect("sandbox workspace purge schema assertions should complete");
+    assert_eq!(first, expected_migration_labels());
+    assert!(second.is_empty(), "V58 must not reapply: {second:?}");
+    assert_eq!(catalog_count, 142);
+    assert_eq!(
+        workspace_stages,
+        vec![
+            (
+                "moa.sandbox_workspace_grants".to_string(),
+                "delete".to_string()
+            ),
+            (
+                "moa.sandbox_capacity_reservations".to_string(),
+                "delete".to_string()
+            ),
+            (
+                "moa.sandbox_workspace_checkpoints".to_string(),
+                "delete".to_string()
+            ),
+            (
+                "moa.sandbox_storage_resources".to_string(),
+                "delete".to_string()
+            ),
+            (
+                "moa.sandbox_workspace_operations".to_string(),
+                "delete".to_string()
+            ),
+            ("moa.sandbox_workspaces".to_string(), "delete".to_string()),
+            (
+                "moa.sandbox_tenant_capacity_limits".to_string(),
+                "delete".to_string()
+            ),
+            (
+                "moa.tenant_purge_learning_source_delete_claims".to_string(),
+                "retain_control".to_string()
+            ),
+        ]
+    );
+    assert_eq!(fence_count, 14);
+    assert_eq!(global_catalog_count, 0);
+    assert!(purge_definition.contains("catalog_count <> 142"));
+    assert!(purge_definition.contains("exactly 142 tables"));
+    assert!(purge_definition.contains("SET current_checkpoint_id = NULL"));
+    assert!(purge_definition.contains("ORDER BY target.generation DESC"));
+    assert_eq!(checkpoint_columns.len(), 7);
+    assert_eq!(fenced_sqlstate.as_deref(), Some("55000"));
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn sandbox_workspace_purge_boundary_requires_exact_maintenance_role_and_operation_db() {
+    // Pins: neither an ordinary tenant role nor a forged transaction-local GUC
+    // can activate the purge bypass. Only the dedicated maintenance role and
+    // exact active `(tenant_id, operation_id)` may fence rows and confirm proof.
+    let database = FreshMigrationDatabase::create()
+        .await
+        .expect("create isolated sandbox purge boundary database");
+    let outcome = async {
+        clean_apply_then_reapply(database.target_url()).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(database.target_url())
+            .await?;
+        let tenant_id = uuid::Uuid::new_v4();
+        let neighbor_tenant_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let provider_account_id = uuid::Uuid::new_v4();
+        let operation_id = format!("sandbox-boundary-{tenant_id}");
+
+        sqlx::query(
+            "INSERT INTO moa.sandbox_provider_accounts (\
+                 provider_account_id, provider, isolation_cell, organization_fingerprint\
+             ) VALUES ($1, 'local', $2, $3)",
+        )
+        .bind(provider_account_id)
+        .bind(format!("cell-{provider_account_id}"))
+        .bind(format!("organization-{provider_account_id}"))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO moa.sandbox_workspaces (\
+                 workspace_id, tenant_id, scope_kind, scope_run_id, scope_task_id,\
+                 provider, provider_account_id, provider_account_generation,\
+                 durability_class, lifecycle_state\
+             ) VALUES ($1, $2, 'execution_task', $3, $4, 'local', $5, 1,\
+                       'portable_filesystem', 'ready')",
+        )
+        .bind(workspace_id)
+        .bind(tenant_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(uuid::Uuid::new_v4())
+        .bind(provider_account_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+            .bind(tenant_id)
+            .bind(&operation_id)
+            .execute(&pool)
+            .await?;
+
+        let privileges: (bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT has_function_privilege(
+                       'moa_app',
+                       'moa.fence_sandbox_workspaces_for_tenant_purge(uuid,text)',
+                       'EXECUTE'
+                   ),
+                   has_function_privilege(
+                       'moa_workspace_maintenance',
+                       'moa.fence_sandbox_workspaces_for_tenant_purge(uuid,text)',
+                       'EXECUTE'
+                   ),
+                   EXISTS (
+                       SELECT 1
+                       FROM pg_auth_members AS membership
+                       JOIN pg_roles AS member ON member.oid = membership.member
+                       JOIN pg_roles AS granted ON granted.oid = membership.roleid
+                       WHERE member.rolname = current_user
+                         AND granted.rolname = 'moa_workspace_maintenance'
+                   )
+            "#,
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(privileges, (false, true, false));
+
+        let mut ordinary_function = pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_app")
+            .execute(&mut *ordinary_function)
+            .await?;
+        let ordinary_user: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&mut *ordinary_function)
+            .await?;
+        assert_eq!(ordinary_user, "moa_app");
+        let ordinary_error =
+            sqlx::query("SELECT moa.fence_sandbox_workspaces_for_tenant_purge($1, $2)")
+                .bind(tenant_id)
+                .bind(&operation_id)
+                .execute(&mut *ordinary_function)
+                .await
+                .expect_err("ordinary tenant role must not execute maintenance purge functions");
+        assert_eq!(
+            ordinary_error
+                .as_database_error()
+                .and_then(|error| error.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("42501")
+        );
+        ordinary_function.rollback().await?;
+
+        let mut forged_guc = pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_app")
+            .execute(&mut *forged_guc)
+            .await?;
+        sqlx::query(
+            "SELECT set_config('moa.tenant_id', $1, true), \
+                    set_config('moa.storage_partition_id', $1, true), \
+                    set_config('moa.control_plane', 'false', true)",
+        )
+        .bind(tenant_id.to_string())
+        .execute(&mut *forged_guc)
+        .await?;
+        sqlx::query("SELECT set_config('moa.tenant_purge_operation_id', $1, true)")
+            .bind(&operation_id)
+            .execute(&mut *forged_guc)
+            .await?;
+        let forged_error = sqlx::query(
+            "UPDATE moa.sandbox_workspaces SET updated_at = now() \
+             WHERE tenant_id = $1 AND workspace_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .execute(&mut *forged_guc)
+        .await
+        .expect_err("a caller-set purge GUC alone must not bypass the tenant fence");
+        assert_eq!(
+            forged_error
+                .as_database_error()
+                .and_then(|error| error.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("55000")
+        );
+        forged_guc.rollback().await?;
+
+        for (tenant, operation) in [
+            (tenant_id, "wrong-operation".to_string()),
+            (neighbor_tenant_id, operation_id.clone()),
+        ] {
+            let mut wrong_scope = pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
+                .execute(&mut *wrong_scope)
+                .await?;
+            let wrong_scope_error =
+                sqlx::query("SELECT moa.fence_sandbox_workspaces_for_tenant_purge($1, $2)")
+                    .bind(tenant)
+                    .bind(operation)
+                    .execute(&mut *wrong_scope)
+                    .await
+                    .expect_err("maintenance purge must match the exact active fence");
+            assert_eq!(
+                wrong_scope_error
+                    .as_database_error()
+                    .and_then(|error| error.code().map(|code| code.into_owned()))
+                    .as_deref(),
+                Some("55000")
+            );
+            wrong_scope.rollback().await?;
+        }
+
+        let mut exact = pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
+            .execute(&mut *exact)
+            .await?;
+        let maintenance_user: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&mut *exact)
+            .await?;
+        assert_eq!(maintenance_user, "moa_workspace_maintenance");
+        let affected: i64 =
+            sqlx::query_scalar("SELECT moa.fence_sandbox_workspaces_for_tenant_purge($1, $2)")
+                .bind(tenant_id)
+                .bind(&operation_id)
+                .fetch_one(&mut *exact)
+                .await?;
+        assert_eq!(affected, 1);
+        exact.commit().await?;
+
+        let fenced: (String, bool, i64) = sqlx::query_as(
+            "SELECT lifecycle_state, access_fenced_at IS NOT NULL, delete_generation \
+             FROM moa.sandbox_workspaces WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(fenced, ("deleting".to_string(), true, 1));
+
+        let mut exact_proof = pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
+            .execute(&mut *exact_proof)
+            .await?;
+        sqlx::query("SELECT moa.confirm_sandbox_external_absence_for_tenant_purge($1, $2, $3)")
+            .bind(tenant_id)
+            .bind(&operation_id)
+            .bind("sha256:exact-maintenance-proof")
+            .execute(&mut *exact_proof)
+            .await?;
+        sqlx::query("SELECT moa.require_sandbox_external_absence_for_tenant_purge($1, $2)")
+            .bind(tenant_id)
+            .bind(&operation_id)
+            .execute(&mut *exact_proof)
+            .await?;
+        exact_proof.commit().await?;
+
+        let durable_proof: (bool, Option<String>) = sqlx::query_as(
+            "SELECT sandbox_external_absence_confirmed_at IS NOT NULL,\
+                    sandbox_external_absence_digest \
+             FROM moa.tenant_purge_operations WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            durable_proof,
+            (true, Some("sha256:exact-maintenance-proof".to_string()))
+        );
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    database.finish(outcome).await.expect(
+        "sandbox purge boundary must reject forged callers and accept the exact maintenance claim",
     );
 }

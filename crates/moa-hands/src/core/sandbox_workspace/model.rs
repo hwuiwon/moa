@@ -1,0 +1,294 @@
+//! Durable sandbox-workspace models and lifecycle transition requests.
+
+use chrono::{DateTime, Utc};
+use moa_core::{
+    error::{MoaError, Result},
+    types::{
+        identifiers::{ProviderAccountId, SandboxWorkspaceId, TenantId, WorkspaceCheckpointId},
+        sandbox_workspace::{
+            DurabilityClass, SandboxWorkspaceScope, SandboxWorkspaceState, WorkspaceBinding,
+        },
+    },
+};
+use uuid::Uuid;
+
+use super::checkpoint::archive::CHECKPOINT_ARCHIVE_FORMAT_VERSION;
+use crate::core::leases::{HandLease, LeaseHandle};
+
+/// One durable logical workspace row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxWorkspace {
+    /// Durable logical identity.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Immutable tenant owner.
+    pub tenant_id: TenantId,
+    /// Typed worker or execution-task owner.
+    pub scope: SandboxWorkspaceScope,
+    /// Provider selected for the pinned workspace.
+    pub provider: String,
+    /// Provider account and isolation cell selected for the workspace.
+    pub provider_account_id: ProviderAccountId,
+    /// Provider-account generation admitted at creation.
+    pub provider_account_generation: i64,
+    /// Required persistence behavior.
+    pub durability_class: DurabilityClass,
+    /// Current durable lifecycle state.
+    pub state: SandboxWorkspaceState,
+    /// Single-writer fencing epoch.
+    pub writer_epoch: i64,
+    /// Current compute-instance generation.
+    pub instance_generation: i64,
+    /// Current immutable checkpoint generation.
+    pub checkpoint_generation: i64,
+    /// Current immutable checkpoint, when one has been published.
+    pub checkpoint_id: Option<WorkspaceCheckpointId>,
+    /// Retention deadline, when configured.
+    pub retention_deadline_at: Option<DateTime<Utc>>,
+    /// Monotonic delete fence.
+    pub delete_generation: i64,
+    /// Time caller access was fenced for deletion.
+    pub access_fenced_at: Option<DateTime<Utc>>,
+}
+
+impl SandboxWorkspace {
+    /// Reconstructs the provider-neutral durable binding from this row.
+    pub fn binding(&self) -> Result<WorkspaceBinding> {
+        let provider_account_generation =
+            u64::try_from(self.provider_account_generation).map_err(|_| {
+                MoaError::StorageError(
+                    "workspace provider-account generation is not positive".to_string(),
+                )
+            })?;
+        let writer_epoch = u64::try_from(self.writer_epoch).map_err(|_| {
+            MoaError::StorageError("workspace writer epoch is negative".to_string())
+        })?;
+        let instance_generation = u64::try_from(self.instance_generation).map_err(|_| {
+            MoaError::StorageError("workspace instance generation is negative".to_string())
+        })?;
+        let current_revision = match (self.checkpoint_id, self.checkpoint_generation) {
+            (None, 0) => None,
+            (Some(checkpoint_id), generation) if generation > 0 => {
+                Some(moa_core::types::sandbox_workspace::WorkspaceRevisionRef {
+                    checkpoint_id,
+                    generation: u64::try_from(generation).map_err(|_| {
+                        MoaError::StorageError(
+                            "workspace checkpoint generation is invalid".to_string(),
+                        )
+                    })?,
+                    format_version: CHECKPOINT_ARCHIVE_FORMAT_VERSION,
+                })
+            }
+            _ => {
+                return Err(MoaError::StorageError(
+                    "workspace checkpoint identity and generation disagree".to_string(),
+                ));
+            }
+        };
+        Ok(WorkspaceBinding {
+            tenant_id: self.tenant_id,
+            workspace_id: self.workspace_id,
+            scope: self.scope.clone(),
+            provider_account_id: self.provider_account_id,
+            provider_account_generation,
+            durability_class: self.durability_class,
+            writer_epoch,
+            instance_generation,
+            current_revision,
+        })
+    }
+}
+
+/// Inputs for creating one durable workspace before provider I/O.
+#[derive(Debug, Clone)]
+pub struct CreateWorkspaceRequest {
+    /// Replay-stable workspace identity.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Verified tenant owner.
+    pub tenant_id: TenantId,
+    /// Verified durable execution owner.
+    pub scope: SandboxWorkspaceScope,
+    /// Provider selected by typed capability admission.
+    pub provider: String,
+    /// Selected provider account and isolation cell.
+    pub provider_account_id: ProviderAccountId,
+    /// Exact provider-account generation.
+    pub provider_account_generation: i64,
+    /// Required persistence class.
+    pub durability_class: DurabilityClass,
+    /// Optional independent retention deadline.
+    pub retention_deadline_at: Option<DateTime<Utc>>,
+}
+
+/// Secret-free provider-account binding selected for a new workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceProviderAccount {
+    /// Stable configured provider-account identity.
+    pub provider_account_id: ProviderAccountId,
+    /// Exact configured generation.
+    pub generation: i64,
+    /// Provider adapter name used internally by `moa-hands`.
+    pub provider: String,
+}
+
+/// OpenFGA subject types allowed by the sandbox-workspace tuple matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceGrantSubjectType {
+    /// Parent tenant object.
+    Tenant,
+    /// Parent session object.
+    Session,
+    /// Tenant-local contact.
+    Contact,
+    /// Human operator.
+    Operator,
+    /// Delegated or direct agent principal.
+    Agent,
+    /// Local API-key principal.
+    ApiKey,
+}
+
+impl WorkspaceGrantSubjectType {
+    /// Returns the canonical OpenFGA type label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tenant => "tenant",
+            Self::Session => "session",
+            Self::Contact => "contact",
+            Self::Operator => "operator",
+            Self::Agent => "agent",
+            Self::ApiKey => "api_key",
+        }
+    }
+
+    /// Parses one persisted OpenFGA subject-type label.
+    pub(in crate::core::sandbox_workspace) fn from_label(value: &str) -> Result<Self> {
+        match value {
+            "tenant" => Ok(Self::Tenant),
+            "session" => Ok(Self::Session),
+            "contact" => Ok(Self::Contact),
+            "operator" => Ok(Self::Operator),
+            "agent" => Ok(Self::Agent),
+            "api_key" => Ok(Self::ApiKey),
+            other => Err(MoaError::StorageError(format!(
+                "unknown workspace grant subject type: {other}"
+            ))),
+        }
+    }
+}
+
+/// Relations persisted in the exact sandbox-workspace grant ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceGrantRelation {
+    /// Parent tenant edge.
+    Tenant,
+    /// Parent session edge.
+    Session,
+    /// Direct resource owner.
+    Owner,
+    /// Administrative workspace control.
+    Manage,
+    /// Workspace filesystem use.
+    Use,
+}
+
+impl WorkspaceGrantRelation {
+    /// Returns the canonical OpenFGA relation label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tenant => "tenant",
+            Self::Session => "session",
+            Self::Owner => "owner",
+            Self::Manage => "manage",
+            Self::Use => "use",
+        }
+    }
+
+    /// Parses one persisted workspace-grant relation label.
+    pub(in crate::core::sandbox_workspace) fn from_label(value: &str) -> Result<Self> {
+        match value {
+            "tenant" => Ok(Self::Tenant),
+            "session" => Ok(Self::Session),
+            "owner" => Ok(Self::Owner),
+            "manage" => Ok(Self::Manage),
+            "use" => Ok(Self::Use),
+            other => Err(MoaError::StorageError(format!(
+                "unknown workspace grant relation: {other}"
+            ))),
+        }
+    }
+}
+
+/// One exact desired OpenFGA tuple for a sandbox workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGrant {
+    /// Stable ledger row identity.
+    pub grant_id: Uuid,
+    /// Typed tuple subject.
+    pub subject_type: WorkspaceGrantSubjectType,
+    /// Subject identifier.
+    pub subject_id: Uuid,
+    /// Optional userset relation for future model versions.
+    pub subject_relation: Option<String>,
+    /// Workspace relation granted to the subject.
+    pub relation: WorkspaceGrantRelation,
+}
+
+impl WorkspaceGrant {
+    /// Renders the exact OpenFGA subject or userset string.
+    #[must_use]
+    pub fn subject_wire(&self) -> String {
+        match self.subject_relation.as_deref() {
+            Some(relation) => format!(
+                "{}:{}#{relation}",
+                self.subject_type.as_str(),
+                self.subject_id
+            ),
+            None => format!("{}:{}", self.subject_type.as_str(), self.subject_id),
+        }
+    }
+}
+
+/// Exact compare-and-set state transition.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceTransition {
+    /// Verified tenant owner.
+    pub tenant_id: TenantId,
+    /// Workspace being transitioned.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Required current state.
+    pub from: SandboxWorkspaceState,
+    /// Requested next state.
+    pub to: SandboxWorkspaceState,
+    /// Required writer fence.
+    pub writer_epoch: i64,
+    /// Required compute-instance fence.
+    pub instance_generation: i64,
+}
+
+/// Request to claim the one writable attachment for a workspace.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceWriterClaim {
+    /// Verified tenant owner.
+    pub tenant_id: TenantId,
+    /// Workspace receiving a writer.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Required detached state.
+    pub expected_state: SandboxWorkspaceState,
+    /// Required prior writer fence.
+    pub expected_writer_epoch: i64,
+    /// Required prior instance fence.
+    pub expected_instance_generation: i64,
+}
+
+/// Exact provisioning lease and workspace inputs for hydrated activation.
+#[derive(Debug)]
+pub struct ActivateHydratedWorkspaceRequest<'a> {
+    /// Workspace ownership, head, and generation fences used for hydration.
+    pub binding: &'a WorkspaceBinding,
+    /// Exact provisioning lease generation that received the hydrated hand.
+    pub lease: &'a HandLease,
+    /// Durable handle payload published only with workspace activation.
+    pub handle: LeaseHandle,
+}

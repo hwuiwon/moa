@@ -5,6 +5,7 @@ use moa_core::{
     types::{
         contact::SessionActorRef,
         identifiers::{ModelId, TenantId, ToolCallId},
+        sandbox_workspace::SandboxWorkspaceScope,
         session::SessionMeta,
     },
 };
@@ -26,9 +27,15 @@ fn session() -> SessionMeta {
     SessionMeta {
         tenant_id: identity.tenant_id,
         model: ModelId::new("claude-sonnet-4-6"),
-        created_by: Some(SessionActorRef::Identity {
-            id: identity.id,
-        }),
+        created_by: Some(SessionActorRef::Identity { id: identity.id }),
         ..SessionMeta::default()
+    }
+}
+
+#[allow(dead_code)]
+fn workspace_scope(session: &SessionMeta) -> SandboxWorkspaceScope {
+    SandboxWorkspaceScope::Worker {
+        session_id: session.id,
+        worker_id: "local-tools-offline-worker".to_string(),
     }
 }

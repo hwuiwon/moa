@@ -149,6 +149,44 @@ impl FgaClient {
         &self.inner.model_id
     }
 
+    /// Fetches the configured authorization model and requires an exact schema match.
+    ///
+    /// Startup callers use this to prove the configured model ID names the
+    /// deployment's compiled authorization boundary instead of trusting an
+    /// operator-supplied release number alone.
+    pub async fn verify_authorization_model(
+        &self,
+        expected: &serde_json::Value,
+    ) -> Result<(), AuthzError> {
+        let response = self
+            .inner
+            .http
+            .get(format!(
+                "{}/stores/{}/authorization-models/{}",
+                self.inner.base, self.inner.store_id, self.inner.model_id
+            ))
+            .bearer_auth(&self.inner.token)
+            .send()
+            .await?;
+        let value = self.json_response(response).await?;
+        let mut observed = value.get("authorization_model").cloned().ok_or_else(|| {
+            AuthzError::Ambiguous("GetAuthorizationModel missing authorization_model".to_string())
+        })?;
+        observed.as_object().ok_or_else(|| {
+            AuthzError::Ambiguous("GetAuthorizationModel returned a non-object model".to_string())
+        })?;
+        normalize_authorization_model(&mut observed);
+        let mut expected = expected.clone();
+        normalize_authorization_model(&mut expected);
+        if observed != expected {
+            return Err(AuthzError::Config(
+                "configured OpenFGA model does not match MOA's compiled authorization schema"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Check whether `user` has `relation` on `object`.
     #[tracing::instrument(level = "debug", skip(self), fields(store_id = %self.inner.store_id, relation = %relation, object = %object))]
     pub async fn check(
@@ -400,6 +438,111 @@ impl FgaClient {
     }
 }
 
+fn normalize_authorization_model(model: &mut serde_json::Value) {
+    let Some(model) = model.as_object_mut() else {
+        return;
+    };
+    model.remove("id");
+    remove_empty_object(model, "conditions");
+    let Some(type_definitions) = model
+        .get_mut("type_definitions")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for type_definition in type_definitions {
+        let Some(type_definition) = type_definition.as_object_mut() else {
+            continue;
+        };
+        remove_empty_object(type_definition, "relations");
+        if type_definition
+            .get("metadata")
+            .is_some_and(serde_json::Value::is_null)
+        {
+            type_definition.remove("metadata");
+        }
+        let Some(metadata) = type_definition
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            normalize_userset_defaults(type_definition);
+            continue;
+        };
+        remove_empty_string(metadata, "module");
+        remove_null(metadata, "source_info");
+        if let Some(relations) = metadata
+            .get_mut("relations")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for relation in relations.values_mut() {
+                let Some(relation) = relation.as_object_mut() else {
+                    continue;
+                };
+                remove_empty_string(relation, "module");
+                remove_null(relation, "source_info");
+                if let Some(user_types) = relation
+                    .get_mut("directly_related_user_types")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for user_type in user_types {
+                        if let Some(user_type) = user_type.as_object_mut() {
+                            remove_empty_string(user_type, "condition");
+                        }
+                    }
+                }
+            }
+        }
+        normalize_userset_defaults(type_definition);
+    }
+}
+
+fn normalize_userset_defaults(value: &mut serde_json::Map<String, serde_json::Value>) {
+    fn visit(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => values.iter_mut().for_each(visit),
+            serde_json::Value::Object(object) => {
+                for key in ["computedUserset", "tupleset"] {
+                    if let Some(userset) = object
+                        .get_mut(key)
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        remove_empty_string(userset, "object");
+                    }
+                }
+                object.values_mut().for_each(visit);
+            }
+            _ => {}
+        }
+    }
+    value.values_mut().for_each(visit);
+}
+
+fn remove_empty_object(object: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if object
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        object.remove(key);
+    }
+}
+
+fn remove_empty_string(object: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(str::is_empty)
+    {
+        object.remove(key);
+    }
+}
+
+fn remove_null(object: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if object.get(key).is_some_and(serde_json::Value::is_null) {
+        object.remove(key);
+    }
+}
+
 fn body_for_tuple_op(model_id: &str, op: TupleOp, wire: serde_json::Value) -> serde_json::Value {
     match op {
         TupleOp::Write => json!({
@@ -464,7 +607,120 @@ fn is_idempotent_tuple_error(body: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_idempotent_tuple_error;
+    use super::{is_idempotent_tuple_error, normalize_authorization_model};
+
+    #[test]
+    fn authorization_model_normalization_removes_only_openfga_protobuf_defaults() {
+        // Pins: OpenFGA v1.8.16 GET expands absent protobuf defaults from the
+        // exact model accepted by POST. Startup compares the semantic model
+        // after removing only those path-specific defaults.
+        let mut expected = serde_json::json!({
+            "schema_version": "1.2",
+            "type_definitions": [
+                { "type": "operator" },
+                {
+                    "type": "agent",
+                    "metadata": {
+                        "relations": {
+                            "operator": {
+                                "directly_related_user_types": [{ "type": "operator" }]
+                            }
+                        }
+                    },
+                    "relations": {
+                        "operator": {
+                            "tupleToUserset": {
+                                "tupleset": { "relation": "tenant" },
+                                "computedUserset": { "relation": "admin" }
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let mut observed = serde_json::json!({
+            "id": "01KZJR503DS7YN9PNGPZHAQZBT",
+            "schema_version": "1.2",
+            "conditions": {},
+            "type_definitions": [
+                { "type": "operator", "relations": {}, "metadata": null },
+                {
+                    "type": "agent",
+                    "metadata": {
+                        "module": "",
+                        "source_info": null,
+                        "relations": {
+                            "operator": {
+                                "module": "",
+                                "source_info": null,
+                                "directly_related_user_types": [
+                                    { "type": "operator", "condition": "" }
+                                ]
+                            }
+                        }
+                    },
+                    "relations": {
+                        "operator": {
+                            "tupleToUserset": {
+                                "tupleset": { "object": "", "relation": "tenant" },
+                                "computedUserset": { "object": "", "relation": "admin" }
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+
+        normalize_authorization_model(&mut expected);
+        normalize_authorization_model(&mut observed);
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn authorization_model_normalization_preserves_nondefault_semantics() {
+        // Pins: a condition, userset object, or module/source annotation that
+        // carries data must still make the configured model mismatch.
+        let baseline = serde_json::json!({
+            "schema_version": "1.2",
+            "type_definitions": [{
+                "type": "agent",
+                "metadata": {"relations": {"operator": {
+                    "directly_related_user_types": [{"type": "operator", "condition": ""}],
+                    "module": "",
+                    "source_info": null
+                }}},
+                "relations": {"operator": {"computedUserset": {
+                    "object": "", "relation": "admin"
+                }}}
+            }]
+        });
+        for (pointer, replacement) in [
+            (
+                "/type_definitions/0/metadata/relations/operator/directly_related_user_types/0/condition",
+                serde_json::json!("approved"),
+            ),
+            (
+                "/type_definitions/0/relations/operator/computedUserset/object",
+                serde_json::json!("tenant:root"),
+            ),
+            (
+                "/type_definitions/0/metadata/relations/operator/module",
+                serde_json::json!("policy"),
+            ),
+        ] {
+            let mut expected = baseline.clone();
+            let mut changed = baseline.clone();
+            *changed
+                .pointer_mut(pointer)
+                .expect("fixture pointer must resolve") = replacement;
+            normalize_authorization_model(&mut expected);
+            normalize_authorization_model(&mut changed);
+            assert_ne!(
+                changed, expected,
+                "nondefault field at {pointer} was erased"
+            );
+        }
+    }
 
     #[test]
     fn idempotent_tuple_error_swallows_converged_write_and_delete_conflicts() {

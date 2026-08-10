@@ -173,7 +173,8 @@ async fn live_session_store(database_url: &str) -> PostgresSessionStore {
         .expect("connect live Neon database");
     let mut config = MoaConfig::default();
     config.database.url = database_url.to_string();
-    config.session.attachments = SessionAttachmentStorageConfig::local_rustfs();
+    config.session.attachments = SessionAttachmentStorageConfig::default();
+    config.object_store = moa_config::ObjectStoreConfig::local_rustfs();
     PostgresSessionStore::from_existing_pool_with_config(&config, pool)
         .await
         .expect("live Neon session store")

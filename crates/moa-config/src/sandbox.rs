@@ -1,4 +1,11 @@
-//! Local, cloud hand, and MCP sandbox configuration.
+//! General local hand, sandbox policy, and MCP configuration.
+
+pub mod checkpoint;
+pub mod cloud;
+pub mod workspace;
+
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 
@@ -9,6 +16,7 @@ use moa_core::types::hands::{
     CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit, SandboxPolicySnapshot,
     SandboxProfile,
 };
+use moa_core::types::identifiers::ProviderAccountId;
 use moa_core::types::security::SensitivityClass;
 
 /// Revision naming the built-in, deliberately unbounded local-development
@@ -116,6 +124,8 @@ pub struct LocalConfig {
     pub sandbox_dir: String,
     /// Memory root directory.
     pub memory_dir: String,
+    /// Optional durable provider-account identity for the local deterministic lane.
+    pub provider_account: Option<LocalHandProviderAccountConfig>,
 }
 
 impl Default for LocalConfig {
@@ -124,51 +134,25 @@ impl Default for LocalConfig {
             docker_enabled: true,
             sandbox_dir: "~/.moa/sandbox".to_string(),
             memory_dir: "~/.moa/memory".to_string(),
+            provider_account: None,
         }
     }
 }
 
-/// Cloud runtime configuration.
+/// Deployment-owned account identity for the local deterministic hand provider.
+///
+/// Local hands have no remote credential or control-plane origin, but durable
+/// bindings still require the same non-caller-selectable account generation and
+/// isolation-cell fence as cloud providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CloudConfig {
-    /// Optional alternate memory root for cloud deployments.
-    pub memory_dir: Option<String>,
-    /// Optional hands configuration.
-    pub hands: Option<CloudHandsConfig>,
-}
-
-impl Default for CloudConfig {
-    fn default() -> Self {
-        Self {
-            memory_dir: None,
-            hands: Some(CloudHandsConfig::default()),
-        }
-    }
-}
-
-/// Cloud hand provider configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CloudHandsConfig {
-    /// Default hand provider.
-    pub default_provider: Option<String>,
-    /// Ordered fallback cloud providers attempted when the selected cloud hand is unavailable.
-    pub fallback_providers: Vec<String>,
-    /// Daytona API key loaded from runtime configuration.
-    pub daytona_api_key: Option<String>,
-    /// Optional Daytona API base URL override.
-    pub daytona_api_url: Option<String>,
-    /// Optional default image for Daytona sandboxes.
-    pub daytona_default_image: Option<String>,
-    /// E2B API key loaded from runtime configuration.
-    pub e2b_api_key: Option<String>,
-    /// Optional E2B API base URL override.
-    pub e2b_api_url: Option<String>,
-    /// Optional E2B domain override.
-    pub e2b_domain: Option<String>,
-    /// Optional default E2B template identifier.
-    pub e2b_template: Option<String>,
+#[serde(deny_unknown_fields)]
+pub struct LocalHandProviderAccountConfig {
+    /// Durable account identity persisted on workspaces and local hand handles.
+    pub provider_account_id: ProviderAccountId,
+    /// Durable account generation. Local account replacement increments it.
+    pub generation: u64,
+    /// Operator-defined single-replica or globally reachable isolation cell.
+    pub isolation_cell: String,
 }
 
 /// Credential injection mode for an MCP server.

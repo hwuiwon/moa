@@ -3,19 +3,141 @@
 use std::time::Duration;
 
 use moa_core::{
-    error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
-    types::completion::ToolInvocation, types::hands::SandboxTier,
-    types::observability::TraceContext, types::session::SessionMeta,
+    error::MoaError,
+    error::Result,
+    types::action_policy::ActionPolicyEffect,
+    types::completion::ToolInvocation,
+    types::hands::SandboxTier,
+    types::observability::TraceContext,
+    types::sandbox_workspace::{SandboxWorkspaceState, WorkspaceCapacityDimension},
+    types::session::SessionMeta,
     types::tools::SecuredToolOutput,
 };
-use moa_observability::{apply_trace_context_to_span, current_turn_root_span, record_tool_call};
+use moa_observability::{
+    SandboxStorageResourceMetricState, SandboxWorkspaceCheckpointOperation,
+    SandboxWorkspaceInventoryDrift, SandboxWorkspaceLifecycleOperation,
+    SandboxWorkspaceMetricResult, SandboxWorkspaceProviderKind, SandboxWorkspaceQuotaDecision,
+    apply_trace_context_to_span, current_turn_root_span, record_sandbox_storage_resource_state,
+    record_sandbox_workspace_checkpoint, record_sandbox_workspace_inventory_drift,
+    record_sandbox_workspace_lifecycle, record_sandbox_workspace_quota_decision,
+    record_sandbox_workspace_quota_utilization, record_sandbox_workspace_reaper,
+    record_sandbox_workspace_state, record_tool_call,
+};
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use super::ToolExecution;
+use super::{DeferredWorkspaceToolOutput, ToolExecution};
+
+pub(super) trait SecuredOutputRef {
+    fn secured_output(&self) -> &SecuredToolOutput;
+}
+
+impl SecuredOutputRef for SecuredToolOutput {
+    fn secured_output(&self) -> &SecuredToolOutput {
+        self
+    }
+}
+
+impl SecuredOutputRef for DeferredWorkspaceToolOutput {
+    fn secured_output(&self) -> &SecuredToolOutput {
+        &self.output
+    }
+}
 
 const TOOL_ERROR_OUTPUT_STATUS: &str = "tool returned error output";
 const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
+
+/// Maps a configured provider name onto the bounded metric vocabulary.
+pub fn sandbox_workspace_provider_kind(provider: &str) -> SandboxWorkspaceProviderKind {
+    match provider {
+        "local" => SandboxWorkspaceProviderKind::Local,
+        "daytona" => SandboxWorkspaceProviderKind::Daytona,
+        "e2b" => SandboxWorkspaceProviderKind::E2b,
+        _ => SandboxWorkspaceProviderKind::Other,
+    }
+}
+
+/// Records a workspace lifecycle outcome without accepting identity-bearing labels.
+pub fn record_workspace_lifecycle(
+    provider: &str,
+    operation: SandboxWorkspaceLifecycleOperation,
+    result: SandboxWorkspaceMetricResult,
+    duration: Duration,
+) {
+    record_sandbox_workspace_lifecycle(
+        sandbox_workspace_provider_kind(provider),
+        operation,
+        result,
+        duration,
+    );
+}
+
+/// Sets one provider/state workspace fleet count.
+pub fn record_workspace_state(provider: &str, state: SandboxWorkspaceState, count: u64) {
+    record_sandbox_workspace_state(sandbox_workspace_provider_kind(provider), state, count);
+}
+
+/// Sets one provider/state durable storage-resource fleet count.
+pub fn record_workspace_storage_resource_state(
+    provider: &str,
+    state: SandboxStorageResourceMetricState,
+    count: u64,
+) {
+    record_sandbox_storage_resource_state(sandbox_workspace_provider_kind(provider), state, count);
+}
+
+/// Records one bounded workspace capacity admission decision.
+pub fn record_workspace_quota_decision(
+    dimension: WorkspaceCapacityDimension,
+    decision: SandboxWorkspaceQuotaDecision,
+) {
+    record_sandbox_workspace_quota_decision(dimension, decision);
+}
+
+/// Sets a fleet-wide capacity utilization ratio.
+pub fn record_workspace_quota_utilization(dimension: WorkspaceCapacityDimension, ratio: f64) {
+    record_sandbox_workspace_quota_utilization(dimension, ratio);
+}
+
+/// Sets the complete supervised workspace-reaper health snapshot.
+pub fn record_workspace_reaper_health(
+    ready: bool,
+    heartbeat_age: Duration,
+    backlog: u64,
+    oldest_work_age: Duration,
+) {
+    record_sandbox_workspace_reaper(ready, heartbeat_age, backlog, oldest_work_age);
+}
+
+/// Records checkpoint bytes and latency without accepting paths, keys, or identities.
+pub fn record_workspace_checkpoint(
+    provider: &str,
+    operation: SandboxWorkspaceCheckpointOperation,
+    result: SandboxWorkspaceMetricResult,
+    bytes: u64,
+    duration: Duration,
+) {
+    record_sandbox_workspace_checkpoint(
+        sandbox_workspace_provider_kind(provider),
+        operation,
+        result,
+        bytes,
+        duration,
+    );
+}
+
+/// Sets one bounded provider-inventory drift count.
+pub fn record_workspace_inventory_drift(
+    provider: &str,
+    classification: SandboxWorkspaceInventoryDrift,
+    count: u64,
+) {
+    record_sandbox_workspace_inventory_drift(
+        sandbox_workspace_provider_kind(provider),
+        classification,
+        count,
+    );
+}
 
 pub(super) fn tool_execution_span(
     session: &SessionMeta,
@@ -80,16 +202,19 @@ pub(super) fn record_tool_invocation_metadata(
 /// reach a trace exporter is by construction the post-classification text. The
 /// assessment class and capability are recorded as closed-vocabulary attributes;
 /// neither can carry attacker-controlled bytes or unbounded cardinality.
-pub(super) fn record_tool_execution_result(
+pub(super) fn record_tool_execution_result<T>(
     span: &tracing::Span,
     tool_name: &str,
     duration: Duration,
-    result: &Result<SecuredToolOutput>,
-) {
+    result: &Result<T>,
+) where
+    T: SecuredOutputRef,
+{
     span.set_attribute("moa.tool.duration_ms", duration.as_millis() as i64);
 
     match result {
         Ok(secured) => {
+            let secured = secured.secured_output();
             let output = &secured.safe_output;
             let succeeded = !output.is_error;
             span.set_attribute("moa.tool.success", succeeded);
@@ -215,9 +340,41 @@ pub fn truncate_tool_span_text(mut value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_trace_flag, short_content_hash, tool_body_field, tool_output_body_field,
-        truncate_tool_span_text,
+        parse_trace_flag, sandbox_workspace_provider_kind, short_content_hash, tool_body_field,
+        tool_output_body_field, truncate_tool_span_text,
     };
+    use moa_observability::SandboxWorkspaceProviderKind;
+
+    #[test]
+    fn workspace_provider_metric_labels_bucket_untrusted_names() {
+        // Pins: configured account/provider names never become metric labels; only
+        // the three shipped provider classes pass through and everything else is
+        // represented by one bounded `other` series.
+        assert_eq!(
+            sandbox_workspace_provider_kind("local"),
+            SandboxWorkspaceProviderKind::Local
+        );
+        assert_eq!(
+            sandbox_workspace_provider_kind("daytona"),
+            SandboxWorkspaceProviderKind::Daytona
+        );
+        assert_eq!(
+            sandbox_workspace_provider_kind("e2b"),
+            SandboxWorkspaceProviderKind::E2b
+        );
+        for untrusted in [
+            "tenant-74d2",
+            "provider-account-secret",
+            "/home/user/moa-data",
+            "workspace-uuid",
+        ] {
+            assert_eq!(
+                sandbox_workspace_provider_kind(untrusted),
+                SandboxWorkspaceProviderKind::Other,
+                "untrusted provider name must not become a metric label"
+            );
+        }
+    }
 
     #[test]
     fn trace_flag_only_enables_on_explicit_truthy_values() {

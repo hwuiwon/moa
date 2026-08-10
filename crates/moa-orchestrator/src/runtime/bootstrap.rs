@@ -11,7 +11,7 @@ use sqlx::postgres::PgPoolOptions;
 use crate::objects::session_status_migrator::{
     SessionStatusIdleMigrationRequest, SessionStatusIdleMigrationResponse,
 };
-use crate::runtime::endpoint::{DeploymentListResponse, services_registered};
+use crate::runtime::endpoint::{DeploymentListResponse, services_registered_for_mode};
 use crate::runtime::jobs::install_default_cron_jobs;
 
 const BOOTSTRAP_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,6 +44,8 @@ pub struct BootstrapOptions {
     pub migration_deployment_uri: String,
     /// Steady-state handler URI to register after cutover when no Operator is present.
     pub runtime_deployment_uri: Option<String>,
+    /// Sandbox-workspace rollout mode whose service binding must register.
+    pub sandbox_workspace_mode: moa_config::SandboxWorkspaceMode,
 }
 
 /// Verifiable summary of a completed bootstrap pass.
@@ -121,7 +123,7 @@ pub async fn run(options: BootstrapOptions) -> Result<BootstrapReport> {
         register_deployment(&client, admin_url, runtime_deployment_uri).await?;
     }
 
-    wait_for_expected_services(&client, admin_url).await?;
+    wait_for_expected_services(&client, admin_url, options.sandbox_workspace_mode).await?;
     check_public_health(&client, ingress_url).await?;
     install_default_cron_jobs(ingress_url).await?;
     Ok(report)
@@ -392,13 +394,22 @@ async fn wait_for_deployment_absence(
     )
 }
 
-async fn wait_for_expected_services(client: &Client, admin_url: &str) -> Result<()> {
+async fn wait_for_expected_services(
+    client: &Client,
+    admin_url: &str,
+    sandbox_workspace_mode: moa_config::SandboxWorkspaceMode,
+) -> Result<()> {
     let mut last_error = "no registration observation".to_string();
     for attempt in 1..=REGISTRATION_ATTEMPTS {
         match client.get(format!("{admin_url}/deployments")).send().await {
             Ok(response) => match response.error_for_status() {
                 Ok(response) => match response.json::<DeploymentListResponse>().await {
-                    Ok(payload) if services_registered(&payload.deployments) => {
+                    Ok(payload)
+                        if services_registered_for_mode(
+                            &payload.deployments,
+                            sandbox_workspace_mode,
+                        ) =>
+                    {
                         tracing::info!(attempt, "Operator-registered Restate services are ready");
                         return Ok(());
                     }
@@ -417,15 +428,17 @@ async fn wait_for_expected_services(client: &Client, admin_url: &str) -> Result<
 }
 
 async fn check_public_health(client: &Client, ingress_url: &str) -> Result<()> {
-    client
-        .post(format!("{ingress_url}/restate/call/Health/check"))
-        .header("content-type", "application/json")
-        .body("{}")
-        .send()
-        .await
-        .context("call public Restate Health/check")?
-        .error_for_status()
-        .context("public Restate Health/check returned an error")?;
+    crate::restate_identity::with_reqwest_trace_headers(
+        client
+            .post(format!("{ingress_url}/restate/call/Health/check"))
+            .header("content-type", "application/json")
+            .body("{}"),
+    )
+    .send()
+    .await
+    .context("call public Restate Health/check")?
+    .error_for_status()
+    .context("public Restate Health/check returned an error")?;
     Ok(())
 }
 
@@ -434,21 +447,23 @@ async fn migrate_session(
     ingress_url: &str,
     session_id: SessionId,
 ) -> Result<SessionStatusIdleMigrationResponse> {
-    let response = client
-        .post(format!(
-            "{ingress_url}/restate/call/StatusMigrationDispatcher/migrate"
-        ))
-        .header("content-type", "application/json")
-        .header(
-            "idempotency-key",
-            format!("session-status-idle-{session_id}"),
-        )
-        .json(&SessionStatusIdleMigrationRequest { session_id })
-        .send()
-        .await
-        .with_context(|| format!("dispatch Session {session_id} status migration"))?
-        .error_for_status()
-        .with_context(|| format!("Session {session_id} status migration returned an error"))?;
+    let response = crate::restate_identity::with_reqwest_trace_headers(
+        client
+            .post(format!(
+                "{ingress_url}/restate/call/StatusMigrationDispatcher/migrate"
+            ))
+            .header("content-type", "application/json")
+            .header(
+                "idempotency-key",
+                format!("session-status-idle-{session_id}"),
+            )
+            .json(&SessionStatusIdleMigrationRequest { session_id }),
+    )
+    .send()
+    .await
+    .with_context(|| format!("dispatch Session {session_id} status migration"))?
+    .error_for_status()
+    .with_context(|| format!("Session {session_id} status migration returned an error"))?;
     response
         .json()
         .await

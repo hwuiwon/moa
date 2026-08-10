@@ -23,6 +23,9 @@ Postgres stores:
 - graph changelog outbox rows and per-tenant changelog versions
 - large event payload claim-check blobs
 - durable hand leases for sandbox reuse and cleanup
+- sandbox workspace ownership, checkpoint metadata, operation/grant/capacity
+  ledgers, retention, and delete fences (portable checkpoint bytes remain in
+  provider/object storage)
 - analytics views and materialized views
 
 ## Core Tables
@@ -213,6 +216,14 @@ provider text never appear here, so the event is safe in model-visible history.
 the output it wraps. Security metadata is never optional on that variant: an
 output reaching the log without an assessment would be an unclassified output,
 which is indistinguishable from a safe one after the fact.
+
+For a sandbox tool declared `MayWrite`, append of its successful `ToolResult`
+is also the final side of the workspace commit barrier: the writer is quiesced,
+the portable checkpoint manifest and chunks are verified, and the immutable
+workspace head advances first. The event may reference that committed revision;
+it does not contain or make durable arbitrary sandbox files. Read-only tools do
+not advance workspace state. The complete protocol is in
+[Sandbox Workspaces](25-sandbox-workspaces.md).
 
 The append is keyed by the transition digest itself —
 `prompt_injection_circuit:v1:<64 lowercase blake3 hex>` over domain-separated
@@ -466,12 +477,14 @@ Replay uses persisted session contact metadata; clients cannot provide a new
 contact per message to change historical attribution. Tool-call records only
 need the session id because the session store can recover the contact binding.
 
-Sandbox bindings are not recovered from session events. The authoritative
-runtime binding for a session/provider is `moa.hand_leases`, which stores the
-tenant, provider, tier, serialized handle, generation, status, and expiry.
-`ToolRouter` process maps are reconnect caches only; cleanup reads durable
-leases so terminal session teardown works even when the current pod never
-provisioned the original hand.
+Sandbox bindings and filesystem contents are not recovered from session events.
+`moa.hand_leases` is authoritative only for an ephemeral compute attachment and
+its compute generation. The tenant-scoped `moa.sandbox_workspaces` aggregate,
+its checkpoint/operation rows, and the portable checkpoint object store are
+authoritative for retained filesystem state. `ToolRouter` process maps are
+reconnect caches only. Compute cleanup reads durable leases; workspace cleanup
+uses its separate generation-fenced lifecycle and cannot be implied by terminal
+session teardown. See [Sandbox Workspaces](25-sandbox-workspaces.md).
 
 ## Compaction
 

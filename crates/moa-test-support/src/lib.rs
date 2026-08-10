@@ -28,6 +28,8 @@ mod orchestrator_fixture;
 pub use orchestrator_fixture::{
     ConversationOptions, FixtureCapabilityAttempt, FixtureCapabilityCall,
     FixtureCapabilityController, FixtureCapabilityOptions, FixtureCapabilityOutcome,
-    FixtureCapabilityTool, IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
-    drive_conversation,
+    FixtureCapabilityTool, IsolatedTest, OrchestratorTestFixture, RustFsFixture,
+    SandboxWorkspaceCrashBarrier, SandboxWorkspaceCrashControl, SandboxWorkspaceFixture,
+    TestApiClient, TestSessionHandle, WorkspaceRestartProbe, drive_conversation,
+    provision_workspace_maintenance_login,
 };

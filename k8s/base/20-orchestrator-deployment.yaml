@@ -90,6 +90,12 @@ spec:
                 secretKeyRef:
                   name: moa-postgres
                   key: url
+            - name: MOA_DATABASE_MAINTENANCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres-maintenance
+                  key: url
+                  optional: true
             # Fleet budget: 50 HPA replicas reserve 20 foreground + 1 background
             # connection = 1,050. Edge reserves 24, leaving 126 connections for
             # migrations, deploy overlap, and operators in a 1,200-connection tier.

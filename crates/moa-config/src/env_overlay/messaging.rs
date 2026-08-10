@@ -6,6 +6,71 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
     let path = match field {
         "restate_ingress_url" => &["orchestrator", "restate_ingress_url"][..],
         "restate_llm_gateway_url" => &["orchestrator", "llm_gateway_url"],
+        "session_attachment_bucket" => &["session", "attachments", "storage", "bucket"],
+        "session_attachment_prefix" => &["session", "attachments", "storage", "prefix"],
+        "sandbox_checkpoint_enabled" => &["sandbox_checkpoints", "enabled"],
+        "sandbox_checkpoint_bucket" => &["sandbox_checkpoints", "storage", "bucket"],
+        "sandbox_checkpoint_prefix" => &["sandbox_checkpoints", "storage", "prefix"],
+        "sandbox_checkpoint_bucket_versioning" => &["sandbox_checkpoints", "bucket_versioning"],
+        "sandbox_checkpoint_versioning_observation_maximum_age_seconds" => &[
+            "sandbox_checkpoints",
+            "versioning_observation",
+            "maximum_age_seconds",
+        ],
+        "sandbox_checkpoint_versioning_observation_timeout_seconds" => &[
+            "sandbox_checkpoints",
+            "versioning_observation",
+            "timeout_seconds",
+        ],
+        "sandbox_checkpoint_retained_ancestor_count" => &[
+            "sandbox_checkpoints",
+            "retention",
+            "retained_ancestor_count",
+        ],
+        "sandbox_checkpoint_minimum_age_seconds" => {
+            &["sandbox_checkpoints", "retention", "minimum_age_seconds"]
+        }
+        "sandbox_checkpoint_gc_batch_size" => {
+            &["sandbox_checkpoints", "retention", "gc_batch_size"]
+        }
+        "sandbox_checkpoint_claim_ttl_seconds" => {
+            &["sandbox_checkpoints", "retention", "claim_ttl_seconds"]
+        }
+        "sandbox_checkpoint_retry_backoff_seconds" => {
+            &["sandbox_checkpoints", "retention", "retry_backoff_seconds"]
+        }
+        "sandbox_checkpoint_deletion_max_objects" => {
+            &["sandbox_checkpoints", "deletion", "max_objects"]
+        }
+        "sandbox_checkpoint_deletion_max_bytes" => {
+            &["sandbox_checkpoints", "deletion", "max_bytes"]
+        }
+        "sandbox_checkpoint_absence_window_seconds" => &[
+            "sandbox_checkpoints",
+            "deletion",
+            "consistency_window_seconds",
+        ],
+        "sandbox_checkpoint_max_entries" => &["sandbox_checkpoints", "max_entries"],
+        "sandbox_checkpoint_max_path_depth" => &["sandbox_checkpoints", "max_path_depth"],
+        "sandbox_checkpoint_max_file_bytes" => &["sandbox_checkpoints", "max_file_bytes"],
+        "sandbox_checkpoint_max_total_bytes" => &["sandbox_checkpoints", "max_total_bytes"],
+        "sandbox_checkpoint_max_chunk_bytes" => &["sandbox_checkpoints", "max_chunk_bytes"],
+        "sandbox_checkpoint_max_compressed_chunk_bytes" => {
+            &["sandbox_checkpoints", "max_compressed_chunk_bytes"]
+        }
+        "sandbox_workspace_mode" => &["sandbox_workspaces", "mode"],
+        "sandbox_workspace_operation_retention_seconds" => {
+            &["sandbox_workspaces", "operation_retention_seconds"]
+        }
+        "sandbox_workspace_maximum_operation_seconds" => {
+            &["sandbox_workspaces", "maximum_operation_seconds"]
+        }
+        "sandbox_workspace_reconciliation_claim_ttl_seconds" => {
+            &["sandbox_workspaces", "reconciliation_claim_ttl_seconds"]
+        }
+        "sandbox_workspace_reaper_heartbeat_maximum_age_seconds" => {
+            &["sandbox_workspaces", "reaper_heartbeat_maximum_age_seconds"]
+        }
         _ => return None,
     };
     Some(strings(path))
@@ -22,10 +87,7 @@ pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
         "MOA_RUNTIME_CACHE_REDIS_URL",
         &overlay.runtime_cache_redis_url,
     )?;
-    validate_url(
-        "MOA_SESSION_ATTACHMENT_ENDPOINT",
-        &overlay.session_attachment_endpoint,
-    )
+    validate_url("MOA_OBJECT_STORE_ENDPOINT", &overlay.object_store_endpoint)
 }
 
 impl EnvOverlay {
@@ -101,14 +163,14 @@ mod tests {
     fn session_attachment_overlay_applies_object_store_settings() {
         // Pins: session upload bytes use explicit object storage config rather than Postgres bytes.
         let overlay = EnvOverlay::from_iter(env_pairs([
-            ("MOA_SESSION_ATTACHMENT_BACKEND", "gcs"),
+            ("MOA_OBJECT_STORE_BACKEND", "gcs"),
             ("MOA_SESSION_ATTACHMENT_BUCKET", "moa-prod-attachments"),
             ("MOA_SESSION_ATTACHMENT_PREFIX", "prod/session-attachments"),
             (
-                "MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH",
+                "MOA_OBJECT_STORE_GCP_APPLICATION_CREDENTIALS_PATH",
                 "/var/run/secrets/gcp/application-default.json",
             ),
-            ("MOA_SESSION_ATTACHMENT_ALLOW_HTTP", "false"),
+            ("MOA_OBJECT_STORE_ALLOW_HTTP", "false"),
         ]))
         .expect("session attachment overlay should parse");
         let mut config = MoaConfig::default();
@@ -117,23 +179,88 @@ mod tests {
             .apply_to(&mut config)
             .expect("session attachment overlay should apply");
 
+        assert_eq!(config.object_store.backend, ObjectStoreBackend::Gcs);
         assert_eq!(
-            config.session.attachments.backend,
-            SessionAttachmentBackend::Gcs
+            config.session.attachments.storage.bucket,
+            "moa-prod-attachments"
         );
-        assert_eq!(config.session.attachments.bucket, "moa-prod-attachments");
         assert_eq!(
-            config.session.attachments.prefix,
+            config.session.attachments.storage.prefix,
             "prod/session-attachments"
         );
         assert_eq!(
             config
-                .session
-                .attachments
+                .object_store
                 .gcp_application_credentials_path
                 .as_deref(),
             Some("/var/run/secrets/gcp/application-default.json")
         );
-        assert!(!config.session.attachments.allow_http);
+        assert!(!config.object_store.allow_http);
+    }
+
+    #[test]
+    fn sandbox_checkpoint_overlay_uses_shared_transport_and_separate_namespace() {
+        // Pins: checkpoint bytes share one credential owner with attachments
+        // while retaining a distinct bucket and opaque prefix.
+        let overlay = EnvOverlay::from_iter(env_pairs([
+            ("MOA_OBJECT_STORE_ENDPOINT", "http://rustfs:9000"),
+            ("MOA_OBJECT_STORE_ALLOW_HTTP", "true"),
+            ("MOA_SANDBOX_CHECKPOINT_BUCKET", "tenant-checkpoints"),
+            ("MOA_SANDBOX_CHECKPOINT_PREFIX", "portable/v1"),
+            (
+                "MOA_SANDBOX_CHECKPOINT_BUCKET_VERSIONING",
+                "unversioned_required",
+            ),
+            ("MOA_SANDBOX_CHECKPOINT_MAX_CHUNK_BYTES", "1048576"),
+            ("MOA_SANDBOX_CHECKPOINT_RETAINED_ANCESTOR_COUNT", "5"),
+            ("MOA_SANDBOX_CHECKPOINT_MINIMUM_AGE_SECONDS", "7200"),
+            ("MOA_SANDBOX_CHECKPOINT_GC_BATCH_SIZE", "25"),
+            ("MOA_SANDBOX_CHECKPOINT_CLAIM_TTL_SECONDS", "120"),
+            ("MOA_SANDBOX_CHECKPOINT_RETRY_BACKOFF_SECONDS", "30"),
+            ("MOA_SANDBOX_CHECKPOINT_DELETION_MAX_OBJECTS", "500"),
+            ("MOA_SANDBOX_CHECKPOINT_DELETION_MAX_BYTES", "8589934592"),
+            ("MOA_SANDBOX_CHECKPOINT_ABSENCE_WINDOW_SECONDS", "2"),
+        ]))
+        .expect("sandbox checkpoint overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("sandbox checkpoint overlay should apply");
+
+        assert_eq!(
+            config.object_store.endpoint.as_deref(),
+            Some("http://rustfs:9000")
+        );
+        assert!(config.object_store.allow_http);
+        assert_eq!(
+            config.sandbox_checkpoints.storage.bucket,
+            "tenant-checkpoints"
+        );
+        assert_eq!(config.sandbox_checkpoints.storage.prefix, "portable/v1");
+        assert_eq!(config.sandbox_checkpoints.max_chunk_bytes, 1_048_576);
+        assert_eq!(
+            config.sandbox_checkpoints.bucket_versioning,
+            crate::CheckpointBucketVersioningPolicy::UnversionedRequired
+        );
+        assert_eq!(
+            config.sandbox_checkpoints.retention,
+            crate::CheckpointRetentionConfig {
+                retained_ancestor_count: 5,
+                minimum_age_seconds: 7_200,
+                gc_batch_size: 25,
+                claim_ttl_seconds: 120,
+                retry_backoff_seconds: 30,
+            }
+        );
+        assert_eq!(config.sandbox_checkpoints.deletion.max_objects, 500);
+        assert_eq!(config.sandbox_checkpoints.deletion.max_bytes, 8_589_934_592);
+        assert_eq!(
+            config
+                .sandbox_checkpoints
+                .deletion
+                .consistency_window_seconds,
+            2
+        );
     }
 }

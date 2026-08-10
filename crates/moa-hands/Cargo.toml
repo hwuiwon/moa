@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+sandbox-workspace-failpoints = []
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
@@ -20,32 +24,36 @@ moa-config = { workspace = true }
 moa-connectors = { workspace = true }
 moa-db = { workspace = true }
 moa-observability = { workspace = true }
+moa-crypto = { workspace = true }
 moa-security = { workspace = true }
+object_store.workspace = true
 opentelemetry.workspace = true
+quick-xml.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+reqwest-object-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+secrecy.workspace = true
 sha2.workspace = true
 shell-words.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
+tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
 moa-auth-providers = { workspace = true }
-moa-crypto = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-migrations = { workspace = true }
 moa-memory-pii = { workspace = true }
 moa-security = { workspace = true, features = ["test-support"] }
 moa-session = { workspace = true }
-moa-test-support = { workspace = true }
+moa-test-support = { workspace = true, features = ["orchestrator-fixture"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
-secrecy.workspace = true
-tempfile.workspace = true
 tracing-subscriber.workspace = true

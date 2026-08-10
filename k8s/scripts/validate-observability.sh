@@ -71,6 +71,13 @@ EXPECTED_ALERTS=(
   MOARestateSnapshotPartitionsMissing
   MOARestateSnapshotUploadFailures
   MOARestateStateStorageGrowingFast
+  MOASandboxWorkspaceCheckpointFailures
+  MOASandboxWorkspaceInventoryDrift
+  MOASandboxWorkspaceLifecycleFailures
+  MOASandboxWorkspaceQuotaNearCapacity
+  MOASandboxWorkspaceReaperBacklogAge
+  MOASandboxWorkspaceReaperHeartbeatStale
+  MOASandboxWorkspaceReaperUnready
 )
 
 # Prometheus spellings of the server instruments verified against Restate
@@ -326,6 +333,8 @@ import pathlib
 import re
 import sys
 
+import yaml
+
 root = pathlib.Path(sys.argv[1])
 patches = {
     "orchestrator": root / "k8s/overlays/production/patches/orchestrator-observability.yaml",
@@ -524,7 +533,17 @@ REFERENCED_METRICS="${WORK_DIR}/referenced-metrics.txt"
   || die "no metric names were extracted from any alert expression"
 MISSING_METRICS=()
 while read -r metric; do
-  if ! grep -rqF "\"${metric}\"" "${REPO_ROOT}/crates"; then
+  # Prometheus materializes histogram `_bucket`, `_count`, and `_sum` series
+  # from the base Rust instrument name. Accept those generated spellings only
+  # when the exact base histogram is present in source.
+  base_metric="${metric}"
+  case "${metric}" in
+    *_bucket) base_metric="${metric%_bucket}" ;;
+    *_count) base_metric="${metric%_count}" ;;
+    *_sum) base_metric="${metric%_sum}" ;;
+  esac
+  if ! grep -rqF "\"${metric}\"" "${REPO_ROOT}/crates" \
+    && ! grep -rqF "\"${base_metric}\"" "${REPO_ROOT}/crates"; then
     MISSING_METRICS+=("${metric}")
   fi
 done < <(sort -u "${REFERENCED_METRICS}")
@@ -660,7 +679,171 @@ PY
 echo "Checking Grafana dashboard delivery..."
 [[ -d "${CANONICAL_DASHBOARD_DIR}" ]] \
   || die "canonical Grafana dashboard directory is missing: ${CANONICAL_DASHBOARD_DIR}"
-GRAFANA_SYNC_WORKFLOW_TEXT="$(<"${REPO_ROOT}/.github/workflows/sync-grafana-dashboards.yml")"
-assert_contains "${GRAFANA_SYNC_WORKFLOW_TEXT}" "sync-grafana-dashboards.sh" \
-  "the dashboard sync workflow does not invoke the canonical publisher"
+echo "Checking the sandbox workspace metrics/dashboard/alert contract..."
+python3 - "${REPO_ROOT}" <<'PY' || exit 1
+import json
+import pathlib
+import re
+import sys
+
+import yaml
+
+root = pathlib.Path(sys.argv[1])
+runtime_metrics = (root / "crates/moa-observability/src/runtime_metrics.rs").read_text(
+    encoding="utf-8"
+)
+dashboard_path = root / "dashboards/grafana/moa-sandbox-fleet.json"
+dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
+panels = dashboard.get("panels") or []
+if len(panels) != 12:
+    raise SystemExit(f"{dashboard_path} must contain exactly 12 operational panels")
+panel_ids = [panel.get("id") for panel in panels]
+if len(panel_ids) != len(set(panel_ids)):
+    raise SystemExit(f"{dashboard_path} contains duplicate panel IDs")
+
+expected = {
+    "moa_sandbox_workspace_checkpoint_bytes_total",
+    "moa_sandbox_workspace_checkpoint_duration_seconds",
+    "moa_sandbox_workspace_inventory_drift",
+    "moa_sandbox_workspace_lifecycle_duration_seconds",
+    "moa_sandbox_workspace_lifecycle_total",
+    "moa_sandbox_workspace_quota_decisions_total",
+    "moa_sandbox_workspace_quota_utilization_ratio",
+    "moa_sandbox_workspace_reaper_backlog",
+    "moa_sandbox_workspace_reaper_heartbeat_age_seconds",
+    "moa_sandbox_workspace_reaper_oldest_work_age_seconds",
+    "moa_sandbox_workspace_reaper_ready",
+    "moa_sandbox_workspace_state",
+    "moa_sandbox_workspace_storage_resource_state",
+}
+metric_pattern = re.compile(r"moa_sandbox_workspace_[a-z0-9_]+")
+expressions = "\n".join(
+    target.get("expr", "")
+    for panel in panels
+    for target in panel.get("targets") or []
+)
+observed = set(metric_pattern.findall(expressions))
+normalized = {
+    re.sub(r"_(?:bucket|count|sum)$", "", metric) for metric in observed
+}
+if normalized != expected:
+    raise SystemExit(
+        f"{dashboard_path} metric inventory drifted; "
+        f"missing={sorted(expected - normalized)}, extra={sorted(normalized - expected)}"
+    )
+for metric in expected:
+    if f'"{metric}"' not in runtime_metrics:
+        raise SystemExit(f"dashboard metric {metric} is not emitted by runtime_metrics.rs")
+
+for forbidden in (
+    "tenant_id",
+    "workspace_id",
+    "provider_account_id",
+    "provider_generation",
+    "resource_id",
+    "checkpoint_id",
+    "object_key",
+    "path",
+    "content",
+    "secret",
+):
+    if forbidden in expressions:
+        raise SystemExit(
+            f"{dashboard_path} exposes forbidden identity/content dimension {forbidden!r}"
+        )
+
+workspace_metric_source = runtime_metrics[
+    runtime_metrics.index("pub fn record_sandbox_workspace_lifecycle") :
+    runtime_metrics.index("pub fn record_session_event_append")
+]
+metric_label_keys = set(re.findall(r'"([a-z_]+)"\s*=>', workspace_metric_source))
+if metric_label_keys != {
+    "classification",
+    "decision",
+    "dimension",
+    "operation",
+    "provider_kind",
+    "result",
+    "state",
+}:
+    raise SystemExit(
+        "sandbox workspace Rust metric label vocabulary drifted: "
+        f"{sorted(metric_label_keys)}"
+    )
+
+allowed_group_labels = {
+    "classification",
+    "decision",
+    "dimension",
+    "le",
+    "operation",
+    "provider_kind",
+    "result",
+    "state",
+}
+for group in re.findall(r"\bby\s*\(([^)]*)\)", expressions):
+    labels = {label.strip() for label in group.split(",") if label.strip()}
+    unknown = labels - allowed_group_labels
+    if unknown:
+        raise SystemExit(
+            f"{dashboard_path} groups by labels outside the bounded contract: {sorted(unknown)}"
+        )
+
+kustomization = (root / "ops/prometheus/alerts/kustomization.yaml").read_text(
+    encoding="utf-8"
+)
+if kustomization.count("sandbox-workspaces.yaml") != 1:
+    raise SystemExit(
+        "sandbox-workspaces.yaml must appear exactly once in the alert kustomization"
+    )
+
+alerts_path = root / "ops/prometheus/alerts/sandbox-workspaces.yaml"
+alerts = yaml.safe_load(alerts_path.read_text(encoding="utf-8"))
+rules = [
+    rule
+    for group in alerts.get("spec", {}).get("groups") or []
+    for rule in group.get("rules") or []
+]
+if len(rules) != 7:
+    raise SystemExit(f"{alerts_path} must contain exactly seven actionable alerts")
+for rule in rules:
+    expression = rule.get("expr", "")
+    annotations = rule.get("annotations") or {}
+    if not annotations.get("runbook_url", "").startswith(
+        "https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#"
+    ):
+        raise SystemExit(f"{rule.get('alert')} has no sandbox data-operations runbook")
+    for forbidden in (
+        "tenant_id",
+        "workspace_id",
+        "provider_account_id",
+        "resource_id",
+        "checkpoint_id",
+        "object_key",
+        "path",
+        "content",
+        "secret",
+    ):
+        if forbidden in expression:
+            raise SystemExit(
+                f"{rule.get('alert')} uses forbidden alert dimension {forbidden!r}"
+            )
+
+runbook = (root / "docs/19-data-operations.md").read_text(encoding="utf-8")
+for heading in (
+    "## Sandbox Workspace Operations",
+    "### Workspace Reaper Failure",
+    "### Workspace Maintenance Backlog",
+    "### Workspace Capacity Pressure",
+    "### Portable Checkpoint Failures",
+    "### Provider Inventory Drift",
+):
+    if heading not in runbook:
+        raise SystemExit(f"sandbox workspace alert runbook section is missing: {heading}")
+
+print(
+    f"  OK {len(panels)} panels consume the exact {len(expected)}-family "
+    "low-cardinality sandbox workspace metric contract"
+)
+PY
 echo "Observability validation OK"

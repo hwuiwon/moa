@@ -283,32 +283,47 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
         let token = format!("LIVE-TOOL-{}", provider.label().to_uppercase());
         let mut metadata = HashMap::new();
         metadata.insert("suite".to_string(), json!("live-provider-matrix"));
-        let response = provider
-            .complete(
-                CompletionRequest {
-                    model: None,
-                    messages: vec![moa_core::types::context::ContextMessage::user(format!(
-                        "You must call the emit_token tool exactly once with token \"{token}\". \
-                     Do not answer in plain text before the tool call."
-                    ))],
-                    tools: vec![emit_token_tool()],
-                    max_output_tokens: Some(256),
-                    temperature: None,
-                    response_format: None,
-                    native_web_search: Default::default(),
-                    metadata,
-                }
-                .into_shared(),
-            )
-            .await
-            .unwrap_or_else(|error| {
-                panic!("{} tool-call request failed: {error}", provider.label())
-            })
-            .collect()
-            .await
-            .unwrap_or_else(|error| {
-                panic!("{} tool-call stream failed: {error}", provider.label())
-            });
+        let request = CompletionRequest {
+            model: None,
+            messages: vec![moa_core::types::context::ContextMessage::user(format!(
+                "You must call the emit_token tool exactly once with token \"{token}\". \
+                 Do not answer in plain text before the tool call."
+            ))],
+            tools: vec![emit_token_tool()],
+            max_output_tokens: Some(256),
+            temperature: None,
+            response_format: None,
+            native_web_search: Default::default(),
+            metadata,
+        }
+        .into_shared();
+
+        // Live models occasionally return an empty candidate despite accepting
+        // the request. Retry that provider-side nondeterminism, while retaining
+        // the exact tool-name and argument assertions below.
+        let mut response = None;
+        for _ in 0..3 {
+            let candidate = provider
+                .complete(request.clone())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{} tool-call request failed: {error}", provider.label())
+                })
+                .collect()
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{} tool-call stream failed: {error}", provider.label())
+                });
+            let has_tool_call = candidate
+                .content
+                .iter()
+                .any(|content| matches!(content, CompletionContent::ToolCall(_)));
+            response = Some(candidate);
+            if has_tool_call {
+                break;
+            }
+        }
+        let response = response.expect("bounded tool-call attempt count is non-zero");
 
         let tool_call = response.content.iter().find_map(|content| match content {
             CompletionContent::ToolCall(call) => Some(&call.invocation),

@@ -62,6 +62,8 @@ mod postgres;
 mod process;
 mod redis;
 mod restate;
+mod rustfs;
+mod sandbox_workspace;
 mod scripted_provider;
 
 pub use crate::fixture_capability::{
@@ -71,11 +73,17 @@ pub use crate::fixture_capability::{
 pub use client::{TestApiClient, TestSessionHandle};
 pub use conversation::{ConversationOptions, drive_conversation};
 pub use otlp_capture::OtlpCapture;
+pub use rustfs::RustFsFixture;
+pub use sandbox_workspace::{
+    SandboxWorkspaceCrashBarrier, SandboxWorkspaceCrashControl, SandboxWorkspaceFixture,
+    WorkspaceRestartProbe,
+};
 
 use openfga::{
     bootstrap_openfga, external_fga_client, fixture_fga_endpoint_from_env, start_openfga_container,
     wait_for_openfga,
 };
+pub use postgres::provision_workspace_maintenance_login;
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};
 use process::{
     FixtureBinarySnapshot, OrchestratorRestartConfig, OrchestratorSpawnConfig, hard_kill_child,
@@ -113,6 +121,7 @@ pub struct OrchestratorTestFixture {
     restart_config: Option<OrchestratorRestartConfig>,
     fixture_capability: Option<crate::fixture_capability::FixtureCapabilityRuntime>,
     otlp_capture: Option<OtlpCapture>,
+    sandbox_workspace: Option<SandboxWorkspaceFixture>,
 }
 
 impl OrchestratorTestFixture {
@@ -144,7 +153,7 @@ impl OrchestratorTestFixture {
         if let Ok(ingress_url) = std::env::var("MOA_RESTATE_INGRESS_URL") {
             return Self::external(ingress_url);
         }
-        Self::internal(None, Vec::new(), None, true).await
+        Self::internal(None, Vec::new(), None, true, false).await
     }
 
     /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
@@ -152,7 +161,7 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script), Vec::new(), None, true).await
+        Self::internal(Some(script), Vec::new(), None, true, false).await
     }
 
     /// Starts a dedicated scripted fixture with extra orchestrator process environment.
@@ -163,7 +172,7 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script), extra_env, None, true).await
+        Self::internal(Some(script), extra_env, None, true, false).await
     }
 
     /// Starts a restartable dedicated fixture with a scripted provider and fake MCP capabilities.
@@ -176,7 +185,32 @@ impl OrchestratorTestFixture {
         }
         validate_execution_fixture_env(&options.orchestrator_env)?;
         let extra_env = options.orchestrator_env.clone();
-        Self::internal(Some(script), extra_env, Some(options), true).await
+        Self::internal(Some(script), extra_env, Some(options), true, false).await
+    }
+
+    /// Starts a dedicated scripted fixture with durable workspace owners.
+    pub async fn with_sandbox_workspace_fixture(
+        script: serde_json::Value,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<Self> {
+        if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
+            bail!("sandbox-workspace fixtures cannot use an external orchestrator");
+        }
+        validate_execution_fixture_env(&extra_env)?;
+        Self::internal(Some(script), extra_env, None, true, true).await
+    }
+
+    /// Starts a durable-workspace fixture with the fake MCP capability server.
+    pub async fn with_sandbox_workspace_execution_fixture(
+        script: serde_json::Value,
+        options: FixtureCapabilityOptions,
+    ) -> Result<Self> {
+        if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
+            bail!("sandbox-workspace execution fixtures cannot use an external orchestrator");
+        }
+        validate_execution_fixture_env(&options.orchestrator_env)?;
+        let extra_env = options.orchestrator_env.clone();
+        Self::internal(Some(script), extra_env, Some(options), true, true).await
     }
 
     /// Starts a dedicated fixture backed by a configured real LLM provider.
@@ -203,7 +237,7 @@ impl OrchestratorTestFixture {
                 "MOA_RUN_LIVE_EXECUTION_EVALS=1 requires MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
             );
         }
-        Self::internal(None, Vec::new(), None, false).await
+        Self::internal(None, Vec::new(), None, false, false).await
     }
 
     fn external(raw_ingress_url: String) -> Result<Self> {
@@ -236,6 +270,7 @@ impl OrchestratorTestFixture {
             restart_config: None,
             fixture_capability: None,
             otlp_capture: None,
+            sandbox_workspace: None,
         })
     }
 
@@ -244,10 +279,23 @@ impl OrchestratorTestFixture {
         mut extra_env: Vec<(String, String)>,
         capability_options: Option<FixtureCapabilityOptions>,
         use_provider_override: bool,
+        use_sandbox_workspace: bool,
     ) -> Result<Self> {
         if capability_options.is_some() && !use_provider_override {
             bail!("fixture capabilities require the scripted-provider override");
         }
+        let sandbox_workspace = if use_sandbox_workspace {
+            let fixture = SandboxWorkspaceFixture::start().await?;
+            for (key, value) in fixture.orchestrator_env() {
+                if extra_env.iter().any(|(existing, _)| existing == &key) {
+                    bail!("sandbox-workspace fixture owns reserved environment key `{key}`");
+                }
+                extra_env.push((key, value));
+            }
+            Some(fixture)
+        } else {
+            None
+        };
         let repo_root = repo_root();
         let postgres_url_override = match extra_env
             .iter()
@@ -268,6 +316,11 @@ impl OrchestratorTestFixture {
             }
             None => None,
         };
+        if use_sandbox_workspace && postgres_url_override.is_some() {
+            bail!(
+                "sandbox-workspace recovery fixtures require their own disposable Postgres and cannot accept MOA_DATABASE_URL"
+            );
+        }
         let (postgres_url, postgres) = match postgres_url_override {
             Some(postgres_url) => (postgres_url, None),
             None => {
@@ -285,6 +338,18 @@ impl OrchestratorTestFixture {
         moa_migrations::run(&postgres_url)
             .await
             .context("apply migrations to orchestrator fixture Postgres")?;
+        if use_sandbox_workspace {
+            if extra_env
+                .iter()
+                .any(|(key, _)| key == "MOA_DATABASE_MAINTENANCE_URL")
+            {
+                bail!(
+                    "sandbox-workspace fixture owns reserved environment key `MOA_DATABASE_MAINTENANCE_URL`"
+                );
+            }
+            let maintenance_url = provision_workspace_maintenance_login(&postgres_url).await?;
+            extra_env.push(("MOA_DATABASE_MAINTENANCE_URL".to_string(), maintenance_url));
+        }
 
         let (restate, ingress_port, admin_port) = start_restate_container().await?;
         let ingress_url = format!("http://127.0.0.1:{ingress_port}");
@@ -467,7 +532,20 @@ impl OrchestratorTestFixture {
             restart_config,
             fixture_capability,
             otlp_capture: Some(otlp_capture),
+            sandbox_workspace,
         })
+    }
+
+    /// Returns the restart-stable durable workspace resources for this fixture.
+    pub fn sandbox_workspace(&self) -> Result<&SandboxWorkspaceFixture> {
+        self.sandbox_workspace
+            .as_ref()
+            .context("fixture was not started with durable sandbox-workspace resources")
+    }
+
+    /// Deletes only the durable workspace checkpoint namespace owned by this fixture.
+    pub async fn cleanup_sandbox_workspace_namespace(&self) -> Result<()> {
+        self.sandbox_workspace()?.cleanup_namespace().await
     }
 
     /// Returns the fixture-owned OTLP capture surface.
@@ -1036,6 +1114,7 @@ mod tests {
             restart_config: None,
             fixture_capability: None,
             otlp_capture: None,
+            sandbox_workspace: None,
         }
     }
 

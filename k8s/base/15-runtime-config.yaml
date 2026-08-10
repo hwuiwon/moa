@@ -10,6 +10,10 @@ data:
   MOA_SECURITY_PROFILE: local
   MOA_PERMISSIONS_DEFAULT_EFFECT: allow
   MOA_CLOUD_HANDS_DEFAULT_PROVIDER: local
+  # Durable workspaces are dark unless an operator deliberately selects the
+  # maintenance or canary-admission rollout state.
+  MOA_SANDBOX_WORKSPACE_MODE: disabled
+  MOA_SANDBOX_WORKSPACE_RECONCILIATION_CLAIM_TTL_SECONDS: "60"
   # Deployment sandbox policy layer. This local-profile overlay states the
   # deliberately unbounded development policy explicitly; a cloud overlay must
   # replace it, because MOA_SECURITY_PROFILE=cloud refuses to start on the

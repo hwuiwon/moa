@@ -23,7 +23,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 
 ## What MOA Provides
 
-- **Durable work:** sessions, conversational workers, and execution runs survive process restarts because Restate owns orchestration and Postgres owns product data.
+- **Durable work:** sessions, conversational workers, and execution runs survive process restarts because Restate owns orchestration and Postgres owns product data. Sandbox compute remains ephemeral; tenant filesystem work survives only through the independently retained `SandboxWorkspace` and its verified portable checkpoints, as defined in [Sandbox Workspaces](25-sandbox-workspaces.md).
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
 - **Outcome assessment:** MOA records whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
 - **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
@@ -46,6 +46,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 6. **Progressive context.** The pipeline keeps stable prefix content cacheable and loads expensive dynamic context only when it matters.
 7. **Least necessary tool access.** Hands and MCP tools are selected, approved, and isolated based on the task.
 8. **Enterprise governance.** Admin operations, audit trails, and rollback paths are part of the product surface, not post-hoc logs.
+9. **Durability is explicit.** A durable session or Restate journal does not make arbitrary sandbox files durable. Compute, logical workspace metadata, and committed filesystem bytes have distinct owners and lifecycles.
 
 ## Differentiators
 
@@ -64,5 +65,6 @@ MOA's differentiators are architectural, not cosmetic:
 
 - MOA does not require a durable session intent taxonomy for routing or learning. The agent loop and skills decide dynamically from context.
 - MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
+- MOA does not retain sandbox process memory by default or treat a live sandbox, mutable volume, paused instance, or provider snapshot as the committed filesystem revision. The filesystem-only workspace contract requires a verified portable checkpoint.
 - MOA does not bind agent work to a single front door. REST/gateway, API automation, and messaging adapters are peers over the same runtime model.
 - MOA does not optimize for a single-user personal desktop workflow. Local mode is a development and operator path over the same enterprise runtime model.

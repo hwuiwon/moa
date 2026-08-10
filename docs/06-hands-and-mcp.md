@@ -4,13 +4,20 @@ _Hand providers, tool routing, MCP, sandbox lifecycle, and recovery._
 
 ## Contract
 
-Hands are temporary execution environments. They are provisioned on first use
-and destroyed when their owning scope reaches a terminal state. The root
-coordinator runs sandbox-free; each conversational worker or sandbox-using
-execution task owns an isolated hand, released when that scope becomes terminal.
-Any remaining hands are released at session or run teardown. The brain never talks
-to hands directly; it asks the `ToolRouter` to execute a named tool with
-structured input.
+Hands are ephemeral execution environments. `SandboxWorkspace` is the separate,
+durable, tenant-owned filesystem aggregate. Compute can be destroyed while its
+workspace is retained, and a workspace can be purged without treating a running
+hand as its source of truth. The root coordinator runs sandbox-free; each
+conversational worker or sandbox-using execution task may own one typed
+workspace and attach one isolated hand under independent writer and instance
+fences. The brain never talks to either directly; it asks the `ToolRouter` to
+execute a named tool with structured input.
+
+The complete data model, state machine, commit barrier, provider storage
+capabilities, provider-pinning rule, and purge order live in
+[Sandbox Workspaces](25-sandbox-workspaces.md). Restate/session durability does
+not make arbitrary files in a hand durable. Only a verified portable checkpoint
+is the committed filesystem revision.
 
 Credentials must not be visible to generated code. Git, MCP, and external API
 credentials are fetched or injected by trusted host-side code, not placed in
@@ -77,14 +84,23 @@ do neither for a bare host process.
 Refusals are the point of the table. A provider that accepted a dimension and
 dropped it would turn policy into decoration.
 
+Persistent-workspace admission uses an operator-authored provider-account route,
+the workspace's durability class, the hand's effective sandbox profile, and a
+durable capacity reservation. `SandboxStorageProvider` exposes one required
+contract for every admitted route: prepare and attach mutable storage, publish
+and restore portable checkpoints, delete, enumerate, and reconcile. After
+materialization, a workspace remains provider-pinned unless a verified portable
+checkpoint exists and the target satisfies the same format and security
+profile.
+
 ## Provider Map
 
 | Provider | Use | Notes |
 |---|---|---|
-| Local | Zero-setup tests and development | Uses a workspace directory and optional Docker support. |
+| Local | Zero-setup tests and development | Uses isolated per-instance scratch plus durable portable checkpoints; host-local execution is refused for cloud/multi-tenant profiles. |
 | Docker | Local/containerized execution | Hardened by `moa-hands` and `moa-security` policies. |
-| Daytona | Cloud workspace provider | Compiled into the normal build; enabled by runtime cloud-hands config. Supports pause/resume/destroy around idle sessions. |
-| E2B | MicroVM isolation | Compiled into the normal build; enabled by runtime cloud-hands config. Use for untrusted or security-sensitive execution. |
+| Daytona | Cloud workspace provider | Uses one tenant-dedicated volume per provider-account/isolation cell with opaque per-workspace subpaths; portable checkpoints remain recovery authority. |
+| E2B | MicroVM isolation | Uses GET-verified running compute only, exports the reserved mutable root into a portable checkpoint, kills the source, and restores into fresh compute. Pause/resume, provider snapshots, and E2B volumes are absent from the persistence route because the public pause and snapshot contracts preserve process memory. |
 | Operator MCP | Deployment-wide external tools and SaaS integrations | Routed through the process-wide `MCPClient` using operator configuration. |
 | Tenant connector | Reviewed tenant HTTP actions | Routed through exact connection/binding/generation pins and the shared governed tool path. |
 
@@ -147,12 +163,13 @@ Cloud hand routing is runtime-configured, not feature-gated. Set
 `cloud.hands.default_provider` (or `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`) to the
 first cloud provider, then set `cloud.hands.fallback_providers` (or
 `MOA_CLOUD_HANDS_FALLBACK_PROVIDERS`) to an ordered comma-separated fallback
-list such as `e2b`. The router tries the next provider when provisioning or
-health-check fails before a tool runs. After a tool has started, it only moves
-to a fallback provider for tools declared `Idempotent`; non-idempotent tools
-still return an error instead of risking duplicate side effects. Once a fallback
-provider succeeds for a session or worker scope, that scope uses the successful
-provider first until the hand scope is reclaimed.
+list such as `e2b`. Before workspace materialization, the router may try the next
+provider when capability/capacity admission, provisioning, or health-check
+fails before a tool runs. Once filesystem state exists, idempotency alone is
+insufficient: the workspace is provider-pinned. Stateful fallback requires a
+verified portable checkpoint and a target provider that admits its checkpoint
+format and security profile. Otherwise routing fails closed without starting an
+empty replacement. An ambiguous command, quiesce, or commit never falls back.
 
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
 It includes the review id, tenant, user, session or worker origin, tool
@@ -242,17 +259,21 @@ annotation, and routing changes.
 
 ## Lifecycle
 
-Active hands are keyed by owning session/run scope and provider. Conversational
-worker leases use `(session_id, worker_id, provider)`; execution-task leases use
-the stable run/task origin and generation. The authoritative binding lives in
-Postgres; `ToolRouter` process maps are reconnect caches only. A
-first tool call claims a durable lease before provisioning the hand. Later tool
-calls on any Kubernetes replica load the lease, reconnect or resume the provider
-handle when healthy, or mark it stale and reprovision with a new generation. On
-terminal session status, cancellation, failure, or panic cleanup, the
-orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
-leases for every worker scope rather than only handles cached in the current
-process.
+Active hands are keyed by typed worker or execution-task scope and provider.
+The durable `SandboxWorkspace` is keyed independently from its current compute
+lease. The authoritative bindings live in Postgres; `ToolRouter` process maps
+are reconnect caches only. First use resolves or creates the tenant-scoped
+workspace, claims its writer, restores or attaches the committed state, and only
+then provisions compute. Later calls on any Kubernetes replica verify both
+workspace fences and the hand lease before reconnecting or replacing compute.
+
+The architecture and runtime admit no bare-session/coordinator workspace.
+Sandbox dispatch requires a typed worker or execution-task workspace scope and
+rejects its absence before workspace reads or provider I/O. Session-wide
+terminal cleanup is only an aggregate teardown selector over typed compute
+attachments; it is not an ownable hand or workspace scope. Terminal cleanup
+checkpoints according to policy, releases compute, and leaves retained workspace
+state or reconciliation ownership intact.
 
 The provisioning claim atomically records a fresh operation ID, absolute create
 deadline, and later reconciliation time with its lease generation before
@@ -276,11 +297,12 @@ Provisioning uses the same resolved profile that was persisted on the claim.
 When replacing a stale binding, the claimant destroys and clears the old
 durable handle before provisioning a replacement.
 
-### The durable reaper
+### The durable compute reaper
 
 A hard maximum lifetime is only policy if something destroys the sandbox when it
-fires, and the sandboxes that most need destroying belong to sessions that will
-never send another request. `HandLeaseReaper` is that owner. It is started by
+fires, and the sandboxes that most need destroying belong to worker or
+execution-task owners that may never send another request. `HandLeaseReaper` is
+that owner. It is started by
 `runtime::jobs::start_hand_lease_reaper` before the orchestrator accepts
 traffic — startup fails outright if no hand provider is registered — and sweeps
 independently of traffic. It claims bounded batches with `FOR UPDATE ... SKIP
@@ -302,10 +324,18 @@ separated by the explicit confirmation interval. V57 also rejects generation
 rotation unless the operation ID and provisioning deadline rotate with it, so
 an already-running pre-V57 writer fails before creating an uncorrelated hand.
 
-### Isolated Sandbox Ownership
+This reaper owns ephemeral compute only. It may stop or destroy a hand;
+it cannot delete a retained workspace, advance or discard its checkpoint head,
+or release a newer workspace attachment. Workspace reconciliation and retention
+use their own generation-fenced operation ledger and cleanup owner.
 
-Worker compute is keyed by `worker_id`, not by the parent session, so each
-worker owns exactly one sandbox and siblings never share one:
+### Workspace And Compute Ownership
+
+Workspace ownership is typed as `Worker { session_id, worker_id }` or
+`ExecutionTask { run_id, task_id }`. There is no session-only variant. Each
+workspace has at most one writable attachment, enforced by a database
+constraint/compare-and-set over `writer_epoch`; `instance_generation` separately
+fences provider compute. Siblings never share a writable workspace or hand:
 
 - **The coordinator is sandbox-free.** Root-turn preparation in `brain_bridge.rs`
   filters the coordinator's tool schemas through `ToolRouter::tool_requires_sandbox`
@@ -314,25 +344,21 @@ worker owns exactly one sandbox and siblings never share one:
   directly from the trusted manifest by `ToolExecutor`; it does not provision a
   hand. The worker tool subsets keep the hand tools, so all real computation is
   delegated. Zero workers means zero sandboxes.
-- **Each worker owns one hand.** `ToolCallRequest.worker_id` is populated
-  from `GovernedInvocationOrigin::Worker` and threaded through the tool executor
-  into the lease/cache key `(session_id, worker_id, provider)`. The
-  pre-existing coordinator scope is the empty `worker_id`. N parallel
-  workers hold N independent sandboxes.
-- **Per-worker release.** Because each sandbox has exactly one owner, a child
-  can release its own hand without over-releasing siblings. `Worker::cleanup`
-  (the generation-guarded self-cleanup) dispatches
-  `ToolExecutor::release_worker_hands` → `reclaim_hands(session_id,
-  Some(worker_id))`, which reclaims only that scope. The VO holds no
-  `ToolRouter`, so the release is a detached service call. Session teardown
-  still reclaims any remaining coordinator/orphan hands via
-  `reclaim_hands(session_id, None)`.
-- **Sandboxes are refreshable, never the primary state source.** Durable agent
-  state lives in the event log, artifacts, and object store, so a sandbox crash is
-  recovered by marking the durable lease stale, claiming a new fenced
-  `generation`, provisioning a fresh hand, and replaying the hash-validated
-  `trusted_sandbox_manifest` to reinstall the prior files. No agent work product
-  may live only in a sandbox.
+- **Each valid owner has one workspace and one writable hand attachment.** A
+  worker or sandbox-using execution task carries its typed workspace binding
+  through the tool executor. N parallel owners have N independent workspace
+  scopes and compute instances.
+- **Release and retention are independent.** `Worker::cleanup` and execution
+  task cleanup checkpoint according to policy and release only their current
+  compute attachment. They do not delete retained workspace state or drop an
+  ambiguous-operation ledger. Workspace deletion is a separately authorized,
+  generation-fenced lifecycle.
+- **Working sandboxes are replaceable, never the committed source.** A sandbox
+  crash fences its instance, provisions fresh compute, restores the verified
+  current portable checkpoint, then reinstalls the current trusted manifest and
+  runtime controls outside the checkpoint root. Event history and a trusted-file
+  manifest cannot reconstruct arbitrary task-created files; those files survive
+  only when the checkpoint commit barrier published them.
 
 This Worker model remains for conversational delegation in `act`; Worker is not
 an execution-plan node or bulk DAG primitive. A sandbox-using `ExecutionTask`
@@ -356,6 +382,18 @@ Provider implementations must make cleanup best-effort and observable. Failed
 cleanup should warn through `tracing`, not panic or hide the terminal session
 outcome.
 
+Every sandbox tool has an exhaustive `WorkspaceEffect::ReadOnly` or
+`WorkspaceEffect::MayWrite` declaration. Read-only calls do not advance the
+workspace. A `MayWrite` call persists intent, executes under a cancellable
+deadline, quiesces and proves its writer stopped, flushes and verifies provider
+ownership, streams the filesystem-only mutable root into a bounded encrypted
+portable checkpoint, validates its manifest/chunks, compare-and-set advances
+the workspace head, and only then persists a successful `ToolResult`. An
+ambiguous stage leaves the workspace dirty and `reconciling`, returns
+non-success, retains cleanup ownership, and forbids blank fallback. The complete
+state machine and seven-step barrier are canonical in
+[Sandbox Workspaces](25-sandbox-workspaces.md).
+
 ## Recovery
 
 Hand providers classify failures into:
@@ -367,9 +405,10 @@ Hand providers classify failures into:
 | Fatal | Input, policy, or non-recoverable provider error | Return failure to the turn loop |
 
 `health_check(handle)` lets the router replace dead sandboxes before a user
-tool call discovers the failure. When multiple cloud hand routes are configured,
-the router prefers provider fallback before same-provider reprovision for these
-pre-execution failures.
+tool call discovers the failure. Before workspace materialization, multiple
+cloud routes may use typed capability/capacity fallback. After materialization,
+a fresh hand restores the provider-pinned workspace; cross-provider fallback is
+allowed only from a verified portable checkpoint compatible with the target.
 
 Tool calls must also declare their idempotency behavior:
 
@@ -431,6 +470,8 @@ connection lifecycle, credential vault, management API, and rollout contract.
 - Prefer MCP or host-side helpers for external APIs instead of raw shell
   commands with secrets.
 - Use parsed command normalization for shell action-policy patterns.
-- Keep generated-code sandboxes ephemeral by default.
-- Destroy or pause hands when sessions stop so stale credentials and state do
-  not linger.
+- Keep generated-code compute ephemeral; persist only the filesystem-only
+  mutable root through the governed `SandboxWorkspace` commit barrier.
+- Destroy hands when their worker/execution-task scope
+  stops so stale credentials and processes do not linger; retain or delete the
+  workspace only through its independent policy and purge lifecycle.

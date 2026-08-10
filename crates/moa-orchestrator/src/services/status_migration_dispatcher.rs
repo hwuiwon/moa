@@ -30,11 +30,12 @@ impl StatusMigrationDispatcher for StatusMigrationDispatcherImpl {
         request: Json<SessionStatusIdleMigrationRequest>,
     ) -> Result<Json<SessionStatusIdleMigrationResponse>, HandlerError> {
         let session_id = request.0.session_id;
-        let response = ctx
-            .object_client::<SessionStatusMigratorClient>(session_id.to_string())
-            .migrate_status_idle(request)
-            .call()
-            .await?;
+        let response = crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionStatusMigratorClient>(session_id.to_string())
+                .migrate_status_idle(request),
+        )
+        .call()
+        .await?;
         Ok(response)
     }
 }

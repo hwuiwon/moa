@@ -9,22 +9,38 @@ use moa_connectors::executor::{
 };
 use moa_core::traits::{SessionEventLookupStore, SessionStore};
 use moa_core::{
-    error::MoaError, error::ToolFailureClass, events::Event, events::EventType,
-    types::action_policy::ExecutionCompensationOrigin, types::action_policy::ExecutionTaskOrigin,
-    types::completion::ToolInvocation, types::events_stream::ClaimCheck,
-    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::SessionId,
-    types::identifiers::ToolCallId, types::security::ToolCapabilityId, types::session::SessionMeta,
-    types::tools::IdempotencyClass, types::tools::SecuredToolOutput, types::tools::ToolCallRequest,
-    types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
-    types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
+    error::MoaError,
+    error::ToolFailureClass,
+    events::Event,
+    events::EventType,
+    types::action_policy::ExecutionCompensationOrigin,
+    types::action_policy::ExecutionTaskOrigin,
+    types::completion::ToolInvocation,
+    types::events_stream::ClaimCheck,
+    types::events_stream::EventRecord,
+    types::hands::SandboxFile,
+    types::identifiers::{
+        ExecutionRunScopeId, ExecutionTaskScopeId, SessionId, TenantId, ToolCallId,
+    },
+    types::sandbox_workspace::SandboxWorkspaceScope,
+    types::security::ToolCapabilityId,
+    types::session::SessionMeta,
+    types::tools::IdempotencyClass,
+    types::tools::SecuredToolOutput,
+    types::tools::ToolCallRequest,
+    types::tools::ToolDefinition,
+    types::tools::ToolOutput,
+    types::tools::TrustedSandboxFileEntry,
+    types::tools::TrustedSandboxFileManifestPayload,
+    types::tools::TrustedSandboxFileManifestRef,
 };
 use moa_execution::repository::{
     ExecutionEffectAdmissionOutcome, ExecutionEffectOwner, ExecutionRepository, ExecutionScope,
 };
 use moa_execution::wire::ExecutionToolDispatchRejection;
 use moa_hands::{
-    PendingConnectorToolOutput, ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution,
-    ToolRouter,
+    DeferredWorkspaceToolOutput, JournaledWorkspaceCommit, PendingConnectorToolOutput,
+    ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution, ToolRouter,
 };
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -36,6 +52,7 @@ use restate_sdk::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::services::sandbox_workspaces::SandboxWorkspaceManagement;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{blocked_canary_message, blocked_canary_tool_output};
 use crate::workflows::errors::{
@@ -149,6 +166,8 @@ pub enum ExecutionToolCallOutcome {
 /// Request to release one finishing worker's scoped hands during its cleanup.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseWorkerHandsRequest {
+    /// Verified tenant that owns the session and worker lease.
+    pub tenant_id: TenantId,
     /// Owning session under which the worker's hands were provisioned.
     pub session_id: SessionId,
     /// Worker scope whose sandbox should be released.
@@ -158,6 +177,8 @@ pub struct ReleaseWorkerHandsRequest {
 /// Request to release one terminal or cancelled execution task's scoped hands.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseExecutionTaskHandsRequest {
+    /// Verified tenant that owns the execution run and lease.
+    pub tenant_id: TenantId,
     /// Owning parent session.
     pub session_id: SessionId,
     /// Owning execution run.
@@ -170,6 +191,8 @@ pub struct ReleaseExecutionTaskHandsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseExecutionCompensationHandsRequest {
+    /// Verified tenant that owns the execution run and lease.
+    pub tenant_id: TenantId,
     /// Owning parent session.
     pub session_id: SessionId,
     /// Owning execution run.
@@ -181,6 +204,8 @@ pub struct ReleaseExecutionCompensationHandsRequest {
 /// Request to release every hand under a session at terminal teardown.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseSessionHandsRequest {
+    /// Verified tenant that owns the session leases.
+    pub tenant_id: TenantId,
     /// Session whose hands and durable leases should be reclaimed.
     pub session_id: SessionId,
 }
@@ -190,12 +215,13 @@ pub struct ReleaseSessionHandsRequest {
 struct ScopedCatalogAdmission {
     pin: ToolCatalogPin,
     definition: Option<ToolDefinition>,
+    requires_sandbox: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", content = "output", rename_all = "snake_case")]
 enum JournaledToolExecution {
-    Standard(SecuredToolOutput),
+    Standard(DeferredWorkspaceToolOutput),
     InstalledConnector(PendingConnectorToolOutput),
 }
 
@@ -266,6 +292,7 @@ pub struct ToolExecutorImpl {
     connector_completion: ConnectorInvocationCompletionService,
     session_access: SessionAccess,
     execution_repository: ExecutionRepository,
+    workspace_management: SandboxWorkspaceManagement,
 }
 
 impl ToolExecutorImpl {
@@ -278,13 +305,15 @@ impl ToolExecutorImpl {
         sessions: Arc<dyn SessionStore>,
         events: Arc<dyn SessionEventLookupStore>,
         pool: sqlx::PgPool,
+        workspace_management: SandboxWorkspaceManagement,
     ) -> Self {
         Self {
             router,
             connector_catalogs,
             connector_completion,
             session_access: SessionAccess { sessions, events },
-            execution_repository: ExecutionRepository::new(pool),
+            execution_repository: ExecutionRepository::new(pool.clone()),
+            workspace_management,
         }
     }
 
@@ -310,7 +339,12 @@ impl ToolExecutorImpl {
             .await?;
         let pin = catalog.pin()?;
         let definition = catalog.tool_definition(&request.tool_name);
-        Ok(ScopedCatalogAdmission { pin, definition })
+        let requires_sandbox = catalog.tool_requires_sandbox(&request.tool_name);
+        Ok(ScopedCatalogAdmission {
+            pin,
+            definition,
+            requires_sandbox,
+        })
     }
 
     async fn execute_scoped_with_scope(
@@ -318,6 +352,7 @@ impl ToolExecutorImpl {
         session: &SessionMeta,
         request: &ToolCallRequest,
         hand_scope: Option<&str>,
+        workspace_scope: Option<&SandboxWorkspaceScope>,
     ) -> moa_core::error::Result<JournaledToolExecution> {
         let catalog = self
             .scoped_catalog_for_session(&request.caller_identity, session)
@@ -332,9 +367,15 @@ impl ToolExecutorImpl {
                 .await
                 .map(JournaledToolExecution::InstalledConnector);
         }
-        self.execute_buffered_with_scope(catalog.as_ref(), session, request, hand_scope)
-            .await
-            .map(JournaledToolExecution::Standard)
+        self.execute_buffered_with_scope(
+            catalog.as_ref(),
+            session,
+            request,
+            hand_scope,
+            workspace_scope,
+        )
+        .await
+        .map(JournaledToolExecution::Standard)
     }
 
     /// Runs one authorized tool call and returns its classified output.
@@ -350,7 +391,8 @@ impl ToolExecutorImpl {
         session: &SessionMeta,
         request: &ToolCallRequest,
         hand_scope: Option<&str>,
-    ) -> moa_core::error::Result<SecuredToolOutput> {
+        workspace_scope: Option<&SandboxWorkspaceScope>,
+    ) -> moa_core::error::Result<DeferredWorkspaceToolOutput> {
         let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
         execute_buffered_with_trusted_files(
             self.router.as_ref(),
@@ -358,9 +400,31 @@ impl ToolExecutorImpl {
             session,
             request,
             hand_scope,
+            workspace_scope,
             trusted_sandbox_files,
         )
         .await
+    }
+
+    /// Commits one already-journaled mutable sandbox result without rerunning its command.
+    async fn commit_buffered_workspace(
+        &self,
+        session: &SessionMeta,
+        request: &ToolCallRequest,
+        workspace_scope: &SandboxWorkspaceScope,
+    ) -> moa_core::error::Result<()> {
+        self.router
+            .commit_authorized_workspace_after_tool(JournaledWorkspaceCommit {
+                session,
+                workspace_scope,
+                tool_call_id: request.tool_call_id,
+                scope: ToolCallScope::unbounded().with_budget(
+                    moa_core::types::resource::ResourceBudget::until(
+                        chrono::Utc::now() + chrono::Duration::minutes(5),
+                    ),
+                ),
+            })
+            .await
     }
 
     async fn execute_connector_pending(
@@ -378,7 +442,7 @@ impl ToolExecutorImpl {
             .execute_installed_connector_pending(moa_hands::AuthorizedToolCall {
                 session,
                 caller_identity: &request.caller_identity,
-                worker_id: None,
+                workspace_scope: None,
                 invocation: &invocation,
                 tool_call_id: request.tool_call_id,
                 active_canary: request.active_canary.as_deref(),
@@ -431,8 +495,9 @@ async fn execute_buffered_with_trusted_files(
     session: &SessionMeta,
     request: &ToolCallRequest,
     hand_scope: Option<&str>,
+    workspace_scope: Option<&SandboxWorkspaceScope>,
     trusted_sandbox_files: Vec<SandboxFile>,
-) -> moa_core::error::Result<SecuredToolOutput> {
+) -> moa_core::error::Result<DeferredWorkspaceToolOutput> {
     if request.caller_identity.tenant_id != session.tenant_id {
         return Err(MoaError::PermissionDenied(
             "tool caller identity does not match the loaded session tenant".to_string(),
@@ -445,13 +510,16 @@ async fn execute_buffered_with_trusted_files(
         // exactly the same injected instructions as any remote tool result.
         let raw = root_trusted_file_read(&request.input, &trusted_sandbox_files)
             .unwrap_or_else(root_file_read_denied_output);
-        return Ok(classify_tool_output(
-            &raw,
-            OutputClassification {
-                capability: &ToolCapabilityId::builtin(&request.tool_name),
-                active_canary: request.active_canary.as_deref(),
-            },
-        ));
+        return Ok(DeferredWorkspaceToolOutput {
+            output: classify_tool_output(
+                &raw,
+                OutputClassification {
+                    capability: &ToolCapabilityId::builtin(&request.tool_name),
+                    active_canary: request.active_canary.as_deref(),
+                },
+            ),
+            workspace_commit_required: false,
+        });
     }
 
     let invocation = ToolInvocation {
@@ -459,17 +527,16 @@ async fn execute_buffered_with_trusted_files(
         name: request.tool_name.clone(),
         input: request.input.clone(),
     };
-    // Scope the hand (and its trusted-file manifest) to the originating
-    // worker so each worker owns its own sandbox; the root coordinator keeps
-    // `None` for the shared session-level scope.
+    // Trusted runtime files retain the existing ephemeral hand key, while the
+    // durable workspace owner is carried independently as a typed scope.
     router
         .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
         .await;
     router
-        .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
+        .execute_authorized_with_recovery_deferred_workspace_commit(moa_hands::AuthorizedToolCall {
             session,
             caller_identity: &request.caller_identity,
-            worker_id: hand_scope,
+            workspace_scope,
             invocation: &invocation,
             tool_call_id: request.tool_call_id,
             active_canary: request.active_canary.as_deref(),
@@ -592,6 +659,7 @@ impl ToolExecutor for ToolExecutorImpl {
             .await?
             .into_inner();
         let activated_catalog = admission.pin;
+        let requires_sandbox = admission.requires_sandbox;
         annotate_activated_catalog_span(&activated_catalog);
         if let Some(output) = tool_contract_denial(&request, &activated_catalog) {
             append_tool_dispatch_denied_event(&ctx, &request, &output).await?;
@@ -637,6 +705,30 @@ impl ToolExecutor for ToolExecutorImpl {
         let request_for_run = request.clone();
         let session_for_run = session.clone();
         let hand_scope = request.worker_id.clone();
+        let workspace_scope = worker_workspace_scope(&session, hand_scope.as_deref())
+            .map_err(moa_error_to_handler_error)?;
+        let root_trusted_file_read = hand_scope.is_none() && request.tool_name == "file_read";
+        if requires_sandbox && !root_trusted_file_read {
+            let exact_scope = workspace_scope.clone().ok_or_else(|| {
+                TerminalError::new(
+                    "sandbox tools require a worker-owned or execution-task-owned workspace",
+                )
+            })?;
+            let workspace_management = self.workspace_management.clone();
+            let caller_identity = request.caller_identity.clone();
+            ctx.run(|| async move {
+                workspace_management
+                    .resolve_or_create_for_tool(caller_identity, exact_scope)
+                    .await
+                    .map(Json::from)
+            })
+            .name(format!(
+                "sandbox_workspace_resolve:{}",
+                request.tool_call_id
+            ))
+            .await?;
+        }
+        let workspace_scope_for_run = workspace_scope.clone();
         let service = self.clone();
         let journaled = match ctx
             .run(|| async move {
@@ -645,6 +737,7 @@ impl ToolExecutor for ToolExecutorImpl {
                         &session_for_run,
                         &request_for_run,
                         hand_scope.as_deref(),
+                        workspace_scope_for_run.as_ref(),
                     )
                     .await
                     .map(Json::from)
@@ -661,7 +754,32 @@ impl ToolExecutor for ToolExecutorImpl {
             }
         };
         let output = match journaled {
-            JournaledToolExecution::Standard(output) => output,
+            JournaledToolExecution::Standard(pending) => {
+                if pending.workspace_commit_required {
+                    let exact_scope = workspace_scope.clone().ok_or_else(|| {
+                        TerminalError::new(
+                            "mutable sandbox result is missing its typed workspace scope",
+                        )
+                    })?;
+                    let service = self.clone();
+                    let session_for_commit = session.clone();
+                    let request_for_commit = request.clone();
+                    ctx.run(|| async move {
+                        service
+                            .commit_buffered_workspace(
+                                &session_for_commit,
+                                &request_for_commit,
+                                &exact_scope,
+                            )
+                            .await
+                            .map_err(moa_error_to_handler_error)
+                    })
+                    .name(format!("sandbox_workspace_commit:{}", request.tool_call_id))
+                    .retry_policy(RunRetryPolicy::new().max_attempts(1))
+                    .await?;
+                }
+                pending.output
+            }
             JournaledToolExecution::InstalledConnector(pending) => {
                 let (secured, metadata, ticket) = pending.into_parts();
                 finalize_connector_succeeded(
@@ -734,6 +852,7 @@ impl ToolExecutor for ToolExecutorImpl {
             .await?
             .into_inner();
         let activated_catalog = admission.pin;
+        let requires_sandbox = admission.requires_sandbox;
         annotate_activated_catalog_span(&activated_catalog);
         if let Some(output) = tool_contract_denial(&request.call, &activated_catalog) {
             return Ok(Json::from(ExecutionToolCallOutcome::Completed {
@@ -759,6 +878,8 @@ impl ToolExecutor for ToolExecutorImpl {
         };
         let run_name = execution_tool_run_name(&definition, &request.call, origin);
         let hand_scope = execution_hand_scope(origin);
+        let workspace_scope = execution_workspace_scope(origin);
+        let workspace_scope_for_run = workspace_scope.clone();
         let request_for_run = request.call.clone();
         let session_for_run = session.clone();
         let service = self.clone();
@@ -791,6 +912,27 @@ impl ToolExecutor for ToolExecutorImpl {
             }));
         }
 
+        if requires_sandbox {
+            let exact_scope = workspace_scope.clone().ok_or_else(|| {
+                TerminalError::new(
+                    "sandbox tools require a worker-owned or execution-task-owned workspace",
+                )
+            })?;
+            let workspace_management = self.workspace_management.clone();
+            let caller_identity = request.call.caller_identity.clone();
+            ctx.run(|| async move {
+                workspace_management
+                    .resolve_or_create_for_tool(caller_identity, exact_scope)
+                    .await
+                    .map(Json::from)
+            })
+            .name(format!(
+                "execution_sandbox_workspace_resolve:{}",
+                request.call.tool_call_id
+            ))
+            .await?;
+        }
+
         // This journaled admission is the linearization cut point. A terminal fence that wins
         // the same run-row lock returns above without calling the router; an admitted replay must
         // continue into this stable Restate effect operation and be joined by terminal settlement.
@@ -802,6 +944,7 @@ impl ToolExecutor for ToolExecutorImpl {
                             &session_for_run,
                             &request_for_run,
                             Some(hand_scope.as_str()),
+                            workspace_scope_for_run.as_ref(),
                         )
                         .await,
                 )
@@ -821,7 +964,41 @@ impl ToolExecutor for ToolExecutorImpl {
             }
         };
         let output = match journaled {
-            JournaledToolExecution::Standard(output) => output,
+            JournaledToolExecution::Standard(pending) => {
+                if pending.workspace_commit_required {
+                    let exact_scope = workspace_scope.clone().ok_or_else(|| {
+                        TerminalError::new(
+                            "mutable sandbox result is missing its typed workspace scope",
+                        )
+                    })?;
+                    let service = self.clone();
+                    let session_for_commit = session.clone();
+                    let request_for_commit = request.call.clone();
+                    let commit_result = ctx
+                        .run(|| async move {
+                            service
+                                .commit_buffered_workspace(
+                                    &session_for_commit,
+                                    &request_for_commit,
+                                    &exact_scope,
+                                )
+                                .await
+                                .map_err(moa_error_to_handler_error)
+                        })
+                        .name(format!(
+                            "execution_sandbox_workspace_commit:{}",
+                            request.call.tool_call_id
+                        ))
+                        .retry_policy(RunRetryPolicy::new().max_attempts(1))
+                        .await;
+                    if let Err(error) = commit_result {
+                        return Ok(Json::from(ExecutionToolCallOutcome::UnknownOutcome {
+                            message: error.to_string(),
+                        }));
+                    }
+                }
+                pending.output
+            }
             JournaledToolExecution::InstalledConnector(pending) => {
                 let (secured, metadata, ticket) = pending.into_parts();
                 finalize_connector_succeeded(
@@ -903,7 +1080,11 @@ impl ToolExecutor for ToolExecutorImpl {
         let request = request.into_inner();
         let complete = self
             .router
-            .reclaim_hands(&request.session_id, Some(request.worker_id.as_str()))
+            .reclaim_hands(
+                request.tenant_id,
+                &request.session_id,
+                Some(request.worker_id.as_str()),
+            )
             .await;
         if !complete {
             return Err(TerminalError::new("worker hand cleanup incomplete").into());
@@ -928,7 +1109,7 @@ impl ToolExecutor for ToolExecutorImpl {
         });
         if !self
             .router
-            .reclaim_hands(&request.session_id, Some(scope.as_str()))
+            .reclaim_hands(request.tenant_id, &request.session_id, Some(scope.as_str()))
             .await
         {
             return Err(TerminalError::new("execution task hand cleanup incomplete").into());
@@ -953,7 +1134,7 @@ impl ToolExecutor for ToolExecutorImpl {
         });
         if !self
             .router
-            .reclaim_hands(&request.session_id, Some(scope.as_str()))
+            .reclaim_hands(request.tenant_id, &request.session_id, Some(scope.as_str()))
             .await
         {
             return Err(
@@ -975,7 +1156,9 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_session_hands");
         let request = request.into_inner();
-        self.router.reclaim_hands(&request.session_id, None).await;
+        self.router
+            .reclaim_hands(request.tenant_id, &request.session_id, None)
+            .await;
         Ok(())
     }
 }
@@ -1052,6 +1235,34 @@ pub fn execution_hand_scope(origin: ExecutionToolCallOrigin) -> String {
     match origin {
         ExecutionToolCallOrigin::Task(origin) => execution_task_hand_scope(origin),
         ExecutionToolCallOrigin::Compensation(origin) => execution_compensation_hand_scope(origin),
+    }
+}
+
+fn worker_workspace_scope(
+    session: &SessionMeta,
+    worker_id: Option<&str>,
+) -> moa_core::error::Result<Option<SandboxWorkspaceScope>> {
+    match worker_id {
+        None => Ok(None),
+        Some(worker_id) if !worker_id.trim().is_empty() => {
+            Ok(Some(SandboxWorkspaceScope::Worker {
+                session_id: session.id,
+                worker_id: worker_id.to_string(),
+            }))
+        }
+        Some(_) => Err(MoaError::ValidationError(
+            "sandbox worker scope must contain a non-empty worker ID".to_string(),
+        )),
+    }
+}
+
+fn execution_workspace_scope(origin: ExecutionToolCallOrigin) -> Option<SandboxWorkspaceScope> {
+    match origin {
+        ExecutionToolCallOrigin::Task(origin) => Some(SandboxWorkspaceScope::ExecutionTask {
+            run_id: ExecutionRunScopeId(origin.run_uid),
+            task_id: ExecutionTaskScopeId(origin.task_uid),
+        }),
+        ExecutionToolCallOrigin::Compensation(_) => None,
     }
 }
 
@@ -1617,10 +1828,12 @@ mod tests {
         types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
         types::agent::LockedToolRef, types::events_stream::EventRecord, types::hands::HandHandle,
         types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
-        types::hands::SandboxTier, types::identifiers::HandProvisioningOperationId,
+        types::hands::SandboxTier, types::identifiers::ExecutionRunScopeId,
+        types::identifiers::ExecutionTaskScopeId, types::identifiers::HandProvisioningOperationId,
         types::identifiers::SessionId, types::identifiers::TenantId,
-        types::identifiers::ToolCallId, types::security::SensitivityClass,
-        types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
+        types::identifiers::ToolCallId, types::sandbox_workspace::SandboxWorkspaceScope,
+        types::security::SensitivityClass, types::session::SessionMeta,
+        types::tools::IdempotencyClass, types::tools::ToolCallRequest,
         types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
         types::tools::ToolPolicySpec,
     };
@@ -1641,8 +1854,9 @@ mod tests {
         blocked_canary_tool_output, classify_execution_tool_result,
         execute_buffered_with_trusted_files, execution_compensation_hand_scope,
         execution_hand_scope, execution_task_hand_scope, execution_task_tool_run_name,
-        execution_tool_run_name, has_prior_tool_call_event, is_installed_connector_action,
-        root_trusted_file_read, tool_contract_denial,
+        execution_tool_run_name, execution_workspace_scope, has_prior_tool_call_event,
+        is_installed_connector_action, root_trusted_file_read, tool_contract_denial,
+        worker_workspace_scope,
     };
 
     struct ConnectorLookingBuiltIn;
@@ -1720,6 +1934,8 @@ mod tests {
 
         async fn provisioned_hands(
             &self,
+            _provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+            _provider_account_generation: u64,
             operation_id: HandProvisioningOperationId,
         ) -> moa_core::error::Result<Vec<HandHandle>> {
             let hands = self
@@ -2004,6 +2220,48 @@ mod tests {
             execution_task_hand_scope(first),
             execution_task_hand_scope(sibling)
         );
+        assert_eq!(
+            execution_workspace_scope(ExecutionToolCallOrigin::Task(first)),
+            Some(SandboxWorkspaceScope::ExecutionTask {
+                run_id: ExecutionRunScopeId(first.run_uid),
+                task_id: ExecutionTaskScopeId(first.task_uid),
+            })
+        );
+        assert_eq!(
+            execution_workspace_scope(ExecutionToolCallOrigin::Compensation(
+                ExecutionCompensationOrigin {
+                    run_uid: first.run_uid,
+                    compensation_id: Uuid::from_u128(30),
+                    generation: 1,
+                },
+            )),
+            None,
+            "compensation cannot acquire a sandbox workspace"
+        );
+    }
+
+    #[test]
+    fn worker_workspace_scope_requires_the_verified_session_and_nonempty_worker() {
+        // Pins: conversational sandbox ownership comes only from verified session state plus a
+        // nonempty worker ID; root and malformed worker paths cannot synthesize a workspace.
+        let session = SessionMeta {
+            id: SessionId(Uuid::from_u128(40)),
+            ..SessionMeta::default()
+        };
+
+        assert_eq!(
+            worker_workspace_scope(&session, Some("worker-1"))
+                .expect("nonempty worker scope should be accepted"),
+            Some(SandboxWorkspaceScope::Worker {
+                session_id: session.id,
+                worker_id: "worker-1".to_string(),
+            })
+        );
+        assert_eq!(
+            worker_workspace_scope(&session, None).expect("root scope should be represented"),
+            None
+        );
+        assert!(worker_workspace_scope(&session, Some("   ")).is_err());
     }
 
     #[test]
@@ -2335,6 +2593,7 @@ mod tests {
             &session_for_request(&request),
             &request,
             None,
+            None,
             Vec::new(),
         )
         .await
@@ -2421,15 +2680,20 @@ mod tests {
     async fn execute_buffered_installs_loaded_trusted_files() {
         // Pins: durable manifest files loaded by the SessionStore reach the selected hand.
         let (router, provider, files) = install_scenario();
-        let request = trusted_file_request(router.as_ref(), None);
+        let request = trusted_file_request(router.as_ref(), Some("worker-1".to_string()));
+        let session = session_for_request(&request);
+        let workspace_scope = worker_workspace_scope(&session, request.worker_id.as_deref())
+            .expect("fixture worker scope should be valid")
+            .expect("fixture request should have a worker scope");
         let catalog = router.activated_catalog();
 
         let output = execute_buffered_with_trusted_files(
             router.as_ref(),
             catalog.as_ref(),
-            &session_for_request(&request),
+            &session,
             &request,
-            None,
+            request.worker_id.as_deref(),
+            Some(&workspace_scope),
             files.clone(),
         )
         .await
@@ -2446,14 +2710,19 @@ mod tests {
         let (router, provider, files) = install_scenario();
         let request = trusted_file_request(router.as_ref(), Some("worker-7".to_string()));
         let worker_scope = request.worker_id.clone();
+        let session = session_for_request(&request);
+        let workspace_scope = worker_workspace_scope(&session, worker_scope.as_deref())
+            .expect("fixture worker scope should be valid")
+            .expect("fixture request should have a worker scope");
         let catalog = router.activated_catalog();
 
         let output = execute_buffered_with_trusted_files(
             router.as_ref(),
             catalog.as_ref(),
-            &session_for_request(&request),
+            &session,
             &request,
             worker_scope.as_deref(),
+            Some(&workspace_scope),
             files.clone(),
         )
         .await
@@ -2510,6 +2779,7 @@ mod tests {
             &session_for_request(&request),
             &request,
             None,
+            None,
             Vec::new(),
         )
         .await
@@ -2560,6 +2830,7 @@ mod tests {
             &session_for_request(&request),
             &request,
             None,
+            None,
             files,
         )
         .await
@@ -2600,6 +2871,7 @@ mod tests {
             catalog.as_ref(),
             &session_for_request(&request),
             &request,
+            None,
             None,
             vec![SandboxFile {
                 path: ".moa/skills/test/SKILL.md".to_string(),

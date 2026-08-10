@@ -24,6 +24,10 @@ mod execution_service_db;
 mod fga_mock;
 #[path = "orchestrator_db/lineage_postgres_db.rs"]
 mod lineage_postgres_db;
+#[path = "orchestrator_db/sandbox_workspace_authz_db.rs"]
+mod sandbox_workspace_authz_db;
+#[path = "orchestrator_db/sandbox_workspace_readiness_db.rs"]
+mod sandbox_workspace_readiness_db;
 #[path = "orchestrator_db/scim_groups_db.rs"]
 mod scim_groups_db;
 #[path = "orchestrator_db/session_store_db.rs"]

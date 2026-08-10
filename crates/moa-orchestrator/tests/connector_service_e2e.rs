@@ -512,6 +512,14 @@ fn fixture(status: ConnectionStatus, current_generation: u64) -> Fixture {
     fixture_with_definition(status, current_generation, None, false, definition())
 }
 
+fn oauth_fixture(status: ConnectionStatus, current_generation: u64) -> Fixture {
+    let mut definition = definition();
+    definition.auth = vec![RuntimeConnectorAuthRequirement::ManagedOauth {
+        slot: CredentialSlotName::PRIMARY,
+    }];
+    fixture_with_definition(status, current_generation, None, false, definition)
+}
+
 fn fixture_with_definition(
     status: ConnectionStatus,
     current_generation: u64,
@@ -799,7 +807,7 @@ async fn managed_knowledge_parent_generic_operations_stop_after_auth_and_load_of
                 | Operation::Delete => ConnectionStatus::PendingAuth,
             };
             let fixture = if matches!(operation, Operation::AdvanceCredential) {
-                fixture(status, 1)
+                oauth_fixture(status, 1)
             } else {
                 fixture_with_definition(
                     status,
@@ -913,7 +921,7 @@ async fn managed_knowledge_parent_generic_operations_stop_after_auth_and_load_of
 async fn credential_fence_crash_resume_reuses_exact_next_suspended_generation_offline() {
     // Pins: a crash after fencing but before staged activation resumes without
     // attempting a second generation advance or serializing a staging token.
-    let fixture = fixture(ConnectionStatus::Active, 7);
+    let fixture = oauth_fixture(ConnectionStatus::Active, 7);
     let identity = fixture_identity(&fixture);
     let connection_id = fixture_connection_id(&fixture);
     let metadata = ConnectorCredentialWriteMetadata {
@@ -993,7 +1001,7 @@ async fn credential_fence_replay_rejects_next_generation_that_is_active_offline(
 async fn disconnect_fences_before_audit_preserving_connection_revocation_offline() {
     // Pins: no credential revocation begins until the connection and bindings
     // have crossed the durable Disconnecting execution fence.
-    let fixture = fixture(ConnectionStatus::Active, 3);
+    let fixture = oauth_fixture(ConnectionStatus::Active, 3);
     let identity = fixture_identity(&fixture);
     let connection_id = fixture_connection_id(&fixture);
     let response = fixture
@@ -1036,7 +1044,7 @@ async fn delete_fences_pending_and_active_connections_before_revocation_offline(
     // Pins: every delete path durably disables execution before vault teardown,
     // then records the terminal lifecycle only after revocation succeeds.
     for initial_status in [ConnectionStatus::PendingAuth, ConnectionStatus::Active] {
-        let fixture = fixture(initial_status, 3);
+        let fixture = oauth_fixture(initial_status, 3);
         let identity = fixture_identity(&fixture);
         let connection_id = fixture_connection_id(&fixture);
 

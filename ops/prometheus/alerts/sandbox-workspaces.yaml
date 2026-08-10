@@ -1,0 +1,84 @@
+# Durable sandbox workspace lifecycle, capacity, and reconciliation alerts.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: moa-sandbox-workspaces
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: moa-sandbox-workspace-alerts
+    app.kubernetes.io/part-of: moa
+    moa.dev/rule-sync: mimir
+spec:
+  groups:
+    - name: moa-sandbox-workspaces
+      interval: 30s
+      rules:
+        - alert: MOASandboxWorkspaceLifecycleFailures
+          expr: sum(rate(moa_sandbox_workspace_lifecycle_total{result=~"failed|ambiguous"}[5m])) by (provider_kind, operation, result) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Durable sandbox workspace operations are failing
+            description: "{{ $labels.provider_kind }} {{ $labels.operation }} operations have sustained {{ $labels.result }} outcomes at {{ $value }} operations/sec. Ambiguous results must converge through reconciliation before retrying externally."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#sandbox-workspace-operations
+
+        - alert: MOASandboxWorkspaceReaperUnready
+          expr: min(moa_sandbox_workspace_reaper_ready) == 0 or absent(moa_sandbox_workspace_reaper_ready)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: The supervised workspace reaper is unready
+            description: "At least one serving replica reports an unready workspace reaper. Readiness should drain it; verify the job result and do not disable maintenance while durable work remains."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-reaper-failure
+
+        - alert: MOASandboxWorkspaceReaperHeartbeatStale
+          expr: max(moa_sandbox_workspace_reaper_heartbeat_age_seconds) > 120
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: The workspace reaper heartbeat is stale
+            description: "The oldest workspace reaper heartbeat is {{ $value }} seconds old (threshold 120s). Treat the replica as unready and inspect the supervised job before restarting it."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-reaper-failure
+
+        - alert: MOASandboxWorkspaceReaperBacklogAge
+          expr: max(moa_sandbox_workspace_reaper_oldest_work_age_seconds) > 900
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Workspace maintenance backlog is aging
+            description: "The oldest workspace maintenance item is {{ $value }} seconds old (threshold 900s). Check provider availability, checkpoint object deletion, and reconciliation findings."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-maintenance-backlog
+
+        - alert: MOASandboxWorkspaceQuotaNearCapacity
+          expr: max(moa_sandbox_workspace_quota_utilization_ratio) by (dimension) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Sandbox workspace fleet capacity is nearly exhausted
+            description: "Fleet utilization for {{ $labels.dimension }} is {{ $value | humanizePercentage }} (threshold 90%). Inspect provider inventory and durable reservations before increasing limits."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-capacity-pressure
+
+        - alert: MOASandboxWorkspaceCheckpointFailures
+          expr: sum(rate(moa_sandbox_workspace_checkpoint_duration_seconds_count{result!="succeeded"}[10m])) by (provider_kind, operation, result) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Portable checkpoint operations are failing
+            description: "{{ $labels.provider_kind }} checkpoint {{ $labels.operation }} operations report {{ $labels.result }} outcomes at {{ $value }} operations/sec. Verify object-store/KMS health and preserve the last committed revision."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#portable-checkpoint-failures
+
+        - alert: MOASandboxWorkspaceInventoryDrift
+          expr: sum(moa_sandbox_workspace_inventory_drift) by (provider_kind, classification) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Provider inventory differs from durable MOA ownership
+            description: "{{ $value }} unresolved {{ $labels.classification }} findings exist for {{ $labels.provider_kind }}. Findings are quarantined and must never be auto-deleted; prove ownership and absence before resolving them."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#provider-inventory-drift

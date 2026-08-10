@@ -213,6 +213,98 @@ fn every_flat_overlay_field_resolves_to_a_config_path() {
 }
 
 #[test]
+fn sandbox_workspace_overlay_applies_typed_mode_canary_and_quota_routes() {
+    // Pins: rollout configuration has one canonical flat environment surface;
+    // callers cannot smuggle provider/tenant routing through request fields.
+    let account = "5df222fb-c303-5ae4-a494-8ae4de622e2d";
+    let tenant = "ae88b9a9-35e8-5ce4-a4de-8f5172c17115";
+    let canary = format!(
+        r#"{{"provider_account_id":"{account}","provider_account_generation":1,"isolation_cell":"canary-a","tenant_allowlist":["{tenant}"]}}"#
+    );
+    let quotas = format!(
+        r#"[{{"tenant_id":"{tenant}","provider_account_id":"{account}","provider_account_generation":1,"max_workspaces":10,"max_active_hands":2,"max_checkpoints":100,"max_logical_bytes":1073741824}}]"#
+    );
+    let overlay = EnvOverlay::from_iter(env_pairs([
+        ("MOA_SANDBOX_WORKSPACE_MODE", "admit"),
+        ("MOA_SANDBOX_WORKSPACE_CANARY_JSON", canary.as_str()),
+        ("MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON", quotas.as_str()),
+        (
+            "MOA_SANDBOX_WORKSPACE_OPERATION_RETENTION_SECONDS",
+            "604800",
+        ),
+        ("MOA_SANDBOX_WORKSPACE_MAXIMUM_OPERATION_SECONDS", "86400"),
+        (
+            "MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_MAXIMUM_AGE_SECONDS",
+            "120",
+        ),
+        (
+            "MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_TIMEOUT_SECONDS",
+            "15",
+        ),
+    ]))
+    .expect("workspace rollout overlay should parse");
+    let mut config = MoaConfig::default();
+
+    overlay
+        .apply_to(&mut config)
+        .expect("bounded canary rollout should apply");
+
+    assert_eq!(config.sandbox_workspaces.mode, SandboxWorkspaceMode::Admit);
+    assert_eq!(
+        config
+            .sandbox_workspaces
+            .canary
+            .as_ref()
+            .expect("canary is configured")
+            .isolation_cell,
+        "canary-a"
+    );
+    assert_eq!(config.sandbox_workspaces.quota_routes.len(), 1);
+    assert_eq!(
+        config
+            .sandbox_checkpoints
+            .versioning_observation
+            .maximum_age_seconds,
+        120
+    );
+}
+
+#[test]
+fn sandbox_workspace_overlay_rejects_unknown_mode() {
+    // Pins: a rollout-mode typo cannot silently fall back to disabled or admit.
+    assert_config_error_contains(
+        EnvOverlay::from_iter(env_pairs([("MOA_SANDBOX_WORKSPACE_MODE", "enabled")])),
+        "enabled",
+    );
+}
+
+#[test]
+fn sandbox_workspace_overlay_applies_typed_local_provider_account() {
+    // Pins: local deterministic recovery declares the exact same durable
+    // account/generation/cell identity as runtime bootstrap and admission.
+    let account_id = "55555555-5555-5555-5555-555555555555";
+    let overlay = EnvOverlay::from_iter(env_pairs([(
+        "MOA_LOCAL_PROVIDER_ACCOUNT_JSON",
+        &format!(
+            r#"{{"provider_account_id":"{account_id}","generation":2,"isolation_cell":"local-fixture-a"}}"#
+        ),
+    )]))
+    .expect("typed local provider account env should parse");
+    let mut config = MoaConfig::default();
+    overlay
+        .apply_to(&mut config)
+        .expect("typed local provider account env should apply");
+
+    let account = config
+        .local
+        .provider_account
+        .expect("local provider account should be configured");
+    assert_eq!(account.provider_account_id.to_string(), account_id);
+    assert_eq!(account.generation, 2);
+    assert_eq!(account.isolation_cell, "local-fixture-a");
+}
+
+#[test]
 fn from_iter_applies_flat_single_underscore_env() {
     // Pins: flat MOA env names deserialize through envy and update real nested config fields.
     let approval_key_hex = "01".repeat(32);

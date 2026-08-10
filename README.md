@@ -175,8 +175,14 @@ Required cloud process configuration includes:
 MOA_DATABASE_URL=postgres://runtime-role@...
 MOA_RESTATE_INGRESS_URL=http://localhost:10010
 MOA_OPENAI_API_KEY=...
-DAYTONA_API_KEY=... # optional, depending on hand provider
+MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON='[{..."credential":{"path":"/run/secrets/e2b","owner_uid":10001}}]'
 ```
+
+Cloud hand provider keys are mounted files selected by persisted provider
+account and generation. They are deliberately absent from `MoaConfig`, process
+environment variables, public DTOs, events, and sandbox environments. See
+[`docs/23-environment-variables.md`](docs/23-environment-variables.md) for the
+account mapping contract.
 
 ## Architecture
 

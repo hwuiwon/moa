@@ -34,6 +34,7 @@ secretGenerator:
     namespace: moa-system
     literals:
       - bucket=moa-session-attachments
+      - checkpoint-bucket=moa-workspace-checkpoints
       - region=us-east-1
       - access-key-id=moaadmin
       - secret-access-key=moa-local-dev-secret

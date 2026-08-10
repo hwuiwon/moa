@@ -127,6 +127,12 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
         llm_provider: llm.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router),
+        workspace_scope: Some(
+            moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+                session_id: session.id,
+                worker_id: "brain-turn-artifact-worker".to_string(),
+            },
+        ),
     })
     .await
     .unwrap();
@@ -233,6 +239,12 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         llm_provider: llm.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router),
+        workspace_scope: Some(
+            moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+                session_id: session.id,
+                worker_id: "brain-turn-artifact-stderr-worker".to_string(),
+            },
+        ),
     })
     .await
     .unwrap();

@@ -1,11 +1,82 @@
-# The cloud sandbox credential lives only in the production overlay: base and
-# local render the local security profile and must not reference a cloud
-# sandbox Secret at all. The cloud profile refuses to serve without it.
+# Provider credentials are projected into a root-only Secret volume, copied by
+# a one-shot root init container into a per-pod emptyDir with the runtime UID,
+# and mounted read-only into the serving process. Kubernetes Secret updates are
+# atomically projected; a rollout or secret-manager sidecar can atomically
+# replace the runtime file, which MOA resolves on every provider attempt.
+- op: add
+  path: /spec/template/spec/securityContext
+  value:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+- op: add
+  path: /spec/template/spec/serviceAccountName
+  value: moa-sandbox-workspace-object-store
+- op: add
+  path: /spec/template/spec/initContainers/-
+  value:
+    name: prepare-hand-provider-credentials
+    image: moa/orchestrator:latest
+    command: ["/bin/sh", "-ec"]
+    args:
+      - >-
+        install -o 10001 -g 10001 -m 0400
+        /var/run/secrets/moa-hand-provider-source/e2b
+        /var/run/secrets/moa-hand-providers/e2b
+    securityContext:
+      runAsNonRoot: false
+      runAsUser: 0
+      runAsGroup: 0
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: hand-provider-secret-source
+        mountPath: /var/run/secrets/moa-hand-provider-source
+        readOnly: true
+      - name: hand-provider-credentials
+        mountPath: /var/run/secrets/moa-hand-providers
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: hand-provider-credentials
+    mountPath: /var/run/secrets/moa-hand-providers
+    readOnly: true
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_CLOUD_HANDS_E2B_API_KEY
+    name: MOA_AUTHZ_OPENFGA_PRESHARED_KEY
     valueFrom:
       secretKeyRef:
-        name: moa-hand-provider-keys
-        key: e2b
+        name: openfga-secret-render-input
+        key: preshared-key
+- op: replace
+  path: /spec/template/spec/containers/0/env/3/valueFrom/secretKeyRef/optional
+  value: false
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: hand-provider-secret-source
+    secret:
+      secretName: sandbox-provider-secret-render-input
+      defaultMode: 0400
+      items:
+        - key: e2b
+          path: e2b
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: hand-provider-credentials
+    emptyDir:
+      medium: Memory
+- op: add
+  path: /spec/template/spec/containers/0/securityContext
+  value:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]

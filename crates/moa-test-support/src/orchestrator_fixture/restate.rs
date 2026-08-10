@@ -127,12 +127,7 @@ pub(super) async fn wait_for_registered_services(admin_url: &str) -> Result<()> 
                     .json::<DeploymentsResponse>()
                     .await
                     .context("decode Restate deployment list")?;
-                if payload.deployments.iter().any(|deployment| {
-                    deployment
-                        .services
-                        .iter()
-                        .any(|service| service.name == "Session")
-                }) {
+                if payload.deployments.iter().any(deployment_is_routable) {
                     return Ok(());
                 }
             }
@@ -167,6 +162,23 @@ struct RegisteredService {
     name: String,
 }
 
+fn deployment_is_routable(deployment: &Deployment) -> bool {
+    const REQUIRED_SERVICES: [&str; 5] = [
+        "Session",
+        "ActionReviewDispatcher",
+        "Execution",
+        "ExecutionRun",
+        "ExecutionTask",
+    ];
+
+    REQUIRED_SERVICES.iter().all(|required| {
+        deployment
+            .services
+            .iter()
+            .any(|service| service.name == *required)
+    })
+}
+
 pub(super) fn trim_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -184,4 +196,30 @@ pub(super) fn derive_admin_url(ingress_url: &str) -> String {
             Some(url.to_string().trim_end_matches('/').to_string())
         })
         .unwrap_or_else(|| "http://127.0.0.1:10011".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_readiness_requires_every_route_used_during_startup() {
+        // Pins: Session discovery alone cannot release the fixture while the
+        // action-review reaper and execution workflows would still receive 404.
+        let service = |name: &str| RegisteredService {
+            name: name.to_string(),
+        };
+        let mut deployment = Deployment {
+            services: vec![service("Session")],
+        };
+        assert!(!deployment_is_routable(&deployment));
+
+        deployment.services.extend([
+            service("ActionReviewDispatcher"),
+            service("Execution"),
+            service("ExecutionRun"),
+            service("ExecutionTask"),
+        ]);
+        assert!(deployment_is_routable(&deployment));
+    }
 }

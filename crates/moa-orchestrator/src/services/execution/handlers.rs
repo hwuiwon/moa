@@ -484,12 +484,13 @@ impl Execution for ExecutionImpl {
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            send_run_wake(
+            call_run_wake(
                 &ctx,
                 run_uid,
                 wake_epoch,
                 ExecutionRunWakeReason::AmendmentAccepted,
-            );
+            )
+            .await?;
         }
         for task_id in accepted.task_ids_to_release() {
             crate::restate_identity::replay_safe_request(

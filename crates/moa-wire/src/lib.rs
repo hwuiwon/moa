@@ -16,6 +16,7 @@ pub mod knowledge;
 pub mod lineage;
 pub mod memory;
 pub mod privacy;
+pub mod sandbox_workspaces;
 pub mod session_store;
 pub mod skills;
 pub mod tenants;

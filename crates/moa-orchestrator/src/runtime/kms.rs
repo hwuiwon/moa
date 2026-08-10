@@ -66,6 +66,20 @@ impl KmsRuntime {
         self.provider.clone()
     }
 
+    /// Requires restart-durable key material for a persistence owner.
+    ///
+    /// `kms.allow_ephemeral` is a development escape hatch for transient data;
+    /// it never authorizes portable checkpoints whose ciphertext must survive a
+    /// serving-process restart.
+    pub fn require_durable(&self, owner: &str) -> Result<()> {
+        if self.provider.is_durable() {
+            return Ok(());
+        }
+        bail!(
+            "{owner} requires a durable KMS; configure kms.provider=postgres (or another persistent provider)"
+        )
+    }
+
     /// Checks whether the live provider remains compatible with serving state.
     pub async fn check_readiness(&self) -> Result<()> {
         if let Some(provider) = &self.postgres {
@@ -223,11 +237,12 @@ fn kms_durability_guard(is_durable: bool, allow_ephemeral: bool) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
-    use super::{kms_durability_guard, load_root_key_ring};
+    use super::{KmsRuntime, kms_durability_guard, load_root_key_ring};
 
     #[test]
     fn kms_guard_requires_explicit_ephemeral_opt_in_offline() {
@@ -239,6 +254,26 @@ mod tests {
         let error = kms_durability_guard(false, false)
             .expect_err("ephemeral provider without opt-in must fail closed");
         assert!(error.contains("kms.provider=postgres") && error.contains("allow_ephemeral"));
+    }
+
+    #[test]
+    fn durable_checkpoint_owner_rejects_ephemeral_kms_even_with_dev_opt_in_offline() {
+        // Pins: the general local-development KMS escape hatch cannot make a
+        // restart-durable checkpoint claim durability it does not have.
+        let runtime = KmsRuntime {
+            provider: Arc::new(moa_crypto::LocalKmsProvider::new()),
+            postgres: None,
+            required_generation: "local".to_string(),
+        };
+
+        let error = runtime
+            .require_durable("sandbox workspace checkpoints")
+            .expect_err("checkpoint persistence must reject ephemeral KMS");
+
+        assert!(
+            error.to_string().contains("requires a durable KMS")
+                && error.to_string().contains("kms.provider=postgres")
+        );
     }
 
     #[tokio::test]

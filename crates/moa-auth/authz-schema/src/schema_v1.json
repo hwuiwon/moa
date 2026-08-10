@@ -232,6 +232,115 @@
       }
     },
     {
+      "type": "sandbox_workspace",
+      "metadata": {
+        "relations": {
+          "tenant": {
+            "directly_related_user_types": [
+              {
+                "type": "tenant"
+              }
+            ]
+          },
+          "session": {
+            "directly_related_user_types": [
+              {
+                "type": "session"
+              }
+            ]
+          },
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "contact"
+              },
+              {
+                "type": "operator"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "manage": {
+            "directly_related_user_types": [
+              {
+                "type": "operator"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "use": {
+            "directly_related_user_types": [
+              {
+                "type": "contact"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "operator"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "tenant": {
+          "this": {}
+        },
+        "session": {
+          "this": {}
+        },
+        "owner": {
+          "this": {}
+        },
+        "manage": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "tenant"
+                  },
+                  "computedUserset": {
+                    "relation": "admin"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "use": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "manage"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "type": "tenant",
       "metadata": {
         "relations": {

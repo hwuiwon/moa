@@ -193,15 +193,21 @@ impl SessionImpl {
         annotate_restate_handler_span("Session", "destroy");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&self.authz, &ctx, session_id).await?;
+        let state = Tracked::<SessionVoState>::load(&ctx).await?;
         // Reclaim any coordinator/orphan hands still leased under this session before the
         // VO state is cleared. The Session VO holds no `ToolRouter`, so this is dispatched
         // detached (fire-and-forget) to the ToolExecutor service that owns the router. It is
         // non-fatal; without this caller durable leases reclaim only via their 1-hour TTL.
-        crate::restate_identity::replay_safe_request(
-            ctx.service_client::<ToolExecutorClient>()
-                .release_session_hands(Json::from(ReleaseSessionHandsRequest { session_id })),
-        )
-        .send();
+        if let Some(meta) = state.meta.as_ref() {
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<ToolExecutorClient>()
+                    .release_session_hands(Json::from(ReleaseSessionHandsRequest {
+                        tenant_id: meta.tenant_id,
+                        session_id,
+                    })),
+            )
+            .send();
+        }
         ctx.clear_all();
         tracing::info!(key = %ctx.key(), "session VO state cleared");
         Ok(())

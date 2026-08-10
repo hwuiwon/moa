@@ -9,10 +9,12 @@ mod normalization;
 mod output_budget;
 mod policy;
 pub mod profile;
+pub mod provider_credentials;
 pub mod reaper;
 mod recovery;
 mod registration;
-mod telemetry;
+pub mod sandbox_workspace;
+pub mod telemetry;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -25,9 +27,9 @@ use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::MemoryRetrievalExecutor,
-    traits::MemoryToolExecutor, traits::NullLineageHandle, traits::SessionStore,
-    types::action_policy::CallOrigin, types::hands::HandHandle, types::hands::SandboxFile,
-    types::hands::SandboxPolicySnapshot, types::identifiers::SessionId,
+    traits::MemoryToolExecutor, traits::NullLineageHandle, traits::SandboxStorageProvider,
+    traits::SessionStore, types::action_policy::CallOrigin, types::hands::HandHandle,
+    types::hands::SandboxFile, types::hands::SandboxPolicySnapshot, types::identifiers::SessionId,
     types::identifiers::TenantId, types::resource::ResourceBudget,
 };
 use moa_security::{
@@ -39,7 +41,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::local::LocalHandProvider;
 
-pub use dispatch::{AuthorizedToolCall, PendingConnectorToolOutput};
+pub use dispatch::{
+    AuthorizedToolCall, DeferredWorkspaceToolOutput, JournaledWorkspaceCommit,
+    PendingConnectorToolOutput,
+};
 use leases::HandLeaseStore;
 pub use mcp_catalog::{
     CandidateConnector, CatalogDefect, McpCatalogActivation, McpCatalogRefresh, McpConnectorHealth,
@@ -52,11 +57,17 @@ pub use profile::{
     PostgresTenantSandboxPolicyStore, deployment_sandbox_policy, local_development_sandbox_policy,
     route_sandbox_policy,
 };
+pub use provider_credentials::{
+    FileProviderCredentialSource, ProviderCredentialSource, ProviderEndpoint, ProviderHttpAttempt,
+    ProviderSandboxAttempt,
+};
 pub use reaper::{HandLeaseReaper, HandLeaseReaperConfig, PostgresExpiredHandLeaseClaims};
 pub use registration::{
     HandRoute, MCP_TOOL_REFERENCE_PREFIX, ToolExecution, ToolRegistry,
     governed_tool_contract_revision, installed_connector_tool_name, mcp_tool_reference,
 };
+use sandbox_workspace::operations::PostgresWorkspaceOperationRepository;
+use sandbox_workspace::repository::PostgresWorkspaceRepository;
 pub use telemetry::truncate_tool_span_text;
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
@@ -240,6 +251,15 @@ impl ToolCatalogSnapshot {
         self.registry.tool_requires_sandbox(name)
     }
 
+    /// Returns the declared durable-workspace effect for one sandbox tool.
+    #[must_use]
+    pub fn tool_workspace_effect(
+        &self,
+        name: &str,
+    ) -> Option<moa_core::types::sandbox_workspace::WorkspaceEffect> {
+        self.registry.workspace_effect(name)
+    }
+
     /// Returns one tool's canonical governed contract revision.
     #[must_use]
     pub fn contract_revision(&self, name: &str) -> Option<&str> {
@@ -383,10 +403,14 @@ impl McpOwner {
 /// external await.
 struct HandLifecycleOwner {
     providers: HashMap<String, Arc<dyn HandProvider>>,
+    storage_providers: HashMap<String, Arc<dyn SandboxStorageProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
     active_hands: RwLock<HashMap<String, ActiveHand>>,
     preferred_hand_routes: RwLock<HashMap<String, String>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,
+    workspace_repository: Option<Arc<PostgresWorkspaceRepository>>,
+    workspace_operations: Option<Arc<PostgresWorkspaceOperationRepository>>,
+    checkpoint_store: Option<Arc<sandbox_workspace::checkpoint::store::CheckpointObjectStore>>,
     deployment_sandbox_policy: SandboxPolicySnapshot,
     tenant_sandbox_policy: Option<Arc<dyn TenantSandboxPolicyStore>>,
     hand_lease_reaper_installed: bool,
@@ -433,10 +457,14 @@ impl HandLifecycleOwner {
     ) -> Self {
         Self {
             providers,
+            storage_providers: HashMap::new(),
             local_provider: None,
             active_hands: RwLock::new(HashMap::new()),
             preferred_hand_routes: RwLock::new(HashMap::new()),
             hand_leases: None,
+            workspace_repository: None,
+            workspace_operations: None,
+            checkpoint_store: None,
             deployment_sandbox_policy,
             tenant_sandbox_policy: None,
             hand_lease_reaper_installed: false,
@@ -457,6 +485,14 @@ impl HandLifecycleOwner {
             .collect()
     }
 
+    /// Installs the provider-neutral persistent-workspace adapters.
+    fn set_storage_providers(
+        &mut self,
+        storage_providers: HashMap<String, Arc<dyn SandboxStorageProvider>>,
+    ) {
+        self.storage_providers = storage_providers;
+    }
+
     /// Installs the optional local provider used by local file setup paths.
     fn set_local_provider(&mut self, provider: Option<Arc<LocalHandProvider>>) {
         self.local_provider = provider;
@@ -475,6 +511,16 @@ impl HandLifecycleOwner {
     /// Attaches the durable lease owner.
     fn set_hand_lease_store(&mut self, store: Arc<dyn HandLeaseStore>) {
         self.hand_leases = Some(store);
+    }
+
+    /// Attaches the durable workspace repositories used by tool dispatch.
+    fn set_workspace_repositories(
+        &mut self,
+        workspaces: Arc<PostgresWorkspaceRepository>,
+        operations: Arc<PostgresWorkspaceOperationRepository>,
+    ) {
+        self.workspace_repository = Some(workspaces);
+        self.workspace_operations = Some(operations);
     }
 
     /// Records that the deployment starts its durable lease reaper.

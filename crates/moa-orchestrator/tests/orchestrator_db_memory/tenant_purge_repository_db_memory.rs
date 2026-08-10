@@ -30,6 +30,152 @@ type AuthzOutboxIdentityState = (
 type AuthzOutboxDeliveryState = (Uuid, String, String, i64, i32, Option<String>, bool, bool);
 
 #[tokio::test]
+async fn tenant_purge_requires_exact_sandbox_workspace_external_absence_proof_before_relational_deletion_db_memory()
+ {
+    // Pins: the production repository must leave tenant rows intact when the
+    // sandbox external-absence proof is missing or names another operation,
+    // then commit and replay only after the maintenance role durably confirms
+    // the exact active tenant-purge fence.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap sandbox-proof tenant-purge db");
+    let pool = test_db.store().pool();
+    let tenant_id = Uuid::new_v4();
+    let neighbour_tenant_id = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    seed_tenant(pool, tenant_id).await;
+    seed_tenant(pool, neighbour_tenant_id).await;
+
+    let missing_proof = purge_relational(pool, tenant_id, &operation_id)
+        .await
+        .expect_err("relational deletion must wait for durable sandbox absence");
+    assert!(
+        missing_proof
+            .contains("tenant relational purge requires durable sandbox external absence proof"),
+        "unexpected missing-proof error: {missing_proof}"
+    );
+    let fenced_without_proof: (i64, i64, String, String, bool, bool, String) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM tenants WHERE id = $1),
+            (SELECT count(*) FROM tenants WHERE id = $2),
+            purge.status,
+            purge.current_stage,
+            purge.sandbox_external_absence_confirmed_at IS NULL,
+            purge.sandbox_external_absence_digest IS NULL,
+            fence.status
+        FROM moa.tenant_purge_operations AS purge
+        JOIN moa.destruction_operation_fence AS fence
+          ON fence.tenant_id = purge.tenant_id
+         AND fence.operation_id = purge.operation_id
+        WHERE purge.tenant_id = $1
+          AND purge.operation_id = $3
+          AND fence.subject_id IS NULL
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(neighbour_tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("load fenced tenant purge before sandbox proof");
+    assert_eq!(
+        fenced_without_proof,
+        (
+            1,
+            1,
+            "in_progress".to_string(),
+            "authz".to_string(),
+            true,
+            true,
+            "in_progress".to_string(),
+        ),
+        "the proof gate must fence access without deleting target or neighbour rows"
+    );
+
+    let mut wrong_operation = pool
+        .begin()
+        .await
+        .expect("begin wrong-operation sandbox proof");
+    sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
+        .execute(&mut *wrong_operation)
+        .await
+        .expect("assume workspace maintenance role for proof rejection");
+    let wrong_operation_error =
+        sqlx::query("SELECT moa.confirm_sandbox_external_absence_for_tenant_purge($1, $2, $3)")
+            .bind(tenant_id)
+            .bind(format!("{operation_id}-wrong"))
+            .bind("sha256:wrong-operation-proof")
+            .execute(&mut *wrong_operation)
+            .await
+            .expect_err("another operation must not confirm this purge's sandbox absence");
+    assert_eq!(
+        wrong_operation_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("55000"),
+        "wrong-operation proof must fail the exact durable fence: {wrong_operation_error}"
+    );
+    wrong_operation
+        .rollback()
+        .await
+        .expect("roll back rejected sandbox proof transaction");
+
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
+    let expected_digest = sandbox_external_absence_digest(tenant_id, &operation_id);
+    let durable_proof: (bool, String) = sqlx::query_as(
+        "SELECT sandbox_external_absence_confirmed_at IS NOT NULL, \
+                sandbox_external_absence_digest \
+         FROM moa.tenant_purge_operations \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("load exact durable sandbox absence proof");
+    assert_eq!(durable_proof, (true, expected_digest));
+
+    let first = purge_relational(pool, tenant_id, &operation_id)
+        .await
+        .expect("exact durable sandbox proof should release relational deletion");
+    let replay = purge_relational(pool, tenant_id, &operation_id)
+        .await
+        .expect("committed sandbox-proof purge should replay idempotently");
+    assert_eq!(first, RelationalPurgeOutcome::Committed);
+    assert_eq!(replay, RelationalPurgeOutcome::AlreadyCommitted);
+    let committed: (i64, i64, String, String, String) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM tenants WHERE id = $1),
+            (SELECT count(*) FROM tenants WHERE id = $2),
+            status,
+            current_stage,
+            sandbox_external_absence_digest
+        FROM moa.tenant_purge_operations
+        WHERE tenant_id = $1 AND operation_id = $3
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(neighbour_tenant_id)
+    .bind(&operation_id)
+    .fetch_one(pool)
+    .await
+    .expect("load committed sandbox-proof purge");
+    assert_eq!(
+        committed,
+        (
+            0,
+            1,
+            "relationally_committed".to_string(),
+            "complete".to_string(),
+            sandbox_external_absence_digest(tenant_id, &operation_id),
+        )
+    );
+}
+
+#[tokio::test]
 async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves_exact_residue_db_memory()
  {
     // Pins: the production repository removes the new credential, OAuth,
@@ -95,6 +241,7 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
     )
     .await
     .expect("start tenant-wide destruction fence");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
 
     // The purge runs through a BOUNDED pool so the maintenance-hatch assertion
     // below can inspect every connection the purge could have used. That is the
@@ -364,6 +511,408 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
 }
 
 #[tokio::test]
+async fn tenant_purge_drains_normalized_learning_sources_before_owners_db_memory() {
+    // Pins: the production purge may drain normalized sources in their existing
+    // early catalog transactions only with a row-exact owner capability. Ordinary
+    // DELETE, a forged exact-operation GUC, and UPDATE remain constrained; cyclic
+    // candidate provenance still drains before its owners, the neighbour survives,
+    // and the committed operation replays without repeating relational work.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap normalized-learning purge db");
+    let pool = test_db.store().pool();
+    let tenant_id = Uuid::new_v4();
+    let neighbour_tenant_id = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{tenant_id}");
+    let partition_id = tenant_id.to_string();
+    let neighbour_partition_id = neighbour_tenant_id.to_string();
+    let first_candidate_id = Uuid::new_v4();
+    let second_candidate_id = Uuid::new_v4();
+    let first_candidate_source_id = Uuid::new_v4();
+    let second_candidate_source_id = Uuid::new_v4();
+    let learning_id = Uuid::new_v4();
+    let learning_source_id = Uuid::new_v4();
+    let neighbour_candidate_id = Uuid::new_v4();
+    let neighbour_candidate_source_id = Uuid::new_v4();
+    let neighbour_learning_id = Uuid::new_v4();
+    let neighbour_learning_source_id = Uuid::new_v4();
+
+    seed_tenant(pool, tenant_id).await;
+    seed_tenant(pool, neighbour_tenant_id).await;
+    let mut seed = pool.begin().await.expect("begin normalized-learning seed");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_candidates (
+            id, tenant_id, storage_partition_id, candidate_type, proposal_kind,
+            status, payload, risk_class
+        ) VALUES
+            ($1, $3, $4, 'skill', 'skill_draft', 'proposed', '{}'::JSONB, 'low'),
+            ($2, $3, $4, 'skill', 'skill_draft', 'proposed', '{}'::JSONB, 'low')
+        "#,
+    )
+    .bind(first_candidate_id)
+    .bind(second_candidate_id)
+    .bind(tenant_id.to_string())
+    .bind(&partition_id)
+    .execute(&mut *seed)
+    .await
+    .expect("seed learning candidate owner");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_candidate_source (
+            id, candidate_id, tenant_id, storage_partition_id, source_kind,
+            promotion_candidate_id
+        ) VALUES
+            ($1, $3, $5, $6, 'promotion_candidate', $4),
+            ($2, $4, $5, $6, 'promotion_candidate', $3)
+        "#,
+    )
+    .bind(first_candidate_source_id)
+    .bind(second_candidate_source_id)
+    .bind(first_candidate_id)
+    .bind(second_candidate_id)
+    .bind(tenant_id.to_string())
+    .bind(&partition_id)
+    .execute(&mut *seed)
+    .await
+    .expect("seed normalized candidate source");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_log (
+            id, tenant_id, storage_partition_id, learning_type, target_id, payload
+        ) VALUES ($1, $2, $3, 'skill', $4, '{}'::JSONB)
+        "#,
+    )
+    .bind(learning_id)
+    .bind(tenant_id.to_string())
+    .bind(&partition_id)
+    .bind(first_candidate_id.to_string())
+    .execute(&mut *seed)
+    .await
+    .expect("seed learning-log owner");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_log_source (
+            id, learning_id, tenant_id, storage_partition_id, source_kind, candidate_id
+        ) VALUES ($1, $2, $3, $4, 'candidate', $5)
+        "#,
+    )
+    .bind(learning_source_id)
+    .bind(learning_id)
+    .bind(tenant_id.to_string())
+    .bind(&partition_id)
+    .bind(first_candidate_id)
+    .execute(&mut *seed)
+    .await
+    .expect("seed normalized learning-log source");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_candidates (
+            id, tenant_id, storage_partition_id, candidate_type, proposal_kind,
+            status, payload, risk_class
+        ) VALUES ($1, $2, $3, 'skill', 'skill_draft', 'proposed', '{}'::JSONB, 'low')
+        "#,
+    )
+    .bind(neighbour_candidate_id)
+    .bind(neighbour_tenant_id.to_string())
+    .bind(&neighbour_partition_id)
+    .execute(&mut *seed)
+    .await
+    .expect("seed neighbour learning candidate");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_candidate_source (
+            id, candidate_id, tenant_id, storage_partition_id, source_kind,
+            promotion_candidate_id
+        ) VALUES ($1, $2, $3, $4, 'promotion_candidate', $2)
+        "#,
+    )
+    .bind(neighbour_candidate_source_id)
+    .bind(neighbour_candidate_id)
+    .bind(neighbour_tenant_id.to_string())
+    .bind(&neighbour_partition_id)
+    .execute(&mut *seed)
+    .await
+    .expect("seed neighbour normalized candidate source");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_log (
+            id, tenant_id, storage_partition_id, learning_type, target_id, payload
+        ) VALUES ($1, $2, $3, 'skill', $4, '{}'::JSONB)
+        "#,
+    )
+    .bind(neighbour_learning_id)
+    .bind(neighbour_tenant_id.to_string())
+    .bind(&neighbour_partition_id)
+    .bind(neighbour_candidate_id.to_string())
+    .execute(&mut *seed)
+    .await
+    .expect("seed neighbour learning-log owner");
+    sqlx::query(
+        r#"
+        INSERT INTO learning_log_source (
+            id, learning_id, tenant_id, storage_partition_id, source_kind, candidate_id
+        ) VALUES ($1, $2, $3, $4, 'candidate', $5)
+        "#,
+    )
+    .bind(neighbour_learning_source_id)
+    .bind(neighbour_learning_id)
+    .bind(neighbour_tenant_id.to_string())
+    .bind(&neighbour_partition_id)
+    .bind(neighbour_candidate_id)
+    .execute(&mut *seed)
+    .await
+    .expect("seed neighbour normalized learning-log source");
+    seed.commit()
+        .await
+        .expect("commit complete normalized-learning owners and sources");
+
+    let mut ordinary = pool
+        .begin()
+        .await
+        .expect("begin ordinary normalized-source delete");
+    sqlx::query("DELETE FROM learning_log_source WHERE id = $1")
+        .bind(learning_source_id)
+        .execute(&mut *ordinary)
+        .await
+        .expect("queue ordinary final-source delete until deferred constraint check");
+    let ordinary_error = ordinary
+        .commit()
+        .await
+        .expect_err("ordinary owner delete must not remove a final normalized source");
+    assert_eq!(
+        ordinary_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514"),
+        "ordinary final-source delete must fail completeness: {ordinary_error}"
+    );
+
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(&operation_id)
+        .execute(pool)
+        .await
+        .expect("start normalized-learning tenant purge");
+
+    let mut forged = pool
+        .begin()
+        .await
+        .expect("begin forged normalized-source delete");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(&mut *forged)
+        .await
+        .expect("assume ordinary application role");
+    sqlx::query("SELECT set_config('moa.storage_partition_id', $1, true)")
+        .bind(&partition_id)
+        .execute(&mut *forged)
+        .await
+        .expect("scope ordinary role to the target partition");
+    sqlx::query("SELECT set_config('moa.tenant_purge_operation_id', $1, true)")
+        .bind(&operation_id)
+        .execute(&mut *forged)
+        .await
+        .expect("forge exact transaction-local purge operation id");
+    let forged_delete = sqlx::query("DELETE FROM learning_log_source WHERE id = $1")
+        .bind(learning_source_id)
+        .execute(&mut *forged)
+        .await
+        .expect("queue forged final-source delete until deferred constraint check");
+    assert_eq!(
+        forged_delete.rows_affected(),
+        1,
+        "ordinary application role must exercise the visible final source"
+    );
+    let forged_error = forged
+        .commit()
+        .await
+        .expect_err("a caller-set GUC must not bypass normalized-source completeness");
+    assert_eq!(
+        forged_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514"),
+        "forged final-source delete must fail the completeness constraint: {forged_error}"
+    );
+
+    let mut forged_update = pool
+        .begin()
+        .await
+        .expect("begin forged normalized-source update");
+    sqlx::query("SELECT set_config('moa.tenant_purge_operation_id', $1, true)")
+        .bind(&operation_id)
+        .execute(&mut *forged_update)
+        .await
+        .expect("set exact purge operation id for source update");
+    sqlx::query("UPDATE learning_candidate_source SET candidate_id = $1 WHERE id = $2")
+        .bind(second_candidate_id)
+        .bind(first_candidate_source_id)
+        .execute(&mut *forged_update)
+        .await
+        .expect("queue owner-moving source update until deferred constraint check");
+    let update_error = forged_update
+        .commit()
+        .await
+        .expect_err("exact purge context must not bypass source UPDATE completeness");
+    assert_eq!(
+        update_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514"),
+        "source UPDATE during active purge must fail completeness: {update_error}"
+    );
+
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'public.learning_log_source' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .execute(pool)
+    .await
+    .expect("focus exact savepoint probe on learning-log sources");
+    let mut savepoint_probe = pool
+        .begin()
+        .await
+        .expect("begin source-claim savepoint probe");
+    sqlx::query("SAVEPOINT source_claim_probe")
+        .execute(&mut *savepoint_probe)
+        .await
+        .expect("create source-claim savepoint");
+    let probed_batch: (String, String, i64) = sqlx::query_as(
+        "SELECT batch_state, stage, affected \
+         FROM moa.run_tenant_purge_batch($1, $2)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(&mut *savepoint_probe)
+    .await
+    .expect("run exact learning-source batch inside savepoint");
+    assert_eq!(
+        probed_batch,
+        (
+            "in_progress".to_string(),
+            "public.learning_log_source".to_string(),
+            1,
+        )
+    );
+    let live_claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.tenant_purge_learning_source_delete_claims \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .fetch_one(&mut *savepoint_probe)
+    .await
+    .expect("count exact uncommitted source-delete claim");
+    assert_eq!(live_claims, 1);
+    sqlx::query("ROLLBACK TO SAVEPOINT source_claim_probe")
+        .execute(&mut *savepoint_probe)
+        .await
+        .expect("roll back exact source-delete claim and row delete");
+    let rolled_back: (i64, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM moa.tenant_purge_learning_source_delete_claims \
+              WHERE tenant_id = $1 AND operation_id = $2), \
+             (SELECT count(*) FROM learning_log_source WHERE id = $3)",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .bind(learning_source_id)
+    .fetch_one(&mut *savepoint_probe)
+    .await
+    .expect("load source and claim state after savepoint rollback");
+    assert_eq!(
+        rolled_back,
+        (0, 1),
+        "savepoint rollback must restore the source and remove its exact claim"
+    );
+    savepoint_probe
+        .commit()
+        .await
+        .expect("commit empty savepoint probe transaction");
+    sqlx::query(
+        "UPDATE moa.tenant_purge_operations \
+         SET current_stage = 'authz' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&operation_id)
+    .execute(pool)
+    .await
+    .expect("restore production purge start stage after savepoint probe");
+
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
+
+    let first = purge_relational(pool, tenant_id, &operation_id)
+        .await
+        .expect("normalized learning rows should purge without deferred-trigger failure");
+    let replay = purge_relational(pool, tenant_id, &operation_id)
+        .await
+        .expect("committed normalized-learning purge should replay");
+    assert_eq!(first, RelationalPurgeOutcome::Committed);
+    assert_eq!(replay, RelationalPurgeOutcome::AlreadyCommitted);
+
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM learning_candidate_source
+             WHERE id IN ($1, $2)),
+            (SELECT count(*) FROM learning_candidates
+             WHERE id IN ($3, $4)),
+            (SELECT count(*) FROM learning_log_source WHERE id = $5),
+            (SELECT count(*) FROM learning_log WHERE id = $6)
+        "#,
+    )
+    .bind(first_candidate_source_id)
+    .bind(second_candidate_source_id)
+    .bind(first_candidate_id)
+    .bind(second_candidate_id)
+    .bind(learning_source_id)
+    .bind(learning_id)
+    .fetch_one(pool)
+    .await
+    .expect("count normalized learning residue");
+    assert_eq!(counts, (0, 0, 0, 0));
+
+    let neighbour_counts: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM learning_candidate_source WHERE id = $1),
+            (SELECT count(*) FROM learning_candidates WHERE id = $2),
+            (SELECT count(*) FROM learning_log_source WHERE id = $3),
+            (SELECT count(*) FROM learning_log WHERE id = $4)
+        "#,
+    )
+    .bind(neighbour_candidate_source_id)
+    .bind(neighbour_candidate_id)
+    .bind(neighbour_learning_source_id)
+    .bind(neighbour_learning_id)
+    .fetch_one(pool)
+    .await
+    .expect("count neighbour normalized learning state");
+    assert_eq!(
+        neighbour_counts,
+        (1, 1, 1, 1),
+        "source-claim identity must not authorize another tenant's rows"
+    );
+
+    let capability_residue: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM moa.tenant_purge_learning_source_delete_claims")
+            .fetch_one(pool)
+            .await
+            .expect("count transaction-scoped source-delete capabilities");
+    assert_eq!(
+        capability_residue, 0,
+        "source-delete capabilities must be consumed in the authorizing statement"
+    );
+}
+
+#[tokio::test]
 async fn tenant_purge_locked_delete_rollback_retries_same_stage_db_memory() {
     // Pins: a row already locked by an uncommitted DELETE must make the purge
     // batch fail quickly and atomically. It must not skip the row, advance the
@@ -392,6 +941,7 @@ async fn tenant_purge_locked_delete_rollback_retries_same_stage_db_memory() {
         .execute(pool)
         .await
         .expect("start the bounded tenant purge");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
 
     // All stages before users are empty in this focused fixture. Advance the
     // durable cursor directly so the first production batch reaches the locked
@@ -556,6 +1106,7 @@ async fn tenant_purge_unknown_stage_and_invalid_state_pair_fail_closed_db_memory
         .execute(pool)
         .await
         .expect("start unknown-stage purge fixture");
+    confirm_sandbox_external_absence(pool, unknown_tenant, &unknown_operation).await;
     sqlx::query(
         "UPDATE moa.tenant_purge_operations \
          SET current_stage = 'moa.unknown_stage' \
@@ -621,6 +1172,7 @@ async fn tenant_purge_unknown_stage_and_invalid_state_pair_fail_closed_db_memory
         .execute(pool)
         .await
         .expect("start invalid-pair purge fixture");
+    confirm_sandbox_external_absence(pool, invalid_tenant, &invalid_operation).await;
     sqlx::query(
         "UPDATE moa.tenant_purge_operations \
          SET current_stage = 'complete' \
@@ -697,6 +1249,7 @@ async fn tenant_purge_catalog_preserves_global_simulator_authority_db_memory() {
     )
     .await
     .expect("start global-authority catalog fence");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
 
     assert_eq!(
         purge_relational(pool, tenant_id, &operation_id)
@@ -753,6 +1306,7 @@ async fn tenant_purge_catalog_drift_fails_closed_with_resumable_progress_db_memo
     )
     .await
     .expect("start catalog-check destruction fence");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
 
     let error = purge_relational(pool, tenant_id, &operation_id)
         .await
@@ -826,6 +1380,7 @@ async fn tenant_purge_preserves_active_and_receipted_deletes_and_reactivates_dea
     )
     .await
     .expect("start exact-residue destruction fence");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
 
     assert_eq!(
         purge_relational(pool, tenant_id, &operation_id)
@@ -908,6 +1463,7 @@ async fn tenant_purge_removes_an_expired_vector_claim_as_bounded_residue_db_memo
     )
     .await
     .expect("start vector-claim destruction fence");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
 
     assert_eq!(
         purge_relational(pool, tenant_id, &operation_id)
@@ -1362,6 +1918,7 @@ async fn tenant_purge_release_stage_resumes_after_process_loss_at_1001_boundary_
         .execute(pool)
         .await
         .expect("start release-policy boundary purge");
+    confirm_sandbox_external_absence(pool, tenant_id, &operation_id).await;
     sqlx::query(
         "UPDATE moa.tenant_purge_operations \
          SET current_stage = 'moa.artifact_release_policy' \
@@ -2044,6 +2601,38 @@ async fn seed_tenant(pool: &PgPool, tenant_id: Uuid) {
         .execute(pool)
         .await
         .expect("seed tenant");
+}
+
+async fn confirm_sandbox_external_absence(pool: &PgPool, tenant_id: Uuid, operation_id: &str) {
+    sqlx::query("SELECT moa.start_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(operation_id)
+        .execute(pool)
+        .await
+        .expect("start exact tenant purge before confirming sandbox absence");
+    let mut transaction = pool
+        .begin()
+        .await
+        .expect("begin sandbox absence confirmation");
+    sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
+        .execute(&mut *transaction)
+        .await
+        .expect("assume the maintenance-only sandbox purge role");
+    sqlx::query("SELECT moa.confirm_sandbox_external_absence_for_tenant_purge($1, $2, $3)")
+        .bind(tenant_id)
+        .bind(operation_id)
+        .bind(sandbox_external_absence_digest(tenant_id, operation_id))
+        .execute(&mut *transaction)
+        .await
+        .expect("persist exact sandbox external absence proof");
+    transaction
+        .commit()
+        .await
+        .expect("commit sandbox external absence proof");
+}
+
+fn sandbox_external_absence_digest(tenant_id: Uuid, operation_id: &str) -> String {
+    format!("sha256:test-sandbox-absence:{tenant_id}:{operation_id}")
 }
 
 async fn seed_purge_families(

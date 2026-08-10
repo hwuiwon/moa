@@ -1,6 +1,7 @@
 //! Semantic validation for artifact documents.
 
 mod connectors;
+mod json;
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,6 +31,11 @@ use crate::simulation::{
     SimulationPersonaDefinition, SimulationProfileDefinition, SimulationScenarioDefinition,
 };
 use crate::skill::SkillDefinition;
+
+use self::json::{
+    decode_json_pointer_segments, is_json_pointer, pointer_segments_are_strict_prefix,
+    validate_json_pointer, validate_json_schema,
+};
 
 /// A single semantic validation error.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1749,12 +1755,6 @@ fn is_capability_version(value: &str) -> bool {
             .is_some_and(|byte| byte.is_ascii_alphanumeric())
 }
 
-fn validate_json_schema(path: &str, schema: &Value, report: &mut ValidationReport) {
-    if !schema.is_object() {
-        report.push_error(path, "JSON schema must be an object");
-    }
-}
-
 fn validate_schema_version(path: &str, schema_version: u32, report: &mut ValidationReport) {
     if schema_version != 1 {
         report.push_error(path, "schema_version must equal 1");
@@ -1765,67 +1765,6 @@ fn validate_positive_u32(path: &str, value: u32, label: &str, report: &mut Valid
     if value == 0 {
         report.push_error(path, format!("{label} must be at least one"));
     }
-}
-
-fn validate_json_pointer(path: &str, pointer: &str, report: &mut ValidationReport) {
-    if !is_json_pointer(pointer) {
-        report.push_error(path, "value must be an RFC 6901 JSON Pointer");
-    }
-}
-
-fn is_json_pointer(pointer: &str) -> bool {
-    if pointer.is_empty() {
-        return true;
-    }
-    if !pointer.starts_with('/') {
-        return false;
-    }
-    let bytes = pointer.as_bytes();
-    let mut index = 0_usize;
-    while index < bytes.len() {
-        if bytes[index] == b'~' {
-            let Some(next) = bytes.get(index + 1) else {
-                return false;
-            };
-            if !matches!(next, b'0' | b'1') {
-                return false;
-            }
-            index += 2;
-        } else {
-            index += 1;
-        }
-    }
-    true
-}
-
-fn decode_json_pointer_segments(pointer: &str) -> Option<Vec<String>> {
-    if pointer.is_empty() {
-        return Some(Vec::new());
-    }
-    let encoded_segments = pointer.strip_prefix('/')?;
-    encoded_segments
-        .split('/')
-        .map(|encoded| {
-            let mut decoded = String::with_capacity(encoded.len());
-            let mut characters = encoded.chars();
-            while let Some(character) = characters.next() {
-                if character != '~' {
-                    decoded.push(character);
-                    continue;
-                }
-                match characters.next() {
-                    Some('0') => decoded.push('~'),
-                    Some('1') => decoded.push('/'),
-                    Some(_) | None => return None,
-                }
-            }
-            Some(decoded)
-        })
-        .collect()
-}
-
-fn pointer_segments_are_strict_prefix(left: &[String], right: &[String]) -> bool {
-    left.len() < right.len() && right.starts_with(left)
 }
 
 /// Validates that skill action ids in `definition.spec.actions[*]` are present

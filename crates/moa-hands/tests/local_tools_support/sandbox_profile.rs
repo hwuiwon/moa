@@ -56,11 +56,29 @@ fn hand_spec_with_profile(
 ) -> moa_core::types::hands::HandSpec {
     moa_core::types::hands::HandSpec {
         provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
+        workspace: workspace_binding(),
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: tier,
         image: None,
         env: std::collections::HashMap::new(),
-        workspace_mount: None,
+        filesystem: moa_core::types::sandbox_workspace::SandboxFilesystemLayout::standard(),
         effective_profile: effective_profile_from(profile, capability_revision),
+    }
+}
+
+fn workspace_binding() -> moa_core::types::sandbox_workspace::WorkspaceBinding {
+    moa_core::types::sandbox_workspace::WorkspaceBinding {
+        tenant_id: moa_core::types::identifiers::TenantId::new(),
+        scope: moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+            session_id: moa_core::types::identifiers::SessionId::new(),
+            worker_id: "local-tools-worker".to_string(),
+        },
+        workspace_id: moa_core::types::identifiers::SandboxWorkspaceId::new(),
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId::new(),
+        provider_account_generation: 1,
+        durability_class: moa_core::types::sandbox_workspace::DurabilityClass::PortableFilesystem,
+        writer_epoch: 1,
+        instance_generation: 1,
+        current_revision: None,
     }
 }

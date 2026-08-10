@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use moa_config::MoaConfig;
-use moa_config::SessionAttachmentBackend;
+use moa_config::ObjectStoreBackend;
 use moa_core::{
     error::MoaError, error::Result, types::identifiers::SessionAttachmentId,
     types::identifiers::SessionId, types::identifiers::TenantId,
@@ -32,29 +32,31 @@ pub(crate) struct AttachmentObjectStore {
 impl AttachmentObjectStore {
     /// Builds an attachment object store from typed MOA config.
     pub(crate) fn from_config(config: &MoaConfig) -> Result<Self> {
+        config.object_store.validate()?;
         config.session.attachments.validate()?;
         let attachments = &config.session.attachments;
-        let store: Arc<dyn ObjectStore> = match attachments.backend {
-            SessionAttachmentBackend::S3 => {
+        let object_store = &config.object_store;
+        let store: Arc<dyn ObjectStore> = match object_store.backend {
+            ObjectStoreBackend::S3 => {
                 let mut builder = AmazonS3Builder::from_env()
-                    .with_bucket_name(attachments.bucket.clone())
-                    .with_allow_http(attachments.allow_http)
-                    .with_virtual_hosted_style_request(attachments.virtual_hosted_style)
+                    .with_bucket_name(attachments.storage.bucket.clone())
+                    .with_allow_http(object_store.allow_http)
+                    .with_virtual_hosted_style_request(object_store.virtual_hosted_style)
                     // Attachment slots are written create-only, which S3 expresses as an
                     // `If-None-Match: *` precondition. Without this the store rejects every
                     // conditional put as unsupported and no upload can be stored at all.
                     .with_conditional_put(S3ConditionalPut::ETagMatch);
 
-                if let Some(region) = non_empty(&attachments.region) {
+                if let Some(region) = non_empty(&object_store.region) {
                     builder = builder.with_region(region);
                 }
-                if let Some(endpoint) = non_empty(&attachments.endpoint) {
+                if let Some(endpoint) = non_empty(&object_store.endpoint) {
                     builder = builder.with_endpoint(endpoint);
                 }
-                if let Some(access_key_id) = non_empty(&attachments.access_key_id) {
+                if let Some(access_key_id) = non_empty(&object_store.access_key_id) {
                     builder = builder.with_access_key_id(access_key_id);
                 }
-                if let Some(secret_access_key) = non_empty(&attachments.secret_access_key) {
+                if let Some(secret_access_key) = non_empty(&object_store.secret_access_key) {
                     builder = builder.with_secret_access_key(secret_access_key);
                 }
 
@@ -64,17 +66,17 @@ impl AttachmentObjectStore {
                     ))
                 })?)
             }
-            SessionAttachmentBackend::Gcs => {
+            ObjectStoreBackend::Gcs => {
                 let mut builder = GoogleCloudStorageBuilder::from_env()
-                    .with_bucket_name(attachments.bucket.clone());
+                    .with_bucket_name(attachments.storage.bucket.clone());
 
-                if let Some(path) = non_empty(&attachments.gcp_service_account_path) {
+                if let Some(path) = non_empty(&object_store.gcp_service_account_path) {
                     builder = builder.with_service_account_path(path);
                 }
-                if let Some(key) = non_empty(&attachments.gcp_service_account_key) {
+                if let Some(key) = non_empty(&object_store.gcp_service_account_key) {
                     builder = builder.with_service_account_key(key);
                 }
-                if let Some(path) = non_empty(&attachments.gcp_application_credentials_path) {
+                if let Some(path) = non_empty(&object_store.gcp_application_credentials_path) {
                     builder = builder.with_application_credentials(path);
                 }
 
@@ -88,7 +90,7 @@ impl AttachmentObjectStore {
 
         Ok(Self {
             store,
-            prefix: normalize_prefix(&attachments.prefix),
+            prefix: normalize_prefix(&attachments.storage.prefix),
         })
     }
 

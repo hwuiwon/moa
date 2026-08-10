@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - ../../base
   - ../../observability
+  - sandbox-workspace-object-store-service-account.yaml
 
 images:
   - name: moa/orchestrator

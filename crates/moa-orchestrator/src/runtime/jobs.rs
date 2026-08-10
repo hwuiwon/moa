@@ -10,6 +10,7 @@ use moa_hands::{HandLeaseReaper, HandLeaseReaperConfig, PostgresExpiredHandLease
 use reqwest::Client;
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::services::authz_challenges_reaper::{AuthzChallengeReaper, AuthzChallengeReaperHandle};
 
@@ -88,6 +89,110 @@ pub fn start_hand_lease_reaper(
     .spawn();
     tracing::info!(providers = %provider_names, "durable hand lease reaper started");
     Ok(handle)
+}
+
+/// Starts the supervised durable workspace maintenance owner.
+///
+/// The first complete reconciliation/retention/inventory pass must finish
+/// before the handle reports ready. Any pass error terminates the task; `main`
+/// treats that join as process-fatal instead of serving without a cleanup owner.
+pub fn start_workspace_reaper(
+    coordinator: Arc<
+        moa_hands::core::sandbox_workspace::maintenance::WorkspaceMaintenanceCoordinator,
+    >,
+    config: &MoaConfig,
+) -> Result<moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperHandle> {
+    let maximum_age = Duration::from_secs(
+        config
+            .sandbox_workspaces
+            .reaper_heartbeat_maximum_age_seconds,
+    );
+    let interval = Duration::from_secs((maximum_age.as_secs() / 3).clamp(1, 10));
+    let batch_size = i64::from(config.sandbox_checkpoints.retention.gc_batch_size);
+    let reaper = coordinator
+        .workspace_reaper(8)
+        .context("build durable workspace reaper")?;
+    let handle = moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperHandle::spawn(
+        coordinator,
+        reaper,
+        interval,
+        batch_size,
+        maximum_age,
+    )
+    .context("start durable workspace reaper")?;
+    tracing::info!(
+        interval_seconds = interval.as_secs(),
+        heartbeat_maximum_age_seconds = maximum_age.as_secs(),
+        batch_size,
+        "durable workspace reaper started"
+    );
+    Ok(handle)
+}
+
+/// Supervised refresh owner for authenticated checkpoint-bucket versioning state.
+pub struct CheckpointBucketVersioningRefreshHandle {
+    observer:
+        moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
+    shutdown: CancellationToken,
+    task: JoinHandle<Result<()>>,
+}
+
+impl CheckpointBucketVersioningRefreshHandle {
+    /// Waits for the refresh task to exit so the process supervisor can fail closed.
+    pub async fn task_result(&mut self) -> Result<()> {
+        let result = (&mut self.task)
+            .await
+            .context("join checkpoint bucket versioning refresh task");
+        self.observer.invalidate();
+        result?
+    }
+
+    /// Invalidates readiness and stops the refresh task during graceful shutdown.
+    pub async fn shutdown(self) -> Result<()> {
+        self.observer.invalidate();
+        self.shutdown.cancel();
+        self.task
+            .await
+            .context("join checkpoint bucket versioning refresh task")?
+    }
+}
+
+/// Starts periodic authenticated checkpoint-bucket versioning observation.
+///
+/// Runtime dependency construction has already completed the first observation.
+/// Each refresh is scheduled strictly before that observation can become stale.
+/// Any ambiguous, versioned, timed-out, or unauthenticated observation exits the
+/// task; `main` treats that unexpected exit as process-fatal.
+pub fn start_checkpoint_bucket_versioning_refresh(
+    observer: moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
+) -> CheckpointBucketVersioningRefreshHandle {
+    let interval = observer.recommended_refresh_interval();
+    let shutdown = CancellationToken::new();
+    let task_observer = observer.clone();
+    let task_shutdown = shutdown.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = task_shutdown.cancelled() => return Ok(()),
+                () = tokio::time::sleep(interval) => {
+                    if let Err(error) = task_observer.observe_unversioned().await {
+                        task_observer.invalidate();
+                        return Err(anyhow::Error::new(error)
+                            .context("refresh authenticated checkpoint bucket versioning state"));
+                    }
+                }
+            }
+        }
+    });
+    tracing::info!(
+        interval_seconds = interval.as_secs_f64(),
+        "checkpoint bucket versioning refresh started"
+    );
+    CheckpointBucketVersioningRefreshHandle {
+        observer,
+        shutdown,
+        task,
+    }
 }
 
 /// Starts periodic MCP connector catalog refresh, when any connector is configured.
@@ -375,8 +480,11 @@ fn default_cron_jobs() -> Vec<DefaultCronJob> {
 mod tests {
     use super::*;
     use axum::{Router, extract::Path, extract::State, http::StatusCode, routing::post};
+    use moa_config::{ObjectStoreConfig, ObjectStoreCredentialMode};
+    use moa_hands::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Shared state for the mock Restate CronJob configure endpoint.
     struct MockCronState {
@@ -440,6 +548,80 @@ mod tests {
             .get(key)
             .copied()
             .unwrap_or(0)
+    }
+
+    async fn spawn_s3_versioning_sequence(bodies: [&'static str; 2]) -> (String, JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind S3 versioning fixture");
+        let address = listener.local_addr().expect("S3 fixture address");
+        let task = tokio::spawn(async move {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().await.expect("accept S3 request");
+                let mut request = vec![0_u8; 8 * 1024];
+                let _ = stream.read(&mut request).await.expect("read S3 request");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write S3 response");
+            }
+        });
+        (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn versioning_refresh_invalidates_readiness_and_exits_on_provider_drift() {
+        // Pins: a provider that enables versioning after startup closes the
+        // exact gate used by checkpoint deletion and terminates the supervised
+        // refresh owner instead of leaving readiness on until observation age-out.
+        let (endpoint, server) = spawn_s3_versioning_sequence([
+            "<VersioningConfiguration/>",
+            "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+        ])
+        .await;
+        let mut config = MoaConfig {
+            object_store: ObjectStoreConfig {
+                credential_mode: ObjectStoreCredentialMode::Static,
+                endpoint: Some(endpoint),
+                access_key_id: Some("fixture-access".to_string()),
+                secret_access_key: Some("fixture-secret".to_string()),
+                allow_http: true,
+                ..ObjectStoreConfig::default()
+            },
+            ..MoaConfig::default()
+        };
+        config
+            .sandbox_checkpoints
+            .versioning_observation
+            .maximum_age_seconds = 1;
+        config
+            .sandbox_checkpoints
+            .versioning_observation
+            .timeout_seconds = 1;
+        let (_store, observer) = CheckpointObjectStore::from_config_with_versioning_observer(
+            &config,
+            Arc::new(moa_crypto::LocalKmsProvider::new()),
+        )
+        .expect("build checkpoint observer fixture");
+        observer
+            .observe_unversioned()
+            .await
+            .expect("initial unversioned observation should open readiness");
+        assert!(observer.is_ready());
+
+        let mut handle = start_checkpoint_bucket_versioning_refresh(observer.clone());
+        let error = tokio::time::timeout(Duration::from_secs(2), handle.task_result())
+            .await
+            .expect("refresh owner should exit after versioning drift")
+            .expect_err("versioning drift must terminate refresh supervision");
+
+        assert!(error.to_string().contains("refresh authenticated"));
+        assert!(!observer.is_ready());
+        server.await.expect("join S3 versioning fixture");
     }
 
     #[tokio::test]

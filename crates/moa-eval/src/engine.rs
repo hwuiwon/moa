@@ -723,6 +723,7 @@ async fn run_environment(
                 llm_provider: environment.llm_provider.clone(),
                 pipeline: &environment.pipeline,
                 tool_router: Some(environment.tool_router.clone()),
+                workspace_scope: None,
             },
             runtime_tx: &runtime_tx,
             event_tx: None,

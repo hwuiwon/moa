@@ -22,6 +22,7 @@ truth.
 | `docs/09-skills-and-learning.md` | Agent Skills format and distillation |
 | `docs/10-technology-stack.md` | Crates, build targets, deployment |
 | `docs/24-connectors-and-connections.md` | Connector definitions, connections, actions, sources, credentials, and rollout |
+| `docs/25-sandbox-workspaces.md` | Durable sandbox workspace ownership, lifecycle, checkpoints, and provider storage |
 
 ## Workspace Crates
 
@@ -33,7 +34,7 @@ crate, translate it to `crates/<name>/...`.
 | Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline and execution planning, `moa-execution` execution-plan compiler/interpreter/repository, `moa-db` shared storage helpers, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-runtime-store` runtime cache, `moa-edge` public HTTP edge, `moa-migrations` Postgres migrations |
 | Memory and learning | `moa-memory-*` graph/ingest/lifecycle/PII/types/vector, `moa-knowledge` tenant knowledge base, `moa-skills` registry/distillation/improvement |
 | Agents, artifacts, experiments | `moa-agents` agent resolution/policy, `moa-contacts` contact identity, `moa-artifacts` artifact definitions and optional skill execution-plan templates, `moa-experiments` experiment runs and score storage |
-| Connectors, tools, and providers | `moa-connectors` connection lifecycle/action/source bindings and ledgers, `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding/rerank providers, `moa-messaging` Slack and notification adapters, `moa-security` destination/vault policy and MCP proxy |
+| Connectors, tools, and providers | `moa-connectors` connection lifecycle/action/source bindings and ledgers, `moa-hands` tool routing plus sandbox-workspace lifecycle/repositories/provider adapters, `moa-providers` LLM/embedding/rerank providers, `moa-messaging` Slack and notification adapters, `moa-security` destination/vault policy and MCP proxy |
 | Auth, audit, lineage, observability | `moa-auth/*` identity/authz/OpenFGA bootstrap, `moa-ocsf` security events, `moa-lineage/*` citation, sinks, OTel, audit chain, `moa-observability` metrics/tracing |
 | Eval and dev tooling | `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`, `xtask`, `workspace-hack` |
 

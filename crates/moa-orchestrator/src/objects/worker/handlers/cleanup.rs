@@ -144,7 +144,8 @@ pub(super) async fn release_and_clear_worker(
     // or siblings' sandboxes. The Worker VO holds no `ToolRouter`, so the release is
     // delegated to the ToolExecutor service that owns the router and awaited before
     // clearing state.
-    if let Some(request) = release_worker_hands_request(state.parent_session, &worker_id)
+    if let Some(request) =
+        release_worker_hands_request(state.tenant_id, state.parent_session, &worker_id)
         && let Err(error) = crate::restate_identity::replay_safe_request(
             ctx.service_client::<ToolExecutorClient>()
                 .release_worker_hands(Json::from(request)),
@@ -226,13 +227,17 @@ pub(super) async fn reschedule_cleanup(
 /// with `session_id = parent_session`) plus the child's own id, matching the
 /// `(session_id, worker_id)` hand scope used by `ToolRouter::reclaim_hands`.
 pub(super) fn release_worker_hands_request(
+    tenant_id: Option<TenantId>,
     parent_session: Option<SessionId>,
     worker_id: &str,
 ) -> Option<ReleaseWorkerHandsRequest> {
-    parent_session.map(|session_id| ReleaseWorkerHandsRequest {
-        session_id,
-        worker_id: worker_id.to_string(),
-    })
+    tenant_id
+        .zip(parent_session)
+        .map(|(tenant_id, session_id)| ReleaseWorkerHandsRequest {
+            tenant_id,
+            session_id,
+            worker_id: worker_id.to_string(),
+        })
 }
 
 /// Issues one generation-guarded delayed self-call to `Worker/cleanup`.

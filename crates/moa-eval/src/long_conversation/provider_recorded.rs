@@ -131,10 +131,17 @@ impl RecordedScriptedProvider {
         request: &R,
     ) -> Result<CompletionStream, RecordedProviderError> {
         let events = self.complete_events(request)?;
-        Ok(CompletionStream::from_response(response_from_events(
-            events,
-            self.capabilities().model_id,
-        )))
+        let mut response = response_from_events(events, self.capabilities().model_id);
+        if response.usage.total_input_tokens() == 0 {
+            let total_input_tokens = estimate_input_tokens(request);
+            response.usage.input_tokens_uncached = total_input_tokens.div_ceil(5).max(1);
+            response.usage.input_tokens_cache_read =
+                total_input_tokens.saturating_sub(response.usage.input_tokens_uncached);
+        }
+        if response.usage.output_tokens == 0 && !response.content.is_empty() {
+            response.usage.output_tokens = estimate_output_tokens(&response);
+        }
+        Ok(CompletionStream::from_response(response))
     }
 }
 
@@ -224,7 +231,12 @@ fn recorded_compaction_events() -> Vec<ProviderEvent> {
             text: RECORDED_COMPACTION_SUMMARY.to_string(),
         },
         ProviderEvent::Usage {
-            usage: TokenUsage::default(),
+            usage: TokenUsage {
+                input_tokens_uncached: 256,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 12,
+            },
         },
         ProviderEvent::Terminal {
             stop_reason: StopReason::EndTurn,
@@ -267,4 +279,31 @@ fn response_from_events(events: Vec<ProviderEvent>, model: ModelId) -> Completio
         duration_ms: 0,
         thought_signature: None,
     }
+}
+
+fn estimate_input_tokens<R: CompletionRequestView + ?Sized>(request: &R) -> usize {
+    let message_chars = request
+        .messages()
+        .iter()
+        .map(|message| message.content.chars().count())
+        .sum::<usize>();
+    let tool_chars = request
+        .tools()
+        .iter()
+        .map(|tool| tool.to_string().chars().count())
+        .sum::<usize>();
+    estimate_tokens(message_chars.saturating_add(tool_chars))
+}
+
+fn estimate_output_tokens(response: &CompletionResponse) -> usize {
+    let content_chars = response
+        .content
+        .iter()
+        .map(|content| serde_json::to_string(content).map_or(0, |value| value.chars().count()))
+        .sum::<usize>();
+    estimate_tokens(response.text.chars().count().max(content_chars))
+}
+
+fn estimate_tokens(characters: usize) -> usize {
+    characters.saturating_add(3).saturating_div(4).max(1)
 }

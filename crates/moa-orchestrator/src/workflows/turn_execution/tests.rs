@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use moa_brain::pipeline::skills::SELECTED_SKILL_NAMES_METADATA_KEY;
 use serde_json::json;
 
 use super::*;

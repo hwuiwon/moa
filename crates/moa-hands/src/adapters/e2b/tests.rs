@@ -1,9 +1,18 @@
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use moa_config::CloudHandProviderKind;
 use moa_core::{
     error::MoaError,
-    traits::HandProvider,
+    traits::{HandProvider, SandboxStorageProvider},
     types::{
-        hands::{EgressPolicy, SandboxTier},
-        identifiers::HandProvisioningOperationId,
+        hands::{EgressPolicy, HandHandle, SandboxTier},
+        identifiers::{HandProvisioningOperationId, WorkspaceCheckpointId, WorkspaceOperationId},
+        sandbox_workspace::{
+            WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceRevisionRef,
+            WorkspaceStorageOperation,
+        },
     },
 };
 use serde_json::Value;
@@ -137,32 +146,80 @@ fn fixture_response(
     }
     if first_line.starts_with("POST /sandboxes/sbx-123/connect ") {
         return (
-            "200 OK",
+            "409 Conflict",
             "application/json",
-            r#"{"sandboxID":"sbx-123","domain":"example.e2b.test","envdAccessToken":"envd-token","envdVersion":"0.1.1"}"#.to_string(),
+            r#"{"error":"connect must not run after GET returns a running access token"}"#
+                .to_string(),
         );
     }
     if first_line.starts_with("POST /process.Process/Start ") {
+        let stdout = if request.contains("echo hello") {
+            "aGVsbG8K"
+        } else {
+            ""
+        };
         return (
             "200 OK",
             "application/connect+json",
             encode_test_envelopes(&[
                 serde_json::json!({"event":{"start":{"pid": 12}}}),
-                serde_json::json!({"event":{"data":{"stdout":"aGVsbG8K"}}}),
+                serde_json::json!({"event":{"data":{"stdout":stdout}}}),
                 serde_json::json!({"event":{"end":{"exited":true,"status":"exit status 0"}}}),
                 serde_json::json!({}),
             ]),
         );
+    }
+    if first_line.starts_with("POST /filesystem.Filesystem/ListDir ") {
+        return (
+            "200 OK",
+            "application/json",
+            serde_json::json!({
+                "entries": [{
+                    "name": "marker.txt",
+                    "path": "/workspace/marker.txt",
+                    "type": "file",
+                    "size": "6",
+                    "mode": 0o644,
+                    "permissions": "-rw-r--r--",
+                    "owner": "user",
+                    "group": "user",
+                    "modifiedTime": "2026-08-09T00:00:00Z"
+                }]
+            })
+            .to_string(),
+        );
+    }
+    if first_line.starts_with("GET /files?") {
+        return ("200 OK", "application/octet-stream", "marker".to_string());
     }
     if first_line.starts_with("DELETE /sandboxes/sbx-123 ") {
         *created_metadata = None;
         return ("204 No Content", "application/json", String::new());
     }
     if first_line.starts_with("GET /sandboxes/sbx-123 ") {
-        return (
-            "200 OK",
-            "application/json",
-            r#"{"state":"paused"}"#.to_string(),
+        return created_metadata.as_ref().map_or_else(
+            || {
+                (
+                    "404 Not Found",
+                    "application/json",
+                    r#"{"error":"not found"}"#.to_string(),
+                )
+            },
+            |metadata| {
+                (
+                    "200 OK",
+                    "application/json",
+                    serde_json::json!({
+                        "sandboxID": "sbx-123",
+                        "state": "running",
+                        "metadata": metadata,
+                        "domain": "example.e2b.test",
+                        "envdAccessToken": "envd-token",
+                        "envdVersion": "0.5.0",
+                    })
+                    .to_string(),
+                )
+            },
         );
     }
     (
@@ -195,17 +252,39 @@ fn assert_discovery_request(target: &str, operation_id: HandProvisioningOperatio
 async fn provisions_executes_and_destroys_sandbox() {
     let mut fixture = FixtureE2BApi::start().await;
 
-    let provider =
-        E2BHandProvider::with_api_url("test-key", fixture.api_url(), "example.e2b.test", "base")
-            .unwrap()
-            .with_sandbox_base_url(fixture.api_url());
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            fixture.api_url(),
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ))
+    .with_sandbox_base_url(fixture.api_url());
     let spec = crate::core::profile::test_support::hand_spec(
         SandboxTier::MicroVM,
         e2b_test_profile(EgressPolicy::DenyAll),
     );
     let operation_id = spec.provisioning_operation_id;
-    let handle = provider.provision(spec).await.unwrap();
+    let account_id = spec.workspace.provider_account_id;
+    let account_generation = spec.workspace.provider_account_generation;
+    let binding = spec.workspace.clone();
+    let handle = provider.provision(spec.clone()).await.unwrap();
     assert_discovery_request(&fixture.next_discovery_request().await, operation_id);
+
+    let mut stale_spec = spec;
+    stale_spec.workspace.instance_generation += 1;
+    let error = provider
+        .provision(stale_spec)
+        .await
+        .expect_err("changed workspace binding must invalidate E2B reuse");
+    assert_discovery_request(&fixture.next_discovery_request().await, operation_id);
+    assert!(
+        matches!(error, MoaError::ProviderError(ref message) if message.contains("different creation spec")),
+        "unexpected reuse error: {error}"
+    );
     let create_request = fixture.next_create_request().await;
     // Pins: the effective profile's egress mode — not a provider-level flag —
     // decides E2B's internet switch, and the profile's maximum lifetime becomes
@@ -221,7 +300,42 @@ async fn provisions_executes_and_destroys_sandbox() {
         Some(300)
     );
     assert_eq!(
-        provider.provisioned_hands(operation_id).await.unwrap(),
+        create_request.get("autoPause").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        create_request
+            .pointer("/autoResume/enabled")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert!(
+        create_request.get("volumeMounts").is_none(),
+        "E2B volumes must not enter production sandbox creation"
+    );
+    let metadata = create_request
+        .get("metadata")
+        .and_then(Value::as_object)
+        .expect("create request should carry workspace metadata");
+    assert_eq!(
+        metadata
+            .get(super::E2B_TENANT_METADATA_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        Some(binding.tenant_id.to_string())
+    );
+    assert_eq!(
+        metadata
+            .get(super::E2B_WORKSPACE_METADATA_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        Some(binding.workspace_id.to_string())
+    );
+    assert_eq!(
+        provider
+            .provisioned_hands(account_id, account_generation, operation_id)
+            .await
+            .unwrap(),
         vec![handle.clone()]
     );
     assert_discovery_request(&fixture.next_discovery_request().await, operation_id);
@@ -247,16 +361,113 @@ async fn provisions_executes_and_destroys_sandbox() {
         .unwrap();
     assert_eq!(output.process_stdout(), Some("hello\n"));
 
+    // Pins: E2B pause/resume retain process memory and cannot be selected by
+    // the durable filesystem path.
+    assert!(matches!(
+        provider.pause(&handle).await,
+        Err(MoaError::Unsupported(_))
+    ));
+    assert!(matches!(
+        provider.resume(&handle).await,
+        Err(MoaError::Unsupported(_))
+    ));
     provider.destroy(&handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn e2b_rejects_a_mutable_root_outside_the_checkpoint_boundary() {
+    // Pins: E2B export/import is hard-bound to the standard mutable root, so a
+    // caller cannot redirect checkpoint traversal into trusted or runtime state.
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            "http://127.0.0.1:1",
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ));
+    let mut spec = crate::core::profile::test_support::hand_spec(
+        SandboxTier::MicroVM,
+        e2b_test_profile(EgressPolicy::DenyAll),
+    );
+    spec.filesystem.mutable_root = PathBuf::from("/opt/moa/trusted");
+
+    let error = provider
+        .provision(spec)
+        .await
+        .expect_err("nonstandard E2B mutable root must fail before provider I/O");
+
+    assert!(
+        matches!(error, MoaError::ValidationError(message) if message.contains("mutable root"))
+    );
+}
+
+#[tokio::test]
+async fn e2b_commit_rejects_a_parent_at_generation_zero_before_provider_io() {
+    // Pins: invalid initial-parent state is rejected before credentials,
+    // sandbox inspection, checkpoint export, or object publication.
+    let mut binding = crate::core::profile::test_support::hand_spec(
+        SandboxTier::MicroVM,
+        e2b_test_profile(EgressPolicy::DenyAll),
+    )
+    .workspace;
+    binding.current_revision = None;
+    let parent = WorkspaceRevisionRef {
+        checkpoint_id: WorkspaceCheckpointId::new(),
+        generation: 1,
+        format_version: 1,
+    };
+    let hand = HandHandle::e2b(
+        "unreached",
+        binding.provider_account_id,
+        binding.provider_account_generation,
+    );
+    let operation = WorkspaceStorageOperation {
+        operation_id: WorkspaceOperationId::new(),
+        kind: WorkspaceOperationKind::Commit,
+        binding,
+        deadline: chrono::Utc::now() + chrono::Duration::minutes(1),
+        request_hash: "a".repeat(64),
+    };
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            "http://127.0.0.1:1",
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ));
+
+    let error = provider
+        .publish_workspace_checkpoint(WorkspaceCheckpointPublishRequest {
+            operation,
+            hand,
+            parent_revision: Some(parent),
+        })
+        .await
+        .expect_err("generation-zero parent must fail before provider I/O");
+
+    assert!(matches!(error, MoaError::ValidationError(message) if message.contains("parent")));
 }
 
 #[tokio::test]
 async fn e2b_egress_posture_comes_from_the_effective_profile() {
     let mut fixture = FixtureE2BApi::start().await;
 
-    let provider =
-        E2BHandProvider::with_api_url("test-key", fixture.api_url(), "example.e2b.test", "base")
-            .unwrap();
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            fixture.api_url(),
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ));
 
     // An egress allowlist has no E2B field that enforces it, so it is refused
     // before any sandbox is created rather than degraded into unrestricted.
@@ -284,6 +495,8 @@ async fn e2b_egress_posture_comes_from_the_effective_profile() {
         e2b_test_profile(EgressPolicy::Unrestricted),
     );
     let operation_id = spec.provisioning_operation_id;
+    let account_id = spec.workspace.provider_account_id;
+    let account_generation = spec.workspace.provider_account_generation;
     let handle = provider.provision(spec).await.unwrap();
 
     assert_discovery_request(&fixture.next_discovery_request().await, operation_id);
@@ -295,10 +508,85 @@ async fn e2b_egress_posture_comes_from_the_effective_profile() {
         Some(true)
     );
     assert_eq!(
-        provider.provisioned_hands(operation_id).await.unwrap(),
+        provider
+            .provisioned_hands(account_id, account_generation, operation_id)
+            .await
+            .unwrap(),
         vec![handle]
     );
     assert_discovery_request(&fixture.next_discovery_request().await, operation_id);
+}
+
+// Pins: E2B checkpoint export streams only the reserved data root through a
+// permission-restricted operation temp directory and Task 6's canonical
+// archive builder; successful cleanup leaves no plaintext operation root.
+#[tokio::test]
+async fn exports_reserved_data_root_through_canonical_archive_and_wipes_temp() {
+    let mut fixture = FixtureE2BApi::start().await;
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            fixture.api_url(),
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ))
+    .with_sandbox_base_url(fixture.api_url());
+    let spec = crate::core::profile::test_support::hand_spec(
+        SandboxTier::MicroVM,
+        e2b_test_profile(EgressPolicy::DenyAll),
+    );
+    let binding = spec.workspace.clone();
+    let before = e2b_operation_temp_dirs();
+    let handle = provider
+        .provision(spec)
+        .await
+        .expect("provision E2B fixture");
+    let _ = fixture.next_discovery_request().await;
+    let (sandbox_id, attempt, sandbox) = provider
+        .workspace_sandbox(&handle, &binding)
+        .await
+        .expect("inspect exact running sandbox");
+
+    let archive = super::storage::export_data_root(
+        &provider,
+        &attempt,
+        &sandbox_id,
+        &sandbox,
+        crate::core::sandbox_workspace::checkpoint::archive::ArchiveLimits {
+            max_entries: 8,
+            max_path_depth: 8,
+            max_file_bytes: 16,
+            max_total_bytes: 16,
+            max_chunk_bytes: 8,
+            max_compressed_chunk_bytes: 64,
+        },
+    )
+    .await
+    .expect("export canonical E2B data root");
+
+    assert_eq!(archive.manifest.logical_bytes, 6);
+    assert_eq!(archive.manifest.entries.len(), 1);
+    assert_eq!(archive.manifest.entries[0].path, "marker.txt");
+    assert_eq!(e2b_operation_temp_dirs(), before);
+    provider
+        .destroy(&handle)
+        .await
+        .expect("destroy fixture sandbox");
+}
+
+fn e2b_operation_temp_dirs() -> BTreeSet<PathBuf> {
+    std::fs::read_dir(std::env::temp_dir())
+        .expect("read host temp directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".moa-e2b-"))
+        })
+        .collect()
 }
 
 fn encode_test_envelopes(messages: &[Value]) -> String {

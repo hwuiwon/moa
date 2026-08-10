@@ -53,12 +53,18 @@ spec:
               --ingress-url http://restate.moa-restate.svc.cluster.local:8080
               --database-url "$MOA_BOOTSTRAP_DATABASE_URL"
               --migration-deployment-uri http://moa-session-status-migrator.moa-system.svc.cluster.local:9080
+              --sandbox-workspace-mode "$MOA_SANDBOX_WORKSPACE_MODE"
           env:
             - name: MOA_BOOTSTRAP_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: moa-postgres
                   key: admin-url
+            - name: MOA_SANDBOX_WORKSPACE_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: moa-runtime-config
+                  key: MOA_SANDBOX_WORKSPACE_MODE
           resources:
             requests:
               cpu: 50m

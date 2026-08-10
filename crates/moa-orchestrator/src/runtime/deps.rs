@@ -1,6 +1,6 @@
 //! Dependency construction for orchestrator runtime startup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::brain_bridge::{TurnPipelineStageFactory, TurnRequestPreparer};
@@ -28,6 +28,7 @@ use moa_connectors::service::{ConnectorService, CredentialSlotVerifier};
 use moa_core::{
     traits::{ChannelAdapter, EmbeddingProvider, RuntimeCacheStore},
     types::channel::Channel,
+    types::identifiers::TenantId,
 };
 use moa_hands::{
     PostgresTenantSandboxPolicyStore, ToolRouter, core::leases::PostgresHandLeaseStore,
@@ -105,6 +106,19 @@ pub struct RuntimeDeps {
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Tool router used by ToolExecutor and runtime services.
     pub tool_router: Arc<ToolRouter>,
+    /// Authenticated checkpoint-bucket versioning observer shared with the store gate.
+    pub checkpoint_versioning_observer: Option<
+        moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
+    >,
+    /// Process-wide workspace maintenance and tenant-purge owner.
+    pub workspace_maintenance: Option<
+        Arc<moa_hands::core::sandbox_workspace::maintenance::WorkspaceMaintenanceCoordinator>,
+    >,
+    /// Tenants whose active destruction fence denied quota bootstrap.
+    ///
+    /// Maintenance remains available to finish their purge, while every new
+    /// workspace admission path fails closed for the lifetime of this process.
+    pub sandbox_workspace_fenced_tenants: Arc<HashSet<TenantId>>,
     /// Host-owned graph-memory ingestion runtime shared by both ingest adapters.
     pub(crate) ingest_runtime: Arc<moa_memory_ingest::IngestRuntime>,
     /// Process-wide graph-memory retrieval engine shared by every read adapter.
@@ -145,10 +159,34 @@ impl RuntimeDeps {
         config: Arc<MoaConfig>,
         pool: PgPool,
         background_pool: PgPool,
+        maintenance_pool: Option<PgPool>,
         restate_ingress_url: &str,
         providers_override: ProvidersOverride,
         skip_fga: bool,
     ) -> Result<Self> {
+        let workspace_runtime_enabled = config.sandbox_workspaces.mode.maintenance_enabled();
+        let sandbox_workspace_bootstrap = if workspace_runtime_enabled {
+            let maintenance_pool = maintenance_pool.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sandbox workspace maintenance requires its dedicated database pool"
+                )
+            })?;
+            moa_hands::core::sandbox_workspace::maintenance::WorkspaceMaintenanceCoordinator::verify_maintenance_pool(
+                maintenance_pool,
+            )
+            .await
+            .context("verify dedicated sandbox workspace maintenance database role")?;
+            crate::runtime::sandbox_workspace_rollout::bootstrap_accounts_and_quotas(
+                config.as_ref(),
+                maintenance_pool,
+            )
+            .await
+            .context("bootstrap sandbox provider accounts and quota routes")?
+        } else {
+            crate::runtime::sandbox_workspace_rollout::SandboxWorkspaceBootstrapReport::default()
+        };
+        let sandbox_workspace_fenced_tenants =
+            Arc::new(sandbox_workspace_bootstrap.fenced_tenants());
         // The audit writer is instance-owned and started before anything that can
         // produce an event. Startup fails outright if it cannot start: the
         // previous global initializer logged a warning and left every audit event
@@ -164,13 +202,21 @@ impl RuntimeDeps {
             // Every `require_authz*` call already takes this client, so hanging
             // the audit here makes the audit writer an explicit dependency of
             // every authorization check without touching a call site.
-            Some(
-                build_fga_client(config.as_ref())?.with_security_audit(moa_authz::SecurityAudit {
-                    pool: pool.clone(),
-                    emitter: audit.emitter(),
-                    emit_allows: config.audit_security.emit_authz_allows,
-                }),
-            )
+            let fga_client = build_fga_client(config.as_ref())?;
+            if workspace_runtime_enabled {
+                let expected_model: serde_json::Value =
+                    serde_json::from_str(moa_authz_schema::SCHEMA_V1_JSON)
+                        .context("decode compiled OpenFGA model v7")?;
+                fga_client
+                    .verify_authorization_model(&expected_model)
+                    .await
+                    .context("verify exact OpenFGA model v7 before workspace runtime startup")?;
+            }
+            Some(fga_client.with_security_audit(moa_authz::SecurityAudit {
+                pool: pool.clone(),
+                emitter: audit.emitter(),
+                emit_allows: config.audit_security.emit_authz_allows,
+            }))
         };
         let authz_outbox_poller = fga_client
             .clone()
@@ -236,22 +282,47 @@ impl RuntimeDeps {
             .context("build graph-memory ingestion runtime")?,
         );
         let mcp_egress_guard = build_mcp_egress_guard(config.as_ref(), egress_classifier.as_ref())?;
-        let tool_router = ToolRouter::from_config(
+        let (checkpoint_store, checkpoint_versioning_observer) = if workspace_runtime_enabled {
+            kms.require_durable("sandbox workspace checkpoints")?;
+            let (store, observer) =
+                moa_hands::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore::from_config_with_versioning_observer(
+                    config.as_ref(),
+                    kms.provider(),
+                )?;
+            observer
+                .observe_unversioned()
+                .await
+                .context("observe checkpoint bucket versioning before workspace startup")?;
+            let store = Arc::new(store);
+            store
+                .preflight_create_only_namespace()
+                .await
+                .context("preflight checkpoint bucket create-only namespace")?;
+            (Some(store), Some(observer))
+        } else {
+            (None, None)
+        };
+        let tool_router = ToolRouter::from_config_with_checkpoint_store(
             config.as_ref(),
             mcp_egress_guard,
             Some(session_store.clone()),
+            checkpoint_store.clone(),
+            workspace_runtime_enabled.then(|| pool.clone()),
+            workspace_runtime_enabled.then(|| kms.provider()),
+            workspace_runtime_enabled,
         )
-        .await?
-        .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
-        // The reaper is started unconditionally by `runtime::jobs` for this
-        // process, so the router may admit deadlines whose destruction owner is
-        // that reaper. Declaring it here rather than inferring it keeps the
-        // admission check honest: a deployment that stops starting the reaper
-        // has to change this line and will fail admission until it does.
-        .with_hand_lease_reaper()
-        .with_tenant_sandbox_policy_store(Arc::new(PostgresTenantSandboxPolicyStore::new(
-            pool.clone(),
-        )))
+        .await?;
+        let tool_router = if workspace_runtime_enabled {
+            tool_router
+                .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
+                // Runtime jobs starts the destruction owner before listeners.
+                .with_hand_lease_reaper()
+                .with_tenant_sandbox_policy_store(Arc::new(PostgresTenantSandboxPolicyStore::new(
+                    pool.clone(),
+                )))
+        } else {
+            tool_router
+        }
         .with_session_store(session_store.clone())
         .with_memory_retrieval_executor(Arc::new(
             crate::services::memory::OrchestratorMemoryRetrievalExecutor::from_retrieval_engine(
@@ -265,8 +336,37 @@ impl RuntimeDeps {
         ));
         // Both sandbox owners are attached by the builder chain above, so the
         // cloud requirement can only be checked once the router is complete.
-        tool_router.validate_cloud_startup(config.as_ref())?;
+        if workspace_runtime_enabled {
+            tool_router.validate_cloud_startup(config.as_ref())?;
+        }
         let tool_router = Arc::new(tool_router);
+        let workspace_maintenance = if config.sandbox_workspaces.mode.maintenance_enabled() {
+            let maintenance_pool = maintenance_pool.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sandbox workspace maintenance requires its dedicated database pool"
+                )
+            })?;
+            let checkpoint_store = checkpoint_store.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sandbox workspace maintenance requires the durable checkpoint store"
+                )
+            })?;
+            Some(Arc::new(
+                moa_hands::core::sandbox_workspace::maintenance::WorkspaceMaintenanceCoordinator::new(
+                    maintenance_pool,
+                    checkpoint_store,
+                    tool_router.sandbox_storage_providers(),
+                    tool_router.hand_providers(),
+                    config.sandbox_checkpoints.retention.clone(),
+                    std::time::Duration::from_secs(
+                        config.sandbox_workspaces.reconciliation_claim_ttl_seconds,
+                    ),
+                )
+                .context("build sandbox workspace maintenance coordinator")?,
+            ))
+        } else {
+            None
+        };
         let connector_runtime = build_connector_runtime_dependencies(
             pool.clone(),
             fga_client.clone(),
@@ -300,6 +400,9 @@ impl RuntimeDeps {
             providers,
             embedding_provider,
             tool_router,
+            checkpoint_versioning_observer,
+            workspace_maintenance,
+            sandbox_workspace_fenced_tenants,
             ingest_runtime,
             retrieval_engine,
             connector_catalogs: connector_runtime.catalogs,

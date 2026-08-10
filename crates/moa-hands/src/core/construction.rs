@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use moa_config::CloudHandProviderKind;
 use moa_config::CloudHandsConfig;
 use moa_config::LOCAL_DEVELOPMENT_SANDBOX_REVISION;
 use moa_config::MoaConfig;
@@ -12,17 +13,20 @@ use moa_connectors::domain::ConnectionDefinitionRef;
 use moa_connectors::executor::ConnectorActionRuntime;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
-    traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    traits::SandboxStorageProvider, traits::SessionStore, types::action_policy::ActionPolicyEffect,
     types::action_policy::CallOrigin, types::agent::AgentConnectorBinding,
     types::hands::BuiltinPolicyRevision, types::hands::SandboxPolicySnapshot,
     types::hands::SandboxTier,
 };
+use moa_crypto::KeyManagementProvider;
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpEgressGuard, UnmatchedPermissionPattern,
 };
+use sqlx::PgPool;
 
 use super::normalization::expand_local_path;
 use super::profile::{deployment_sandbox_policy, route_sandbox_policy};
+use super::provider_credentials::{FileProviderCredentialSource, ProviderCredentialSource};
 use super::{
     DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, ToolCatalogSnapshot, ToolRegistry,
     ToolRouter,
@@ -110,6 +114,30 @@ impl ToolRouter {
         mcp_egress_guard: Option<Arc<McpEgressGuard>>,
         rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
     ) -> Result<Self> {
+        Self::from_config_with_checkpoint_store(
+            config,
+            mcp_egress_guard,
+            rule_store,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+    }
+
+    /// Creates a router with an explicitly composed encrypted checkpoint store.
+    pub async fn from_config_with_checkpoint_store(
+        config: &MoaConfig,
+        mcp_egress_guard: Option<Arc<McpEgressGuard>>,
+        rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
+        checkpoint_store: Option<
+            Arc<super::sandbox_workspace::checkpoint::store::CheckpointObjectStore>,
+        >,
+        workspace_pool: Option<PgPool>,
+        workspace_kms: Option<Arc<dyn KeyManagementProvider>>,
+        workspace_providers_enabled: bool,
+    ) -> Result<Self> {
         if !config.mcp_servers.is_empty() && mcp_egress_guard.is_none() {
             return Err(MoaError::ConfigError(
                 "configured MCP servers require an egress guard".to_string(),
@@ -117,44 +145,120 @@ impl ToolRouter {
         }
         validate_mcp_server_configuration(config)?;
 
-        let hand_routes = configured_hand_routes(config)?;
-        validate_security_profile(config, &hand_routes, rule_store.as_ref())?;
+        let hand_routes = if workspace_providers_enabled {
+            let routes = configured_hand_routes(config)?;
+            validate_security_profile(config, &routes, rule_store.as_ref())?;
+            routes
+        } else {
+            Vec::new()
+        };
 
         let mut providers = HashMap::new();
+        let mut storage_providers: HashMap<String, Arc<dyn SandboxStorageProvider>> =
+            HashMap::new();
         let mut sandbox_root = None;
         let mut local_provider = None;
         if routes_include_local_provider(&hand_routes) {
             let expanded_sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
-            let provider = Arc::new(
-                LocalHandProvider::new_with_docker_detection(
-                    &expanded_sandbox_root,
-                    config.local.docker_enabled,
-                )
-                .await?
-                .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
-            );
+            let mut provider = LocalHandProvider::new_with_docker_detection(
+                &expanded_sandbox_root,
+                config.local.docker_enabled,
+            )
+            .await?
+            .with_command_timeout(DEFAULT_TOOL_TIMEOUT);
+            if let Some(store) = checkpoint_store.as_ref() {
+                provider = provider.with_checkpoint_store(Arc::clone(store));
+            }
+            let provider = Arc::new(provider);
             let provider_trait: Arc<dyn HandProvider> = provider.clone();
+            let storage_trait: Arc<dyn SandboxStorageProvider> = provider.clone();
             providers.insert(DEFAULT_PROVIDER_NAME.to_string(), provider_trait);
+            storage_providers.insert(DEFAULT_PROVIDER_NAME.to_string(), storage_trait);
             sandbox_root = Some(expanded_sandbox_root);
             local_provider = Some(provider);
         }
 
-        if let Some(hands) = &config.cloud.hands
-            && cloud_provider_requested(hands, "daytona")
-        {
-            providers.insert(
-                "daytona".to_string(),
-                Arc::new(DaytonaHandProvider::from_config(config)?),
-            );
-        }
-
-        if let Some(hands) = &config.cloud.hands
-            && cloud_provider_requested(hands, "e2b")
-        {
-            providers.insert(
-                "e2b".to_string(),
-                Arc::new(E2BHandProvider::from_config(config)?),
-            );
+        if workspace_providers_enabled && let Some(hands) = &config.cloud.hands {
+            let cloud_requested = cloud_provider_requested(hands, "daytona")
+                || cloud_provider_requested(hands, "e2b");
+            let credentials = if cloud_requested {
+                let source = Arc::new(FileProviderCredentialSource::from_config(hands)?);
+                source.validate_all().await?;
+                Some(source as Arc<dyn ProviderCredentialSource>)
+            } else {
+                None
+            };
+            if cloud_provider_requested(hands, "daytona") {
+                let source = credentials.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError("Daytona credential source is unavailable".to_string())
+                })?;
+                let checkpoint_store = checkpoint_store.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError(
+                        "Daytona persistent workspaces require a checkpoint object store"
+                            .to_string(),
+                    )
+                })?;
+                let pool = workspace_pool.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError(
+                        "Daytona persistent workspaces require durable workspace repositories"
+                            .to_string(),
+                    )
+                })?;
+                let kms = workspace_kms.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError(
+                        "Daytona persistent workspaces require durable KMS marker authority"
+                            .to_string(),
+                    )
+                })?;
+                let provider = Arc::new(DaytonaHandProvider::new_with_storage(
+                    Arc::clone(source),
+                    crate::adapters::daytona::storage::DaytonaStorageDependencies {
+                        config: config.cloud.daytona_storage.clone(),
+                        checkpoint_store: Arc::clone(checkpoint_store),
+                        workspaces: Arc::new(super::sandbox_workspace::repository::PostgresWorkspaceRepository::new(
+                            pool.clone(),
+                        )),
+                        storage_resources: Arc::new(
+                            super::sandbox_workspace::storage_resources::PostgresWorkspaceStorageResourceRepository::new(
+                                pool.clone(),
+                            ),
+                        ),
+                        operations: Arc::new(
+                            super::sandbox_workspace::operations::PostgresWorkspaceOperationRepository::new(
+                                pool.clone(),
+                            ),
+                        ),
+                        capacity: Arc::new(
+                            super::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository::new(
+                                pool.clone(),
+                            ),
+                        ),
+                        kms: Arc::clone(kms),
+                    },
+                )?);
+                let hand: Arc<dyn HandProvider> = provider.clone();
+                let storage: Arc<dyn SandboxStorageProvider> = provider;
+                providers.insert("daytona".to_string(), hand);
+                storage_providers.insert("daytona".to_string(), storage);
+            }
+            if cloud_provider_requested(hands, "e2b") {
+                let source = credentials.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError("E2B credential source is unavailable".to_string())
+                })?;
+                let checkpoint_store = checkpoint_store.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError(
+                        "E2B persistent workspaces require a checkpoint object store".to_string(),
+                    )
+                })?;
+                let provider = Arc::new(
+                    E2BHandProvider::new(Arc::clone(source))
+                        .with_checkpoint_store(Arc::clone(checkpoint_store)),
+                );
+                let hand: Arc<dyn HandProvider> = provider.clone();
+                let storage: Arc<dyn SandboxStorageProvider> = provider;
+                providers.insert("e2b".to_string(), hand);
+                storage_providers.insert("e2b".to_string(), storage);
+            }
         }
 
         let mut registry = ToolRegistry::default_local();
@@ -172,6 +276,11 @@ impl ToolRouter {
         }
 
         let mut router = Self::new(registry, providers, deployment_sandbox_policy(config)?);
+        router.hands.checkpoint_store = checkpoint_store;
+        router.hands.set_storage_providers(storage_providers);
+        if let Some(pool) = workspace_pool {
+            router = router.with_workspace_repositories(pool);
+        }
         router.hands.set_sandbox_root(sandbox_root);
         router.hands.set_local_provider(local_provider);
         router.mcp.set_egress_guard(mcp_egress_guard);
@@ -259,6 +368,47 @@ impl ToolRouter {
         self.hands.providers()
     }
 
+    /// Attaches the persistent-workspace adapter for an already registered hand provider.
+    ///
+    /// Explicit router composition uses the provider-declared stable name so
+    /// compute and storage cannot be wired under different route identities.
+    /// Duplicate storage registrations are rejected instead of silently
+    /// replacing the adapter that owns durable workspace state.
+    pub fn with_sandbox_storage_provider(
+        mut self,
+        provider: Arc<dyn SandboxStorageProvider>,
+    ) -> Result<Self> {
+        let name = provider.storage_provider_name().to_string();
+        if name.is_empty() || !self.hands.providers.contains_key(&name) {
+            return Err(MoaError::ConfigError(format!(
+                "sandbox storage provider {name:?} has no matching hand provider"
+            )));
+        }
+        if self.hands.storage_providers.contains_key(&name) {
+            return Err(MoaError::ConfigError(format!(
+                "sandbox storage provider {name} is already registered"
+            )));
+        }
+        self.hands.storage_providers.insert(name, provider);
+        Ok(self)
+    }
+
+    /// Returns every registered workspace-storage provider in stable name order.
+    #[must_use]
+    pub fn sandbox_storage_providers(&self) -> Vec<Arc<dyn SandboxStorageProvider>> {
+        let mut providers = self
+            .hands
+            .storage_providers
+            .iter()
+            .map(|(name, provider)| (name.as_str(), Arc::clone(provider)))
+            .collect::<Vec<_>>();
+        providers.sort_by_key(|(name, _)| *name);
+        providers
+            .into_iter()
+            .map(|(_, provider)| provider)
+            .collect()
+    }
+
     /// Attaches a persistent action-policy rule store to the router.
     #[must_use]
     pub fn with_rule_store(mut self, rule_store: Arc<dyn ActionPolicyRuleStore>) -> Self {
@@ -280,6 +430,27 @@ impl ToolRouter {
         hand_leases: Arc<dyn super::leases::HandLeaseStore>,
     ) -> Self {
         self.hands.set_hand_lease_store(hand_leases);
+        self
+    }
+
+    /// Attaches the tenant workspace and operation-ledger owners.
+    ///
+    /// Both repositories share one pool and are installed together because
+    /// workspace lifecycle transitions require both durable records.
+    #[must_use]
+    pub fn with_workspace_repositories(mut self, pool: PgPool) -> Self {
+        self.hands.set_workspace_repositories(
+            Arc::new(
+                super::sandbox_workspace::repository::PostgresWorkspaceRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            Arc::new(
+                super::sandbox_workspace::operations::PostgresWorkspaceOperationRepository::new(
+                    pool,
+                ),
+            ),
+        );
         self
     }
 
@@ -737,12 +908,15 @@ fn validate_security_profile(
 
 /// Returns whether the credential the named cloud backend needs is present.
 fn cloud_provider_credential_present(hands: &CloudHandsConfig, provider: &str) -> bool {
-    let credential = match provider {
-        "daytona" => hands.daytona_api_key.as_deref(),
-        "e2b" => hands.e2b_api_key.as_deref(),
-        _ => None,
+    let expected = match provider {
+        "daytona" => CloudHandProviderKind::Daytona,
+        "e2b" => CloudHandProviderKind::E2b,
+        _ => return false,
     };
-    credential.is_some_and(|value| !value.trim().is_empty())
+    hands
+        .provider_accounts
+        .iter()
+        .any(|account| account.provider == expected)
 }
 
 /// Attaches each route's authored sandbox policy layer, or the named
@@ -837,17 +1011,10 @@ fn cloud_provider_requested(hands: &CloudHandsConfig, provider: &str) -> bool {
             .fallback_providers
             .iter()
             .any(|candidate| candidate.trim() == provider)
-        || match provider {
-            "daytona" => hands
-                .daytona_api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            "e2b" => hands
-                .e2b_api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            _ => false,
-        }
+        || hands
+            .provider_accounts
+            .iter()
+            .any(|account| account.provider.as_str() == provider)
 }
 
 #[cfg(test)]

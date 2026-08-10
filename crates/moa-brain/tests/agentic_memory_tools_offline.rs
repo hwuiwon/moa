@@ -3,6 +3,8 @@
 //! them on, and when offered they execute through the retrieval executor and
 //! return per-hit provenance.
 
+#![recursion_limit = "256"]
+
 #[path = "support/offline_session_store.rs"]
 mod offline_session_store;
 
@@ -324,6 +326,7 @@ async fn run_capturing_turn(offer: bool) -> Vec<String> {
         llm_provider: provider.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router),
+        workspace_scope: None,
     })
     .await
     .unwrap();
@@ -396,6 +399,7 @@ async fn offered_memory_search_executes_and_returns_provenance() {
         llm_provider: provider.clone(),
         pipeline: &pipeline,
         tool_router: Some(tool_router),
+        workspace_scope: None,
     })
     .await
     .unwrap();

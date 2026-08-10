@@ -77,10 +77,26 @@ spec:
               memory: 2Gi
       volumes:
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: postgres-data
         - name: init
           configMap:
             name: postgres-init
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: moa
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
 ---
 apiVersion: v1
 kind: Service

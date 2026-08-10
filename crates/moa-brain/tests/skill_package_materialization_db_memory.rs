@@ -140,6 +140,12 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         llm_provider: provider.clone(),
         pipeline: &pipeline,
         tool_router: Some(router),
+        workspace_scope: Some(
+            moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+                session_id,
+                worker_id: "skill-package-materialization-worker".to_string(),
+            },
+        ),
     })
     .await?;
     assert_eq!(result, TurnResult::Complete);
@@ -176,7 +182,9 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     assert_eq!(tool_results[2].0.as_deref(), Some("run_script"));
     assert_eq!(
         tool_results[2].1.process_stdout(),
-        Some("helper-script-ok\n")
+        Some("helper-script-ok\n"),
+        "materialized helper result was: {:#?}",
+        tool_results[2].1,
     );
     assert_eq!(tool_results[2].1.process_exit_code(), Some(0));
 
@@ -342,6 +350,12 @@ async fn agent_locked_superseded_skill_revision_materializes_exact_files_after_n
         llm_provider: provider.clone(),
         pipeline: &pipeline,
         tool_router: Some(router),
+        workspace_scope: Some(
+            moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+                session_id,
+                worker_id: "skill-package-symlink-worker".to_string(),
+            },
+        ),
     })
     .await?;
     assert_eq!(result, TurnResult::Complete);

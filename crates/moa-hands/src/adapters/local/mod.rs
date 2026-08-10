@@ -1,5 +1,10 @@
 //! Local hand provider with direct host execution and optional Docker sandboxes.
 
+mod workspace;
+
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -11,14 +16,38 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
-    traits::HandProvider, types::hands::CpuLimit, types::hands::DeadlineEnforcement,
-    types::hands::DiskLimit, types::hands::EgressMode, types::hands::EgressPolicy,
-    types::hands::HandHandle, types::hands::HandProviderCapabilities, types::hands::HandSpec,
-    types::hands::HandStatus, types::hands::MemoryLimit, types::hands::ResourceSupport,
-    types::hands::SandboxFile, types::hands::SandboxProfile, types::hands::SandboxTier,
-    types::hands::SandboxTierCapabilities, types::hands::validate_sandbox_file_path,
-    types::identifiers::HandProvisioningOperationId, types::resource::ResourceBudget,
+    error::MoaError,
+    error::Result,
+    error::ToolFailureClass,
+    error::classify_tool_error,
+    traits::{HandProvider, SandboxStorageProvider},
+    types::hands::CpuLimit,
+    types::hands::DeadlineEnforcement,
+    types::hands::DiskLimit,
+    types::hands::EgressMode,
+    types::hands::EgressPolicy,
+    types::hands::HandHandle,
+    types::hands::HandProviderCapabilities,
+    types::hands::HandSpec,
+    types::hands::HandStatus,
+    types::hands::MemoryLimit,
+    types::hands::ResourceSupport,
+    types::hands::SandboxFile,
+    types::hands::SandboxProfile,
+    types::hands::SandboxTier,
+    types::hands::SandboxTierCapabilities,
+    types::hands::validate_sandbox_file_path,
+    types::identifiers::{HandProvisioningOperationId, WorkspaceCheckpointId},
+    types::resource::ResourceBudget,
+    types::sandbox_workspace::{
+        ProviderAccountStorageInventory, ProviderInventoryOwner, ProviderInventoryResource,
+        ProviderInventoryResourceKind, ProviderStorageKind, ProviderStorageRef,
+        TenantStoragePurgeRequest, WorkspaceAttachRequest, WorkspaceCheckpointPublication,
+        WorkspaceCheckpointPublishRequest, WorkspaceConfirmedDisposition, WorkspaceOperationKind,
+        WorkspaceOperationOutcome, WorkspacePostCommitState, WorkspaceReconcileRequest,
+        WorkspaceRestoreRequest, WorkspaceRevisionRef, WorkspaceStorageDeleteRequest,
+        WorkspaceStorageOperationResult, WorkspaceStoragePrepareRequest,
+    },
     types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
@@ -32,7 +61,17 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::adapters::trusted_command::{
+    normalized_trusted_skill_path, resolve_trusted_skill_command, rewrite_bash_input,
+};
 use crate::core::leases::LeaseHandle;
+use crate::core::sandbox_workspace::checkpoint::archive::build_checkpoint_archive;
+use crate::core::sandbox_workspace::checkpoint::revision::{
+    next_workspace_revision, required_current_revision,
+};
+use crate::core::sandbox_workspace::checkpoint::store::{
+    CheckpointObjectStore, CheckpointStoreContext,
+};
 use crate::tools::sandbox_descriptor::{SandboxToolCapability, supported_capability_for_tool};
 use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep, str_replace};
 
@@ -41,12 +80,13 @@ const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
-const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
 const HAND_SANDBOX_PREFIX: &str = "hand-";
 const HAND_INTENT_DIRECTORY: &str = ".moa-hand-intents";
+const HAND_TRUSTED_DIRECTORY: &str = ".moa-hand-trusted";
 const HAND_INTENT_MARKER_SUFFIX: &str = ".json";
 const DOCKER_NAME_PREFIX: &str = "moa-hand-";
 const DOCKER_OPERATION_LABEL: &str = "com.moa.provisioning-operation-id";
+const DOCKER_TRUSTED_ROOT: &str = "/opt/moa/trusted";
 const DOCKER_SPEC_LABEL: &str = "com.moa.provisioning-spec-sha256";
 const TOOL_ERROR_OUTPUT_STATUS: &str = "tool returned error output";
 const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
@@ -144,21 +184,48 @@ fn docker_memory_support() -> ResourceSupport {
 #[derive(Debug, Clone)]
 struct LocalSandbox {
     execution_root: PathBuf,
+    trusted_root: PathBuf,
     extra_search_skips: Vec<String>,
     /// Absolute instant this sandbox's maximum lifetime expires.
     ///
     /// `None` means the resolved profile declared an explicitly unbounded
     /// maximum lifetime, which is a statement, not a missing value.
     hard_deadline: Option<DateTime<Utc>>,
+    inventory_identity: Option<LocalInventoryIdentity>,
 }
 
 #[derive(Debug, Clone)]
 struct DockerSandbox {
     sandbox_dir: PathBuf,
-    workspace_mount: String,
+    trusted_root: PathBuf,
+    mutable_root: String,
     extra_search_skips: Vec<String>,
     /// Absolute instant this container's maximum lifetime expires.
     hard_deadline: Option<DateTime<Utc>>,
+    inventory_identity: Option<LocalInventoryIdentity>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct LocalInventoryIdentity {
+    provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+    provider_account_generation: u64,
+    owner: ProviderInventoryOwner,
+}
+
+impl LocalInventoryIdentity {
+    fn from_spec(spec: &HandSpec) -> Self {
+        Self {
+            provider_account_id: spec.workspace.provider_account_id,
+            provider_account_generation: spec.workspace.provider_account_generation,
+            owner: ProviderInventoryOwner {
+                tenant_id: spec.workspace.tenant_id,
+                workspace_id: spec.workspace.workspace_id,
+                provisioning_operation_id: Some(spec.provisioning_operation_id),
+                writer_epoch: Some(spec.workspace.writer_epoch),
+                instance_generation: Some(spec.workspace.instance_generation),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -167,8 +234,9 @@ struct LocalProvisioningMarker {
     operation_id: HandProvisioningOperationId,
     spec_fingerprint: String,
     sandbox_tier: SandboxTier,
-    workspace_mount: Option<PathBuf>,
+    mutable_root: PathBuf,
     hard_deadline: Option<DateTime<Utc>>,
+    inventory_identity: LocalInventoryIdentity,
 }
 
 #[derive(serde::Serialize)]
@@ -176,8 +244,9 @@ struct LocalCreationSpecIdentity<'a> {
     sandbox_tier: SandboxTier,
     image: &'a Option<String>,
     env: Vec<(&'a str, &'a str)>,
-    workspace_mount: &'a Option<PathBuf>,
+    filesystem: &'a moa_core::types::sandbox_workspace::SandboxFilesystemLayout,
     effective_profile_hash: &'a str,
+    workspace: &'a moa_core::types::sandbox_workspace::WorkspaceBinding,
 }
 
 #[derive(Debug)]
@@ -214,6 +283,21 @@ fn hard_deadline_from_metadata(metadata: &serde_json::Value) -> Option<DateTime<
     }
 }
 
+fn inventory_identity_from_metadata(
+    metadata: &serde_json::Value,
+) -> Result<LocalInventoryIdentity> {
+    serde_json::from_value(metadata.get("inventory_identity").cloned().ok_or_else(|| {
+        MoaError::ProviderError(
+            "local hand lease is missing verified inventory identity".to_string(),
+        )
+    })?)
+    .map_err(|error| {
+        MoaError::ProviderError(format!(
+            "local hand lease has malformed inventory identity: {error}"
+        ))
+    })
+}
+
 fn hard_deadline_for(profile: &SandboxProfile) -> Option<DateTime<Utc>> {
     profile
         .max_lifetime
@@ -231,6 +315,7 @@ pub struct LocalHandProvider {
     command_timeout: Duration,
     local_sandboxes: Arc<RwLock<HashMap<PathBuf, LocalSandbox>>>,
     docker_sandboxes: Arc<RwLock<HashMap<String, DockerSandbox>>>,
+    checkpoint_store: Option<Arc<CheckpointObjectStore>>,
 }
 
 impl LocalHandProvider {
@@ -258,6 +343,7 @@ impl LocalHandProvider {
             command_timeout: DEFAULT_TOOL_TIMEOUT,
             local_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             docker_sandboxes: Arc::new(RwLock::new(HashMap::new())),
+            checkpoint_store: None,
         })
     }
 
@@ -273,9 +359,22 @@ impl LocalHandProvider {
         self
     }
 
+    /// Installs durable encrypted portable-checkpoint storage.
+    #[must_use]
+    pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointObjectStore>) -> Self {
+        self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
     fn sandbox_dir(&self, operation_id: HandProvisioningOperationId) -> PathBuf {
         self.work_dir
             .join(format!("{HAND_SANDBOX_PREFIX}{operation_id}"))
+    }
+
+    fn trusted_dir(&self, operation_id: HandProvisioningOperationId) -> PathBuf {
+        self.work_dir
+            .join(HAND_TRUSTED_DIRECTORY)
+            .join(operation_id.to_string())
     }
 
     fn intent_marker_path(&self, operation_id: HandProvisioningOperationId) -> PathBuf {
@@ -299,8 +398,9 @@ impl LocalHandProvider {
             sandbox_tier: spec.sandbox_tier,
             image: &spec.image,
             env,
-            workspace_mount: &spec.workspace_mount,
+            filesystem: &spec.filesystem,
             effective_profile_hash: spec.effective_profile.profile_hash(),
+            workspace: &spec.workspace,
         };
         let digest = Sha256::digest(serde_json::to_vec(&identity)?);
         Ok(hex::encode(digest))
@@ -387,8 +487,9 @@ impl LocalHandProvider {
                     operation_id: spec.provisioning_operation_id,
                     spec_fingerprint: expected_fingerprint,
                     sandbox_tier: spec.sandbox_tier,
-                    workspace_mount: spec.workspace_mount.clone(),
+                    mutable_root: spec.filesystem.mutable_root.clone(),
                     hard_deadline: hard_deadline_for(spec.effective_profile.profile()),
+                    inventory_identity: LocalInventoryIdentity::from_spec(spec),
                 };
                 if self.publish_intent_marker(&marker).await? {
                     marker
@@ -420,6 +521,10 @@ impl LocalHandProvider {
         }
         #[cfg(unix)]
         fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o770)).await?;
+        let trusted_dir = self.trusted_dir(spec.provisioning_operation_id);
+        fs::create_dir_all(&trusted_dir).await?;
+        #[cfg(unix)]
+        fs::set_permissions(&trusted_dir, std::fs::Permissions::from_mode(0o700)).await?;
         Ok((sandbox_dir, marker))
     }
 
@@ -429,18 +534,28 @@ impl LocalHandProvider {
         sandbox_dir: &Path,
         workspace_mount: &Path,
         hard_deadline: Option<DateTime<Utc>>,
-    ) -> HandHandle {
+        inventory_identity: &LocalInventoryIdentity,
+    ) -> Result<HandHandle> {
         let extra_search_skips = file_search::load_moaignore(sandbox_dir).await;
         self.docker_sandboxes.write().await.insert(
             container_id.clone(),
             DockerSandbox {
                 sandbox_dir: sandbox_dir.to_path_buf(),
-                workspace_mount: workspace_mount.to_string_lossy().into_owned(),
+                trusted_root: self.trusted_dir(
+                    operation_id_from_sandbox_dir(sandbox_dir).ok_or_else(|| {
+                        MoaError::ProviderError(
+                            "Docker sandbox directory has no provisioning operation identity"
+                                .to_string(),
+                        )
+                    })?,
+                ),
+                mutable_root: workspace_mount.to_string_lossy().into_owned(),
                 extra_search_skips,
                 hard_deadline,
+                inventory_identity: Some(inventory_identity.clone()),
             },
         );
-        HandHandle::docker(container_id)
+        Ok(HandHandle::docker(container_id))
     }
 
     async fn docker_containers_for_operation(
@@ -491,8 +606,9 @@ impl LocalHandProvider {
                 sandbox_dir,
                 workspace_mount,
                 marker.hard_deadline,
+                &marker.inventory_identity,
             )
-            .await,
+            .await?,
         ))
     }
 
@@ -506,10 +622,7 @@ impl LocalHandProvider {
             .image
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_IMAGE.to_string());
-        let workspace_mount = spec
-            .workspace_mount
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCKER_WORKSPACE));
+        let workspace_mount = spec.filesystem.mutable_root.clone();
         let mount = format!("{}:{}", sandbox_dir.display(), workspace_mount.display());
         let container_name = Self::docker_name(spec.provisioning_operation_id);
         if let Some(handle) = self
@@ -541,6 +654,8 @@ impl LocalHandProvider {
             format!("/tmp:{DOCKER_TMPFS_OPTIONS}"),
             "--tmpfs".to_string(),
             format!("/run:{DOCKER_TMPFS_OPTIONS}"),
+            "--tmpfs".to_string(),
+            "/opt/moa/trusted:rw,nosuid,nodev,size=64m,mode=0755".to_string(),
             "--cap-drop".to_string(),
             "ALL".to_string(),
             "--security-opt".to_string(),
@@ -582,14 +697,14 @@ impl LocalHandProvider {
         }
 
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(self
-            .register_docker_sandbox(
-                container_id,
-                sandbox_dir,
-                &workspace_mount,
-                marker.hard_deadline,
-            )
-            .await)
+        self.register_docker_sandbox(
+            container_id,
+            sandbox_dir,
+            &workspace_mount,
+            marker.hard_deadline,
+            &marker.inventory_identity,
+        )
+        .await
     }
 
     async fn provision_local(
@@ -599,17 +714,16 @@ impl LocalHandProvider {
         marker: &LocalProvisioningMarker,
     ) -> Result<HandHandle> {
         reject_unenforceable_host_profile(spec.effective_profile.profile())?;
-        let execution_root = spec
-            .workspace_mount
-            .clone()
-            .unwrap_or_else(|| sandbox_dir.clone());
+        let execution_root = sandbox_dir.clone();
         let extra_search_skips = file_search::load_moaignore(&execution_root).await;
         self.local_sandboxes.write().await.insert(
             sandbox_dir.clone(),
             LocalSandbox {
                 execution_root,
+                trusted_root: self.trusted_dir(spec.provisioning_operation_id),
                 extra_search_skips,
                 hard_deadline: marker.hard_deadline,
+                inventory_identity: Some(marker.inventory_identity.clone()),
             },
         );
         Ok(HandHandle::local(sandbox_dir))
@@ -623,8 +737,12 @@ impl LocalHandProvider {
             .cloned()
             .unwrap_or_else(|| LocalSandbox {
                 execution_root: sandbox_dir.to_path_buf(),
+                trusted_root: operation_id_from_sandbox_dir(sandbox_dir)
+                    .map(|operation_id| self.trusted_dir(operation_id))
+                    .unwrap_or_else(|| self.work_dir.join(HAND_TRUSTED_DIRECTORY).join("unknown")),
                 extra_search_skips: Vec::new(),
                 hard_deadline: None,
+                inventory_identity: None,
             })
     }
 
@@ -640,24 +758,48 @@ impl LocalHandProvider {
         let now = Utc::now();
         match supported_capability_for_tool(tool, LOCAL_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
-                bash::execute_local(
+                let params = bash::BashToolInput::parse(input)?;
+                let trusted_root = sandbox.trusted_root.to_str().ok_or_else(|| {
+                    MoaError::ProviderError(
+                        "local trusted sandbox root is not valid UTF-8".to_string(),
+                    )
+                })?;
+                let trusted = resolve_trusted_skill_command(&params.cmd, trusted_root)?;
+                let rewritten;
+                let execution_input = if let Some(command) = trusted.as_ref() {
+                    rewritten = rewrite_bash_input(input, command)?;
+                    rewritten.as_str()
+                } else {
+                    input
+                };
+                let mut output = bash::execute_local(
                     &sandbox.execution_root,
-                    input,
+                    execution_input,
                     self.command_timeout,
                     bash::remaining_lifetime(sandbox.hard_deadline, now),
                     budget.time_remaining(now),
                     hard_cancel_token,
                 )
-                .await
+                .await?;
+                if let Some(command) = trusted {
+                    command.redact_output(&mut output);
+                }
+                Ok(output)
             }
             Some(SandboxToolCapability::Grep) => {
-                grep::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips).await
+                let extra_search_skips = file_search::load_moaignore(&sandbox.execution_root).await;
+                grep::execute(&sandbox.execution_root, input, &extra_search_skips).await
             }
             Some(SandboxToolCapability::FileOutline) => {
                 file_outline::execute(&sandbox.execution_root, input).await
             }
             Some(SandboxToolCapability::FileRead) => {
-                file_read::execute(&sandbox.execution_root, input).await
+                let root = if file_read_targets_trusted_skill(input)? {
+                    &sandbox.trusted_root
+                } else {
+                    &sandbox.execution_root
+                };
+                file_read::execute(root, input).await
             }
             Some(SandboxToolCapability::StrReplace) => {
                 str_replace::execute(&sandbox.execution_root, input).await
@@ -666,8 +808,8 @@ impl LocalHandProvider {
                 file_write::execute(&sandbox.execution_root, input).await
             }
             Some(SandboxToolCapability::FileSearch) => {
-                file_search::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips)
-                    .await
+                let extra_search_skips = file_search::load_moaignore(&sandbox.execution_root).await;
+                file_search::execute(&sandbox.execution_root, input, &extra_search_skips).await
             }
             None => Err(MoaError::ToolError(format!(
                 "unsupported local hand tool: {tool}"
@@ -695,16 +837,29 @@ impl LocalHandProvider {
 
         match supported_capability_for_tool(tool, LOCAL_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
-                bash::execute_docker(
+                let params = bash::BashToolInput::parse(input)?;
+                let trusted = resolve_trusted_skill_command(&params.cmd, DOCKER_TRUSTED_ROOT)?;
+                let rewritten;
+                let execution_input = if let Some(command) = trusted.as_ref() {
+                    rewritten = rewrite_bash_input(input, command)?;
+                    rewritten.as_str()
+                } else {
+                    input
+                };
+                let mut output = bash::execute_docker(
                     container_id,
-                    &sandbox.workspace_mount,
-                    input,
+                    &sandbox.mutable_root,
+                    execution_input,
                     self.command_timeout,
                     bash::remaining_lifetime(sandbox.hard_deadline, Utc::now()),
                     budget.time_remaining(Utc::now()),
                     hard_cancel_token,
                 )
-                .await
+                .await?;
+                if let Some(command) = trusted {
+                    command.redact_output(&mut output);
+                }
+                Ok(output)
             }
             Some(SandboxToolCapability::Grep) => {
                 grep::execute(&sandbox.sandbox_dir, input, &sandbox.extra_search_skips).await
@@ -712,7 +867,7 @@ impl LocalHandProvider {
             Some(SandboxToolCapability::FileOutline) => {
                 file_outline::execute_docker(
                     container_id,
-                    &sandbox.workspace_mount,
+                    &sandbox.mutable_root,
                     input,
                     self.command_timeout,
                     hard_cancel_token,
@@ -720,17 +875,21 @@ impl LocalHandProvider {
                 .await
             }
             Some(SandboxToolCapability::FileRead) => {
-                file_read::execute_docker_bind_mount(
-                    &sandbox.sandbox_dir,
-                    &sandbox.workspace_mount,
-                    input,
-                )
-                .await
+                if file_read_targets_trusted_skill(input)? {
+                    file_read::execute(&sandbox.trusted_root, input).await
+                } else {
+                    file_read::execute_docker_bind_mount(
+                        &sandbox.sandbox_dir,
+                        &sandbox.mutable_root,
+                        input,
+                    )
+                    .await
+                }
             }
             Some(SandboxToolCapability::StrReplace) => {
                 str_replace::execute_docker(
                     container_id,
-                    &sandbox.workspace_mount,
+                    &sandbox.mutable_root,
                     input,
                     self.command_timeout,
                     hard_cancel_token,
@@ -740,7 +899,7 @@ impl LocalHandProvider {
             Some(SandboxToolCapability::FileWrite) => {
                 file_write::execute_docker_bind_mount(
                     &sandbox.sandbox_dir,
-                    &sandbox.workspace_mount,
+                    &sandbox.mutable_root,
                     input,
                 )
                 .await
@@ -748,7 +907,7 @@ impl LocalHandProvider {
             Some(SandboxToolCapability::FileSearch) => {
                 file_search::execute_docker(
                     container_id,
-                    &sandbox.workspace_mount,
+                    &sandbox.mutable_root,
                     input,
                     &sandbox.extra_search_skips,
                     self.command_timeout,
@@ -763,7 +922,8 @@ impl LocalHandProvider {
     }
 
     async fn destroy_local_sandbox(&self, sandbox_dir: &Path) -> Result<()> {
-        if let Some(operation_id) = operation_id_from_sandbox_dir(sandbox_dir)
+        let operation_id = operation_id_from_sandbox_dir(sandbox_dir);
+        if let Some(operation_id) = operation_id
             && self
                 .read_intent_marker(operation_id)
                 .await?
@@ -782,7 +942,12 @@ impl LocalHandProvider {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        if let Some(operation_id) = operation_id_from_sandbox_dir(sandbox_dir) {
+        if let Some(operation_id) = operation_id {
+            match fs::remove_dir_all(self.trusted_dir(operation_id)).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             let marker_path = self.intent_marker_path(operation_id);
             match fs::remove_file(marker_path).await {
                 Ok(()) => {}
@@ -807,6 +972,63 @@ impl LocalHandProvider {
         Ok(())
     }
 
+    async fn replace_trusted_files_at_root(
+        &self,
+        root: &Path,
+        files: &[SandboxFile],
+    ) -> Result<()> {
+        match fs::remove_dir_all(root).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::create_dir_all(root).await?;
+        #[cfg(unix)]
+        fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).await?;
+        self.install_files_at_root(root, files).await
+    }
+
+    async fn replace_docker_trusted_files(
+        &self,
+        container_id: &str,
+        sandbox: &DockerSandbox,
+        files: &[SandboxFile],
+    ) -> Result<()> {
+        self.replace_trusted_files_at_root(&sandbox.trusted_root, files)
+            .await?;
+        let clear = Command::new("docker")
+            .args([
+                "exec",
+                "--user",
+                "0",
+                container_id,
+                "sh",
+                "-c",
+                "find /opt/moa/trusted -mindepth 1 -delete",
+            ])
+            .output()
+            .await?;
+        if !clear.status.success() {
+            return Err(MoaError::ProviderError(format!(
+                "failed to clear Docker trusted root: {}",
+                String::from_utf8_lossy(&clear.stderr).trim()
+            )));
+        }
+        let source = format!("{}/.", sandbox.trusted_root.display());
+        let destination = format!("{container_id}:/opt/moa/trusted");
+        let copy = Command::new("docker")
+            .args(["cp", &source, &destination])
+            .output()
+            .await?;
+        if !copy.status.success() {
+            return Err(MoaError::ProviderError(format!(
+                "failed to install Docker trusted files: {}",
+                String::from_utf8_lossy(&copy.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
     /// Builds the durable lease payload needed to reconnect this local or Docker handle.
     pub async fn lease_handle(
         &self,
@@ -822,8 +1044,10 @@ impl LocalHandProvider {
                     serde_json::json!({
                         "kind": "local",
                         "execution_root": sandbox.execution_root,
+                        "trusted_root": sandbox.trusted_root,
                         "extra_search_skips": sandbox.extra_search_skips,
                         "hard_deadline": sandbox.hard_deadline,
+                        "inventory_identity": sandbox.inventory_identity,
                     }),
                 ))
             }
@@ -845,9 +1069,11 @@ impl LocalHandProvider {
                     serde_json::json!({
                         "kind": "docker",
                         "sandbox_dir": sandbox.sandbox_dir,
-                        "workspace_mount": sandbox.workspace_mount,
+                        "trusted_root": sandbox.trusted_root,
+                        "mutable_root": sandbox.mutable_root,
                         "extra_search_skips": sandbox.extra_search_skips,
                         "hard_deadline": sandbox.hard_deadline,
+                        "inventory_identity": sandbox.inventory_identity,
                     }),
                 ))
             }
@@ -861,9 +1087,11 @@ impl LocalHandProvider {
     pub async fn adopt_lease_handle(&self, lease_handle: &LeaseHandle) -> Result<HandHandle> {
         match &lease_handle.handle {
             HandHandle::Local { sandbox_dir } => {
-                let Some(metadata) = lease_handle.provider_metadata.as_ref() else {
-                    return Ok(lease_handle.handle.clone());
-                };
+                let metadata = lease_handle.provider_metadata.as_ref().ok_or_else(|| {
+                    MoaError::ProviderError(
+                        "local hand lease is missing sandbox metadata".to_string(),
+                    )
+                })?;
                 let execution_root = metadata
                     .get("execution_root")
                     .and_then(serde_json::Value::as_str)
@@ -878,8 +1106,18 @@ impl LocalHandProvider {
                     sandbox_dir.clone(),
                     LocalSandbox {
                         execution_root,
+                        trusted_root: metadata
+                            .get("trusted_root")
+                            .and_then(serde_json::Value::as_str)
+                            .map(PathBuf::from)
+                            .ok_or_else(|| {
+                                MoaError::ProviderError(
+                                    "local hand lease is missing trusted_root".to_string(),
+                                )
+                            })?,
                         extra_search_skips,
                         hard_deadline: hard_deadline_from_metadata(metadata),
+                        inventory_identity: Some(inventory_identity_from_metadata(metadata)?),
                     },
                 );
                 Ok(lease_handle.handle.clone())
@@ -899,11 +1137,24 @@ impl LocalHandProvider {
                             "docker hand lease {container_id} is missing sandbox_dir"
                         ))
                     })?;
-                let workspace_mount = metadata
-                    .get("workspace_mount")
+                let mutable_root = metadata
+                    .get("mutable_root")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or(DEFAULT_DOCKER_WORKSPACE)
+                    .ok_or_else(|| {
+                        MoaError::ProviderError(format!(
+                            "docker hand lease {container_id} is missing mutable_root"
+                        ))
+                    })?
                     .to_string();
+                let trusted_root = metadata
+                    .get("trusted_root")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        MoaError::ProviderError(format!(
+                            "docker hand lease {container_id} is missing trusted_root"
+                        ))
+                    })?;
                 let extra_search_skips = metadata
                     .get("extra_search_skips")
                     .and_then(serde_json::Value::as_array)
@@ -913,9 +1164,11 @@ impl LocalHandProvider {
                     container_id.clone(),
                     DockerSandbox {
                         sandbox_dir,
-                        workspace_mount,
+                        trusted_root,
+                        mutable_root,
                         extra_search_skips,
                         hard_deadline: hard_deadline_from_metadata(metadata),
+                        inventory_identity: Some(inventory_identity_from_metadata(metadata)?),
                     },
                 );
                 Ok(lease_handle.handle.clone())
@@ -1140,6 +1393,8 @@ impl HandProvider for LocalHandProvider {
 
     async fn provisioned_hands(
         &self,
+        _provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+        _provider_account_generation: u64,
         operation_id: HandProvisioningOperationId,
     ) -> Result<Vec<HandHandle>> {
         let sandbox_dir = self.sandbox_dir(operation_id);
@@ -1162,24 +1417,37 @@ impl HandProvider for LocalHandProvider {
             if let Some(marker) = marker.as_ref()
                 && marker.sandbox_tier == SandboxTier::Container
             {
-                let workspace_mount = marker
-                    .workspace_mount
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCKER_WORKSPACE));
+                let workspace_mount = marker.mutable_root.clone();
                 handles.push(
                     self.register_docker_sandbox(
                         container_id,
                         &sandbox_dir,
                         &workspace_mount,
                         marker.hard_deadline,
+                        &marker.inventory_identity,
                     )
-                    .await,
+                    .await?,
                 );
             } else {
                 handles.push(HandHandle::docker(container_id));
             }
         }
 
+        if let Some(marker) = marker.as_ref()
+            && marker.sandbox_tier != SandboxTier::Container
+        {
+            let extra_search_skips = file_search::load_moaignore(&sandbox_dir).await;
+            self.local_sandboxes.write().await.insert(
+                sandbox_dir.clone(),
+                LocalSandbox {
+                    execution_root: sandbox_dir.clone(),
+                    trusted_root: self.trusted_dir(operation_id),
+                    extra_search_skips,
+                    hard_deadline: marker.hard_deadline,
+                    inventory_identity: Some(marker.inventory_identity.clone()),
+                },
+            );
+        }
         if marker.is_some() || fs::try_exists(&sandbox_dir).await? {
             handles.push(HandHandle::local(sandbox_dir));
         }
@@ -1205,7 +1473,7 @@ impl HandProvider for LocalHandProvider {
         match handle {
             HandHandle::Local { sandbox_dir } => {
                 let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
-                self.install_files_at_root(&sandbox.execution_root, files)
+                self.replace_trusted_files_at_root(&sandbox.trusted_root, files)
                     .await
             }
             HandHandle::Docker { container_id } => {
@@ -1220,7 +1488,7 @@ impl HandProvider for LocalHandProvider {
                             "unknown docker sandbox handle: {container_id}"
                         ))
                     })?;
-                self.install_files_at_root(&sandbox.sandbox_dir, files)
+                self.replace_docker_trusted_files(container_id, &sandbox, files)
                     .await
             }
             _ => Err(MoaError::Unsupported(
@@ -1353,6 +1621,59 @@ impl HandProvider for LocalHandProvider {
             )),
         }
     }
+}
+
+fn confirmed_storage_result(
+    storage: Option<ProviderStorageRef>,
+) -> WorkspaceStorageOperationResult {
+    WorkspaceStorageOperationResult {
+        outcome: WorkspaceOperationOutcome::Confirmed,
+        confirmed_disposition: Some(WorkspaceConfirmedDisposition::ResourcePresent),
+        storage,
+        checkpoint_publication: None,
+        post_commit_state: None,
+    }
+}
+
+fn file_read_targets_trusted_skill(input: &str) -> Result<bool> {
+    let payload: serde_json::Value = serde_json::from_str(input)?;
+    let path = payload
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| MoaError::ValidationError("file_read requires a path".to_string()))?;
+    if let Some(path) = normalized_trusted_skill_path(path) {
+        validate_sandbox_file_path(&path)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn local_mutable_storage_id(
+    binding: &moa_core::types::sandbox_workspace::WorkspaceBinding,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"moa/local-mutable-workspace/v1");
+    digest.update(binding.tenant_id.0.as_bytes());
+    digest.update(binding.workspace_id.0.as_bytes());
+    digest.update(binding.provider_account_id.0.as_bytes());
+    digest.update(binding.provider_account_generation.to_be_bytes());
+    hex::encode(digest.finalize())
+}
+
+async fn promote_into_empty_compute_root(staging: &Path, root: &Path) -> Result<()> {
+    let mut entries = fs::read_dir(root).await?;
+    if entries.next_entry().await?.is_some() {
+        let _ = fs::remove_dir_all(staging).await;
+        return Err(MoaError::ValidationError(
+            "checkpoint restore requires a fresh empty compute data root".to_string(),
+        ));
+    }
+    fs::remove_dir(root).await?;
+    if let Err(error) = fs::rename(staging, root).await {
+        let _ = fs::create_dir(root).await;
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn string_vec_from_json_array(values: &[serde_json::Value]) -> Vec<String> {
@@ -1578,79 +1899,5 @@ pub fn classify_error(
             classify_tool_error(error, consecutive_timeouts)
         }
         _ => classify_tool_error(error, consecutive_timeouts),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use moa_core::{
-        error::MoaError, traits::HandProvider, types::hands::HandSpec,
-        types::hands::SandboxProfile, types::hands::SandboxTier,
-    };
-    use tempfile::tempdir;
-
-    use super::LocalHandProvider;
-
-    fn hand_spec(tier: SandboxTier) -> HandSpec {
-        crate::core::profile::test_support::hand_spec(tier, SandboxProfile::unrestricted())
-    }
-
-    #[tokio::test]
-    async fn local_container_tier_fails_when_docker_is_unavailable() {
-        // Pins: requested container isolation must not silently become host-local execution.
-        let dir = tempdir().expect("create tempdir");
-        let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
-            .await
-            .expect("create local hand provider");
-
-        let error = provider
-            .provision(hand_spec(SandboxTier::Container))
-            .await
-            .expect_err("container tier should fail when Docker is unavailable");
-
-        assert!(
-            matches!(error, MoaError::ProviderError(message) if message.contains("Docker is unavailable"))
-        );
-        assert_eq!(
-            std::fs::read_dir(dir.path())
-                .expect("read sandbox root")
-                .count(),
-            0,
-            "failed container provisioning should not leave a local fallback sandbox"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn local_sandbox_directory_is_owner_group_restricted() {
-        // Pins: local sandbox directories must not grant world access.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempdir().expect("create tempdir");
-        let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
-            .await
-            .expect("create local hand provider");
-
-        let handle = provider
-            .provision(hand_spec(SandboxTier::Local))
-            .await
-            .expect("provision local sandbox");
-        let sandbox_dir = match &handle {
-            moa_core::types::hands::HandHandle::Local { sandbox_dir } => sandbox_dir,
-            other => panic!("expected local hand, got {other:?}"),
-        };
-        let mode = std::fs::metadata(sandbox_dir)
-            .expect("read sandbox metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-
-        assert_eq!(mode, 0o770);
-
-        provider
-            .destroy(&handle)
-            .await
-            .expect("destroy local sandbox");
     }
 }

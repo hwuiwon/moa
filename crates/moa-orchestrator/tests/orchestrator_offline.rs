@@ -12,6 +12,10 @@ mod llm_gateway;
 mod memory_service;
 #[path = "orchestrator_offline/replay_determinism.rs"]
 mod replay_determinism;
+#[path = "orchestrator_offline/sandbox_workspace_management.rs"]
+mod sandbox_workspace_management;
+#[path = "orchestrator_offline/sandbox_workspace_rollout_offline.rs"]
+mod sandbox_workspace_rollout_offline;
 #[path = "orchestrator_offline/session_vo.rs"]
 mod session_vo;
 #[path = "orchestrator_offline/skills_service.rs"]

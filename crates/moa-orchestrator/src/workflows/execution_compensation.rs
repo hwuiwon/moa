@@ -810,6 +810,7 @@ async fn cleanup_compensation_hands(
         ctx.service_client::<ToolExecutorClient>()
             .release_execution_compensation_hands(Json::from(
                 ReleaseExecutionCompensationHandsRequest {
+                    tenant_id: request.tenant_id,
                     session_id: request.session_id,
                     run_uid: request.run_uid,
                     compensation_id: request.compensation_id,

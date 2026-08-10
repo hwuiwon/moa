@@ -13,6 +13,7 @@ mod event_queries;
 mod experience;
 mod guardrails;
 pub mod implementation;
+mod reporting;
 mod request;
 mod responses;
 mod segments;
@@ -30,7 +31,6 @@ use moa_brain::execution_planning::{
     route_execution,
 };
 use moa_brain::lineage::emit_generation_lineage;
-use moa_brain::pipeline::skills::SELECTED_SKILL_NAMES_METADATA_KEY;
 use moa_brain::segment_assessment::AssessmentOverride;
 use moa_core::{
     coordination_counters::CoordinationCounters,
@@ -41,8 +41,7 @@ use moa_core::{
     traits::LLMProvider,
     types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
     types::completion::{
-        CompletionRequest, CompletionResponse, CompletionStream, SharedCompletionRequest,
-        StopReason, TokenUsage,
+        CompletionRequest, CompletionStream, SharedCompletionRequest, StopReason, TokenUsage,
     },
     types::context::ContextMessage,
     types::execution_planning::{
@@ -64,14 +63,11 @@ use moa_execution::repository::{
 use moa_lineage_core::TurnId;
 use moa_observability::restate_observability::{
     emit_turn_coordination_summary, emit_turn_latency_summary, emit_turn_replay_summary,
-    llm_call_span, session_turn_span,
+    llm_call_span,
 };
 use moa_observability::{
     TurnLatencyCounters, record_session_error, record_turn_latency, record_turn_llm_call_duration,
     scope_turn_latency_counters,
-};
-use moa_wire::session_store::{
-    AppendEventRequest, RecordSegmentSkillActivationRequest, RecordSegmentTurnUsageRequest,
 };
 use moa_wire::turn::{
     RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress, TurnTrigger,
@@ -86,6 +82,10 @@ use self::guardrails::{
     OutputGuardrailOutcome, evaluate_input_guardrail, visible_response_after_output_guardrail,
 };
 use self::implementation::TurnExecutionImpl;
+use self::reporting::{
+    create_turn_span, emit_turn_cap_exceeded, maybe_append_turn_metrics, record_response,
+    record_selected_segment_skills, selected_skill_names, turn_cap_reached_message,
+};
 use self::request::{BuiltTurnRequest, build_request_inside_workflow};
 use self::responses::{
     append_brain_response_from_completion, append_clarification_response, has_user_message_origin,
@@ -101,7 +101,6 @@ use self::tools::{
     dispatch_response_tool_calls,
 };
 
-use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::{
     execution::ExecutionClient,
@@ -109,13 +108,12 @@ use crate::services::{
         BoundedCompletionRequest, LLMCompletionAction, LLMCompletionOwner, LLMGatewayClient,
         attach_completion_owner, completion_idempotency_key,
     },
-    session_store::RestateSessionStoreClient,
 };
 use crate::tool_invocation::governed::completion_tool_catalog_pin;
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
     ensure_delegation_tool_schemas, exclude_reserved_control_tool_schemas, response_tool_calls,
-    summarize_response_text, turn_outcome_for_response,
+    turn_outcome_for_response,
 };
 use crate::turn_driver::{
     model_loop as driver_model_loop, progress as driver_progress, segments as driver_segments,
@@ -1508,167 +1506,6 @@ fn request_requires_processing(trigger: TurnTrigger) -> bool {
     trigger != TurnTrigger::UserMessage
 }
 
-/// Whether per-turn `TurnMetrics` telemetry events should be persisted to the durable log.
-///
-/// Off by default (zero production log growth); enabled in eval/test via `MOA_PERSIST_TURN_METRICS`.
-/// Cached once — reading a process-stable env var is deterministic across Restate replay.
-fn persist_turn_metrics_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("MOA_PERSIST_TURN_METRICS")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
-    })
-}
-
-/// Appends a per-turn `TurnMetrics` telemetry event when persistence is enabled (else a no-op).
-///
-/// Snapshots must be taken before calling so the event does not count its own append.
-#[allow(clippy::too_many_arguments)]
-async fn maybe_append_turn_metrics(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    turn_id: &str,
-    actor: &str,
-    coordination: &moa_core::coordination_counters::CoordinationSnapshot,
-    replay: &moa_core::session_replay::TurnReplaySnapshot,
-    llm_ms: u64,
-    tool_ms: u64,
-    persist_ms: u64,
-) -> Result<(), HandlerError> {
-    if !persist_turn_metrics_enabled() {
-        return Ok(());
-    }
-    crate::restate_identity::replay_safe_request(
-        ctx.service_client::<RestateSessionStoreClient>()
-            .append_event(Json(AppendEventRequest {
-                session_id,
-                event: Event::TurnMetrics {
-                    turn_id: turn_id.to_string(),
-                    actor: actor.to_string(),
-                    session_vo_calls: coordination.session_vo_calls,
-                    worker_vo_calls: coordination.worker_vo_calls,
-                    vo_sends: coordination.vo_sends,
-                    durable_appends: coordination.durable_appends,
-                    get_events_calls: replay.get_events_calls,
-                    events_bytes: replay.events_bytes,
-                    llm_ms,
-                    tool_ms,
-                    persist_ms,
-                },
-                dedupe_key: Some(format!("turn_metrics:{turn_id}")),
-            })),
-    )
-    .call()
-    .await?;
-    Ok(())
-}
-
-async fn record_response(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    response: &CompletionResponse,
-    last_summary: &mut Option<String>,
-) -> Result<(), HandlerError> {
-    *last_summary = summarize_response_text(response);
-    let usage = response.token_usage();
-    let token_cost = (usage.total_input_tokens() + usage.output_tokens) as u64;
-    if token_cost > 0 {
-        crate::restate_identity::replay_safe_request(
-            ctx.service_client::<RestateSessionStoreClient>()
-                .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
-                    session_id,
-                    token_cost,
-                })),
-        )
-        .call()
-        .await?;
-    }
-    Ok(())
-}
-
-async fn record_selected_segment_skills(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    metadata: &std::collections::HashMap<String, serde_json::Value>,
-) -> Result<(), HandlerError> {
-    for skill_name in selected_skill_names(metadata) {
-        crate::restate_identity::replay_safe_request(
-            ctx.service_client::<RestateSessionStoreClient>()
-                .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
-                    session_id,
-                    skill_name,
-                })),
-        )
-        .call()
-        .await?;
-    }
-    Ok(())
-}
-
-fn selected_skill_names(
-    metadata: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<String> {
-    let mut names = metadata
-        .get(SELECTED_SKILL_NAMES_METADATA_KEY)
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// Builds the user-facing message shown when a turn stops at its model-loop cap.
-///
-/// `max_turns` is the cap actually in force, which is the higher delegation cap when
-/// the turn escalated after spawning a worker.
-fn turn_cap_reached_message(max_turns: usize) -> String {
-    format!(
-        "MOA stopped because this turn reached the model-loop turn cap ({max_turns}). Narrow the scope or ask MOA to continue."
-    )
-}
-
-async fn emit_turn_cap_exceeded(
-    appender: &TurnEventAppender,
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    max_turns: usize,
-) -> Result<(), HandlerError> {
-    record_session_error("turn_cap");
-    append_session_event(
-        appender,
-        ctx,
-        session_id,
-        Event::Error {
-            message: format!("model-loop turn cap reached ({max_turns}), stopping"),
-            recoverable: true,
-        },
-    )
-    .await
-    .map(|_| ())
-}
-
-fn create_turn_span(
-    meta: Option<&SessionMeta>,
-    prompt: Option<&str>,
-    turn_number: usize,
-    environment: Option<&str>,
-) -> tracing::Span {
-    let Some(meta) = meta else {
-        return tracing::info_span!(
-            "session_turn",
-            otel.name = %format!("MOA turn {turn_number}"),
-            moa.turn.number = turn_number as i64,
-        );
-    };
-    session_turn_span(meta, prompt, turn_number as i64, environment)
-}
-
 fn parse_session_id(raw: &str) -> Result<SessionId, HandlerError> {
     uuid::Uuid::parse_str(raw)
         .map(SessionId)
@@ -1679,26 +1516,6 @@ fn parse_turn_id(raw: &str) -> Result<TurnId, HandlerError> {
     uuid::Uuid::parse_str(raw)
         .map(TurnId)
         .map_err(|error| TerminalError::new(format!("invalid turn_id `{raw}`: {error}")).into())
-}
-
-async fn notify_session_of_outcome(
-    ctx: &WorkflowContext<'_>,
-    session_id: &str,
-    identity: &moa_core::traits::Identity,
-    outcome: &TurnOutcome,
-) -> Result<(), HandlerError> {
-    moa_core::coordination_counters::record_session_vo_call();
-    let request = ctx
-        .object_client::<SessionClient>(session_id.to_string())
-        .record_turn_outcome(Json::from(outcome.clone()));
-    with_identity_headers(request, identity).call().await?;
-    tracing::info!(
-        session_id = %session_id,
-        turn_id = %outcome.turn_id,
-        kind = ?outcome.kind,
-        "TurnExecution outcome notified to Session VO"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

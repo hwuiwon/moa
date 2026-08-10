@@ -23,13 +23,16 @@ prelude, and compatibility re-exports are forbidden. Domain-specific ports
 such as knowledge discovery and contact OTP delivery stay in their owning
 domain crates rather than moving into `moa-core`.
 
-- IDs: `TenantId`, `StoragePartitionId` for storage partition internals, `UserId`, `SessionId`
+- IDs: `TenantId`, `StoragePartitionId` for storage partition internals,
+  `UserId`, `SessionId`, `SandboxWorkspaceId`, `WorkspaceCheckpointId`,
+  `WorkspaceOperationId`, `ProviderAccountId`, and the core boundary-only
+  `ExecutionTaskScopeId`
 - Platform RLS context: `RlsContext`
 - Errors: `MoaError`, `Result`
 - Session and event DTOs: `SessionMeta`, `SessionStatus`, `Event`,
   `EventRecord`, `EventStream`, `EventRange`, `EventFilter`
 - Trait surfaces: `BrainOrchestrator`, `SessionStore`, `BlobStore`,
-  `BranchManager`, `HandProvider`, `LLMProvider`, `ChannelAdapter`,
+  `BranchManager`, `HandProvider`, `SandboxStorageProvider`, `LLMProvider`, `ChannelAdapter`,
   `BuiltInTool`, `ContextProcessor`, and the connection-scoped
   `CredentialVault`
 - Tool execution context: `ToolContext`
@@ -92,7 +95,7 @@ DTOs for the public HTTP edge and orchestrator HTTP surface live in `moa-wire`.
 | `moa-artifacts` | Immutable connector definition, reviewed HTTP action contract, schemas, named credential requirements, and policy floors |
 | `moa-connectors` | Generic tenant connection lifecycle/health/generation, repositories, constrained HTTP execution, installed action bindings, invocation ledgers, and Nango/Merge managed-parent claims |
 | `moa-security` | Production outbound destination admission and one-attempt DNS-pinned client construction |
-| `moa-hands` | Operator-owned deployment MCP catalog and ephemeral governed tool projection |
+| `moa-hands` | Operator-owned deployment MCP catalog, governed tool projection, and sandbox-workspace lifecycle/repositories/operation and capacity ledgers/checkpoint logic/provider adapters |
 | `moa-knowledge` | Nango/Merge knowledge projections, typed provider/materialization records, cursors/deletions, ACL capture, parsing, ingestion, and six capability-specific repository ports |
 | `moa-orchestrator` | Authentication/authorization context, Restate durability boundaries, runtime composition, and Nango/Merge provider workflow binding |
 
@@ -101,6 +104,16 @@ DTOs for the public HTTP edge and orchestrator HTTP surface live in `moa-wire`.
 `moa-connectors` nor `moa-artifacts`; the orchestrator composes the independently
 owned connection and linked-provider services. See
 [Connectors And Connections](24-connectors-and-connections.md).
+
+For persistent sandboxes, `moa-hands` is the domain owner: lifecycle and state
+transitions, tenant-scoped SQL repositories, one-writer/instance fencing,
+operation and capacity ledgers, checkpoint/archive behavior, reconciliation,
+and local/Daytona/E2B storage adapters. `moa-orchestrator` owns only the
+authentication/authorization checks, Restate `ctx.run` and service/workflow
+boundaries, and composition. Providers own active working bytes; the durable
+S3-compatible object store owns portable checkpoint bytes. Restate/session
+state never owns arbitrary sandbox files. See
+[Sandbox Workspaces](25-sandbox-workspaces.md).
 
 ### Placement Rules
 
@@ -121,6 +134,8 @@ owned connection and linked-provider services. See
 | Connector lifecycle, binding, catalog-revision, or invocation type | `moa-connectors` |
 | Knowledge provider record, ACL, cursor, or ingestion type | `moa-knowledge` |
 | Wire DTO for the HTTP surface | `moa-wire` |
+| Shared sandbox-workspace IDs, scopes, capability and lifecycle contracts | `moa-core` |
+| Sandbox-workspace lifecycle, SQL repositories, provider storage adapters, and portable checkpoint behavior | `moa-hands` |
 
 Anti-patterns:
 
@@ -559,3 +574,59 @@ Consequences:
   and self-hosted deployments still require no Auth0 dependency at runtime.
 - Extracting a provider package again requires an independently composed
   consumer or ownership boundary.
+
+### ADR 0010 - Separate Ephemeral Sandbox Compute From Durable Workspaces
+
+Status: Accepted.
+Date: 2026-08-08.
+
+Hand leases currently describe provider compute and cleanup, but a durable
+session does not preserve arbitrary files created inside that compute. Long-lived
+tenant filesystem state needs its own authorization, lifecycle, commit, storage,
+and purge boundary without turning a sandbox into the system of record.
+
+Decisions:
+
+1. `HandProvider` remains the ephemeral compute boundary. A tenant-owned
+   `SandboxWorkspace` is independently retained and deleted, and admits only a
+   typed `Worker` or `ExecutionTask` scope. There is no coordinator/session-only
+   workspace scope. Runtime sandbox dispatch rejects calls without one of those
+   typed owners before workspace reads or provider I/O.
+2. `moa-core` owns shared workspace identifiers, scope and lifecycle types,
+   effects, bindings, capabilities, and the provider-neutral storage trait.
+   `moa-hands` owns workspace state transitions, SQL repositories, one-writer
+   and instance fencing, operations/capacity, portable checkpoints,
+   reconciliation, and provider adapters. `moa-orchestrator` owns authz,
+   Restate boundaries, and composition.
+3. Postgres owns workspace ownership, lifecycle, fences, checkpoint metadata,
+   operation/grant/capacity ledgers, retention, and delete state. Provider
+   storage may own a mutable working copy; durable S3-compatible object storage
+   owns immutable portable checkpoint bytes. Restate/session state owns neither.
+4. Every workspace has at most one writable attachment. `writer_epoch` fences
+   the logical writer, `instance_generation` fences compute, and the hand-lease
+   generation remains distinct. External-operation intent precedes provider I/O,
+   and unknown outcomes stay reserved and reconciling.
+5. A successful mutating tool result is behind the seven-step commit barrier in
+   [Sandbox Workspaces](25-sandbox-workspaces.md). A mutable volume, paused
+   sandbox, or native provider snapshot is never the committed revision by
+   itself. Stateful provider fallback requires a verified portable checkpoint;
+   otherwise it fails closed and remains provider-pinned.
+6. Persistence is filesystem-only by default. Daytona uses a tenant-dedicated
+   volume with opaque workspace subpaths as working state, E2B uses portable
+   export plus kill/fresh-compute restore while pause, snapshots, and volumes
+   remain excluded, and local/Docker
+   uses isolated scratch. Trusted/runtime/credential/policy/process state stays
+   outside the checkpoint root and is rebuilt from current authority.
+7. Compute reaping never implies workspace deletion. Tenant purge fences access,
+   deletes and reconciles all provider/object/KMS resources, proves external
+   absence, and only then deletes ownership metadata and inverse authz tuples.
+
+Consequences:
+
+- Acknowledged sandbox mutations survive compute replacement only after a
+  verified portable checkpoint publishes.
+- Provider accelerators can improve resume latency without becoming recovery or
+  authorization authority.
+- Workspace schema, authorization, provider integration, and runtime admission
+  changes are a breaking migration; no compatibility scope preserves the unsafe
+  session-level lifecycle.

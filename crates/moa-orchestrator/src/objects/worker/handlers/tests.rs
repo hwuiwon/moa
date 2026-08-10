@@ -9,7 +9,7 @@ use crate::objects::worker::WorkerVoState;
 use moa_core::types::action_policy::{
     ActionReviewContinuation, ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
 };
-use moa_core::types::identifiers::{SessionId, ToolCallId};
+use moa_core::types::identifiers::{SessionId, TenantId, ToolCallId};
 use moa_core::types::security::SecurityCircuitOwner;
 use moa_core::types::worker::state::WorkerState;
 use uuid::Uuid;
@@ -217,13 +217,19 @@ fn cleanup_release_request_targets_owning_session_and_child() {
     // (where its hands were provisioned) and its own id, so cleanup frees exactly its
     // own scope; a child with no owning session issues no release.
     let session_id = SessionId::new();
-    let request = release_worker_hands_request(Some(session_id), "sub-7")
+    let tenant_id = TenantId::new();
+    let request = release_worker_hands_request(Some(tenant_id), Some(session_id), "sub-7")
         .expect("a child with a parent session releases its scoped hands");
+    assert_eq!(request.tenant_id, tenant_id);
     assert_eq!(request.session_id, session_id);
     assert_eq!(request.worker_id, "sub-7");
     assert!(
-        release_worker_hands_request(None, "sub-7").is_none(),
+        release_worker_hands_request(Some(tenant_id), None, "sub-7").is_none(),
         "a child with no owning session issues no hand release"
+    );
+    assert!(
+        release_worker_hands_request(None, Some(session_id), "sub-7").is_none(),
+        "a child with no verified tenant issues no hand release"
     );
 }
 

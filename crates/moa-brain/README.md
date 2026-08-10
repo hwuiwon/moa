@@ -29,6 +29,5 @@ single agent turn end to end. Retrieval and query planning live in
 
 ## Features
 
-- `eval-harness` — enables the `harness` module, the `chat_harness` /
-  `replay_corpus` examples, and the harness-driven test binaries; pulls in
-  `moa-hands` and `moa-memory-ingest`.
+- `eval-harness` — enables the `harness` module and its harness-driven test
+  binaries; pulls in `moa-hands` and `moa-memory-ingest`.

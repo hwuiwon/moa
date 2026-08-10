@@ -132,22 +132,22 @@ async fn start_contacts_upstream(conflicting_id: Option<&str>) -> ContactsUpstre
 ///
 /// `docker-compose` publishes RustFS on `MOA_RUSTFS_PORT` because 9000 is a popular port
 /// (minio, k3d node ports), so a developer whose host already uses 9000 maps it elsewhere.
-/// The lane resolves the same `MOA_SESSION_ATTACHMENT_ENDPOINT` the deployment overlay
+/// The lane resolves the same `MOA_OBJECT_STORE_ENDPOINT` the deployment overlay
 /// uses, then that published port, before falling back to the documented default.
-fn local_attachment_storage() -> SessionAttachmentStorageConfig {
-    let mut attachments = SessionAttachmentStorageConfig::local_rustfs();
-    if let Some(endpoint) = std::env::var("MOA_SESSION_ATTACHMENT_ENDPOINT")
+fn configure_local_attachment_storage(config: &mut MoaConfig) {
+    config.session.attachments = SessionAttachmentStorageConfig::default();
+    config.object_store = moa_config::ObjectStoreConfig::local_rustfs();
+    if let Some(endpoint) = std::env::var("MOA_OBJECT_STORE_ENDPOINT")
         .ok()
         .filter(|endpoint| !endpoint.trim().is_empty())
     {
-        attachments.endpoint = Some(endpoint);
+        config.object_store.endpoint = Some(endpoint);
     } else if let Some(port) = std::env::var("MOA_RUSTFS_PORT")
         .ok()
         .filter(|port| !port.trim().is_empty())
     {
-        attachments.endpoint = Some(format!("http://127.0.0.1:{}", port.trim()));
+        config.object_store.endpoint = Some(format!("http://127.0.0.1:{}", port.trim()));
     }
-    attachments
 }
 
 /// Provisions an isolated Postgres schema whose store writes to local RustFS.
@@ -164,7 +164,7 @@ async fn create_attachment_test_store() -> (PostgresSessionStore, String, String
     let mut config = MoaConfig::default();
     config.database.url = database_url.clone();
     config.database.schema = Some(schema_name.clone());
-    config.session.attachments = local_attachment_storage();
+    configure_local_attachment_storage(&mut config);
     let store = PostgresSessionStore::from_existing_pool_with_config(&config, pool)
         .await
         .expect("create attachment test store");

@@ -195,6 +195,7 @@ metrics-exporter-otel = "0.3"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 moka = { version = "0.12", features = ["future"] }
 object_store = { version = "0.11", features = ["aws", "gcp"] }
+quick-xml = "0.37"
 opentelemetry = "0.31"
 opentelemetry-appender-tracing = { version = "0.31.1", features = ["experimental_use_tracing_span_context"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "logs", "grpc-tonic", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
@@ -217,6 +218,10 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "stream",
 ] }
+reqwest-object-store = { package = "reqwest", version = "0.12", default-features = false, features = [
+    "http2",
+    "rustls-tls-native-roots",
+] }
 redis = { version = "0.32", default-features = false, features = [
     "script",
     "tokio-comp",
@@ -235,6 +240,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
+zstd = "0.13"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-metrics = "0.4"

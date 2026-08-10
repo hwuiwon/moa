@@ -170,6 +170,7 @@ operator knob for it.
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_DATABASE_ADMIN_URL` | `database.admin_url` | _none_ | Direct/admin database URL used by explicit migration and maintenance commands such as `moa-orchestrator migrate`; normal runtime startup never reads it |
+| `MOA_DATABASE_MAINTENANCE_URL` | `database.maintenance_url` | _none_ | Dedicated login for cross-tenant sandbox workspace maintenance; maintenance/admit require membership in `moa_workspace_maintenance` and reject runtime/admin credential reuse |
 | `MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS` | `database.background_max_connections` | 2 | Maximum pool size reserved for process-owned background workers, separate from the foreground Restate handler pool |
 | `MOA_DATABASE_CONNECT_TIMEOUT_SECONDS` | `database.connect_timeout_seconds` | 10 | Pool acquire timeout, in seconds |
 | `MOA_DATABASE_MAX_CONNECTIONS` | `database.max_connections` | 20 | Maximum pool size for the shared Postgres client |
@@ -242,22 +243,83 @@ operator knob for it.
 | `MOA_UNSTRUCTURED_CHUNKING_STRATEGY` | `knowledge.unstructured.chunking_strategy` | by_title | Unstructured chunking strategy |
 | `MOA_UNSTRUCTURED_STRATEGY` | `knowledge.unstructured.strategy` | auto | Unstructured partition strategy |
 
+### `object_store`
+
+Shared object-store transport and credentials are consumed by both session
+attachments and encrypted portable sandbox checkpoints. Buckets and prefixes
+remain owner-specific below; do not configure a second credential set for one
+of those owners.
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_OBJECT_STORE_ACCESS_KEY_ID` | `object_store.access_key_id` | _none_ | Optional explicit S3 access key **(secret)** |
+| `MOA_OBJECT_STORE_ALLOW_HTTP` | `object_store.allow_http` | false | Allows HTTP only for loopback or in-cluster RustFS |
+| `MOA_OBJECT_STORE_BACKEND` | `object_store.backend` | s3 | Shared object-store backend (`s3` or `gcs`) |
+| `MOA_OBJECT_STORE_CREDENTIAL_MODE` | `object_store.credential_mode` | ambient | Credential source (`ambient`, `static`, or `workload_identity`). Cloud sandbox-workspace maintenance requires `workload_identity`; that mode rejects static key/file fields. |
+| `MOA_OBJECT_STORE_ENDPOINT` | `object_store.endpoint` | _none_ | Optional S3-compatible endpoint |
+| `MOA_OBJECT_STORE_GCP_APPLICATION_CREDENTIALS_PATH` | `object_store.gcp_application_credentials_path` | _none_ | Optional GCS application credentials file path |
+| `MOA_OBJECT_STORE_GCP_SERVICE_ACCOUNT_KEY` | `object_store.gcp_service_account_key` | _none_ | Optional inline GCS service-account JSON **(secret)** |
+| `MOA_OBJECT_STORE_GCP_SERVICE_ACCOUNT_PATH` | `object_store.gcp_service_account_path` | _none_ | Optional GCS service-account file path |
+| `MOA_OBJECT_STORE_REGION` | `object_store.region` | us-east-1 | AWS/S3-compatible region |
+| `MOA_OBJECT_STORE_SECRET_ACCESS_KEY` | `object_store.secret_access_key` | _none_ | Optional explicit S3 secret key **(secret)** |
+| `MOA_OBJECT_STORE_VIRTUAL_HOSTED_STYLE` | `object_store.virtual_hosted_style` | false | Uses virtual-hosted-style S3 requests when true |
+
+### `sandbox_checkpoints`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_SANDBOX_CHECKPOINT_ENABLED` | `sandbox_checkpoints.enabled` | true | Enables encrypted portable workspace checkpoints; serving startup then requires durable KMS |
+| `MOA_SANDBOX_CHECKPOINT_BUCKET` | `sandbox_checkpoints.storage.bucket` | moa-workspace-checkpoints | Separate bucket for immutable checkpoint chunks and manifests |
+| `MOA_SANDBOX_CHECKPOINT_PREFIX` | `sandbox_checkpoints.storage.prefix` | workspace-checkpoints | Reserved opaque checkpoint key namespace |
+| `MOA_SANDBOX_CHECKPOINT_BUCKET_VERSIONING` | `sandbox_checkpoints.bucket_versioning` | unversioned_required | Requires the provider to report an unversioned bucket; unknown, enabled, or suspended versioning fails readiness and purge |
+| `MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_MAXIMUM_AGE_SECONDS` | `sandbox_checkpoints.versioning_observation.maximum_age_seconds` | 60 | Maximum age of the authenticated bucket-versioning observation accepted by readiness |
+| `MOA_SANDBOX_CHECKPOINT_VERSIONING_OBSERVATION_TIMEOUT_SECONDS` | `sandbox_checkpoints.versioning_observation.timeout_seconds` | 10 | Deadline for the authenticated bucket-versioning control-plane request |
+| `MOA_SANDBOX_CHECKPOINT_RETAINED_ANCESTOR_COUNT` | `sandbox_checkpoints.retention.retained_ancestor_count` | 3 | Committed checkpoint ancestors retained behind the current head |
+| `MOA_SANDBOX_CHECKPOINT_MINIMUM_AGE_SECONDS` | `sandbox_checkpoints.retention.minimum_age_seconds` | 86400 | Minimum checkpoint age before retention GC may claim it |
+| `MOA_SANDBOX_CHECKPOINT_GC_BATCH_SIZE` | `sandbox_checkpoints.retention.gc_batch_size` | 100 | Maximum checkpoint tombstones claimed in one transaction |
+| `MOA_SANDBOX_CHECKPOINT_CLAIM_TTL_SECONDS` | `sandbox_checkpoints.retention.claim_ttl_seconds` | 300 | Durable checkpoint-GC claim lease duration |
+| `MOA_SANDBOX_CHECKPOINT_RETRY_BACKOFF_SECONDS` | `sandbox_checkpoints.retention.retry_backoff_seconds` | 60 | Retry delay after partial or failed object deletion |
+| `MOA_SANDBOX_CHECKPOINT_DELETION_MAX_OBJECTS` | `sandbox_checkpoints.deletion.max_objects` | 200000 | Fail-closed object-count bound for one checkpoint prefix |
+| `MOA_SANDBOX_CHECKPOINT_DELETION_MAX_BYTES` | `sandbox_checkpoints.deletion.max_bytes` | 17179869184 | Fail-closed stored-byte bound for one checkpoint prefix |
+| `MOA_SANDBOX_CHECKPOINT_ABSENCE_WINDOW_SECONDS` | `sandbox_checkpoints.deletion.consistency_window_seconds` | 1 | Minimum delay between the two empty inventories proving prefix absence |
+| `MOA_SANDBOX_CHECKPOINT_MAX_ENTRIES` | `sandbox_checkpoints.max_entries` | 100000 | Maximum filesystem entries per checkpoint |
+| `MOA_SANDBOX_CHECKPOINT_MAX_PATH_DEPTH` | `sandbox_checkpoints.max_path_depth` | 64 | Maximum normalized path depth |
+| `MOA_SANDBOX_CHECKPOINT_MAX_FILE_BYTES` | `sandbox_checkpoints.max_file_bytes` | 536870912 | Maximum logical bytes in one regular file |
+| `MOA_SANDBOX_CHECKPOINT_MAX_TOTAL_BYTES` | `sandbox_checkpoints.max_total_bytes` | 4294967296 | Maximum logical bytes in one checkpoint |
+| `MOA_SANDBOX_CHECKPOINT_MAX_CHUNK_BYTES` | `sandbox_checkpoints.max_chunk_bytes` | 4194304 | Maximum decompressed bytes per independently encrypted chunk |
+| `MOA_SANDBOX_CHECKPOINT_MAX_COMPRESSED_CHUNK_BYTES` | `sandbox_checkpoints.max_compressed_chunk_bytes` | 8388608 | Maximum compressed bytes accepted for one chunk |
+
+The checkpoint bucket is intentionally separate and must never have object
+versioning enabled. Local RustFS initialization verifies the provider reports
+`Not configured`; a bucket that was ever enabled and is now only suspended is
+not equivalent because historical versions remain. Production readiness must
+make the same provider control-plane check before serving checkpoint traffic.
+
+### `sandbox_workspaces`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_SANDBOX_WORKSPACE_MODE` | `sandbox_workspaces.mode` | disabled | Rollout state: `disabled` constructs no workspace mutation owners; `maintenance` runs cleanup/reconciliation but rejects new work; `admit` additionally permits the exact canary route |
+| `MOA_SANDBOX_WORKSPACE_OPERATION_RETENTION_SECONDS` | `sandbox_workspaces.operation_retention_seconds` | 604800 | Server-side durable operation/replay retention; must cover the maximum operation window plus the reconciliation claim TTL |
+| `MOA_SANDBOX_WORKSPACE_MAXIMUM_OPERATION_SECONDS` | `sandbox_workspaces.maximum_operation_seconds` | 86400 | Maximum in-flight provider-operation window before reconciliation owns recovery |
+| `MOA_SANDBOX_WORKSPACE_RECONCILIATION_CLAIM_TTL_SECONDS` | `sandbox_workspaces.reconciliation_claim_ttl_seconds` | 60 | Stale ambiguous-operation claim lease; must exceed the reaper interval and remains separate from checkpoint-GC claims |
+| `MOA_SANDBOX_WORKSPACE_REAPER_HEARTBEAT_MAXIMUM_AGE_SECONDS` | `sandbox_workspaces.reaper_heartbeat_maximum_age_seconds` | 60 | Maximum supervised workspace-reaper heartbeat age accepted by readiness |
+| `MOA_SANDBOX_WORKSPACE_CANARY_JSON` | `sandbox_workspaces.canary` | _none_ | Exact deployment-owned provider account/generation/isolation cell plus tenant UUID allowlist; required in `admit` |
+| `MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON` | `sandbox_workspaces.quota_routes` | [] | Explicit positive workspace, active-hand, checkpoint-count, and logical-byte limits for each allowlisted tenant/account/generation route |
+
+`maintenance` and `admit` require exact OpenFGA v7 with bootstrap enabled,
+durable Postgres KMS, portable checkpoints, complete provider-account mappings
+with immutable project fingerprints, and a verified checkpoint bucket. Cloud
+deployments additionally require object-store workload identity. Runtime
+readiness then proves reachability, the observed versioning posture, provider
+capabilities, database bootstrap, and a fresh supervised reaper heartbeat.
+
 ### `session`
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID` | `session.attachments.access_key_id` | _none_ | Optional explicit S3 access key |
-| `MOA_SESSION_ATTACHMENT_ALLOW_HTTP` | `session.attachments.allow_http` | false | Allows HTTP endpoints for local S3-compatible development |
-| `MOA_SESSION_ATTACHMENT_BACKEND` | `session.attachments.backend` | s3 | Object store backend |
-| `MOA_SESSION_ATTACHMENT_BUCKET` | `session.attachments.bucket` | moa-session-attachments | Bucket that stores attachment objects |
-| `MOA_SESSION_ATTACHMENT_ENDPOINT` | `session.attachments.endpoint` | _none_ | Optional S3-compatible endpoint |
-| `MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH` | `session.attachments.gcp_application_credentials_path` | _none_ | Optional GCS application credentials file path |
-| `MOA_SESSION_ATTACHMENT_GCP_SERVICE_ACCOUNT_KEY` | `session.attachments.gcp_service_account_key` | _none_ | Optional inline GCS service account JSON **(secret)** |
-| `MOA_SESSION_ATTACHMENT_GCP_SERVICE_ACCOUNT_PATH` | `session.attachments.gcp_service_account_path` | _none_ | Optional GCS service account file path |
-| `MOA_SESSION_ATTACHMENT_PREFIX` | `session.attachments.prefix` | session-attachments | Prefix used for all MOA attachment objects in the bucket |
-| `MOA_SESSION_ATTACHMENT_REGION` | `session.attachments.region` | us-east-1 | AWS/S3-compatible region |
-| `MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY` | `session.attachments.secret_access_key` | _none_ | Optional explicit S3 secret key **(secret)** |
-| `MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE` | `session.attachments.virtual_hosted_style` | false | Uses virtual-hosted-style S3 requests when true |
+| `MOA_SESSION_ATTACHMENT_BUCKET` | `session.attachments.storage.bucket` | moa-session-attachments | Bucket that stores attachment objects |
+| `MOA_SESSION_ATTACHMENT_PREFIX` | `session.attachments.storage.prefix` | session-attachments | Prefix used for all attachment objects |
 | `MOA_SESSION_BLOB_BACKEND` | `session.blob_backend` | postgres | Backend used for claim-check blob payloads |
 | `MOA_SESSION_BLOB_DIR` | `session.blob_dir` | _none_ | Root directory for local blob storage |
 | `MOA_SESSION_BLOB_THRESHOLD_BYTES` | `session.blob_threshold_bytes` | 65536 | Offload threshold in bytes for large event payload strings |
@@ -354,6 +416,7 @@ operator knob for it.
 |---|---|---|---|
 | `MOA_AUTHZ_ENGINE` | `authz.engine` | openfga | Authorization engine selection |
 | `MOA_AUTHZ_OPENFGA_MODEL_ID` | `authz.openfga.model_id` | _empty_ | OpenFGA authorization model ID |
+| `MOA_AUTHZ_OPENFGA_MODEL_VERSION` | `authz.openfga.model_version` | 0 for a newly seeded optional section | Logical model version at that ID; sandbox workspace maintenance/admission requires exactly 7 |
 | `MOA_AUTHZ_OPENFGA_PRESHARED_KEY` | `authz.openfga.preshared_key` | _empty_ | Preshared key configured in OpenFGA **(secret)** |
 | `MOA_AUTHZ_OPENFGA_STORE_ID` | `authz.openfga.store_id` | _empty_ | OpenFGA store ID |
 | `MOA_AUTHZ_OPENFGA_TIMEOUT_MS` | `authz.openfga.timeout_ms` | 2000 | Per-request HTTP timeout in milliseconds |
@@ -455,16 +518,17 @@ observability enable flag.
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_CLOUD_HANDS_DAYTONA_API_KEY` | `cloud.hands.daytona_api_key` | _none_ | Daytona API key loaded from runtime configuration **(secret)** |
-| `MOA_CLOUD_HANDS_DAYTONA_API_URL` | `cloud.hands.daytona_api_url` | _none_ | Optional Daytona API base URL override |
-| `MOA_CLOUD_HANDS_DAYTONA_DEFAULT_IMAGE` | `cloud.hands.daytona_default_image` | _none_ | Optional default image for Daytona sandboxes |
 | `MOA_CLOUD_HANDS_DEFAULT_PROVIDER` | `cloud.hands.default_provider` | _none_ | Default hand provider |
-| `MOA_CLOUD_HANDS_E2B_API_KEY` | `cloud.hands.e2b_api_key` | _none_ | E2B API key loaded from runtime configuration **(secret)** |
-| `MOA_CLOUD_HANDS_E2B_API_URL` | `cloud.hands.e2b_api_url` | _none_ | Optional E2B API base URL override |
-| `MOA_CLOUD_HANDS_E2B_DOMAIN` | `cloud.hands.e2b_domain` | _none_ | Optional E2B domain override |
-| `MOA_CLOUD_HANDS_E2B_TEMPLATE` | `cloud.hands.e2b_template` | _none_ | Optional default E2B template identifier |
 | `MOA_CLOUD_HANDS_FALLBACK_PROVIDERS` | `cloud.hands.fallback_providers` | [] | Ordered fallback cloud providers attempted when the selected cloud hand is unavailable |
+| `MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON` | `cloud.hands.provider_accounts` | [] | JSON array of non-secret persisted provider-account mappings. Each entry fixes the account UUID/generation, provider, isolation cell, exact HTTPS origins, optional project fingerprint/default runtime, and a typed absolute credential-file selector with required owner UID. Secret values are never accepted here. |
 | `MOA_CLOUD_MEMORY_DIR` | `cloud.memory_dir` | _none_ | Optional alternate memory root for cloud deployments |
+
+Cloud sandbox provider keys are deployment-owned files, not tenant connection
+credentials and not environment values. The runtime rejects symlinks, missing
+or non-regular files, wrong ownership, group/world permission bits, empty
+material, unmapped accounts, generation mismatches, and caller-selected paths.
+It reads the selected file for every provider attempt, so atomic projected-file
+rotation is observed without restarting the orchestrator.
 
 ### `permissions`
 
@@ -571,6 +635,7 @@ observability enable flag.
 |---|---|---|---|
 | `MOA_LOCAL_DOCKER_ENABLED` | `local.docker_enabled` | true | Whether local Docker hands are enabled |
 | `MOA_LOCAL_MEMORY_DIR` | `local.memory_dir` | ~/.moa/memory | Memory root directory |
+| `MOA_LOCAL_PROVIDER_ACCOUNT_JSON` | `local.provider_account` | unset | Exact durable provider-account id, generation, and isolation cell for the deterministic local lane |
 | `MOA_LOCAL_SANDBOX_DIR` | `local.sandbox_dir` | ~/.moa/sandbox | Sandbox working directory |
 ## Special (non-overlay) variables
 
@@ -609,7 +674,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | Variable | Consumed by |
 |---|---|
 | `MOA_CONFIG_ENV_STRICT` | This check's own strictness switch (warn vs fail) |
-| `MOA_SKIP_FGA` | Skips OpenFGA bootstrap in local/dev startup |
+| `MOA_SKIP_FGA` | Skips OpenFGA bootstrap only while `sandbox_workspaces.mode=disabled`; maintenance/admit fail startup if it is set |
 | `MOA_ORCHESTRATOR_BIN` / `MOA_ORCHESTRATOR_FEATURES` | e2e harness: orchestrator binary path / cargo features |
 | `MOA_MEMORY_AUTO_BOOTSTRAP` | Auto-run memory schema bootstrap on startup |
 | `MOA_MEMORY_EXTRACTION_MODEL` / `_TIMEOUT_MS` / `_MAX_FACTS_PER_CHUNK` | Memory fact-extraction overrides read directly |

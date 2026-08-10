@@ -135,9 +135,9 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:-moa}-rustfs
     restart: unless-stopped
     environment:
-      RUSTFS_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
-      RUSTFS_SECRET_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
-      RUSTFS_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
+      RUSTFS_ACCESS_KEY: ${MOA_OBJECT_STORE_ACCESS_KEY_ID:-moaadmin}
+      RUSTFS_SECRET_KEY: ${MOA_OBJECT_STORE_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      RUSTFS_REGION: ${MOA_OBJECT_STORE_REGION:-us-east-1}
       RUSTFS_ADDRESS: 0.0.0.0:9000
       RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
       RUSTFS_CONSOLE_ENABLE: "true"
@@ -149,6 +149,12 @@ services:
       - "${MOA_RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
       - moa-rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
   rustfs-init:
     # Pinned by digest: `:latest` drifted on CI (fresh pull) to a revision whose
@@ -160,20 +166,23 @@ services:
     restart: "no"
     depends_on:
       rustfs:
-        condition: service_started
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        until rc alias set --quiet --bucket-lookup path --region "$${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}" rustfs http://rustfs:9000 "$${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}" "$${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}"; do
+        until rc alias set --quiet --bucket-lookup path --region "$${MOA_OBJECT_STORE_REGION:-us-east-1}" rustfs http://rustfs:9000 "$${MOA_OBJECT_STORE_ACCESS_KEY_ID:-moaadmin}" "$${MOA_OBJECT_STORE_SECRET_ACCESS_KEY:-moa-local-dev-secret}"; do
           sleep 1
         done
-        rc bucket create --ignore-existing --region "$${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}" "rustfs/$${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}"
+        rc bucket create --ignore-existing --region "$${MOA_OBJECT_STORE_REGION:-us-east-1}" "rustfs/$${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}"
+        rc bucket create --ignore-existing --region "$${MOA_OBJECT_STORE_REGION:-us-east-1}" "rustfs/$${MOA_SANDBOX_CHECKPOINT_BUCKET:-moa-workspace-checkpoints}"
+        rc bucket version info --json "rustfs/$${MOA_SANDBOX_CHECKPOINT_BUCKET:-moa-workspace-checkpoints}" | grep -Eq '"enabled"[[:space:]]*:[[:space:]]*null'
     environment:
-      MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
-      MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      MOA_OBJECT_STORE_ACCESS_KEY_ID: ${MOA_OBJECT_STORE_ACCESS_KEY_ID:-moaadmin}
+      MOA_OBJECT_STORE_SECRET_ACCESS_KEY: ${MOA_OBJECT_STORE_SECRET_ACCESS_KEY:-moa-local-dev-secret}
       MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
-      MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
+      MOA_SANDBOX_CHECKPOINT_BUCKET: ${MOA_SANDBOX_CHECKPOINT_BUCKET:-moa-workspace-checkpoints}
+      MOA_OBJECT_STORE_REGION: ${MOA_OBJECT_STORE_REGION:-us-east-1}
 
   restate:
     image: docker.restate.dev/restatedev/restate:1.7.2
@@ -292,13 +301,17 @@ services:
       MOA_AUTHZ_OPENFGA_PRESHARED_KEY: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
       MOA_AUTHZ_OPENFGA_STORE_ID: ${MOA_AUTHZ_OPENFGA_STORE_ID:-}
       MOA_AUTHZ_OPENFGA_MODEL_ID: ${MOA_AUTHZ_OPENFGA_MODEL_ID:-}
-      MOA_SESSION_ATTACHMENT_ENDPOINT: http://rustfs:9000
+      MOA_OBJECT_STORE_ENDPOINT: http://rustfs:9000
+      MOA_OBJECT_STORE_CREDENTIAL_MODE: static
       MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
-      MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
-      MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
-      MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
-      MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
-      MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
+      MOA_OBJECT_STORE_REGION: ${MOA_OBJECT_STORE_REGION:-us-east-1}
+      MOA_OBJECT_STORE_ACCESS_KEY_ID: ${MOA_OBJECT_STORE_ACCESS_KEY_ID:-moaadmin}
+      MOA_OBJECT_STORE_SECRET_ACCESS_KEY: ${MOA_OBJECT_STORE_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      MOA_OBJECT_STORE_ALLOW_HTTP: "true"
+      MOA_OBJECT_STORE_VIRTUAL_HOSTED_STYLE: "false"
+      MOA_SANDBOX_CHECKPOINT_BUCKET: ${MOA_SANDBOX_CHECKPOINT_BUCKET:-moa-workspace-checkpoints}
+      MOA_SANDBOX_CHECKPOINT_PREFIX: ${MOA_SANDBOX_CHECKPOINT_PREFIX:-workspace-checkpoints}
+      MOA_SANDBOX_WORKSPACE_MODE: disabled
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       # Development-only: the local security profile permits host-local hands.
       # Production deployments select the fail-closed cloud profile instead.
@@ -362,13 +375,13 @@ services:
       MOA_AUTHZ_OPENFGA_PRESHARED_KEY: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
       MOA_AUTHZ_OPENFGA_STORE_ID: ${MOA_AUTHZ_OPENFGA_STORE_ID:-}
       MOA_AUTHZ_OPENFGA_MODEL_ID: ${MOA_AUTHZ_OPENFGA_MODEL_ID:-}
-      MOA_SESSION_ATTACHMENT_ENDPOINT: http://rustfs:9000
+      MOA_OBJECT_STORE_ENDPOINT: http://rustfs:9000
       MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
-      MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
-      MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
-      MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
-      MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
-      MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
+      MOA_OBJECT_STORE_REGION: ${MOA_OBJECT_STORE_REGION:-us-east-1}
+      MOA_OBJECT_STORE_ACCESS_KEY_ID: ${MOA_OBJECT_STORE_ACCESS_KEY_ID:-moaadmin}
+      MOA_OBJECT_STORE_SECRET_ACCESS_KEY: ${MOA_OBJECT_STORE_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      MOA_OBJECT_STORE_ALLOW_HTTP: "true"
+      MOA_OBJECT_STORE_VIRTUAL_HOSTED_STYLE: "false"
       MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}
       MOA_CLICKHOUSE_USER: ${MOA_CLICKHOUSE_USER:-}
       MOA_CLICKHOUSE_PASSWORD: ${MOA_CLICKHOUSE_PASSWORD:-}

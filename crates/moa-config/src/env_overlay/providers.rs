@@ -7,13 +7,7 @@ pub(super) fn optional_section_seed(path: &[&str]) -> Option<Value> {
         ["cloud", "hands"] => Some(json!({
             "default_provider": null,
             "fallback_providers": [],
-            "daytona_api_key": null,
-            "daytona_api_url": null,
-            "daytona_default_image": null,
-            "e2b_api_key": null,
-            "e2b_api_url": null,
-            "e2b_domain": null,
-            "e2b_template": null,
+            "provider_accounts": [],
         })),
         _ => None,
     }
@@ -99,6 +93,9 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         }
         "providers_pacing_retry_budget_percent" => &["providers", "pacing", "retry_budget_percent"],
         "providers_pacing_retry_budget_floor" => &["providers", "pacing", "retry_budget_floor"],
+        "daytona_storage_consistency_window_seconds" => {
+            &["cloud", "daytona_storage", "consistency_window_seconds"]
+        }
         _ => return None,
     };
     Some(strings(path))
@@ -149,14 +146,7 @@ pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
     validate_url("MOA_LLAMAPARSE_API_URL", &overlay.llamaparse_api_url)?;
     validate_url("MOA_UNSTRUCTURED_API_URL", &overlay.unstructured_api_url)?;
     validate_url("MOA_REDUCTO_API_URL", &overlay.reducto_api_url)?;
-    validate_url(
-        "MOA_CLOUD_HANDS_DAYTONA_API_URL",
-        &overlay.cloud_hands_daytona_api_url,
-    )?;
-    validate_url(
-        "MOA_CLOUD_HANDS_E2B_API_URL",
-        &overlay.cloud_hands_e2b_api_url,
-    )
+    Ok(())
 }
 
 #[cfg(test)]
@@ -452,5 +442,42 @@ mod tests {
         let hands = config.cloud.hands.expect("cloud hands config");
         assert_eq!(hands.default_provider.as_deref(), Some("daytona"));
         assert_eq!(hands.fallback_providers, vec!["e2b".to_string()]);
+    }
+
+    #[test]
+    fn daytona_storage_env_configures_account_cells_and_headroom() {
+        // Pins: Kubernetes can author multiple Daytona isolation cells without
+        // exposing credentials or weakening the documented 100-volume ceiling.
+        let account_id = "00000000-0000-0000-0000-00000000002c";
+        let accounts = serde_json::json!([{
+            "provider_account_id": account_id,
+            "security_class": "standard",
+            "volume_ceiling": 90,
+            "admission_headroom": 5
+        }]);
+        let accounts_json = accounts.to_string();
+        let overlay = EnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_DAYTONA_STORAGE_ACCOUNTS_JSON", accounts_json.as_str()),
+            ("MOA_DAYTONA_STORAGE_CONSISTENCY_WINDOW_SECONDS", "3"),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+        overlay.apply_to(&mut config).expect("overlay should apply");
+
+        config
+            .cloud
+            .daytona_storage
+            .validate()
+            .expect("valid Daytona storage config");
+        assert_eq!(config.cloud.daytona_storage.accounts.len(), 1);
+        assert_eq!(
+            config.cloud.daytona_storage.accounts[0]
+                .provider_account_id
+                .to_string(),
+            account_id
+        );
+        assert_eq!(config.cloud.daytona_storage.accounts[0].volume_ceiling, 90);
+        assert_eq!(config.cloud.daytona_storage.consistency_window_seconds, 3);
     }
 }

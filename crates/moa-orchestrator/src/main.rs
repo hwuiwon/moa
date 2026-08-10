@@ -27,9 +27,11 @@ use moa_orchestrator::{
         endpoint::build_endpoint,
         jobs::{
             start_action_review_reaper, start_authz_challenge_reaper_if_configured,
-            start_hand_lease_reaper, start_mcp_catalog_refresh,
+            start_checkpoint_bucket_versioning_refresh, start_hand_lease_reaper,
+            start_mcp_catalog_refresh, start_workspace_reaper,
         },
         kms::KmsRuntime,
+        sandbox_workspace_rollout::validate_startup_state as validate_sandbox_workspace_rollout,
     },
 };
 use restate_sdk::prelude::*;
@@ -94,6 +96,9 @@ enum Command {
         /// Steady-state handler URI to register after cutover without an Operator.
         #[arg(long)]
         runtime_deployment_uri: Option<String>,
+        /// Sandbox-workspace rollout mode whose service binding must register.
+        #[arg(long, default_value = "disabled", value_parser = parse_sandbox_workspace_mode)]
+        sandbox_workspace_mode: moa_config::SandboxWorkspaceMode,
     },
     /// Activate the required root-key generation and rewrap live KEKs in batches.
     KmsRewrap {
@@ -104,6 +109,15 @@ enum Command {
         #[arg(long)]
         retire_generation: Option<String>,
     },
+}
+
+fn parse_sandbox_workspace_mode(value: &str) -> Result<moa_config::SandboxWorkspaceMode, String> {
+    match value {
+        "disabled" => Ok(moa_config::SandboxWorkspaceMode::Disabled),
+        "maintenance" => Ok(moa_config::SandboxWorkspaceMode::Maintenance),
+        "admit" => Ok(moa_config::SandboxWorkspaceMode::Admit),
+        _ => Err("expected disabled, maintenance, or admit".to_string()),
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -144,6 +158,7 @@ async fn async_main() -> anyhow::Result<()> {
         database_url,
         migration_deployment_uri,
         runtime_deployment_uri,
+        sandbox_workspace_mode,
     }) = args.command.as_ref()
     {
         let report = run_bootstrap(BootstrapOptions {
@@ -152,6 +167,7 @@ async fn async_main() -> anyhow::Result<()> {
             database_url: database_url.clone(),
             migration_deployment_uri: migration_deployment_uri.clone(),
             runtime_deployment_uri: runtime_deployment_uri.clone(),
+            sandbox_workspace_mode: *sandbox_workspace_mode,
         })
         .await?;
         tracing::info!(
@@ -209,6 +225,10 @@ async fn async_main() -> anyhow::Result<()> {
         None => {}
     }
 
+    moa_config
+        .validate_sandbox_workspace_runtime(skip_fga)
+        .context("validate sandbox workspace runtime rollout")?;
+
     let restate_ingress_url = restate_ingress_url(moa_config.as_ref())?;
     let providers_override = ProvidersOverride::from_env();
     providers_override.ensure_allowed(moa_config.as_ref())?;
@@ -223,6 +243,7 @@ async fn async_main() -> anyhow::Result<()> {
     moa_migrations::validate_complete_history(&pool)
         .await
         .context("validate complete database migration history")?;
+    validate_sandbox_workspace_rollout(moa_config.as_ref(), &pool).await?;
     let background_pool = build_database_pool(
         moa_config.database.runtime_url(),
         &database_search_path,
@@ -231,10 +252,28 @@ async fn async_main() -> anyhow::Result<()> {
     )
     .await
     .context("connect background database pool")?;
+    let maintenance_pool = if moa_config.sandbox_workspaces.mode.maintenance_enabled() {
+        let url = moa_config.database.maintenance_url().ok_or_else(|| {
+            anyhow::anyhow!("sandbox workspace maintenance database URL is unavailable")
+        })?;
+        Some(
+            build_database_pool(
+                url,
+                &database_search_path,
+                moa_config.database.background_max_connections,
+                Duration::from_secs(moa_config.database.connect_timeout_seconds),
+            )
+            .await
+            .context("connect dedicated sandbox workspace maintenance database pool")?,
+        )
+    } else {
+        None
+    };
     let mut runtime_deps = RuntimeDeps::build(
         moa_config.clone(),
         pool.clone(),
         background_pool,
+        maintenance_pool,
         &restate_ingress_url,
         providers_override,
         skip_fga,
@@ -246,12 +285,28 @@ async fn async_main() -> anyhow::Result<()> {
 
     let endpoint = build_endpoint(&runtime_deps);
 
+    let mut checkpoint_versioning_refresh_handle = runtime_deps
+        .checkpoint_versioning_observer
+        .clone()
+        .map(start_checkpoint_bucket_versioning_refresh);
+
+    let mut workspace_reaper_handle = runtime_deps
+        .workspace_maintenance
+        .clone()
+        .map(|coordinator| start_workspace_reaper(coordinator, moa_config.as_ref()))
+        .transpose()?;
+    let workspace_reaper_readiness = workspace_reaper_handle
+        .as_ref()
+        .map(moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperHandle::readiness);
+
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(
         readiness.clone(),
         pool.clone(),
         runtime_deps.kms.clone(),
         runtime_deps.lineage.writer.clone(),
+        runtime_deps.checkpoint_versioning_observer.clone(),
+        workspace_reaper_readiness,
     );
     let shutdown = CancellationToken::new();
     let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
@@ -265,10 +320,17 @@ async fn async_main() -> anyhow::Result<()> {
     // before the servers accept traffic, and startup fails outright if no hand
     // provider is registered, so no sandbox is ever provisioned under a policy
     // this process cannot enforce.
-    let hand_lease_reaper_handle = start_hand_lease_reaper(
-        &runtime_deps.background_pool,
-        runtime_deps.tool_router.hand_providers(),
-    )?;
+    let hand_lease_reaper_handle = moa_config
+        .sandbox_workspaces
+        .mode
+        .maintenance_enabled()
+        .then(|| {
+            start_hand_lease_reaper(
+                &runtime_deps.background_pool,
+                runtime_deps.tool_router.hand_providers(),
+            )
+        })
+        .transpose()?;
     // Optional connectors that failed discovery at startup are retried here, and
     // schema changes republished, without restarting the process.
     let mcp_catalog_refresh_handle =
@@ -371,6 +433,38 @@ async fn async_main() -> anyhow::Result<()> {
             result.context("join connector credential ingress server")??;
             bail!("connector credential ingress server exited unexpectedly");
         }
+        result = await_workspace_reaper_exit(&mut workspace_reaper_handle) => {
+            readiness.store(false, Ordering::Release);
+            shutdown.cancel();
+            restate_server.abort();
+            health_server.abort();
+            scim_server.abort();
+            credential_server.abort();
+            if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
+            if let Some(handle) = analytics_export.take() {
+                handle.abort();
+            }
+            result.context("durable workspace reaper exited")?;
+            bail!("durable workspace reaper exited unexpectedly");
+        }
+        result = await_checkpoint_versioning_refresh_exit(&mut checkpoint_versioning_refresh_handle) => {
+            readiness.store(false, Ordering::Release);
+            shutdown.cancel();
+            restate_server.abort();
+            health_server.abort();
+            scim_server.abort();
+            credential_server.abort();
+            if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
+            if let Some(handle) = analytics_export.take() {
+                handle.abort();
+            }
+            result.context("checkpoint bucket versioning refresh exited")?;
+            bail!("checkpoint bucket versioning refresh exited unexpectedly");
+        }
         signal = shutdown_signal() => {
             signal?;
             tracing::info!("shutdown signal received, draining");
@@ -409,7 +503,25 @@ async fn async_main() -> anyhow::Result<()> {
                 let _ = join_task_bounded("analytics export", handle).await;
             }
 
-            abort_and_join_task("hand lease reaper", hand_lease_reaper_handle).await;
+            if let Some(handle) = workspace_reaper_handle.take() {
+                let _ = shutdown_future_bounded(
+                    "durable workspace reaper",
+                    handle.shutdown(),
+                )
+                .await;
+            }
+
+            if let Some(handle) = checkpoint_versioning_refresh_handle.take() {
+                let _ = shutdown_future_bounded(
+                    "checkpoint bucket versioning refresh",
+                    handle.shutdown(),
+                )
+                .await;
+            }
+
+            if let Some(handle) = hand_lease_reaper_handle {
+                abort_and_join_task("hand lease reaper", handle).await;
+            }
             if let Some(handle) = mcp_catalog_refresh_handle {
                 abort_and_join_task("MCP catalog refresh", handle).await;
             }
@@ -475,6 +587,24 @@ async fn async_main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn await_workspace_reaper_exit(
+    handle: &mut Option<moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperHandle>,
+) -> moa_core::error::Result<()> {
+    match handle {
+        Some(handle) => handle.task_result().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn await_checkpoint_versioning_refresh_exit(
+    handle: &mut Option<moa_orchestrator::runtime::jobs::CheckpointBucketVersioningRefreshHandle>,
+) -> anyhow::Result<()> {
+    match handle {
+        Some(handle) => handle.task_result().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn join_task_bounded<T>(name: &'static str, mut handle: JoinHandle<T>) -> Option<T> {
     match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, &mut handle).await {
         Ok(Ok(output)) => Some(output),
@@ -534,6 +664,13 @@ struct ProbeState {
     /// accepted rows are safe in Postgres, and restarting the process would only
     /// drop leases and slow the drain that is already behind.
     lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
+    /// Authenticated checkpoint-bucket observation shared with the deletion gate.
+    checkpoint_versioning: Option<
+        moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
+    >,
+    /// Supervised workspace-maintenance readiness, when maintenance is enabled.
+    workspace_reaper:
+        Option<moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperReadiness>,
 }
 
 impl ProbeState {
@@ -542,12 +679,20 @@ impl ProbeState {
         pool: sqlx::PgPool,
         kms: KmsRuntime,
         lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
+        checkpoint_versioning: Option<
+            moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
+        >,
+        workspace_reaper: Option<
+            moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperReadiness,
+        >,
     ) -> Self {
         Self {
             readiness,
             pool,
             kms,
             lineage_writer,
+            checkpoint_versioning,
+            workspace_reaper,
         }
     }
 
@@ -567,6 +712,18 @@ impl ProbeState {
             && let Some(reason) = writer.unready_reason()
         {
             bail!("lineage writer not ready: {reason}");
+        }
+
+        if let Some(observer) = &self.checkpoint_versioning
+            && !observer.is_ready()
+        {
+            bail!("checkpoint bucket versioning observation is missing or stale");
+        }
+
+        if let Some(reaper) = &self.workspace_reaper
+            && let Some(reason) = reaper.unready_reason()
+        {
+            bail!("durable workspace maintenance not ready: {reason}");
         }
 
         Ok(())

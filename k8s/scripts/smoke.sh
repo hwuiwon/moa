@@ -131,7 +131,7 @@ validate_schemas() {
 }
 
 validate_manifests() {
-  local work_dir local_manifest production_manifest jobs_manifest
+  local work_dir local_manifest production_manifest jobs_manifest rendered_dir
   local local_orchestrator production_orchestrator local_edge production_edge
   local local_bootstrap production_bootstrap local_bootstrap_sa production_bootstrap_sa
   local local_status_migrator production_status_migrator
@@ -139,7 +139,8 @@ validate_manifests() {
   local local_orchestrator_policy production_orchestrator_policy
   local local_edge_service production_edge_service
   local local_runtime_config production_runtime_config local_key_secret
-  local local_snapshot_secret local_rustfs_policy local_rustfs_init
+  local local_snapshot_secret local_rustfs_policy local_rustfs_init local_rustfs local_postgres
+  local local_rustfs_pvc local_postgres_pvc
   local local_restate production_restate
   local local_orchestrator_readiness production_orchestrator_readiness
   local rewrap_job application_content
@@ -148,11 +149,32 @@ validate_manifests() {
   local_manifest="${work_dir}/local.yaml"
   production_manifest="${work_dir}/production.yaml"
   jobs_manifest="${work_dir}/jobs.yaml"
+  rendered_dir="${work_dir}/rendered-production"
 
   command -v kustomize >/dev/null 2>&1 || die "kustomize is required"
   kustomize build "${REPO_ROOT}/k8s/overlays/local" >"${local_manifest}"
   kustomize build "${REPO_ROOT}/k8s/overlays/production" >"${production_manifest}"
   kustomize build "${REPO_ROOT}/k8s/jobs" >"${jobs_manifest}"
+  MOA_ORCHESTRATOR_IMAGE="registry.example/moa/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111" \
+  MOA_EDGE_IMAGE="registry.example/moa/edge@sha256:2222222222222222222222222222222222222222222222222222222222222222" \
+  RESTATE_SNAPSHOT_BUCKET="moa-restate-snapshots-prod" \
+  RESTATE_SNAPSHOT_PREFIX="restate/snapshots" \
+  RESTATE_SNAPSHOT_GSA="moa-restate@example-project.iam.gserviceaccount.com" \
+  SANDBOX_CHECKPOINT_BUCKET="moa-workspace-checkpoints-prod" \
+  SANDBOX_CHECKPOINT_PREFIX="workspace-checkpoints/v1" \
+  SANDBOX_WORKSPACE_GSA="moa-sandbox-workspaces@example-project.iam.gserviceaccount.com" \
+  SANDBOX_PROVIDER_ACCOUNT_ID="5df222fb-c303-5ae4-a494-8ae4de622e2d" \
+  SANDBOX_PROVIDER_ACCOUNT_GENERATION="1" \
+  SANDBOX_PROVIDER_ISOLATION_CELL="prod-canary-a" \
+  SANDBOX_PROVIDER_PROJECT_FINGERPRINT="e2b:project:prod-canary-a" \
+  SANDBOX_CANARY_TENANT_ID="ae88b9a9-35e8-5ce4-a4de-8f5172c17115" \
+  SANDBOX_PROVIDER_CREDENTIAL_SECRET="moa-hand-provider-keys" \
+  SANDBOX_MAINTENANCE_DATABASE_SECRET="moa-postgres-maintenance" \
+  OPENFGA_URL="https://openfga.example.com" \
+  OPENFGA_STORE_ID="store-production" \
+  OPENFGA_MODEL_ID="model-v7" \
+  OPENFGA_PRESHARED_KEY_SECRET="moa-openfga" \
+    "${REPO_ROOT}/k8s/scripts/render-production.sh" "${rendered_dir}"
 
   local_orchestrator="$(manifest_document "${local_manifest}" RestateDeployment moa-orchestrator)"
   production_orchestrator="$(manifest_document "${production_manifest}" RestateDeployment moa-orchestrator)"
@@ -179,7 +201,11 @@ validate_manifests() {
   local_key_secret="$(manifest_document "${local_manifest}" Secret moa-kms-root-keys)"
   local_snapshot_secret="$(manifest_document "${local_manifest}" Secret moa-restate-snapshots)"
   local_rustfs_policy="$(manifest_document "${local_manifest}" NetworkPolicy rustfs-s3-ingress)"
-  local_rustfs_init="$(manifest_document "${local_manifest}" Job rustfs-init-snapshots-v1)"
+  local_rustfs_init="$(manifest_document "${local_manifest}" Job rustfs-init-durable-buckets-v2)"
+  local_rustfs="$(manifest_document "${local_manifest}" Deployment rustfs)"
+  local_postgres="$(manifest_document "${local_manifest}" Deployment postgres)"
+  local_rustfs_pvc="$(manifest_document "${local_manifest}" PersistentVolumeClaim rustfs-data)"
+  local_postgres_pvc="$(manifest_document "${local_manifest}" PersistentVolumeClaim postgres-data)"
   rewrap_job="$(manifest_document "${jobs_manifest}" Job moa-kms-rewrap)"
   for orchestrator in "${local_orchestrator}" "${production_orchestrator}"; do
     assert_contains "${orchestrator}" "name: moa-runtime-config" "orchestrator is missing the runtime ConfigMap"
@@ -205,7 +231,7 @@ validate_manifests() {
   done
   assert_occurrences "$(<"${local_manifest}")" 5 "image: moa/orchestrator:kind" \
     "local runtime, migration-only stage, and bootstrap must use the same orchestrator image"
-  assert_occurrences "$(<"${production_manifest}")" 5 \
+  assert_occurrences "$(<"${production_manifest}")" 6 \
     "image: moa/orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
     "unrendered production runtime, migration-only stage, and bootstrap must use the same immutable sentinel"
   assert_occurrences "${production_edge}" 1 \
@@ -241,6 +267,10 @@ validate_manifests() {
     assert_contains "${bootstrap}" \
       "--migration-deployment-uri http://moa-session-status-migrator.moa-system.svc.cluster.local:9080" \
       "bootstrap Job does not register the migration-only endpoint"
+    assert_contains "${bootstrap}" '--sandbox-workspace-mode "$MOA_SANDBOX_WORKSPACE_MODE"' \
+      "bootstrap Job does not wait for the rollout-mode-specific service set"
+    assert_contains "${bootstrap}" "key: MOA_SANDBOX_WORKSPACE_MODE" \
+      "bootstrap Job does not consume the runtime rollout mode"
     assert_contains "${bootstrap}" "key: admin-url" \
       "bootstrap Job lacks the required database migration authority"
   done
@@ -287,10 +317,62 @@ validate_manifests() {
 
   # The cloud sandbox credential belongs to production only; base and local must
   # not reference it. The cloud profile refuses to serve without it.
-  assert_contains "${production_orchestrator}" "MOA_CLOUD_HANDS_E2B_API_KEY" "production orchestrator is missing the E2B sandbox credential"
-  assert_contains "${production_orchestrator}" "name: moa-hand-provider-keys" "production orchestrator is missing the hand-provider Secret"
-  assert_excludes "${local_orchestrator}" "MOA_CLOUD_HANDS_E2B_API_KEY" "local orchestrator unexpectedly receives the E2B sandbox credential"
+  assert_contains "${production_runtime_config}" "MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON" "production runtime is missing the non-secret provider-account mapping"
+  assert_contains "${production_runtime_config}" 'owner_uid":10001' "production provider-account mapping does not pin the runtime credential owner"
+  assert_contains "${production_orchestrator}" "secretName: sandbox-provider-secret-render-input" "unrendered production orchestrator is missing the provider-secret render input"
+  assert_contains "${production_orchestrator}" "defaultMode: 256" "production hand-provider Secret is not projected with mode 0400"
+  assert_contains "${production_orchestrator}" "mountPath: /var/run/secrets/moa-hand-providers" "production orchestrator is missing the provider credential file mount"
+  assert_contains "${production_orchestrator}" "readOnly: true" "production provider credential mount is not read-only"
+  assert_contains "${production_orchestrator}" "runAsUser: 10001" "production provider credential runtime UID is not explicit"
+  assert_contains "${production_orchestrator}" "runAsGroup: 10001" "production provider credential runtime GID is not explicit"
+  assert_excludes "${production_orchestrator}" "MOA_CLOUD_HANDS_E2B_API_KEY" "production orchestrator still receives a raw E2B key environment variable"
+  assert_excludes "${local_orchestrator}" "MOA_CLOUD_HANDS_PROVIDER_ACCOUNTS_JSON" "local orchestrator unexpectedly receives cloud provider-account configuration"
   assert_excludes "${local_orchestrator}" "moa-hand-provider-keys" "local orchestrator unexpectedly references the hand-provider Secret"
+
+  local rendered_production rendered_orchestrator rendered_runtime_config rendered_workspace_sa
+  rendered_production="${rendered_dir}/production.yaml"
+  rendered_orchestrator="$(manifest_document "${rendered_production}" RestateDeployment moa-orchestrator)"
+  rendered_runtime_config="$(manifest_document "${rendered_production}" ConfigMap moa-runtime-config)"
+  rendered_workspace_sa="$(manifest_document "${rendered_production}" ServiceAccount moa-sandbox-workspace-object-store)"
+  assert_contains "${rendered_orchestrator}" "serviceAccountName: moa-sandbox-workspace-object-store" \
+    "rendered production orchestrator does not use the dedicated checkpoint service account"
+  assert_contains "${rendered_orchestrator}" "secretName: moa-hand-provider-keys" \
+    "rendered production orchestrator is missing the provider credential Secret reference"
+  assert_contains "${rendered_orchestrator}" "name: moa-openfga" \
+    "rendered production orchestrator is missing the OpenFGA preshared-key Secret reference"
+  assert_contains "${rendered_orchestrator}" "name: MOA_DATABASE_MAINTENANCE_URL" \
+    "rendered production orchestrator is missing the workspace maintenance database URL"
+  assert_contains "${rendered_orchestrator}" "name: moa-postgres-maintenance" \
+    "rendered production orchestrator is missing the explicit maintenance database Secret input"
+  assert_contains "${rendered_orchestrator}" "key: url" \
+    "rendered production workspace maintenance database Secret lacks the url key"
+  assert_contains "${rendered_orchestrator}" "optional: false" \
+    "rendered production workspace maintenance database Secret is still optional"
+  assert_contains "${rendered_workspace_sa}" \
+    "iam.gke.io/gcp-service-account: moa-sandbox-workspaces@example-project.iam.gserviceaccount.com" \
+    "rendered checkpoint service account lacks the workload-identity binding"
+  assert_contains "${rendered_runtime_config}" "MOA_SANDBOX_WORKSPACE_MODE: maintenance" \
+    "rendered production workspace rollout does not start dark in maintenance mode"
+  assert_contains "${rendered_runtime_config}" "MOA_AUTHZ_OPENFGA_MODEL_VERSION: \"7\"" \
+    "rendered production runtime does not require exact OpenFGA model v7"
+  assert_contains "${rendered_runtime_config}" "MOA_AUTHZ_OPENFGA_URL: https://openfga.example.com" \
+    "rendered production runtime lacks the rendered OpenFGA endpoint"
+  assert_contains "${rendered_runtime_config}" "MOA_OBJECT_STORE_CREDENTIAL_MODE: workload_identity" \
+    "rendered production object store does not require workload identity"
+  assert_contains "${rendered_runtime_config}" "MOA_SANDBOX_CHECKPOINT_BUCKET: moa-workspace-checkpoints-prod" \
+    "rendered production checkpoint bucket did not consume the safe render input"
+  assert_contains "${rendered_runtime_config}" "MOA_SANDBOX_CHECKPOINT_PREFIX: workspace-checkpoints/v1" \
+    "rendered production checkpoint prefix did not consume the safe render input"
+  assert_contains "${rendered_runtime_config}" "prod-canary-a" \
+    "rendered production runtime lacks the canary isolation cell"
+  assert_contains "${rendered_runtime_config}" "e2b:project:prod-canary-a" \
+    "rendered production runtime lacks the immutable provider fingerprint"
+  assert_excludes "$(<"${rendered_production}")" "image: rustfs/" \
+    "production render unexpectedly contains RustFS"
+  assert_excludes "${rendered_orchestrator}" "MOA_OBJECT_STORE_ACCESS_KEY_ID" \
+    "production orchestrator receives a static object-store access key"
+  assert_excludes "${rendered_orchestrator}" "MOA_OBJECT_STORE_SECRET_ACCESS_KEY" \
+    "production orchestrator receives a static object-store secret key"
 
   # The deleted development opt-in has exactly one post-change contract: the
   # security profile. No manifest may reintroduce the removed key, whose name is
@@ -416,8 +498,31 @@ validate_manifests() {
   assert_excludes "${local_rustfs_policy}" "port: 9001" \
     "local RustFS ingress policy exposes the management console"
   assert_contains "${local_rustfs_init}" \
-    'rc bucket create --ignore-existing --region "${MOA_SESSION_ATTACHMENT_REGION}" "rustfs/moa-restate-snapshots"' \
+    'rc bucket create --ignore-existing --region "${MOA_OBJECT_STORE_REGION}" "rustfs/moa-restate-snapshots"' \
     "local RustFS initializer does not create the dedicated Restate snapshot bucket"
+  assert_contains "${local_rustfs_init}" \
+    'rc bucket create --ignore-existing --region "${MOA_OBJECT_STORE_REGION}" "rustfs/${MOA_SANDBOX_CHECKPOINT_BUCKET}"' \
+    "local RustFS initializer does not create the dedicated workspace-checkpoint bucket"
+  assert_contains "${local_rustfs}" "claimName: rustfs-data" \
+    "local RustFS still uses pod-ephemeral storage instead of its PVC"
+  assert_contains "${local_rustfs}" "rustfs/rustfs:latest@sha256:fa19210ac4697c79d7ccca1ec9b0eb91aebacc6691991ffb14014bb3c67e6cc3" \
+    "local RustFS server image is not digest pinned"
+  assert_contains "${local_rustfs}" "startupProbe:" \
+    "local RustFS lacks a startup probe"
+  assert_contains "${local_rustfs}" "readinessProbe:" \
+    "local RustFS lacks a readiness probe"
+  assert_contains "${local_rustfs}" "livenessProbe:" \
+    "local RustFS lacks a liveness probe"
+  assert_contains "${local_postgres}" "claimName: postgres-data" \
+    "local Postgres still uses pod-ephemeral storage instead of its PVC"
+  assert_contains "${local_rustfs_pvc}" "storage: 20Gi" \
+    "local RustFS PVC lacks an explicit durable capacity request"
+  assert_contains "${local_postgres_pvc}" "storage: 20Gi" \
+    "local Postgres PVC lacks an explicit durable capacity request"
+  assert_excludes "${local_orchestrator}" "/var/run/docker.sock" \
+    "orchestrator receives the Docker socket"
+  assert_excludes "${local_orchestrator}" "hostPath:" \
+    "orchestrator receives a broad host path"
   assert_contains "${production_restate}" 'durability-mode = "balanced"' \
     "production Restate does not use snapshot-aware balanced durability"
   assert_contains "${production_restate}" "snapshot-interval-num-records = 100000" \
@@ -476,6 +581,7 @@ validate_manifests() {
     "production overlay does not select a metrics exporter"
 
   validate_schemas "${work_dir}"
+  validate_schemas "${rendered_dir}"
 
   echo "Manifest validation OK"
 }
@@ -582,9 +688,9 @@ echo "Proving normal replicas can reach ingress but not Restate Admin..."
   }
 "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" delete pod "${NETWORK_CHECK_POD}" --wait=true >/dev/null
 
-if "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get job/rustfs-init-snapshots-v1 >/dev/null 2>&1; then
+if "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get job/rustfs-init-durable-buckets-v2 >/dev/null 2>&1; then
   echo "Waiting for local RustFS bucket initialization..."
-  "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" wait --for=condition=Complete job/rustfs-init-snapshots-v1 --timeout=180s
+  "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" wait --for=condition=Complete job/rustfs-init-durable-buckets-v2 --timeout=180s
 fi
 
 echo "Port-forwarding Restate ingress/admin and MOA edge..."

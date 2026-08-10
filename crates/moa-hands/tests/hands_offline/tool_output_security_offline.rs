@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use moa_core::{
     traits::Identity, traits::IdentityType, traits::MemoryToolExecutor,
     types::completion::ToolInvocation, types::identifiers::ModelId, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::security::OutputAssessmentClass,
-    types::security::ToolCapabilityId, types::session::SessionMeta, types::tools::ToolOutput,
+    types::identifiers::ToolCallId, types::sandbox_workspace::SandboxWorkspaceScope,
+    types::security::OutputAssessmentClass, types::security::ToolCapabilityId,
+    types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -50,6 +51,13 @@ fn session() -> SessionMeta {
         tenant_id: identity().tenant_id,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
+    }
+}
+
+fn worker_workspace_scope(session: &SessionMeta) -> SandboxWorkspaceScope {
+    SandboxWorkspaceScope::Worker {
+        session_id: session.id,
+        worker_id: "tool-output-security-worker".to_string(),
     }
 }
 
@@ -167,7 +175,7 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &invoke(
                 &moa_hands::mcp_tool_reference("third-party", "lookup"),
                 json!({}),
@@ -238,7 +246,7 @@ async fn recovery_created_error_output_is_classified_offline() {
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &invoke(
                 "memory_remember",
                 json!({ "items": [{ "text": "remember this" }] }),
@@ -275,7 +283,7 @@ async fn builtin_tool_output_is_classified_at_its_source_offline() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &invoke(
                 "memory_remember",
                 json!({ "items": [{ "text": "remember this" }] }),
@@ -317,7 +325,7 @@ async fn hand_file_read_output_is_classified_at_its_source_offline() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &invoke(
                 "file_write",
                 json!({ "path": "notes.txt", "content": CONFIRMED_PAYLOAD }),
@@ -334,7 +342,7 @@ async fn hand_file_read_output_is_classified_at_its_source_offline() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &invoke("file_read", json!({ "path": "notes.txt" })),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -372,12 +380,13 @@ async fn process_stdout_is_classified_at_its_source_offline() {
     let router = ToolRouter::new_local(dir.path())
         .await
         .expect("local router");
+    let session = session();
 
     let secured = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
-            session: &session(),
+            session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &invoke(
                 "bash",
                 json!({ "cmd": format!("printf '%s' '{CONFIRMED_PAYLOAD}'") }),
@@ -417,12 +426,13 @@ async fn classification_precedes_the_output_budget_offline() {
     let router = ToolRouter::new_local(dir.path())
         .await
         .expect("local router");
+    let session = session();
 
     let secured = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
-            session: &session(),
+            session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &invoke(
                 "bash",
                 json!({
@@ -468,12 +478,13 @@ async fn byte_identical_carriers_collapse_instead_of_escalating_offline() {
     let router = ToolRouter::new_local(dir.path())
         .await
         .expect("local router");
+    let session = session();
 
     let secured = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
-            session: &session(),
+            session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &invoke(
                 "bash",
                 json!({

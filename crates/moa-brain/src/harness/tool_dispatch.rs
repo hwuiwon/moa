@@ -8,7 +8,7 @@ use moa_core::{
     types::action_policy::ActionPolicyEffect, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::events_stream::EventRecord,
     types::identifiers::SessionId, types::identifiers::ToolCallId, types::resource::ResourceBudget,
-    types::session::SessionMeta,
+    types::sandbox_workspace::SandboxWorkspaceScope, types::session::SessionMeta,
 };
 use moa_hands::{ToolCallScope, ToolRouter};
 use moa_security::ToolInputCanaryScreening;
@@ -42,6 +42,7 @@ pub(super) async fn handle_tool_call(
     session: &SessionMeta,
     session_store: Arc<dyn SessionStore>,
     tool_router: Option<&ToolRouter>,
+    workspace_scope: Option<&SandboxWorkspaceScope>,
     call: &ToolCallContent,
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
@@ -148,6 +149,7 @@ pub(super) async fn handle_tool_call(
                 session,
                 session_store,
                 router,
+                workspace_scope,
                 invocation,
                 tool_id,
                 true,
@@ -263,6 +265,7 @@ pub(super) async fn execute_tool(
     session: &SessionMeta,
     session_store: Arc<dyn SessionStore>,
     tool_router: &ToolRouter,
+    workspace_scope: Option<&SandboxWorkspaceScope>,
     call: &ToolInvocation,
     tool_id: ToolCallId,
     emit_call_event: bool,
@@ -308,7 +311,7 @@ pub(super) async fn execute_tool(
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session,
             caller_identity,
-            worker_id: None,
+            workspace_scope,
             invocation: &execution_call,
             tool_call_id: tool_id,
             active_canary,

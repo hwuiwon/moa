@@ -360,6 +360,22 @@ orchestrator_binary_path() {
   printf '%s/debug/moa-orchestrator-bin\n' "$(orchestrator_fixture_target_dir)"
 }
 
+orchestrator_runtime_library_env() {
+  local target_libdir
+  target_libdir="$(rustc --print target-libdir)"
+
+  case "$(uname -s)" in
+    Darwin)
+      printf 'DYLD_FALLBACK_LIBRARY_PATH=%s\n' \
+        "${target_libdir}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}"
+      ;;
+    *)
+      printf 'LD_LIBRARY_PATH=%s\n' \
+        "${target_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+      ;;
+  esac
+}
+
 apply_central_migrations() {
   env \
     MOA_DATABASE_URL="${DB_URL}" \
@@ -791,10 +807,12 @@ if [[ "${LIVE}" -eq 1 ]]; then
 
   echo
   echo ">> starting shared orchestrator for lifecycle smoke tests"
+  ORCH_RUNTIME_LIBRARY_ENV="$(orchestrator_runtime_library_env)"
   env -u MOA_COHERE_API_KEY \
     -u MOA_ANTHROPIC_API_KEY \
     -u MOA_OPENAI_API_KEY \
     -u MOA_GOOGLE_API_KEY \
+    "${ORCH_RUNTIME_LIBRARY_ENV}" \
     RUST_LOG="${RUST_LOG:-warn}" \
     MOA_PROVIDERS_OVERRIDE="mock:${RUN_SAFE_ID}" \
     MOA_LOCAL_MEMORY_DIR="${TMP_ROOT}/memory" \

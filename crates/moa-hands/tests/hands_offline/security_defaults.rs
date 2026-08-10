@@ -1,12 +1,16 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_config::CloudHandsConfig;
 use moa_config::MoaConfig;
 use moa_config::SandboxProfileConfig;
 use moa_config::SecurityProfile;
+use moa_config::{
+    CloudHandProviderAccountConfig, CloudHandProviderKind, CloudHandsConfig,
+    ProviderSecretFileSelector,
+};
 use moa_core::{
     error::MoaError, error::Result, traits::BuiltInTool, traits::Identity, traits::IdentityType,
     traits::ToolContext, types::action_policy::ActionClass,
@@ -15,12 +19,14 @@ use moa_core::{
     types::completion::ToolInvocation, types::hands::CpuLimit, types::hands::DiskLimit,
     types::hands::EgressPolicy, types::hands::LifetimeLimit, types::hands::MemoryLimit,
     types::identifiers::ModelId, types::identifiers::TenantId, types::identifiers::ToolCallId,
-    types::identifiers::UserId, types::session::SessionMeta, types::tools::IdempotencyClass,
-    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
-    types::tools::ToolPolicySpec,
+    types::identifiers::UserId, types::sandbox_workspace::SandboxWorkspaceScope,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDiffStrategy,
+    types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
+use moa_crypto::LocalKmsProvider;
 use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
 use moa_security::ActionPolicyRuleStore;
+use object_store::memory::InMemory;
 use opentelemetry::Value;
 use opentelemetry::trace::{Status, TracerProvider as _};
 use opentelemetry_sdk::trace::{
@@ -41,6 +47,13 @@ fn session() -> SessionMeta {
         tenant_id: identity().tenant_id,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
+    }
+}
+
+fn worker_workspace_scope(session: &SessionMeta) -> SandboxWorkspaceScope {
+    SandboxWorkspaceScope::Worker {
+        session_id: session.id,
+        worker_id: "security-defaults-worker".to_string(),
     }
 }
 
@@ -78,11 +91,48 @@ fn cloud_config() -> MoaConfig {
     config.permissions.default_effect = ActionPolicyEffect::Deny;
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("e2b".to_string()),
-        e2b_api_key: Some("MOA_TEST_E2B_KEY".to_string()),
+        provider_accounts: vec![test_e2b_account()],
         ..CloudHandsConfig::default()
     });
     config.sandbox_policy.deployment = authored_deployment_sandbox_policy();
     config
+}
+
+fn test_e2b_account() -> CloudHandProviderAccountConfig {
+    let dir = tempdir().expect("provider credential tempdir").keep();
+    let path = dir.join("e2b");
+    std::fs::write(&path, "MOA_TEST_E2B_KEY").expect("write provider credential");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+        .expect("chmod provider credential");
+    let owner_uid = std::fs::metadata(&path)
+        .expect("provider credential metadata")
+        .uid();
+    CloudHandProviderAccountConfig {
+        provider_account_id: moa_core::types::identifiers::ProviderAccountId::new(),
+        generation: 1,
+        provider: CloudHandProviderKind::E2b,
+        isolation_cell: "offline-test".to_string(),
+        api_origin: "https://api.e2b.dev".to_string(),
+        toolbox_origin: None,
+        sandbox_domain: Some("e2b.app".to_string()),
+        default_runtime: Some("base".to_string()),
+        project_fingerprint: None,
+        credential: ProviderSecretFileSelector { path, owner_uid },
+    }
+}
+
+fn test_checkpoint_store()
+-> Arc<moa_hands::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore> {
+    Arc::new(
+        moa_hands::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore::new(
+            Arc::new(InMemory::new()),
+            Arc::new(LocalKmsProvider::new()),
+            "hands-offline/checkpoints",
+            moa_hands::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
+            moa_hands::core::sandbox_workspace::checkpoint::store::ObservedCheckpointBucketVersioning::Unversioned,
+        )
+        .expect("offline checkpoint store should construct"),
+    )
 }
 
 /// An operator-authored deployment sandbox policy, as a cloud deployment must
@@ -208,11 +258,12 @@ async fn execute_failing_local_bash(input: serde_json::Value) -> ToolOutput {
     let router = ToolRouter::from_config(&config, None, None)
         .await
         .expect("local opt-in should allow router construction");
+    let session = session();
     let secured = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
-            session: &session(),
+            session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -392,7 +443,8 @@ async fn cloud_profile_rejects_a_selected_backend_without_credentials() {
         .cloud
         .hands
         .get_or_insert_with(CloudHandsConfig::default)
-        .e2b_api_key = None;
+        .provider_accounts
+        .clear();
 
     let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
         Ok(_) => panic!("cloud profile must reject a backend without credentials"),
@@ -411,9 +463,17 @@ async fn cloud_profile_constructs_with_deny_default_owner_and_credentialed_backe
     // Pins: the four cloud requirements together are sufficient — a valid cloud
     // deployment builds a router whose hand tools target the cloud backend and
     // never register the local host provider.
-    let router = ToolRouter::from_config(&cloud_config(), None, Some(cloud_rule_store()))
-        .await
-        .expect("a fully configured cloud profile should construct");
+    let router = ToolRouter::from_config_with_checkpoint_store(
+        &cloud_config(),
+        None,
+        Some(cloud_rule_store()),
+        Some(test_checkpoint_store()),
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("a fully configured cloud profile should construct");
 
     assert!(router.has_tool("bash"));
     assert!(
@@ -442,7 +502,7 @@ async fn local_route_with_opt_in_registers_local_hands() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -459,7 +519,7 @@ async fn local_route_with_opt_in_registers_local_hands() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: Some(&worker_workspace_scope(&session)),
             invocation: &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -512,7 +572,7 @@ async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
                 .execute_authorized(moa_hands::AuthorizedToolCall {
                     session: &session(),
                     caller_identity: &identity(),
-                    worker_id: None,
+                    workspace_scope: None,
                     invocation: &ToolInvocation {
                         id: None,
                         name: "secret_error".to_string(),
@@ -587,11 +647,12 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
                 let router = ToolRouter::from_config(&config, None, None)
                     .await
                     .expect("local opt-in should allow router construction");
+                let session = session();
                 let secured_2 = router
                     .execute_authorized(moa_hands::AuthorizedToolCall {
-                        session: &session(),
+                        session: &session,
                         caller_identity: &identity(),
-                        worker_id: None,
+                        workspace_scope: Some(&worker_workspace_scope(&session)),
                         invocation: &ToolInvocation {
                             id: None,
                             name: "bash".to_string(),
@@ -969,11 +1030,12 @@ async fn sandbox_provision_spans_carry_policy_identity_and_no_policy_contents() 
         let router = ToolRouter::new_local(&sandbox_root)
             .await
             .expect("local router builds");
+        let session = session();
         let _ = router
             .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
-                session: &session(),
+                session: &session,
                 caller_identity: &identity(),
-                worker_id: None,
+                workspace_scope: Some(&worker_workspace_scope(&session)),
                 invocation: &ToolInvocation {
                     id: None,
                     name: "file_search".to_string(),

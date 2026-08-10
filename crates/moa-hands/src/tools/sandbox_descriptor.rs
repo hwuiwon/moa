@@ -2,8 +2,9 @@
 
 use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
-    types::action_policy::RiskLevel, types::tools::IdempotencyClass, types::tools::ToolDefinition,
-    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicySpec,
+    types::action_policy::RiskLevel, types::sandbox_workspace::WorkspaceEffect,
+    types::tools::IdempotencyClass, types::tools::ToolDefinition, types::tools::ToolDiffStrategy,
+    types::tools::ToolInputShape, types::tools::ToolPolicySpec,
 };
 use serde_json::{Value, json};
 
@@ -115,6 +116,8 @@ pub(crate) struct SandboxToolDescriptor {
     pub(crate) review_preview: SandboxReviewPreviewMetadata,
     /// Provider executor capability key.
     pub(crate) capability: SandboxToolCapability,
+    /// Whether execution can change durable workspace files.
+    pub(crate) workspace_effect: WorkspaceEffect,
 }
 
 impl SandboxToolDescriptor {
@@ -222,6 +225,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
         ),
         review_preview: SandboxReviewPreviewMetadata::Command,
         capability: SandboxToolCapability::Bash,
+        workspace_effect: WorkspaceEffect::MayWrite,
     },
     SandboxToolDescriptor {
         name: "grep",
@@ -239,6 +243,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             label: "Pattern",
         },
         capability: SandboxToolCapability::Grep,
+        workspace_effect: WorkspaceEffect::ReadOnly,
     },
     SandboxToolDescriptor {
         name: "file_outline",
@@ -253,6 +258,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             label: "Path",
         },
         capability: SandboxToolCapability::FileOutline,
+        workspace_effect: WorkspaceEffect::ReadOnly,
     },
     SandboxToolDescriptor {
         name: "file_read",
@@ -267,6 +273,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             label: "Path",
         },
         capability: SandboxToolCapability::FileRead,
+        workspace_effect: WorkspaceEffect::ReadOnly,
     },
     SandboxToolDescriptor {
         name: "str_replace",
@@ -283,6 +290,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             insert_after_line_field: "insert_after_line",
         },
         capability: SandboxToolCapability::StrReplace,
+        workspace_effect: WorkspaceEffect::MayWrite,
     },
     SandboxToolDescriptor {
         name: "file_write",
@@ -297,6 +305,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             content_field: "content",
         },
         capability: SandboxToolCapability::FileWrite,
+        workspace_effect: WorkspaceEffect::MayWrite,
     },
     SandboxToolDescriptor {
         name: "file_search",
@@ -314,6 +323,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             label: "Pattern",
         },
         capability: SandboxToolCapability::FileSearch,
+        workspace_effect: WorkspaceEffect::ReadOnly,
     },
 ];
 
@@ -421,6 +431,8 @@ fn file_search_schema() -> Value {
 mod tests {
     use std::collections::HashSet;
 
+    use moa_core::types::sandbox_workspace::WorkspaceEffect;
+
     use super::{
         SandboxToolCapability, default_sandbox_tool_descriptors, sandbox_tool_descriptors,
     };
@@ -475,5 +487,28 @@ mod tests {
                 "missing descriptor for capability {capability:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_sandbox_tool_declares_its_exact_workspace_effect() {
+        // Pins: a new or renamed sandbox tool cannot bypass the mutating-tool
+        // commit barrier by omitting an explicit workspace effect.
+        let effects = sandbox_tool_descriptors()
+            .iter()
+            .map(|descriptor| (descriptor.name, descriptor.workspace_effect))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            effects,
+            vec![
+                ("bash", WorkspaceEffect::MayWrite),
+                ("grep", WorkspaceEffect::ReadOnly),
+                ("file_outline", WorkspaceEffect::ReadOnly),
+                ("file_read", WorkspaceEffect::ReadOnly),
+                ("str_replace", WorkspaceEffect::MayWrite),
+                ("file_write", WorkspaceEffect::MayWrite),
+                ("file_search", WorkspaceEffect::ReadOnly),
+            ]
+        );
     }
 }

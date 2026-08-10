@@ -24,30 +24,79 @@ use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::{Event, EventType};
 use crate::types::experience::LearningCandidateSummary;
 use crate::types::{
-    action_policy::ToolResultSecurityMetadata, channel::Attachment, channel::Channel,
-    channel::ChannelAccountId, channel::ChannelCapabilities, channel::ChannelEvent,
-    channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
-    channel::SessionChannelBinding, channel::SessionChannelBindingId,
-    channel::SessionChannelBindingResolution, completion::CompletionStream,
-    completion::SharedCompletionRequest, contact::ContactId, contact::ContactPointId,
-    contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
-    contact::StoredSessionAttachment, context::ProcessorOutput, context::WorkingContext,
-    credentials::CredentialContext, credentials::CredentialError, credentials::CredentialIdentity,
-    credentials::CredentialRef, credentials::CredentialStagingToken,
-    credentials::CredentialVersion, credentials::RedactedSecret, events_stream::ClaimCheck,
-    events_stream::EventFilter, events_stream::EventRange, events_stream::EventRecord,
-    events_stream::SequenceNum, experience::ExperienceAttribution, experience::ExperienceRecord,
-    experience::LearningCandidate, experience::LearningCandidateStatus,
-    experience::LearningCandidateStatusUpdate, experience::TaskStrategySuccessRate,
-    hands::HandHandle, hands::HandProviderCapabilities, hands::HandSpec, hands::HandStatus,
-    hands::SandboxFile, identifiers::HandProvisioningOperationId, identifiers::SegmentId,
-    identifiers::SessionAttachmentId, identifiers::SessionId, identifiers::StoragePartitionId,
-    identifiers::TenantId, identifiers::ToolCallId, learning::LearningEntry,
-    model::ModelCapabilities, segment_assessment::SegmentAssessment,
-    segment_assessment::SegmentBaseline, segment_assessment::SkillResolutionRate,
-    segments::SegmentCompletion, segments::TaskSegment, session::Checkpoint,
-    session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
-    session::SessionStatus, session::SessionSummary, snapshot::ContextSnapshot, tools::ToolOutput,
+    action_policy::ToolResultSecurityMetadata,
+    channel::Attachment,
+    channel::Channel,
+    channel::ChannelAccountId,
+    channel::ChannelCapabilities,
+    channel::ChannelEvent,
+    channel::ChannelRef,
+    channel::MessageId,
+    channel::OutboundMessage,
+    channel::SessionChannelBinding,
+    channel::SessionChannelBindingId,
+    channel::SessionChannelBindingResolution,
+    completion::CompletionStream,
+    completion::SharedCompletionRequest,
+    contact::ContactId,
+    contact::ContactPointId,
+    contact::SessionAttachmentSlot,
+    contact::SessionAttachmentUpload,
+    contact::StoredSessionAttachment,
+    context::ProcessorOutput,
+    context::WorkingContext,
+    credentials::CredentialContext,
+    credentials::CredentialError,
+    credentials::CredentialIdentity,
+    credentials::CredentialRef,
+    credentials::CredentialStagingToken,
+    credentials::CredentialVersion,
+    credentials::RedactedSecret,
+    events_stream::ClaimCheck,
+    events_stream::EventFilter,
+    events_stream::EventRange,
+    events_stream::EventRecord,
+    events_stream::SequenceNum,
+    experience::ExperienceAttribution,
+    experience::ExperienceRecord,
+    experience::LearningCandidate,
+    experience::LearningCandidateStatus,
+    experience::LearningCandidateStatusUpdate,
+    experience::TaskStrategySuccessRate,
+    hands::HandHandle,
+    hands::HandProviderCapabilities,
+    hands::HandSpec,
+    hands::HandStatus,
+    hands::SandboxFile,
+    identifiers::HandProvisioningOperationId,
+    identifiers::ProviderAccountId,
+    identifiers::SegmentId,
+    identifiers::SessionAttachmentId,
+    identifiers::SessionId,
+    identifiers::StoragePartitionId,
+    identifiers::TenantId,
+    identifiers::ToolCallId,
+    learning::LearningEntry,
+    model::ModelCapabilities,
+    sandbox_workspace::{
+        ProviderAccountStorageInventory, ProviderStorageRef, TenantStoragePurgeRequest,
+        WorkspaceAttachRequest, WorkspaceCheckpointPublishRequest, WorkspaceReconcileRequest,
+        WorkspaceRestoreRequest, WorkspaceStorageDeleteRequest, WorkspaceStorageOperationResult,
+        WorkspaceStoragePrepareRequest,
+    },
+    segment_assessment::SegmentAssessment,
+    segment_assessment::SegmentBaseline,
+    segment_assessment::SkillResolutionRate,
+    segments::SegmentCompletion,
+    segments::TaskSegment,
+    session::Checkpoint,
+    session::CheckpointHandle,
+    session::SessionFilter,
+    session::SessionMeta,
+    session::SessionStatus,
+    session::SessionSummary,
+    snapshot::ContextSnapshot,
+    tools::ToolOutput,
 };
 
 pub use auth::*;
@@ -628,6 +677,8 @@ pub trait HandProvider: Send + Sync {
     /// result as proof that the operation left no resource.
     async fn provisioned_hands(
         &self,
+        provider_account_id: ProviderAccountId,
+        provider_account_generation: u64,
         operation_id: HandProvisioningOperationId,
     ) -> Result<Vec<HandHandle>>;
 
@@ -691,6 +742,83 @@ pub trait HandProvider: Send + Sync {
 
     /// Destroys a provisioned hand.
     async fn destroy(&self, handle: &HandHandle) -> Result<()>;
+}
+
+/// Provider-neutral durable filesystem storage operations for sandbox workspaces.
+///
+/// Ephemeral compute execution remains owned by [`HandProvider`]. This trait
+/// exposes only the mutable-filesystem and portable-checkpoint operations used
+/// by the workspace lifecycle.
+#[async_trait]
+pub trait SandboxStorageProvider: Send + Sync {
+    /// Returns the storage provider name used for registry lookup and telemetry.
+    fn storage_provider_name(&self) -> &str;
+
+    /// Enumerates the complete provider-account inventory for maintenance.
+    ///
+    /// The provider must authenticate the exact account generation and verify
+    /// any MOA ownership metadata before returning it. Unknown resources are
+    /// returned without an owner so the coordinator can quarantine them; this
+    /// method never deletes inventory as a side effect.
+    async fn enumerate_account_storage(
+        &self,
+        provider_account_id: ProviderAccountId,
+        provider_account_generation: u64,
+    ) -> Result<ProviderAccountStorageInventory>;
+
+    /// Creates or resolves one writable workspace attachment.
+    async fn prepare_workspace_storage(
+        &self,
+        request: WorkspaceStoragePrepareRequest,
+    ) -> Result<WorkspaceStorageOperationResult>;
+
+    /// Verifies one prepared writable workspace attachment on provisioned compute.
+    async fn attach_workspace(
+        &self,
+        request: WorkspaceAttachRequest,
+    ) -> Result<WorkspaceStorageOperationResult>;
+
+    /// Publishes a verified immutable checkpoint from quiesced working state.
+    async fn publish_workspace_checkpoint(
+        &self,
+        request: WorkspaceCheckpointPublishRequest,
+    ) -> Result<WorkspaceStorageOperationResult>;
+
+    /// Restores a verified committed checkpoint into fresh compute.
+    async fn restore_workspace(
+        &self,
+        request: WorkspaceRestoreRequest,
+    ) -> Result<WorkspaceStorageOperationResult>;
+
+    /// Deletes one exact provider-owned storage resource under its operation fence.
+    async fn delete_workspace_storage(
+        &self,
+        request: WorkspaceStorageDeleteRequest,
+    ) -> Result<WorkspaceStorageOperationResult>;
+
+    /// Deletes one tenant-wide storage resource during fenced tenant purge.
+    ///
+    /// Providers whose ordinary delete already has tenant-wide semantics may
+    /// use the default. Shared-volume providers override this to require an
+    /// exact whole-volume reference after every tenant hand is absent.
+    async fn delete_tenant_storage_resource(
+        &self,
+        _request: TenantStoragePurgeRequest,
+    ) -> Result<WorkspaceStorageOperationResult> {
+        Err(MoaError::Unsupported(
+            "provider has no tenant-wide storage resource purge surface".to_string(),
+        ))
+    }
+
+    /// Reconciles an operation whose provider outcome could not be confirmed.
+    async fn reconcile_workspace_operation(
+        &self,
+        request: WorkspaceReconcileRequest,
+    ) -> Result<WorkspaceStorageOperationResult>;
+
+    /// Verifies that an opaque provider storage reference is still owned by the
+    /// expected account before it is used for restore or deletion.
+    async fn verify_workspace_storage(&self, storage: &ProviderStorageRef) -> Result<bool>;
 }
 
 /// Common interface for LLM providers.

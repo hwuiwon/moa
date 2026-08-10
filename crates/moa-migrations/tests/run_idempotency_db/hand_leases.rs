@@ -2,6 +2,44 @@
 
 use super::support::*;
 
+/// Seeds a session and its required agent context in one deferred-constraint transaction.
+async fn seed_session(
+    pool: &sqlx::PgPool,
+    session_id: uuid::Uuid,
+    tenant_id: uuid::Uuid,
+    label: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO public.sessions \
+         (id, tenant_id, storage_partition_id, user_id, model) \
+         VALUES ($1, $2, $3, $4, 'migration-test-model')",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(tenant_id.to_string())
+    .bind(label)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.session_agent_context (\
+             session_id, tenant_id, storage_partition_id, user_id,\
+             agent_definition_ref, agent_revision_uid, policy_hash, display_name, policy_snapshot\
+         ) VALUES (\
+             $1, $2, $3, $4, 'agent://system-default',\
+             '00000000-0000-4000-8000-000000000a02',\
+             'hand-lease-test-policy', 'Hand Lease Test Agent', '{}'::jsonb\
+         )",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(tenant_id.to_string())
+    .bind(label)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
 /// Facts hand-lease effective profile must install on `moa.hand_leases` and `moa.tenant_sandbox_policy`.
 struct HandLeaseProfileFacts {
     provisioning_operation_id_is_required: bool,
@@ -20,7 +58,7 @@ struct HandLeaseProfileFacts {
     rejects_reaping_without_claim: bool,
     rejects_active_row_without_handle: bool,
     rejects_destroyed_row_with_handle: bool,
-    accepts_provisioning_without_handle: bool,
+    rejects_unattached_provisioning_intent: bool,
     rejects_active_row_without_policy: bool,
     rejects_idle_past_hard: bool,
     has_tenant_sandbox_policy_table: bool,
@@ -196,10 +234,10 @@ async fn hand_lease_profile_facts(
         insert_hand_lease(pool, "destroyed", false, false, false, true)
             .await
             .is_err();
-    let accepts_provisioning_without_handle =
+    let rejects_unattached_provisioning_intent =
         insert_hand_lease(pool, "provisioning", true, false, false, false)
             .await
-            .is_ok();
+            .is_err();
 
     Ok(HandLeaseProfileFacts {
         provisioning_operation_id_is_required,
@@ -218,7 +256,7 @@ async fn hand_lease_profile_facts(
         rejects_reaping_without_claim,
         rejects_active_row_without_handle,
         rejects_destroyed_row_with_handle,
-        accepts_provisioning_without_handle,
+        rejects_unattached_provisioning_intent,
         rejects_active_row_without_policy,
         rejects_idle_past_hard,
         has_tenant_sandbox_policy_table,
@@ -240,6 +278,15 @@ async fn insert_hand_lease(
     with_reap_claim: bool,
     with_handle: bool,
 ) -> Result<(), sqlx::Error> {
+    let session_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    seed_session(
+        pool,
+        session_id,
+        tenant_id,
+        &format!("hand-lease-migration-{session_id}"),
+    )
+    .await?;
     let (idle, hard) = if idle_past_hard {
         ("now() + interval '2 hours'", "now() + interval '1 hour'")
     } else {
@@ -292,13 +339,15 @@ async fn insert_hand_lease(
          (session_id, worker_id, tenant_id, provider, tier, status, generation, \
           provisioning_operation_id, provisioning_deadline_at, handle, \
           idle_expires_at, hard_expires_at{policy_columns}{claim_columns}{cleanup_columns}) \
-         VALUES (gen_random_uuid(), '', gen_random_uuid(), 'local', 'local', $1, 1, $2, $3, $4, \
+         VALUES ($5, '', $6, 'local', 'local', $1, 1, $2, $3, $4, \
                  {idle}, {hard}{policy_values}{claim_values}{cleanup_values})"
     ))
     .bind(status)
     .bind(provisioning_operation_id)
     .bind(provisioning_deadline_at)
     .bind(handle)
+    .bind(session_id)
+    .bind(tenant_id)
     .execute(pool)
     .await
     .map(|_| ())
@@ -420,8 +469,8 @@ async fn hand_lease_effective_profile_final_schema_is_strict_db() {
         "a destroyed lease retaining a handle must be rejected"
     );
     assert!(
-        facts.accepts_provisioning_without_handle,
-        "an unresolved provisioning intent must remain durable before a handle exists"
+        facts.rejects_unattached_provisioning_intent,
+        "a provisioning intent must be attached to its durable workspace"
     );
     assert!(
         facts.rejects_active_row_without_policy,
@@ -487,7 +536,8 @@ async fn hand_provisioning_v57_backfills_known_legacy_handles_db() {
         .await?;
         pool.close().await;
 
-        let applied = run_reporting_applied_serialized(&target_url).await?;
+        let applied =
+            apply_through_migration(&target_url, "hand_provisioning_operation_intents").await?;
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&target_url)
@@ -513,9 +563,11 @@ async fn hand_provisioning_v57_backfills_known_legacy_handles_db() {
     let outcome = database.finish(outcome).await;
     let (applied, operation_id, deadline, handle_operation_id) =
         outcome.expect("V57 should backfill a known legacy handle");
-    assert_eq!(
-        applied,
-        expected_migration_labels_from("hand_provisioning_operation_intents")
+    assert!(
+        applied
+            .iter()
+            .any(|migration| migration.contains("hand_provisioning_operation_intents")),
+        "the targeted V57 apply must install provisioning operation intents: {applied:?}"
     );
     assert_eq!(handle_operation_id, operation_id.to_string());
     assert!(
@@ -605,15 +657,24 @@ async fn hand_provisioning_v57_rejects_old_writer_generation_rotation_db() {
             .connect(&target_url)
             .await?;
         let session_id = uuid::Uuid::new_v4();
+        let tenant_id = uuid::Uuid::new_v4();
         let operation_id = uuid::Uuid::new_v4();
+        seed_session(
+            &pool,
+            session_id,
+            tenant_id,
+            &format!("hand-generation-{session_id}"),
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO moa.hand_leases (\
                  session_id, worker_id, tenant_id, provider, tier, status, generation,\
                  provisioning_operation_id, provisioning_deadline_at\
-             ) VALUES ($1, '', gen_random_uuid(), 'local', 'local', 'destroyed', 4, $2, now())",
+             ) VALUES ($1, '', $3, 'local', 'local', 'destroyed', 4, $2, now())",
         )
         .bind(session_id)
         .bind(operation_id)
+        .bind(tenant_id)
         .execute(&pool)
         .await?;
         let error = sqlx::query(
@@ -648,4 +709,228 @@ async fn hand_provisioning_v57_rejects_old_writer_generation_rotation_db() {
     );
     assert_eq!(generation, 4);
     assert_eq!(persisted_operation_id, operation_id);
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn hand_storage_v58_rejects_unresolved_provisioning_before_schema_change_db() {
+    // Pins: V58 does not fabricate workspace ownership for an ambiguous
+    // provider create. The whole migration rolls back until cleanup resolves
+    // the pre-existing provisioning generation.
+    let database = FreshMigrationDatabase::create()
+        .await
+        .expect("create throwaway migration database");
+    let target_url = database.target_url().to_string();
+    let outcome = async {
+        install_required_extensions(&target_url).await?;
+        apply_through_migration(&target_url, "hand_provisioning_operation_intents").await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let session_id = uuid::Uuid::new_v4();
+        let tenant_id = uuid::Uuid::new_v4();
+        seed_session(
+            &pool,
+            session_id,
+            tenant_id,
+            &format!("v58-unresolved-{session_id}"),
+        )
+        .await?;
+        let operation_id = uuid::Uuid::new_v4();
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+        sqlx::query(
+            "INSERT INTO moa.hand_leases (\
+                 session_id, worker_id, tenant_id, provider, tier, status, generation,\
+                 provisioning_operation_id, provisioning_deadline_at, reap_not_before,\
+                 profile, profile_hash, source_deployment_revision, source_tenant_revision,\
+                 source_agent_revision, source_route_revision, source_origin_revision,\
+                 capability_revision\
+             ) VALUES (\
+                 $1, 'worker', $2, 'e2b', 'microvm', 'provisioning', 1, $3, $4,\
+                 $4 + interval '30 seconds', '{}'::jsonb, 'sha256:v58',\
+                 'd', 't', 'a', 'r', 'o', 'c'\
+             )",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .bind(operation_id)
+        .bind(deadline)
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+
+        let error = run_reporting_applied_serialized(&target_url)
+            .await
+            .expect_err("V58 must reject an unresolved provisioning generation")
+            .to_string();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let workspace_table_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('moa.sandbox_workspaces') IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((error, workspace_table_exists))
+    }
+    .await;
+    let outcome = database.finish(outcome).await;
+    let (error, workspace_table_exists) = outcome.expect("inspect fail-closed V58 migration");
+    assert!(
+        error.contains("unresolved provisioning or failed hand leases"),
+        "migration should name the ambiguous provider state: {error}"
+    );
+    assert!(
+        !workspace_table_exists,
+        "a failed preflight must roll back every V58 schema change"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() {
+    // Pins: a live legacy hand blocks V58. After the hand is proven destroyed,
+    // V58 retains it only as an unattached terminal lease, creates no fake
+    // workspace, and installs forced RLS plus the composite session tenant FK.
+    let database = FreshMigrationDatabase::create()
+        .await
+        .expect("create throwaway migration database");
+    let target_url = database.target_url().to_string();
+    let outcome = async {
+        install_required_extensions(&target_url).await?;
+        apply_through_migration(&target_url, "hand_provisioning_operation_intents").await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let session_id = uuid::Uuid::new_v4();
+        let tenant_id = uuid::Uuid::new_v4();
+        let operation_id = uuid::Uuid::new_v4();
+        seed_session(
+            &pool,
+            session_id,
+            tenant_id,
+            &format!("v58-active-{session_id}"),
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO moa.hand_leases (\
+                 session_id, worker_id, tenant_id, provider, tier, status, generation,\
+                 provisioning_operation_id, provisioning_deadline_at, handle,\
+                 idle_expires_at, hard_expires_at, profile, profile_hash,\
+                 source_deployment_revision, source_tenant_revision, source_agent_revision,\
+                 source_route_revision, source_origin_revision, capability_revision\
+             ) VALUES (\
+                 $1, 'worker', $2, 'local', 'local', 'active', 1, $3, now(), $4,\
+                 now() + interval '1 hour', now() + interval '2 hours',\
+                 '{}'::jsonb, 'sha256:v58-active', 'd', 't', 'a', 'r', 'o', 'c'\
+             )",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .bind(operation_id)
+        .bind(sqlx::types::Json(serde_json::json!({
+            "provisioning_operation_id": operation_id,
+            "handle": {"type": "local", "sandbox_dir": "/tmp/v58-active"}
+        })))
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+
+        let first_error = run_reporting_applied_serialized(&target_url)
+            .await
+            .expect_err("V58 must reject an active legacy hand")
+            .to_string();
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        sqlx::query(
+            "UPDATE moa.hand_leases \
+             SET status = 'destroyed', handle = NULL \
+             WHERE session_id = $1 AND tenant_id = $2",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+
+        let applied = run_reporting_applied_serialized(&target_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let workspace_count =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.sandbox_workspaces")
+                .fetch_one(&pool)
+                .await?;
+        let attachment = sqlx::query_as::<_, (Option<uuid::Uuid>, Option<i64>, Option<i64>)>(
+            "SELECT workspace_id, workspace_writer_epoch, workspace_instance_generation \
+             FROM moa.hand_leases WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await?;
+        let rls_tables = sqlx::query_as::<_, (String, bool, bool)>(
+            "SELECT class.relname, class.relrowsecurity, class.relforcerowsecurity \
+             FROM pg_class AS class \
+             JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace \
+             WHERE namespace.nspname = 'moa' \
+               AND class.relname IN (\
+                   'hand_leases', 'sandbox_workspaces', 'sandbox_workspace_operations',\
+                   'sandbox_workspace_checkpoints', 'sandbox_workspace_grants',\
+                   'sandbox_storage_resources', 'sandbox_capacity_reservations'\
+               ) ORDER BY class.relname",
+        )
+        .fetch_all(&pool)
+        .await?;
+        let composite_fk = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint \
+             WHERE conrelid = 'moa.hand_leases'::regclass \
+               AND conname = 'hand_leases_session_tenant_fk')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            first_error,
+            applied,
+            workspace_count,
+            attachment,
+            rls_tables,
+            composite_fk,
+        ))
+    }
+    .await;
+    let outcome = database.finish(outcome).await;
+    let (first_error, applied, workspace_count, attachment, rls_tables, composite_fk) =
+        outcome.expect("V58 should apply after legacy compute is drained");
+    assert!(
+        first_error.contains("legacy hands remain live"),
+        "preflight should require an explicit drain: {first_error}"
+    );
+    assert!(
+        applied
+            .iter()
+            .any(|migration| migration.contains("sandbox_workspaces")),
+        "V58 should be the applied migration: {applied:?}"
+    );
+    assert_eq!(workspace_count, 0, "V58 must not fabricate workspace state");
+    assert_eq!(attachment, (None, None, None));
+    assert_eq!(rls_tables.len(), 7);
+    assert!(
+        rls_tables
+            .iter()
+            .all(|(_, enabled, forced)| *enabled && *forced),
+        "every tenant table must force RLS: {rls_tables:?}"
+    );
+    assert!(
+        composite_fk,
+        "hand leases must reference session plus tenant"
+    );
 }

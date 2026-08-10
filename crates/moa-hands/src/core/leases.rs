@@ -12,9 +12,11 @@ use moa_core::{
     error::MoaError, error::Result, types::hands::EffectiveSandboxProfile,
     types::hands::HandHandle, types::hands::LifetimeLimit, types::hands::SandboxPolicySources,
     types::hands::SandboxProfile, types::hands::SandboxTier,
-    types::identifiers::HandProvisioningOperationId, types::identifiers::SessionId,
-    types::identifiers::TenantId,
+    types::identifiers::HandProvisioningOperationId, types::identifiers::SandboxWorkspaceId,
+    types::identifiers::SessionId, types::identifiers::TenantId,
+    types::identifiers::WorkspaceCheckpointId, types::memory::RlsContext,
 };
+use moa_db::ScopedConn;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, types::Json};
 #[cfg(test)]
@@ -200,6 +202,45 @@ impl HandLeasePolicy {
     }
 }
 
+/// Exact durable workspace fences carried by one compute-lease generation.
+///
+/// A provisioning row records the attachment it is trying to hydrate before
+/// provider I/O. Activation and renewal compare all four values, so a stale
+/// writer, compute instance, or restored revision cannot make a hand routable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandLeaseWorkspaceAttachment {
+    /// Durable logical workspace attached to the compute lease.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Exact single-writer epoch claimed for the hand.
+    pub workspace_writer_epoch: i64,
+    /// Exact provider compute-instance generation claimed for the hand.
+    pub workspace_instance_generation: i64,
+    /// Verified checkpoint restored into the hand, if the workspace has a head.
+    pub restored_checkpoint_id: Option<WorkspaceCheckpointId>,
+}
+
+impl HandLeaseWorkspaceAttachment {
+    /// Builds and validates one exact workspace attachment fence.
+    pub fn new(
+        workspace_id: SandboxWorkspaceId,
+        workspace_writer_epoch: i64,
+        workspace_instance_generation: i64,
+        restored_checkpoint_id: Option<WorkspaceCheckpointId>,
+    ) -> Result<Self> {
+        if workspace_writer_epoch < 0 || workspace_instance_generation < 0 {
+            return Err(MoaError::ValidationError(
+                "hand lease workspace generations must be non-negative".to_string(),
+            ));
+        }
+        Ok(Self {
+            workspace_id,
+            workspace_writer_epoch,
+            workspace_instance_generation,
+            restored_checkpoint_id,
+        })
+    }
+}
+
 /// Converts a lifetime limit into an absolute deadline, or `None` when unbounded.
 fn deadline_from(now: DateTime<Utc>, limit: LifetimeLimit) -> Option<DateTime<Utc>> {
     limit
@@ -213,11 +254,13 @@ fn deadline_from(now: DateTime<Utc>, limit: LifetimeLimit) -> Option<DateTime<Ut
 pub struct HandLease {
     /// Session that owns the hand.
     pub session_id: SessionId,
-    /// Worker scope that owns the hand within the session.
+    /// Opaque typed-owner scope that owns the hand within the session.
     ///
-    /// Empty (`""`) denotes the session-level (coordinator) scope, which is the
-    /// only scope used today. A non-empty value isolates a worker's sandbox so
-    /// the parent and siblings never collapse onto one shared hand.
+    /// Runtime sandbox admission supplies a non-empty opaque key derived from a
+    /// typed worker or execution-task workspace owner, keeping sibling owners
+    /// on distinct leases. Sandbox admission never emits an empty value, and an
+    /// empty low-level repository key must not be interpreted as coordinator
+    /// ownership.
     pub worker_id: String,
     /// Tenant that owns the session.
     pub tenant_id: TenantId,
@@ -247,6 +290,12 @@ pub struct HandLease {
     pub hard_expires_at: Option<DateTime<Utc>>,
     /// Earliest time an ambiguous create or failed cleanup may be reaped.
     pub reap_not_before: Option<DateTime<Utc>>,
+    /// Exact durable workspace attachment fenced to this compute generation.
+    ///
+    /// Only terminal rows created before the V58 hard break may omit it.
+    /// Provisioning and active rows are rejected at both the database and row
+    /// decoder boundaries unless all attachment columns are present.
+    pub attachment: Option<HandLeaseWorkspaceAttachment>,
     /// Policy identity this generation was provisioned under.
     ///
     /// `None` represents an incomplete stale row that is immediately
@@ -259,7 +308,8 @@ pub struct HandLease {
 pub struct HandLeaseProvisionRequest<'a> {
     /// Session that will own the lease.
     pub session_id: SessionId,
-    /// Worker scope, or the empty string for the coordinator scope.
+    /// Opaque lease key derived from the typed workspace owner; runtime sandbox
+    /// callers always supply a non-empty value.
     pub worker_id: &'a str,
     /// Tenant that owns the session.
     pub tenant_id: TenantId,
@@ -267,21 +317,62 @@ pub struct HandLeaseProvisionRequest<'a> {
     pub provider: &'a str,
     /// Sandbox isolation tier requested from the provider.
     pub tier: SandboxTier,
+    /// Exact workspace attachment this provisioning generation must hydrate.
+    pub attachment: HandLeaseWorkspaceAttachment,
     /// Fully resolved policy identity and deadlines.
     pub policy: &'a HandLeasePolicy,
     /// Earlier caller deadline that provisioning must not widen.
     pub caller_deadline: Option<DateTime<Utc>>,
 }
 
+/// Named inputs for renewing one tenant-scoped active lease generation.
+pub struct HandLeaseRenewRequest<'a> {
+    /// Tenant that owns the lease.
+    pub tenant_id: TenantId,
+    /// Session that owns the hand.
+    pub session_id: SessionId,
+    /// Opaque typed-owner scope within the session.
+    pub worker_id: &'a str,
+    /// Provider selected for the generation.
+    pub provider: &'a str,
+    /// Exact compute generation being renewed.
+    pub generation: i64,
+    /// Exact provisioning operation for that generation.
+    pub provisioning_operation_id: HandProvisioningOperationId,
+    /// Exact hydrated workspace attachment being renewed.
+    pub attachment: HandLeaseWorkspaceAttachment,
+    /// Requested new idle deadline, capped by the immutable hard deadline.
+    pub idle_expires_at: DateTime<Utc>,
+}
+
+/// Named inputs for activating one exactly hydrated lease generation.
+pub struct HandLeaseActivateRequest<'a> {
+    /// Tenant that owns the lease.
+    pub tenant_id: TenantId,
+    /// Session that owns the hand.
+    pub session_id: SessionId,
+    /// Opaque typed-owner scope within the session.
+    pub worker_id: &'a str,
+    /// Provider selected for the generation.
+    pub provider: &'a str,
+    /// Exact compute generation being activated.
+    pub generation: i64,
+    /// Durable provider handle created by this provisioning operation.
+    pub handle: LeaseHandle,
+    /// Exact workspace attachment proven hydrated before activation.
+    pub attachment: HandLeaseWorkspaceAttachment,
+}
+
 /// Store contract for durable hand lease coordination.
 ///
-/// Every method carries a `worker_id` scope alongside `session_id`. The empty
-/// string is the session-level (coordinator) scope used by all callers today; a
-/// non-empty value isolates a worker's sandbox. `list_session` intentionally
-/// takes no scope so session teardown reclaims every worker scope at once.
+/// Every foreground method requires the verified tenant in addition to the
+/// typed-owner lease key and session. Implementations must install that tenant
+/// in the database transaction and repeat it in every predicate; a provider
+/// handle or session ID is never an authorization boundary. Fleet-wide cleanup
+/// uses the separate maintenance surface in [`super::reaper`].
 #[async_trait]
 pub trait HandLeaseStore: Send + Sync {
-    /// Atomically claims provisioning for a session/worker/provider when no valid active lease exists.
+    /// Atomically claims provisioning for a session/typed-owner/provider when no valid active lease exists.
     ///
     /// The claim writes the policy identity, sandbox deadlines, absolute create
     /// deadline, and later reconciliation time, so a generation carries its
@@ -292,34 +383,36 @@ pub trait HandLeaseStore: Send + Sync {
         request: HandLeaseProvisionRequest<'_>,
     ) -> Result<Option<HandLease>>;
 
-    /// Loads the current lease for a session/worker/provider.
+    /// Loads the current lease for a session/typed-owner/provider.
     async fn get(
         &self,
+        tenant_id: TenantId,
         session_id: SessionId,
         worker_id: &str,
         provider: &str,
     ) -> Result<Option<HandLease>>;
 
-    /// Lists all durable leases for a session, across every worker scope.
-    async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>>;
+    /// Lists all durable leases for a session, across every typed owner scope.
+    async fn list_session(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+    ) -> Result<Vec<HandLease>>;
 
     /// Marks a claimed generation active with its durable handle payload.
     ///
     /// Activation carries no policy or hard deadline: both were fixed by the
     /// provisioning claim and are immutable for the life of the generation.
     /// Returns `false` when the exact provisioning generation lost its fence.
-    async fn activate(
-        &self,
-        session_id: SessionId,
-        worker_id: &str,
-        provider: &str,
-        generation: i64,
-        handle: LeaseHandle,
-    ) -> Result<bool>;
+    async fn activate(&self, request: HandLeaseActivateRequest<'_>) -> Result<bool>;
 
     /// Clears the previous generation's handle after the provisioning claimant
     /// has destroyed it, without releasing the generation fence.
-    async fn clear_handle_for_provisioning(&self, claim: &HandLease) -> Result<bool>;
+    async fn clear_handle_for_provisioning(
+        &self,
+        tenant_id: TenantId,
+        claim: &HandLease,
+    ) -> Result<bool>;
 
     /// Renews the idle deadline of a current active lease if the generation
     /// fence still matches.
@@ -327,15 +420,7 @@ pub trait HandLeaseStore: Send + Sync {
     /// Renewal can only move the idle deadline, never past the hard deadline,
     /// and a lease whose hard deadline has already passed cannot be renewed at
     /// all. That is what keeps a busy sandbox from living forever.
-    async fn renew_active(
-        &self,
-        session_id: SessionId,
-        worker_id: &str,
-        provider: &str,
-        generation: i64,
-        provisioning_operation_id: HandProvisioningOperationId,
-        idle_expires_at: DateTime<Utc>,
-    ) -> Result<bool>;
+    async fn renew_active(&self, request: HandLeaseRenewRequest<'_>) -> Result<bool>;
 
     /// Moves one exact generation, status, and handle to a non-reaping status.
     ///
@@ -343,6 +428,7 @@ pub trait HandLeaseStore: Send + Sync {
     /// token may finalize or release that ownership fence.
     async fn transition_status(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         status: HandLeaseStatus,
     ) -> Result<bool>;
@@ -354,16 +440,23 @@ pub trait HandLeaseStore: Send + Sync {
     /// policy.
     async fn claim_for_destroy(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         claim_ttl: Duration,
     ) -> Result<Option<Uuid>>;
 
     /// Finalizes a successful destroy against the same exact claim fence.
-    async fn finalize_destroy(&self, expected: &HandLease, claim_token: Uuid) -> Result<bool>;
+    async fn finalize_destroy(
+        &self,
+        tenant_id: TenantId,
+        expected: &HandLease,
+        claim_token: Uuid,
+    ) -> Result<bool>;
 
     /// Releases a failed destroy for later reaping without making it active again.
     async fn release_destroy_claim(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         claim_token: Uuid,
         retry_after: Duration,
@@ -374,14 +467,100 @@ pub trait HandLeaseStore: Send + Sync {
 #[derive(Clone)]
 pub struct PostgresHandLeaseStore {
     pool: PgPool,
+    assume_workspace_maintenance_role: bool,
 }
 
 impl PostgresHandLeaseStore {
     /// Creates a Postgres hand lease store from an existing pool.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            assume_workspace_maintenance_role: false,
+        }
     }
+
+    /// Creates a lease store over the dedicated NOINHERIT maintenance pool.
+    #[must_use]
+    pub fn new_maintenance(pool: PgPool) -> Self {
+        Self {
+            pool,
+            assume_workspace_maintenance_role: true,
+        }
+    }
+
+    /// Begins one foreground transaction with forced tenant RLS active.
+    async fn begin(&self, tenant_id: TenantId) -> Result<ScopedConn<'_>> {
+        if self.assume_workspace_maintenance_role {
+            let mut conn = ScopedConn::begin_control_plane(&self.pool).await?;
+            sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
+                .execute(conn.as_mut())
+                .await
+                .map_err(map_sqlx_error)?;
+            Ok(conn)
+        } else {
+            ScopedConn::begin_as_app(&self.pool, &RlsContext::tenant(tenant_id), true).await
+        }
+    }
+
+    /// Loads the unique active lease holding one exact workspace writer fence.
+    pub async fn get_for_workspace_reconciliation(
+        &self,
+        tenant_id: TenantId,
+        workspace_id: SandboxWorkspaceId,
+        writer_epoch: i64,
+        instance_generation: i64,
+    ) -> Result<Option<HandLease>> {
+        let mut conn = self.begin(tenant_id).await?;
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT {LEASE_COLUMNS}
+            FROM moa.hand_leases
+            WHERE tenant_id = $1 AND workspace_id = $2
+              AND workspace_writer_epoch = $3 AND workspace_instance_generation = $4
+              AND status = 'active' AND handle IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT 2
+            "#
+        ))
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .bind(writer_epoch)
+        .bind(instance_generation)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let leases = rows
+            .iter()
+            .map(hand_lease_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        conn.commit().await?;
+        match leases.as_slice() {
+            [] => Ok(None),
+            [lease] => Ok(Some(lease.clone())),
+            _ => Err(MoaError::StorageError(
+                "workspace reconciliation found multiple active writer leases".to_string(),
+            )),
+        }
+    }
+}
+
+fn attachment_columns(
+    attachment: Option<&HandLeaseWorkspaceAttachment>,
+) -> (
+    Option<SandboxWorkspaceId>,
+    Option<i64>,
+    Option<i64>,
+    Option<WorkspaceCheckpointId>,
+) {
+    attachment.map_or((None, None, None, None), |attachment| {
+        (
+            Some(attachment.workspace_id),
+            Some(attachment.workspace_writer_epoch),
+            Some(attachment.workspace_instance_generation),
+            attachment.restored_checkpoint_id,
+        )
+    })
 }
 
 #[async_trait]
@@ -396,32 +575,40 @@ impl HandLeaseStore for PostgresHandLeaseStore {
             tenant_id,
             provider,
             tier,
+            attachment,
             policy,
             caller_deadline,
         } = request;
         let now = Utc::now();
         let provisioning_deadline_at = provisioning_deadline(now, caller_deadline)?;
         let provisioning_operation_id = HandProvisioningOperationId::new();
+        let mut conn = self.begin(tenant_id).await?;
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO moa.hand_leases (
                 session_id, worker_id, tenant_id, provider, tier, status, generation,
                 provisioning_operation_id, provisioning_deadline_at,
+                workspace_id, workspace_writer_epoch, workspace_instance_generation,
+                restored_checkpoint_id,
                 idle_expires_at, hard_expires_at, profile, profile_hash,
                 source_deployment_revision, source_tenant_revision,
                 source_agent_revision, source_route_revision, source_origin_revision,
                 capability_revision, reap_attempts, reap_not_before
             )
-            VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6, $7, $8, $9, $10, $11,
+            VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6, $7,
+                    $19, $20, $21, $22, $8, $9, $10, $11,
                     $12, $13, $14, $15, $16, $17, 0,
                     $7 + make_interval(secs => $18))
             ON CONFLICT (session_id, worker_id, provider) DO UPDATE
-            SET tenant_id = EXCLUDED.tenant_id,
-                tier = EXCLUDED.tier,
+            SET tier = EXCLUDED.tier,
                 status = 'provisioning',
                 generation = moa.hand_leases.generation + 1,
                 provisioning_operation_id = EXCLUDED.provisioning_operation_id,
                 provisioning_deadline_at = EXCLUDED.provisioning_deadline_at,
+                workspace_id = EXCLUDED.workspace_id,
+                workspace_writer_epoch = EXCLUDED.workspace_writer_epoch,
+                workspace_instance_generation = EXCLUDED.workspace_instance_generation,
+                restored_checkpoint_id = EXCLUDED.restored_checkpoint_id,
                 updated_at = now(),
                 idle_expires_at = EXCLUDED.idle_expires_at,
                 hard_expires_at = EXCLUDED.hard_expires_at,
@@ -435,7 +622,8 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 capability_revision = EXCLUDED.capability_revision,
                 reap_attempts = 0,
                 reap_not_before = EXCLUDED.reap_not_before
-            WHERE (
+            WHERE moa.hand_leases.tenant_id = EXCLUDED.tenant_id
+              AND (
                     moa.hand_leases.status IN ('stale', 'destroyed')
                  OR (
                         moa.hand_leases.status = 'active'
@@ -466,62 +654,87 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(&policy.sources.origin)
         .bind(&policy.capability_revision)
         .bind(PROVISIONING_VISIBILITY_GRACE.as_secs_f64())
-        .fetch_optional(&self.pool)
+        .bind(attachment.workspace_id)
+        .bind(attachment.workspace_writer_epoch)
+        .bind(attachment.workspace_instance_generation)
+        .bind(attachment.restored_checkpoint_id)
+        .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
 
-        row.map(|row| hand_lease_from_row(&row)).transpose()
+        let lease = row.map(|row| hand_lease_from_row(&row)).transpose()?;
+        conn.commit().await?;
+        Ok(lease)
     }
 
     async fn get(
         &self,
+        tenant_id: TenantId,
         session_id: SessionId,
         worker_id: &str,
         provider: &str,
     ) -> Result<Option<HandLease>> {
+        let mut conn = self.begin(tenant_id).await?;
         let row = sqlx::query(&format!(
             r#"
             SELECT {LEASE_COLUMNS}
             FROM moa.hand_leases
             WHERE session_id = $1 AND worker_id = $2 AND provider = $3
+              AND tenant_id = $4
             "#
         ))
         .bind(session_id)
         .bind(worker_id)
         .bind(provider)
-        .fetch_optional(&self.pool)
+        .bind(tenant_id)
+        .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
-
-        row.map(|row| hand_lease_from_row(&row)).transpose()
+        let lease = row.map(|row| hand_lease_from_row(&row)).transpose()?;
+        conn.commit().await?;
+        Ok(lease)
     }
 
-    async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>> {
+    async fn list_session(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+    ) -> Result<Vec<HandLease>> {
+        let mut conn = self.begin(tenant_id).await?;
         let rows = sqlx::query(&format!(
             r#"
             SELECT {LEASE_COLUMNS}
             FROM moa.hand_leases
-            WHERE session_id = $1
+            WHERE session_id = $1 AND tenant_id = $2
             ORDER BY worker_id, provider
             "#
         ))
         .bind(session_id)
-        .fetch_all(&self.pool)
+        .bind(tenant_id)
+        .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
 
-        rows.iter().map(hand_lease_from_row).collect()
+        let leases = rows
+            .iter()
+            .map(hand_lease_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        conn.commit().await?;
+        Ok(leases)
     }
 
-    async fn activate(
-        &self,
-        session_id: SessionId,
-        worker_id: &str,
-        provider: &str,
-        generation: i64,
-        handle: LeaseHandle,
-    ) -> Result<bool> {
+    async fn activate(&self, request: HandLeaseActivateRequest<'_>) -> Result<bool> {
+        let HandLeaseActivateRequest {
+            tenant_id,
+            session_id,
+            worker_id,
+            provider,
+            generation,
+            handle,
+            attachment,
+        } = request;
         let provisioning_operation_id = handle.provisioning_operation_id;
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -538,6 +751,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND provisioning_operation_id = $5
               AND status = 'provisioning'
               AND handle IS NULL
+              AND tenant_id = $7
+              AND workspace_id = $8
+              AND workspace_writer_epoch = $9
+              AND workspace_instance_generation = $10
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $11
             "#,
         )
         .bind(session_id)
@@ -546,15 +764,28 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(generation)
         .bind(provisioning_operation_id)
         .bind(Json(handle))
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(attachment.workspace_id)
+        .bind(attachment.workspace_writer_epoch)
+        .bind(attachment.workspace_instance_generation)
+        .bind(attachment.restored_checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
 
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
-    async fn clear_handle_for_provisioning(&self, claim: &HandLease) -> Result<bool> {
+    async fn clear_handle_for_provisioning(
+        &self,
+        tenant_id: TenantId,
+        claim: &HandLease,
+    ) -> Result<bool> {
+        let (workspace_id, writer_epoch, instance_generation, checkpoint_id) =
+            attachment_columns(claim.attachment.as_ref());
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -566,6 +797,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND provisioning_operation_id = $5
               AND status = 'provisioning'
               AND handle IS NOT DISTINCT FROM $6
+              AND tenant_id = $7
+              AND workspace_id IS NOT DISTINCT FROM $8
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $9
+              AND workspace_instance_generation IS NOT DISTINCT FROM $10
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $11
             "#,
         )
         .bind(claim.session_id)
@@ -574,26 +810,35 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(claim.generation)
         .bind(claim.provisioning_operation_id)
         .bind(claim.handle.clone().map(Json))
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .bind(writer_epoch)
+        .bind(instance_generation)
+        .bind(checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
-    async fn renew_active(
-        &self,
-        session_id: SessionId,
-        worker_id: &str,
-        provider: &str,
-        generation: i64,
-        provisioning_operation_id: HandProvisioningOperationId,
-        idle_expires_at: DateTime<Utc>,
-    ) -> Result<bool> {
+    async fn renew_active(&self, request: HandLeaseRenewRequest<'_>) -> Result<bool> {
+        let HandLeaseRenewRequest {
+            tenant_id,
+            session_id,
+            worker_id,
+            provider,
+            generation,
+            provisioning_operation_id,
+            attachment,
+            idle_expires_at,
+        } = request;
         // `LEAST` is what pins the idle deadline under the hard one: a renewal
         // asking for more than the sandbox's remaining lifetime gets the
         // remaining lifetime, and a lease already past its hard deadline is not
         // matched at all. `hard_expires_at` never appears in `SET`.
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -610,6 +855,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND status = 'active'
               AND (idle_expires_at IS NULL OR idle_expires_at > now())
               AND (hard_expires_at IS NULL OR hard_expires_at > now())
+              AND tenant_id = $7
+              AND workspace_id = $8
+              AND workspace_writer_epoch = $9
+              AND workspace_instance_generation = $10
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $11
             "#,
         )
         .bind(session_id)
@@ -618,16 +868,23 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(generation)
         .bind(provisioning_operation_id)
         .bind(idle_expires_at)
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(attachment.workspace_id)
+        .bind(attachment.workspace_writer_epoch)
+        .bind(attachment.workspace_instance_generation)
+        .bind(attachment.restored_checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
 
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
     async fn transition_status(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         status: HandLeaseStatus,
     ) -> Result<bool> {
@@ -636,6 +893,9 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 "reaping generations may only move through their owned destroy claim".to_string(),
             ));
         }
+        let (workspace_id, writer_epoch, instance_generation, checkpoint_id) =
+            attachment_columns(expected.attachment.as_ref());
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -652,6 +912,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND provisioning_operation_id = $5
               AND status = $6
               AND handle IS NOT DISTINCT FROM $7
+              AND tenant_id = $9
+              AND workspace_id IS NOT DISTINCT FROM $10
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $11
+              AND workspace_instance_generation IS NOT DISTINCT FROM $12
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $13
             "#,
         )
         .bind(expected.session_id)
@@ -662,15 +927,22 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(expected.status.as_str())
         .bind(expected.handle.clone().map(Json))
         .bind(status.as_str())
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .bind(writer_epoch)
+        .bind(instance_generation)
+        .bind(checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
     async fn claim_for_destroy(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         claim_ttl: Duration,
     ) -> Result<Option<Uuid>> {
@@ -681,6 +953,9 @@ impl HandLeaseStore for PostgresHandLeaseStore {
             return Ok(None);
         }
         let claim_token = Uuid::new_v4();
+        let (workspace_id, writer_epoch, instance_generation, checkpoint_id) =
+            attachment_columns(expected.attachment.as_ref());
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -697,6 +972,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND handle IS NOT DISTINCT FROM $7
               AND status <> 'reaping'
               AND (status <> 'failed' OR reap_not_before <= now())
+              AND tenant_id = $10
+              AND workspace_id IS NOT DISTINCT FROM $11
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $12
+              AND workspace_instance_generation IS NOT DISTINCT FROM $13
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $14
             "#,
         )
         .bind(expected.session_id)
@@ -708,14 +988,28 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(expected.handle.clone().map(Json))
         .bind(claim_token)
         .bind(claim_ttl.as_secs_f64())
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .bind(writer_epoch)
+        .bind(instance_generation)
+        .bind(checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok((affected == 1).then_some(claim_token))
     }
 
-    async fn finalize_destroy(&self, expected: &HandLease, claim_token: Uuid) -> Result<bool> {
+    async fn finalize_destroy(
+        &self,
+        tenant_id: TenantId,
+        expected: &HandLease,
+        claim_token: Uuid,
+    ) -> Result<bool> {
+        let (workspace_id, writer_epoch, instance_generation, checkpoint_id) =
+            attachment_columns(expected.attachment.as_ref());
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -734,6 +1028,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND status = 'reaping'
               AND handle IS NOT DISTINCT FROM $6
               AND reap_claim_token = $7
+              AND tenant_id = $8
+              AND workspace_id IS NOT DISTINCT FROM $9
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $10
+              AND workspace_instance_generation IS NOT DISTINCT FROM $11
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $12
             "#,
         )
         .bind(expected.session_id)
@@ -743,19 +1042,29 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(expected.provisioning_operation_id)
         .bind(expected.handle.clone().map(Json))
         .bind(claim_token)
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .bind(writer_epoch)
+        .bind(instance_generation)
+        .bind(checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
     async fn release_destroy_claim(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         claim_token: Uuid,
         retry_after: Duration,
     ) -> Result<bool> {
+        let (workspace_id, writer_epoch, instance_generation, checkpoint_id) =
+            attachment_columns(expected.attachment.as_ref());
+        let mut conn = self.begin(tenant_id).await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -776,6 +1085,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
               AND status = 'reaping'
               AND handle IS NOT DISTINCT FROM $6
               AND reap_claim_token = $8
+              AND tenant_id = $10
+              AND workspace_id IS NOT DISTINCT FROM $11
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $12
+              AND workspace_instance_generation IS NOT DISTINCT FROM $13
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $14
             "#,
         )
         .bind(expected.session_id)
@@ -787,10 +1101,16 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(retry_after.as_secs_f64())
         .bind(claim_token)
         .bind(PROVISIONING_VISIBILITY_GRACE.as_secs_f64())
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .bind(writer_epoch)
+        .bind(instance_generation)
+        .bind(checkpoint_id)
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
     }
 }
@@ -798,11 +1118,19 @@ impl HandLeaseStore for PostgresHandLeaseStore {
 /// Column list every lease read projects, kept in one place so the row decoder
 /// and every query stay in agreement.
 pub(super) const LEASE_COLUMNS: &str = "session_id, worker_id, tenant_id, provider, tier, handle, \
-     status, generation, provisioning_operation_id, provisioning_deadline_at, created_at, updated_at, idle_expires_at, hard_expires_at, reap_not_before, profile, \
+     status, generation, provisioning_operation_id, provisioning_deadline_at, workspace_id, \
+     workspace_writer_epoch, workspace_instance_generation, restored_checkpoint_id, \
+     created_at, updated_at, idle_expires_at, hard_expires_at, reap_not_before, profile, \
      profile_hash, source_deployment_revision, source_tenant_revision, source_agent_revision, \
      source_route_revision, source_origin_revision, capability_revision";
 
 pub(super) fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
+    let status = HandLeaseStatus::from_str(
+        row.try_get::<String, _>("status")
+            .map_err(map_sqlx_error)?
+            .as_str(),
+    )?;
+    let attachment = hand_lease_attachment_from_row(row, status)?;
     Ok(HandLease {
         session_id: row.try_get("session_id").map_err(map_sqlx_error)?,
         worker_id: row.try_get("worker_id").map_err(map_sqlx_error)?,
@@ -817,11 +1145,7 @@ pub(super) fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLea
             .try_get::<Option<Json<LeaseHandle>>, _>("handle")
             .map_err(map_sqlx_error)?
             .map(|handle| handle.0),
-        status: HandLeaseStatus::from_str(
-            row.try_get::<String, _>("status")
-                .map_err(map_sqlx_error)?
-                .as_str(),
-        )?,
+        status,
         generation: row.try_get("generation").map_err(map_sqlx_error)?,
         provisioning_operation_id: row
             .try_get("provisioning_operation_id")
@@ -834,8 +1158,54 @@ pub(super) fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLea
         idle_expires_at: row.try_get("idle_expires_at").map_err(map_sqlx_error)?,
         hard_expires_at: row.try_get("hard_expires_at").map_err(map_sqlx_error)?,
         reap_not_before: row.try_get("reap_not_before").map_err(map_sqlx_error)?,
+        attachment,
         policy: hand_lease_policy_from_row(row)?,
     })
+}
+
+/// Decodes an all-or-none attachment and rejects non-routable live rows.
+fn hand_lease_attachment_from_row(
+    row: &sqlx::postgres::PgRow,
+    status: HandLeaseStatus,
+) -> Result<Option<HandLeaseWorkspaceAttachment>> {
+    let workspace_id = row
+        .try_get::<Option<SandboxWorkspaceId>, _>("workspace_id")
+        .map_err(map_sqlx_error)?;
+    let writer_epoch = row
+        .try_get::<Option<i64>, _>("workspace_writer_epoch")
+        .map_err(map_sqlx_error)?;
+    let instance_generation = row
+        .try_get::<Option<i64>, _>("workspace_instance_generation")
+        .map_err(map_sqlx_error)?;
+    let restored_checkpoint_id = row
+        .try_get::<Option<WorkspaceCheckpointId>, _>("restored_checkpoint_id")
+        .map_err(map_sqlx_error)?;
+
+    match (workspace_id, writer_epoch, instance_generation) {
+        (Some(workspace_id), Some(writer_epoch), Some(instance_generation)) => {
+            HandLeaseWorkspaceAttachment::new(
+                workspace_id,
+                writer_epoch,
+                instance_generation,
+                restored_checkpoint_id,
+            )
+            .map(Some)
+        }
+        (None, None, None) if restored_checkpoint_id.is_none() => {
+            if matches!(
+                status,
+                HandLeaseStatus::Provisioning | HandLeaseStatus::Active
+            ) {
+                return Err(MoaError::StorageError(format!(
+                    "{status:?} hand lease is missing its durable workspace attachment"
+                )));
+            }
+            Ok(None)
+        }
+        _ => Err(MoaError::StorageError(
+            "hand lease has a partial durable workspace attachment".to_string(),
+        )),
+    }
 }
 
 /// Decodes the policy identity columns, treating an incomplete identity as stale.
@@ -959,8 +1329,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct MemoryHandLeaseStore {
-    leases: Mutex<HashMap<(SessionId, String, String), HandLease>>,
-    destroy_claims: Mutex<HashMap<(SessionId, String, String), Uuid>>,
+    leases: Mutex<HashMap<(TenantId, SessionId, String, String), HandLease>>,
+    destroy_claims: Mutex<HashMap<(TenantId, SessionId, String, String), Uuid>>,
 }
 
 #[cfg(test)]
@@ -983,13 +1353,29 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             tenant_id,
             provider,
             tier,
+            attachment,
             policy,
             caller_deadline,
         } = request;
         let mut leases = self.leases.lock().await;
-        let key = (session_id, worker_id.to_string(), provider.to_string());
+        let key = (
+            tenant_id,
+            session_id,
+            worker_id.to_string(),
+            provider.to_string(),
+        );
         let now = Utc::now();
         let provisioning_deadline_at = provisioning_deadline(now, caller_deadline)?;
+        if leases.values().any(|lease| {
+            lease.session_id == session_id
+                && lease.worker_id == worker_id
+                && lease.provider == provider
+                && lease.tenant_id != tenant_id
+        }) {
+            return Err(MoaError::StorageError(
+                "hand lease tenant_id is immutable for an existing session scope".to_string(),
+            ));
+        }
         if let Some(existing) = leases.get(&key) {
             let active_expired = existing.status == HandLeaseStatus::Active
                 && (existing.idle_expires_at.is_some_and(|idle| idle <= now)
@@ -1023,6 +1409,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             idle_expires_at: policy.idle_deadline(now),
             hard_expires_at: policy.hard_deadline(now),
             reap_not_before: Some(reconciliation_time(provisioning_deadline_at)?),
+            attachment: Some(attachment),
             policy: Some(policy.clone()),
         };
         leases.insert(key, lease.clone());
@@ -1031,6 +1418,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
 
     async fn get(
         &self,
+        tenant_id: TenantId,
         session_id: SessionId,
         worker_id: &str,
         provider: &str,
@@ -1039,41 +1427,56 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             .leases
             .lock()
             .await
-            .get(&(session_id, worker_id.to_string(), provider.to_string()))
+            .get(&(
+                tenant_id,
+                session_id,
+                worker_id.to_string(),
+                provider.to_string(),
+            ))
             .cloned())
     }
 
-    async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>> {
+    async fn list_session(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+    ) -> Result<Vec<HandLease>> {
         let mut leases = self
             .leases
             .lock()
             .await
             .values()
-            .filter(|lease| lease.session_id == session_id)
+            .filter(|lease| lease.tenant_id == tenant_id && lease.session_id == session_id)
             .cloned()
             .collect::<Vec<_>>();
         leases.sort_by(|left, right| left.provider.cmp(&right.provider));
         Ok(leases)
     }
 
-    async fn activate(
-        &self,
-        session_id: SessionId,
-        worker_id: &str,
-        provider: &str,
-        generation: i64,
-        handle: LeaseHandle,
-    ) -> Result<bool> {
+    async fn activate(&self, request: HandLeaseActivateRequest<'_>) -> Result<bool> {
+        let HandLeaseActivateRequest {
+            tenant_id,
+            session_id,
+            worker_id,
+            provider,
+            generation,
+            handle,
+            attachment,
+        } = request;
         let mut leases = self.leases.lock().await;
-        let Some(lease) =
-            leases.get_mut(&(session_id, worker_id.to_string(), provider.to_string()))
-        else {
+        let Some(lease) = leases.get_mut(&(
+            tenant_id,
+            session_id,
+            worker_id.to_string(),
+            provider.to_string(),
+        )) else {
             return Ok(false);
         };
         if lease.generation != generation
             || lease.provisioning_operation_id != handle.provisioning_operation_id
             || lease.status != HandLeaseStatus::Provisioning
             || lease.handle.is_some()
+            || lease.attachment.as_ref() != Some(&attachment)
         {
             return Ok(false);
         }
@@ -1084,9 +1487,14 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         Ok(true)
     }
 
-    async fn clear_handle_for_provisioning(&self, claim: &HandLease) -> Result<bool> {
+    async fn clear_handle_for_provisioning(
+        &self,
+        tenant_id: TenantId,
+        claim: &HandLease,
+    ) -> Result<bool> {
         let mut leases = self.leases.lock().await;
         let Some(lease) = leases.get_mut(&(
+            tenant_id,
             claim.session_id,
             claim.worker_id.clone(),
             claim.provider.clone(),
@@ -1097,6 +1505,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             || lease.provisioning_operation_id != claim.provisioning_operation_id
             || lease.status != HandLeaseStatus::Provisioning
             || lease.handle != claim.handle
+            || lease.attachment != claim.attachment
         {
             return Ok(false);
         }
@@ -1105,25 +1514,31 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         Ok(true)
     }
 
-    async fn renew_active(
-        &self,
-        session_id: SessionId,
-        worker_id: &str,
-        provider: &str,
-        generation: i64,
-        provisioning_operation_id: HandProvisioningOperationId,
-        idle_expires_at: DateTime<Utc>,
-    ) -> Result<bool> {
+    async fn renew_active(&self, request: HandLeaseRenewRequest<'_>) -> Result<bool> {
+        let HandLeaseRenewRequest {
+            tenant_id,
+            session_id,
+            worker_id,
+            provider,
+            generation,
+            provisioning_operation_id,
+            attachment,
+            idle_expires_at,
+        } = request;
         let mut leases = self.leases.lock().await;
-        let Some(lease) =
-            leases.get_mut(&(session_id, worker_id.to_string(), provider.to_string()))
-        else {
+        let Some(lease) = leases.get_mut(&(
+            tenant_id,
+            session_id,
+            worker_id.to_string(),
+            provider.to_string(),
+        )) else {
             return Ok(false);
         };
         let now = Utc::now();
         if lease.generation != generation
             || lease.provisioning_operation_id != provisioning_operation_id
             || lease.status != HandLeaseStatus::Active
+            || lease.attachment.as_ref() != Some(&attachment)
             || lease.idle_expires_at.is_some_and(|idle| idle <= now)
             || lease.hard_expires_at.is_some_and(|hard| hard <= now)
         {
@@ -1142,6 +1557,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
 
     async fn transition_status(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         status: HandLeaseStatus,
     ) -> Result<bool> {
@@ -1152,6 +1568,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         }
         let mut leases = self.leases.lock().await;
         let Some(lease) = leases.get_mut(&(
+            tenant_id,
             expected.session_id,
             expected.worker_id.clone(),
             expected.provider.clone(),
@@ -1162,6 +1579,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             || lease.provisioning_operation_id != expected.provisioning_operation_id
             || lease.status != expected.status
             || lease.handle != expected.handle
+            || lease.attachment != expected.attachment
         {
             return Ok(false);
         }
@@ -1178,6 +1596,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
 
     async fn claim_for_destroy(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         _claim_ttl: Duration,
     ) -> Result<Option<Uuid>> {
@@ -1192,6 +1611,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             return Ok(None);
         }
         let key = (
+            tenant_id,
             expected.session_id,
             expected.worker_id.clone(),
             expected.provider.clone(),
@@ -1205,6 +1625,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             || lease.provisioning_operation_id != expected.provisioning_operation_id
             || lease.status != expected.status
             || lease.handle != expected.handle
+            || lease.attachment != expected.attachment
         {
             return Ok(None);
         }
@@ -1215,8 +1636,14 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         Ok(Some(claim_token))
     }
 
-    async fn finalize_destroy(&self, expected: &HandLease, claim_token: Uuid) -> Result<bool> {
+    async fn finalize_destroy(
+        &self,
+        tenant_id: TenantId,
+        expected: &HandLease,
+        claim_token: Uuid,
+    ) -> Result<bool> {
         let key = (
+            tenant_id,
             expected.session_id,
             expected.worker_id.clone(),
             expected.provider.clone(),
@@ -1232,6 +1659,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             || lease.provisioning_operation_id != expected.provisioning_operation_id
             || lease.status != HandLeaseStatus::Reaping
             || lease.handle != expected.handle
+            || lease.attachment != expected.attachment
         {
             return Ok(false);
         }
@@ -1246,11 +1674,13 @@ impl HandLeaseStore for MemoryHandLeaseStore {
 
     async fn release_destroy_claim(
         &self,
+        tenant_id: TenantId,
         expected: &HandLease,
         claim_token: Uuid,
         retry_after: Duration,
     ) -> Result<bool> {
         let key = (
+            tenant_id,
             expected.session_id,
             expected.worker_id.clone(),
             expected.provider.clone(),
@@ -1266,6 +1696,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             || lease.provisioning_operation_id != expected.provisioning_operation_id
             || lease.status != HandLeaseStatus::Reaping
             || lease.handle != expected.handle
+            || lease.attachment != expected.attachment
         {
             return Ok(false);
         }
@@ -1305,6 +1736,8 @@ mod tests {
             tenant_id,
             provider: "local",
             tier: SandboxTier::Local,
+            attachment: HandLeaseWorkspaceAttachment::new(SandboxWorkspaceId::new(), 1, 1, None)
+                .expect("test attachment should validate"),
             policy,
             caller_deadline: None,
         }
@@ -1354,20 +1787,23 @@ mod tests {
         assert_eq!(worker_claim.worker_id, "sub-x");
         assert!(
             store
-                .get(session_id, "", "local")
+                .get(tenant_id, session_id, "", "local")
                 .await
                 .expect("load session lease")
                 .is_some()
         );
         assert!(
             store
-                .get(session_id, "sub-x", "local")
+                .get(tenant_id, session_id, "sub-x", "local")
                 .await
                 .expect("load worker lease")
                 .is_some()
         );
         // list_session reclaims every scope under the session at once.
-        let listed = store.list_session(session_id).await.expect("list leases");
+        let listed = store
+            .list_session(tenant_id, session_id)
+            .await
+            .expect("list leases");
         assert_eq!(listed.len(), 2, "both scopes belong to the session");
     }
 
@@ -1383,17 +1819,23 @@ mod tests {
             .await
             .expect("claim should succeed")
             .expect("claim should be owned");
+        let attachment = claimed
+            .attachment
+            .clone()
+            .expect("provisioning claim carries workspace attachment");
         store
-            .activate(
+            .activate(HandLeaseActivateRequest {
+                tenant_id,
                 session_id,
-                "",
-                "local",
-                claimed.generation,
-                LeaseHandle::new(
+                worker_id: "",
+                provider: "local",
+                generation: claimed.generation,
+                handle: LeaseHandle::new(
                     claimed.provisioning_operation_id,
                     HandHandle::local(PathBuf::from("/tmp/moa-hand")),
                 ),
-            )
+                attachment,
+            })
             .await
             .expect("activate lease");
 
@@ -1406,13 +1848,13 @@ mod tests {
         );
 
         let active = store
-            .get(session_id, "", "local")
+            .get(tenant_id, session_id, "", "local")
             .await
             .expect("load active lease")
             .expect("active lease exists");
         assert!(
             store
-                .transition_status(&active, HandLeaseStatus::Stale)
+                .transition_status(tenant_id, &active, HandLeaseStatus::Stale)
                 .await
                 .expect("mark stale")
         );
@@ -1451,6 +1893,13 @@ mod tests {
                 tenant_id: TenantId::new(),
                 provider: "local",
                 tier: SandboxTier::Local,
+                attachment: HandLeaseWorkspaceAttachment::new(
+                    SandboxWorkspaceId::new(),
+                    1,
+                    1,
+                    None,
+                )
+                .expect("test attachment should validate"),
                 policy: &policy,
                 caller_deadline: Some(caller_deadline),
             })
@@ -1477,6 +1926,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_rejects_mismatched_workspace_hydration_fences() {
+        // Pins: provider success cannot activate or renew a hand after its
+        // workspace writer/instance/revision attachment fence changes.
+        let store = MemoryHandLeaseStore::shared();
+        let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let policy = lease_policy(Some(300), Some(3600), "cap-1");
+        let claim = store
+            .claim_for_provisioning(provision_request(
+                session_id, "worker-a", tenant_id, &policy,
+            ))
+            .await
+            .expect("claim should succeed")
+            .expect("claim should be owned");
+        let exact = claim
+            .attachment
+            .clone()
+            .expect("provisioning claim carries workspace attachment");
+        let stale = HandLeaseWorkspaceAttachment::new(
+            exact.workspace_id,
+            exact.workspace_writer_epoch + 1,
+            exact.workspace_instance_generation,
+            exact.restored_checkpoint_id,
+        )
+        .expect("stale test attachment should validate");
+        let handle = LeaseHandle::new(
+            claim.provisioning_operation_id,
+            HandHandle::local(PathBuf::from("/tmp/moa-hand-fenced")),
+        );
+
+        assert!(
+            !store
+                .activate(HandLeaseActivateRequest {
+                    tenant_id,
+                    session_id,
+                    worker_id: "worker-a",
+                    provider: "local",
+                    generation: claim.generation,
+                    handle: handle.clone(),
+                    attachment: stale.clone(),
+                })
+                .await
+                .expect("mismatched activation should not fail storage"),
+            "a stale writer epoch must not activate compute"
+        );
+        let still_provisioning = store
+            .get(tenant_id, session_id, "worker-a", "local")
+            .await
+            .expect("load lease after rejected activation")
+            .expect("lease remains present");
+        assert_eq!(still_provisioning.status, HandLeaseStatus::Provisioning);
+        assert_eq!(still_provisioning.handle, None);
+
+        assert!(
+            store
+                .activate(HandLeaseActivateRequest {
+                    tenant_id,
+                    session_id,
+                    worker_id: "worker-a",
+                    provider: "local",
+                    generation: claim.generation,
+                    handle,
+                    attachment: exact.clone(),
+                })
+                .await
+                .expect("exact activation succeeds")
+        );
+        assert!(
+            !store
+                .renew_active(HandLeaseRenewRequest {
+                    tenant_id,
+                    session_id,
+                    worker_id: "worker-a",
+                    provider: "local",
+                    generation: claim.generation,
+                    provisioning_operation_id: claim.provisioning_operation_id,
+                    attachment: stale,
+                    idle_expires_at: Utc::now() + chrono::Duration::seconds(600),
+                })
+                .await
+                .expect("mismatched renewal should not fail storage"),
+            "a stale workspace attachment must not renew an active lease"
+        );
+    }
+
+    #[tokio::test]
     async fn memory_store_renew_active_is_generation_fenced() {
         // Pins: lease renewal only extends the current active generation.
         let store = MemoryHandLeaseStore::shared();
@@ -1489,48 +2024,58 @@ mod tests {
             .await
             .expect("claim should succeed")
             .expect("claim should be owned");
+        let attachment = claim
+            .attachment
+            .clone()
+            .expect("provisioning claim carries workspace attachment");
         store
-            .activate(
+            .activate(HandLeaseActivateRequest {
+                tenant_id,
                 session_id,
-                "",
-                "local",
-                claim.generation,
-                LeaseHandle::new(
+                worker_id: "",
+                provider: "local",
+                generation: claim.generation,
+                handle: LeaseHandle::new(
                     claim.provisioning_operation_id,
                     HandHandle::local(PathBuf::from("/tmp/moa-hand")),
                 ),
-            )
+                attachment: attachment.clone(),
+            })
             .await
             .expect("activate lease");
 
         assert!(
             !store
-                .renew_active(
+                .renew_active(HandLeaseRenewRequest {
+                    tenant_id,
                     session_id,
-                    "",
-                    "local",
-                    claim.generation + 1,
-                    claim.provisioning_operation_id,
-                    renewed_expiry
-                )
+                    worker_id: "",
+                    provider: "local",
+                    generation: claim.generation + 1,
+                    provisioning_operation_id: claim.provisioning_operation_id,
+                    attachment: attachment.clone(),
+                    idle_expires_at: renewed_expiry,
+                })
                 .await
                 .expect("wrong generation renewal should not fail storage")
         );
         assert!(
             store
-                .renew_active(
+                .renew_active(HandLeaseRenewRequest {
+                    tenant_id,
                     session_id,
-                    "",
-                    "local",
-                    claim.generation,
-                    claim.provisioning_operation_id,
-                    renewed_expiry,
-                )
+                    worker_id: "",
+                    provider: "local",
+                    generation: claim.generation,
+                    provisioning_operation_id: claim.provisioning_operation_id,
+                    attachment,
+                    idle_expires_at: renewed_expiry,
+                })
                 .await
                 .expect("current generation renewal should succeed")
         );
         let renewed = store
-            .get(session_id, "", "local")
+            .get(tenant_id, session_id, "", "local")
             .await
             .expect("load renewed lease")
             .expect("lease should exist");
@@ -1551,38 +2096,46 @@ mod tests {
             .await
             .expect("claim")
             .expect("claim is owned");
+        let attachment = claim
+            .attachment
+            .clone()
+            .expect("provisioning claim carries workspace attachment");
         let hard_deadline = claim.hard_expires_at.expect("bounded hard deadline");
         store
-            .activate(
+            .activate(HandLeaseActivateRequest {
+                tenant_id,
                 session_id,
-                "",
-                "local",
-                claim.generation,
-                LeaseHandle::new(
+                worker_id: "",
+                provider: "local",
+                generation: claim.generation,
+                handle: LeaseHandle::new(
                     claim.provisioning_operation_id,
                     HandHandle::local(PathBuf::from("/tmp/moa-hand")),
                 ),
-            )
+                attachment: attachment.clone(),
+            })
             .await
             .expect("activate lease");
 
         let greedy = Utc::now() + chrono::Duration::hours(24);
         assert!(
             store
-                .renew_active(
+                .renew_active(HandLeaseRenewRequest {
+                    tenant_id,
                     session_id,
-                    "",
-                    "local",
-                    claim.generation,
-                    claim.provisioning_operation_id,
-                    greedy,
-                )
+                    worker_id: "",
+                    provider: "local",
+                    generation: claim.generation,
+                    provisioning_operation_id: claim.provisioning_operation_id,
+                    attachment,
+                    idle_expires_at: greedy,
+                })
                 .await
                 .expect("renewal within the hard lifetime succeeds")
         );
 
         let renewed = store
-            .get(session_id, "", "local")
+            .get(tenant_id, session_id, "", "local")
             .await
             .expect("load renewed lease")
             .expect("lease should exist");

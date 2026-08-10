@@ -52,6 +52,9 @@ pub struct TenantPurgeImpl {
     lineage_clickhouse: Option<Arc<ClickHouseStore>>,
     analytics_clickhouse: Option<Arc<AnalyticsClickHouseClient>>,
     vector_factory: VectorStoreFactory,
+    workspace_maintenance: Option<
+        Arc<moa_hands::core::sandbox_workspace::maintenance::WorkspaceMaintenanceCoordinator>,
+    >,
 }
 
 impl TenantPurgeImpl {
@@ -65,6 +68,9 @@ impl TenantPurgeImpl {
         pool: sqlx::PgPool,
         credential_vault: Arc<dyn CredentialVault>,
         config: &MoaConfig,
+        workspace_maintenance: Option<
+            Arc<moa_hands::core::sandbox_workspace::maintenance::WorkspaceMaintenanceCoordinator>,
+        >,
     ) -> Self {
         Self {
             pool,
@@ -83,6 +89,7 @@ impl TenantPurgeImpl {
                 )
             }),
             vector_factory: VectorStoreFactory::from_config(config),
+            workspace_maintenance,
         }
     }
 }
@@ -105,14 +112,33 @@ impl TenantPurge for TenantPurgeImpl {
             .map(Json::into_inner)
             .unwrap_or(TenantPurgeStatus::Pending);
 
+        if matches!(
+            status,
+            TenantPurgeStatus::Pending | TenantPurgeStatus::VectorsPurged
+        ) && self.workspace_maintenance.is_none()
+        {
+            return Err(HandlerError::from(anyhow::anyhow!(
+                "tenant purge requires sandbox workspace maintenance mode before any external deletion"
+            )));
+        }
+
         if status == TenantPurgeStatus::Pending {
             let pool = self.pool.clone();
             let factory = self.vector_factory.clone();
             let tenant_id = request.tenant_id;
             let vector_operation_id = operation_id.clone();
             ctx.run(move || async move {
-                purge_external_vectors(&pool, &factory, tenant_id, &vector_operation_id)
-                    .await
+                let result =
+                    purge_external_vectors(&pool, &factory, tenant_id, &vector_operation_id).await;
+                if let Err(error) = &result {
+                    tracing::warn!(
+                        %tenant_id,
+                        operation_id = %vector_operation_id,
+                        %error,
+                        "tenant purge external-vector phase will retry"
+                    );
+                }
+                result
                     .map(Json::from)
                     .map_err(|error| HandlerError::from(anyhow::anyhow!(error)))
             })
@@ -124,6 +150,58 @@ impl TenantPurge for TenantPurgeImpl {
         }
 
         if status == TenantPurgeStatus::VectorsPurged {
+            let maintenance = self.workspace_maintenance.clone().ok_or_else(|| {
+                HandlerError::from(anyhow::anyhow!(
+                    "sandbox workspace maintenance is unavailable for tenant purge"
+                ))
+            })?;
+            let tenant_id = request.tenant_id;
+            let sandbox_operation_id = operation_id.clone();
+            let proof = ctx
+                .run(move || async move {
+                    let result = maintenance
+                        .purge_tenant_external(tenant_id, &sandbox_operation_id)
+                        .await;
+                    if let Err(error) = &result {
+                        tracing::warn!(
+                            %tenant_id,
+                            operation_id = %sandbox_operation_id,
+                            %error,
+                            "tenant purge external phase will retry"
+                        );
+                    }
+                    result
+                        .map(Json::from)
+                        .map_err(|error| HandlerError::from(anyhow::anyhow!(error)))
+                })
+                .name("tenant_purge_sandbox_external_delete")
+                .await?
+                .into_inner();
+
+            // The external phase result is journaled before confirmation starts.
+            // A crash at the confirmation barrier therefore replays the exact
+            // secret-free proof and cannot invoke provider deletion again.
+            let maintenance = self.workspace_maintenance.clone().ok_or_else(|| {
+                HandlerError::from(anyhow::anyhow!(
+                    "sandbox workspace maintenance is unavailable for tenant purge"
+                ))
+            })?;
+            let tenant_id = request.tenant_id;
+            let sandbox_operation_id = operation_id.clone();
+            ctx.run(move || async move {
+                maintenance
+                    .confirm_tenant_external_absence(tenant_id, &sandbox_operation_id, &proof)
+                    .await
+                    .map(Json::from)
+                    .map_err(|error| HandlerError::from(anyhow::anyhow!(error)))
+            })
+            .name("tenant_purge_sandbox_absence_confirmation")
+            .await?;
+            status = TenantPurgeStatus::SandboxWorkspacesPurged;
+            ctx.set(K_STATUS, Json(status));
+        }
+
+        if status == TenantPurgeStatus::SandboxWorkspacesPurged {
             let vault = self.credential_vault.clone();
             let tenant_id = request.tenant_id;
             let credential_operation_id = operation_id.clone();
@@ -698,6 +776,10 @@ mod tests {
         assert_eq!(next_step(TenantPurgeStatus::Pending), Some("vectors"));
         assert_eq!(
             next_step(TenantPurgeStatus::VectorsPurged),
+            Some("sandbox_workspaces")
+        );
+        assert_eq!(
+            next_step(TenantPurgeStatus::SandboxWorkspacesPurged),
             Some("credentials")
         );
         assert_eq!(
@@ -710,7 +792,8 @@ mod tests {
     fn next_step(status: TenantPurgeStatus) -> Option<&'static str> {
         match status {
             TenantPurgeStatus::Pending => Some("vectors"),
-            TenantPurgeStatus::VectorsPurged => Some("credentials"),
+            TenantPurgeStatus::VectorsPurged => Some("sandbox_workspaces"),
+            TenantPurgeStatus::SandboxWorkspacesPurged => Some("credentials"),
             TenantPurgeStatus::CredentialsPurged => Some("relational"),
             TenantPurgeStatus::RelationallyCommitted => Some("clickhouse"),
             TenantPurgeStatus::AnalyticsPurged | TenantPurgeStatus::FailedTerminal => None,

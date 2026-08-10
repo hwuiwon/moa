@@ -48,6 +48,7 @@ mod knowledge;
 pub(crate) mod lineage;
 mod memory;
 mod oauth;
+mod sandbox_workspaces;
 mod session;
 mod session_stream;
 mod tenant_accounts;
@@ -1148,6 +1149,7 @@ fn translate_public_route(
         knowledge::translate,
         artifacts::translate,
         connectors::translate,
+        sandbox_workspaces::translate,
     ] {
         if let Some(translation) = translate(method, uri, body, tenant_id) {
             return translation;

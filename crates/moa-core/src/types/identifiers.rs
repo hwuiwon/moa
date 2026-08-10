@@ -68,6 +68,43 @@ uuid_id!(
 );
 
 uuid_id!(
+    /// Identifier for one tenant-owned durable sandbox workspace.
+    pub struct SandboxWorkspaceId
+);
+
+uuid_id!(
+    /// Identifier for one immutable sandbox-workspace checkpoint.
+    pub struct WorkspaceCheckpointId
+);
+
+uuid_id!(
+    /// Identifier for one durable sandbox-workspace provider operation.
+    pub struct WorkspaceOperationId
+);
+
+uuid_id!(
+    /// Identifier for one configured sandbox provider account and isolation cell.
+    pub struct ProviderAccountId
+);
+
+uuid_id!(
+    /// Core boundary reference to one verified durable execution run.
+    ///
+    /// The owning `moa-execution` crate retains its execution-run domain type.
+    /// Orchestration converts that verified UUID at the workspace boundary.
+    pub struct ExecutionRunScopeId
+);
+
+uuid_id!(
+    /// Core boundary reference to one verified durable execution task.
+    ///
+    /// The owning `moa-execution` crate retains its `ExecutionTaskId` domain
+    /// type. Orchestration converts that verified UUID at the workspace
+    /// boundary without introducing a `moa-core -> moa-execution` dependency.
+    pub struct ExecutionTaskScopeId
+);
+
+uuid_id!(
     /// Identifier for one durable child-to-parent attention signal.
     pub struct AgentSignalId
 );
@@ -80,7 +117,11 @@ impl From<uuid::Uuid> for ToolCallId {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectorConnectionId, StoragePartitionId, TenantId};
+    use super::{
+        ConnectorConnectionId, ExecutionRunScopeId, ExecutionTaskScopeId, ProviderAccountId,
+        SandboxWorkspaceId, StoragePartitionId, TenantId, WorkspaceCheckpointId,
+        WorkspaceOperationId,
+    };
 
     #[test]
     fn storage_partition_id_for_tenant_uses_tenant_uuid_text() {
@@ -108,5 +149,41 @@ mod tests {
 
         assert_eq!(decoded, connection_id);
         assert_eq!(encoded, format!("\"{}\"", connection_id.0));
+    }
+
+    #[test]
+    fn sandbox_workspace_identifiers_round_trip_as_distinct_uuid_newtypes() {
+        // Pins: workspace, checkpoint, operation, provider-account, and durable
+        // execution-task boundaries remain UUID-shaped without string aliases.
+        let value = uuid::Uuid::from_u128(0x5a11_db0c);
+        let encoded = serde_json::to_string(&(
+            SandboxWorkspaceId(value),
+            WorkspaceCheckpointId(value),
+            WorkspaceOperationId(value),
+            ProviderAccountId(value),
+            ExecutionRunScopeId(value),
+            ExecutionTaskScopeId(value),
+        ))
+        .expect("workspace identifiers should serialize");
+        let decoded: (
+            SandboxWorkspaceId,
+            WorkspaceCheckpointId,
+            WorkspaceOperationId,
+            ProviderAccountId,
+            ExecutionRunScopeId,
+            ExecutionTaskScopeId,
+        ) = serde_json::from_str(&encoded).expect("workspace identifiers should deserialize");
+
+        assert_eq!(
+            decoded,
+            (
+                SandboxWorkspaceId(value),
+                WorkspaceCheckpointId(value),
+                WorkspaceOperationId(value),
+                ProviderAccountId(value),
+                ExecutionRunScopeId(value),
+                ExecutionTaskScopeId(value),
+            )
+        );
     }
 }

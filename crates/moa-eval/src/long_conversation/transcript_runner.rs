@@ -24,8 +24,9 @@ use moa_core::{
     types::events_stream::EventRecord, types::experience::AttributionSubjectType,
     types::experience::LearningCandidateSourceRef, types::identifiers::SessionId,
     types::model::ModelCapabilities, types::resource::ResourceBudget,
-    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
-    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
+    types::sandbox_workspace::SandboxWorkspaceScope, types::segment_assessment::AssessmentPhase,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
+    types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
     types::session::SessionMeta,
@@ -630,6 +631,10 @@ async fn drive_one_turn(
     cancel_token: &CancellationToken,
     resource_budget: &mut ResourceBudget,
 ) -> Result<()> {
+    let workspace_scope = SandboxWorkspaceScope::Worker {
+        session_id,
+        worker_id: "long-conversation-eval".to_string(),
+    };
     for turn_index in 0..MAX_LONG_CONVERSATION_AGENT_TURNS {
         let outcome = run_streamed_turn(StreamedTurnRequest {
             turn: BrainTurnRequest {
@@ -639,6 +644,7 @@ async fn drive_one_turn(
                 llm_provider: llm_provider.clone(),
                 pipeline: &environment.pipeline,
                 tool_router: Some(environment.tool_router.clone()),
+                workspace_scope: Some(workspace_scope.clone()),
             },
             runtime_tx,
             event_tx: None,

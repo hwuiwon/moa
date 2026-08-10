@@ -23,6 +23,7 @@ Brain and execution
         v
 Product data in Postgres / Neon
   sessions, events, pending_signals, context_snapshots
+  sandbox workspaces, checkpoint metadata, operation and capacity ledgers
   task_segments, experience_records, experience_attributions,
   learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, configured vector records
@@ -54,6 +55,11 @@ without turning Nango/Merge provider sync into session memory ingestion.
 `moa-connectors` owns the generic tenant connection parent and exact-generation
 HTTP action bindings; `KnowledgeConnection` remains the knowledge-owned
 Nango/Merge capability projection beneath its code-owned managed parent.
+Restate and session durability do not imply durable arbitrary sandbox files.
+Hands are ephemeral compute; independently retained `SandboxWorkspace` metadata
+lives in Postgres and committed filesystem bytes live in provider storage plus
+verified portable checkpoints. [Sandbox Workspaces](25-sandbox-workspaces.md)
+is the canonical contract.
 
 ## Agent Building Blocks
 
@@ -123,6 +129,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 | `ExecutionRepository` | `moa-execution` | Owns scoped run/task persistence, idempotent materialization, atomic budget accounting, generation-fenced outcomes, amendment history, and cancellation. It depends only on shared database/core types, never on Restate or runtime owners. |
 | `ExecutionRun` | `moa-orchestrator` Restate workflow | Drives one durable plan from persisted state, including amendment, cancellation, progress, and terminal completion. |
 | `ExecutionTask` | `moa-orchestrator` Restate workflow | Executes one stable logical node or map-item instance and records one typed outcome. |
+| Sandbox workspace | `moa-hands` domain/repositories/adapters, composed by `moa-orchestrator` | Owns one tenant-scoped, worker-owned or execution-task-owned filesystem lifecycle; Postgres stores ownership/fences and provider/object storage owns bytes. |
 | Connector definition | `moa-artifacts` | Owns immutable reviewed HTTP transport, schema, data-class, credential-slot, and action contracts; the platform supplies the fixed external-write/high-risk/admin-review floor. |
 | Connector connection | `moa-connectors` | Owns tenant lifecycle/health/generation, HTTP action bindings, and durable send outcomes. |
 | Knowledge connection | `moa-knowledge` | Owns Nango/Merge provider records, cursor/deletion behavior, ACL capture, parsing, and ingestion beneath code-owned managed parents. |
@@ -318,7 +325,8 @@ eval-owned session, and dispatch verifies each exact binding once. Release cases
 that reference simulation data bundles fail admission: the supported AgentLoop
 lane has no fixture-backed target capability, so persisted fixture identifiers
 would be provenance without enforcement. Run-scoped hand state is isolated by
-the trial's unique session and sandbox, but is not release gate authority.
+the trial's unique admitted worker/execution-task workspace scope, but is not
+release gate authority.
 The approved plan must produce the policy's deterministic blocking score rows
 (`scenario_outcome`, `target_completed`, `result_produced`, and
 `privacy_safe_output` in the platform policy), and the workflow derives its
@@ -436,7 +444,8 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `BlobStore` | Claim-check storage for large session artifacts | `PostgresBlobStore` by default; explicit `FileBlobStore` for local or mounted-path use |
 | `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | Redis-compatible Valkey in the orchestrator; in-process memory only in isolated non-orchestrator tests |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
-| `HandProvider` | Declare enforceable capabilities per sandbox tier, then provision, discover, execute, pause/resume, and destroy hands. `capabilities()` and `provisioned_hands()` are required with no default bodies. Every platform-created `HandSpec` carries one durable `HandProvisioningOperationId`, the lease's absolute provisioning deadline through `budget.deadline`, and one required six-dimension `EffectiveSandboxProfile`. The platform bounds the complete create dispatch by that persisted deadline. `provision()` is idempotent for the operation ID and same creation spec, rejects reuse with a different spec, and `provisioned_hands()` enumerates every matching live resource so recovery can reconcile providers that may create duplicates. | local, Docker, Daytona, E2B |
+| `HandProvider` | Ephemeral compute only: declare enforceable capabilities per sandbox tier, then provision, discover, execute, and destroy hands. `capabilities()` and `provisioned_hands()` are required with no default bodies. Every platform-created `HandSpec` carries one durable `HandProvisioningOperationId`, the lease's absolute provisioning deadline through `budget.deadline`, and one required six-dimension `EffectiveSandboxProfile`. The platform bounds the complete create dispatch by that persisted deadline. `provision()` is idempotent for the operation ID and same creation spec, rejects reuse with a different spec, and `provisioned_hands()` enumerates every matching live resource so recovery can reconcile providers that may create duplicates. | local, Docker, Daytona, E2B |
+| `SandboxStorageProvider` | Provider-neutral persistent-workspace operations: prepare and attach mutable storage, publish a portable checkpoint, restore, delete, enumerate, and reconcile. | local/Docker portable checkpoint backend, Daytona tenant volumes, E2B portable export plus fresh-compute restore |
 | `LLMProvider` | Provider completion interface, including the shared immutable request path used for failover replay | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, ZeroEntropy zembed-1, Gemini embedding, and test/mock adapters |
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
@@ -528,10 +537,15 @@ control plane (attention signals, terminal-wake, guarded resume) that routes
 through the coordinator VO. All of this is correct on Kubernetes because its state
 lives in Restate VO/workflow state and Postgres (idempotent event appends guarded
 by `session_event_dedupe`). Valkey is the sole shared turn-admission owner, but it
-does not own signals, resume, or terminal results. The root coordinator is sandbox-free, and each worker owns one ephemeral
-sandbox keyed `(session_id, worker_id, provider)` that is released on the
-worker's self-cleanup. `docs/02-brain-orchestration.md` and
-`docs/12-restate-architecture.md` describe these planes in detail.
+does not own signals, resume, or terminal results. The root coordinator is
+sandbox-free. Each worker or sandbox-using execution task owns one typed durable
+`SandboxWorkspace` and may attach one ephemeral hand under independent writer
+and compute-instance fences. Self-cleanup releases compute without deleting
+retained workspace state. Sandbox dispatch without a typed worker or
+execution-task workspace scope is rejected before workspace reads or provider
+I/O; a coordinator or bare session cannot own a workspace.
+`docs/02-brain-orchestration.md`, `docs/12-restate-architecture.md`, and
+[Sandbox Workspaces](25-sandbox-workspaces.md) describe these boundaries.
 
 ### Hosted API Clients
 
@@ -607,7 +621,8 @@ policy.
 | Execution runs | Postgres | `moa.execution_run` and `moa.execution_task` store immutable plan snapshots, provenance, amendments, budgets, stable logical tasks, outcomes, citations, completion checks, and terminal results |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity, plus `learning_log_source` typed provenance |
 | Learning attribution | Postgres | `moa.artifact_revision_contribution` and `moa.artifact_suite_contribution` record whose data produced which derived artifact bytes; `moa.privacy_erasure_record_decision` records one durable disposition per record per erasure operation |
-| Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation and operation fencing, the absolute provider-create deadline, the later reconciliation time, status, and expiry for cross-pod reuse and cleanup |
+| Sandbox workspaces | Postgres + provider/object storage | Postgres stores tenant ownership, typed worker/execution-task scope, lifecycle, writer/instance fences, immutable checkpoint metadata, operation/grant/capacity ledgers, and retention/delete state. Providers may hold active mutable bytes; durable S3-compatible storage holds the verified portable checkpoint bytes. |
+| Hand leases | Postgres | `moa.hand_leases` stores ephemeral compute bindings, serialized handles, compute generation and operation fencing, workspace attachment references, the absolute provider-create deadline, reconciliation time, status, and expiry. Compute reaping never implies workspace deletion. |
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
 | Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids. `SessionAttachmentStore::put` takes a deterministic slot (tenant, session, client message id, ordinal) whose UUIDv5 is the row's primary key, claims that row before writing the object create-only, and reports whether the write created storage or replayed an identical one |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
@@ -883,3 +898,4 @@ for the current full workspace list from `cargo metadata`.
 - Live behavior experiments: `docs/eval/live-behavior-experiments.md`
 - Context pipeline: `docs/07-context-pipeline.md`
 - Multi-tenant learning: `docs/14-multi-tenancy-and-learning.md`
+- Durable sandbox filesystem state: `docs/25-sandbox-workspaces.md`

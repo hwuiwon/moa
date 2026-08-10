@@ -11,13 +11,22 @@ use moa_core::{
 use moa_observability::{record_tool_failure, record_tool_reprovision};
 use tracing::Instrument;
 
-use super::dispatch::{AuthorizedToolCall, McpDispatch};
-use super::lifecycle::{hand_id, scope_key};
+use super::dispatch::{
+    AuthorizedToolCall, DeferredWorkspaceToolOutput, McpDispatch, WorkspaceCommitMode,
+};
+use super::lifecycle::{hand_id, scope_key, workspace_lease_scope};
 use super::registration::{McpClientRoute, McpRouteGeneration};
 use super::{HandRoute, ToolCallScope, ToolExecution, ToolRouter};
 
 const MAX_TOOL_RETRIES: u32 = 3;
 const MAX_TOOL_REPROVISIONS: u32 = 2;
+
+fn completed(output: SecuredToolOutput) -> DeferredWorkspaceToolOutput {
+    DeferredWorkspaceToolOutput {
+        output,
+        workspace_commit_required: false,
+    }
+}
 
 struct HandFailureContext<'request, 'call> {
     request: &'request AuthorizedToolCall<'call>,
@@ -48,7 +57,8 @@ impl ToolRouter {
     pub(super) async fn execute_authorized_with_recovery_inner(
         &self,
         request: AuthorizedToolCall<'_>,
-    ) -> Result<SecuredToolOutput> {
+        workspace_commit_mode: WorkspaceCommitMode,
+    ) -> Result<DeferredWorkspaceToolOutput> {
         let Some(catalog) = request.catalog else {
             return Err(MoaError::ConfigError(
                 "authorized recovery call is missing its catalog selection".to_string(),
@@ -62,12 +72,12 @@ impl ToolRouter {
             let class = ToolFailureClass::Fatal {
                 reason: format!("unknown tool: {}", request.invocation.name),
             };
-            return Ok(Self::secure_router_output(
+            return Ok(completed(Self::secure_router_output(
                 ToolCapabilityId::builtin(&request.invocation.name),
                 request.active_canary,
                 ToolOutput::from(class),
                 None,
-            ));
+            )));
         };
         let capability = registered_tool
             .execution
@@ -78,7 +88,7 @@ impl ToolRouter {
                 let result = self
                     .execute_builtin_once(&request, &registered_tool.definition, &capability, tool)
                     .await;
-                Ok(match result {
+                Ok(completed(match result {
                     Ok(secured) => secured,
                     Err(error) if is_terminal_resource_error(&error) => return Err(error),
                     Err(error) => Self::secure_router_output(
@@ -87,14 +97,21 @@ impl ToolRouter {
                         ToolOutput::from(classify_tool_error(&error, 0)),
                         None,
                     ),
-                })
+                }))
             }
             ToolExecution::Hand { routes } => {
+                if request.workspace_scope.is_none() {
+                    return Err(MoaError::PermissionDenied(
+                        "sandbox tools require a typed worker or execution-task workspace scope"
+                            .to_string(),
+                    ));
+                }
                 self.execute_hand_with_recovery(
                     &request,
                     &registered_tool.definition,
                     &capability,
                     routes,
+                    workspace_commit_mode,
                 )
                 .await
             }
@@ -121,16 +138,19 @@ impl ToolRouter {
                     },
                 )
                 .await
+                .map(completed)
             }
-            ToolExecution::InstalledConnectorAction { .. } => Ok(Self::secure_router_output(
-                capability,
-                request.active_canary,
-                ToolOutput::error(
-                    "installed connector actions require the durable pending-output dispatch path; generic recovery will not retransmit them",
-                    Duration::ZERO,
-                ),
-                None,
-            )),
+            ToolExecution::InstalledConnectorAction { .. } => {
+                Ok(completed(Self::secure_router_output(
+                    capability,
+                    request.active_canary,
+                    ToolOutput::error(
+                        "installed connector actions require the durable pending-output dispatch path; generic recovery will not retransmit them",
+                        Duration::ZERO,
+                    ),
+                    None,
+                )))
+            }
         }
     }
 
@@ -140,9 +160,14 @@ impl ToolRouter {
         tool_definition: &ToolDefinition,
         capability: &ToolCapabilityId,
         routes: &[HandRoute],
-    ) -> Result<SecuredToolOutput> {
+        workspace_commit_mode: WorkspaceCommitMode,
+    ) -> Result<DeferredWorkspaceToolOutput> {
         let session = request.session;
-        let worker_id = request.worker_id;
+        let workspace_scope = request.workspace_scope.ok_or_else(|| {
+            MoaError::PermissionDenied("sandbox tools require a typed workspace scope".to_string())
+        })?;
+        let lease_scope = workspace_lease_scope(workspace_scope);
+        let worker_id = Some(lease_scope.as_str());
         let scope = request.scope;
         let routes = self.ordered_hand_routes(session, worker_id, routes).await?;
         let mut route_index = 0_usize;
@@ -163,7 +188,7 @@ impl ToolRouter {
             })?;
             let next_route = routes.get(route_index + 1);
             let hand = match self
-                .get_or_provision_hand_within(&route, session, worker_id, scope)
+                .get_or_provision_hand_within(&route, session, workspace_scope, scope)
                 .await
             {
                 Ok(hand) => hand,
@@ -239,7 +264,7 @@ impl ToolRouter {
                         )
                         .await?
                     {
-                        return Ok(result);
+                        return Ok(completed(result));
                     }
                     reprovisions += 1;
                     consecutive_timeouts = 0;
@@ -302,7 +327,7 @@ impl ToolRouter {
                         )
                         .await?
                     {
-                        return Ok(result);
+                        return Ok(completed(result));
                     }
                     if is_timeout_error(&error) {
                         consecutive_timeouts += 1;
@@ -326,7 +351,14 @@ impl ToolRouter {
             }
 
             match self
-                .execute_hand_on_handle(request, tool_definition, capability, provider, &hand)
+                .execute_hand_on_handle(
+                    request,
+                    tool_definition,
+                    capability,
+                    provider,
+                    &hand,
+                    workspace_commit_mode,
+                )
                 .await
             {
                 Ok(output) => {
@@ -335,6 +367,7 @@ impl ToolRouter {
                     return Ok(output);
                 }
                 Err(error) if is_terminal_resource_error(&error) => return Err(error),
+                Err(error @ MoaError::ExternalEffectUnknownOutcome { .. }) => return Err(error),
                 Err(error) => {
                     let mut class = self
                         .run_within_scope(scope, async {
@@ -388,7 +421,7 @@ impl ToolRouter {
                         )
                         .await?
                     {
-                        return Ok(result);
+                        return Ok(completed(result));
                     }
                     if is_timeout_error(&error) {
                         consecutive_timeouts += 1;
@@ -463,6 +496,9 @@ impl ToolRouter {
         stage: RecoveryStage,
         idempotency_class: IdempotencyClass,
     ) -> bool {
+        if request.workspace_scope.is_some() {
+            return false;
+        }
         let Some(next_route) = next_route else {
             return false;
         };
@@ -479,7 +515,13 @@ impl ToolRouter {
             "hand route failed; trying fallback provider"
         );
 
-        let scope = scope_key(request.session, request.worker_id);
+        let scope = request
+            .workspace_scope
+            .map(workspace_lease_scope)
+            .map_or_else(
+                || scope_key(request.session, None),
+                |lease| scope_key(request.session, Some(lease.as_str())),
+            );
         let mut preferred = self.hands.preferred_hand_routes.write().await;
         if preferred
             .get(&scope)
@@ -625,7 +667,11 @@ impl ToolRouter {
                 if let Err(error) = self
                     .reprovision_hand(
                         ctx.request.session,
-                        ctx.request.worker_id,
+                        ctx.request.workspace_scope.ok_or_else(|| {
+                            MoaError::PermissionDenied(
+                                "sandbox recovery requires a typed workspace scope".to_string(),
+                            )
+                        })?,
                         ctx.route,
                         ctx.request.scope,
                     )

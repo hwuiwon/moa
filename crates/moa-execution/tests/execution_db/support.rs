@@ -137,7 +137,7 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
         "awaiting_confirmation" => matches!(target, "queued" | "cancelled"),
         "queued" => matches!(
             target,
-            "running" | "blocked" | "unsupported" | "failed" | "cancelled"
+            "running" | "compensating" | "blocked" | "unsupported" | "failed" | "cancelled"
         ),
         "running" => matches!(
             target,
@@ -216,10 +216,18 @@ pub(crate) async fn set_run_status_path(
             _ => None,
         };
         let pending_terminal_status = (*status == "compensating").then_some("failed");
-        let pending_terminal_reason =
-            (*status == "compensating").then_some("transition matrix compensation fixture");
-        let pending_terminal_cause =
-            (*status == "compensating").then(|| json!({"kind": "internal_failure"}));
+        let pending_terminal_reason = (*status == "compensating").then_some("internal_failure");
+        let pending_terminal_cause = (*status == "compensating").then(|| {
+            json!({
+                "terminal_evidence": {
+                    "cause": {"kind": "internal_failure"},
+                    "satisfied_requirement_count": 0,
+                    "requirement_count": 0
+                },
+                "completion_check_results": [],
+                "terminal_gaps": []
+            })
+        });
         assert_eq!(
             sqlx::query(
                 "UPDATE moa.execution_run SET status = $2, terminal_cause = $3, terminal_satisfied_requirement_count = $4, terminal_requirement_count = $4, terminal_reason = $5, pending_terminal_status = $6, pending_terminal_reason = $7, pending_terminal_cause = $8 WHERE run_uid = $1",

@@ -10,6 +10,7 @@ use crate::services::{
     authz_admin::{Authz, AuthzImpl},
     authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
     neon_maint::{NeonMaint, NeonMaintImpl},
+    sandbox_workspaces::{SandboxWorkspaceManagement, SandboxWorkspaces, SandboxWorkspacesImpl},
     security_events::{SecurityEvents, SecurityEventsImpl},
     tenants::{Tenants, TenantsImpl},
 };
@@ -136,7 +137,8 @@ const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &[
 ];
 
 const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
-const HIGH_COST_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+const HIGH_COST_INACTIVITY_TIMEOUT: Duration =
+    Duration::from_secs(moa_config::SANDBOX_TENANT_PURGE_INACTIVITY_TIMEOUT_SECONDS);
 const ABORT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_INITIAL_INTERVAL: Duration = Duration::from_millis(50);
 const RETRY_MAX_INTERVAL: Duration = Duration::from_secs(60);
@@ -171,6 +173,25 @@ fn high_cost_internal_service_options() -> ServiceOptions {
 fn high_cost_internal_workflow_options() -> ServiceOptions {
     high_cost_internal_service_options()
         .handler("run", HandlerOptions::new().workflow_retention(RETENTION))
+}
+
+fn high_cost_public_workflow_options() -> ServiceOptions {
+    service_options()
+        .inactivity_timeout(HIGH_COST_INACTIVITY_TIMEOUT)
+        .abort_timeout(ABORT_CLEANUP_TIMEOUT)
+        .handler("run", HandlerOptions::new().workflow_retention(RETENTION))
+}
+
+fn sandbox_workspace_service_options(config: &MoaConfig) -> ServiceOptions {
+    let retention = Duration::from_secs(config.sandbox_workspaces.operation_retention_seconds);
+    ServiceOptions::new()
+        .idempotency_retention(retention)
+        .journal_retention(retention)
+        .retry_policy_initial_interval(RETRY_INITIAL_INTERVAL)
+        .retry_policy_exponentiation_factor(2.0)
+        .retry_policy_max_interval(RETRY_MAX_INTERVAL)
+        .retry_policy_max_attempts(RETRY_MAX_ATTEMPTS)
+        .retry_policy_pause_on_max_attempts()
 }
 
 /// Restate admin deployment-list response.
@@ -219,6 +240,13 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
     let connector_catalogs = runtime_deps.connector_catalogs.clone();
     let connector_completion = runtime_deps.connector_completion.clone();
     let authz = AuthzEnforcer::new(fga_client.clone());
+    let sandbox_workspace_management = SandboxWorkspaceManagement::from_config(
+        pool.clone(),
+        config.as_ref(),
+        runtime_deps.sandbox_workspace_fenced_tenants.clone(),
+        tool_router.clone(),
+        session_store.clone(),
+    );
     let mut builder = Endpoint::builder()
         .bind_with_options(HealthImpl.serve(), bootstrap_entry_service_options())
         .bind_with_options(
@@ -305,6 +333,14 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
         service_options(),
     );
 
+    if config.sandbox_workspaces.mode.maintenance_enabled() {
+        builder = builder.bind_with_options(
+            SandboxWorkspacesImpl::new(sandbox_workspace_management.clone(), fga_client.clone())
+                .serve(),
+            sandbox_workspace_service_options(config.as_ref()),
+        );
+    }
+
     builder = builder.bind_with_options(
         ExperimentsImpl::new(
             pool.clone(),
@@ -329,6 +365,7 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
                 session_store.clone(),
                 session_store.clone(),
                 pool.clone(),
+                sandbox_workspace_management,
             )
             .serve(),
             high_cost_internal_service_options(),
@@ -449,8 +486,14 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
         )
         .bind_with_options(TenantImpl::new(pool.clone()).serve(), service_options())
         .bind_with_options(
-            TenantPurgeImpl::new(pool.clone(), credential_vault.clone(), config.as_ref()).serve(),
-            workflow_options(),
+            TenantPurgeImpl::new(
+                pool.clone(),
+                credential_vault.clone(),
+                config.as_ref(),
+                runtime_deps.workspace_maintenance.clone(),
+            )
+            .serve(),
+            high_cost_public_workflow_options(),
         )
         .bind_with_options(
             ExecutionRunImpl::new(
@@ -582,11 +625,16 @@ fn action_review_timeout_secs(config: &MoaConfig) -> i64 {
     i64::try_from(config.async_authz.action_review_timeout_secs).unwrap_or(i64::MAX)
 }
 
-/// Returns the service names expected for readiness in this build.
+/// Returns the service names expected for readiness in this rollout mode.
 #[must_use]
-pub fn expected_service_names() -> Vec<&'static str> {
+pub fn expected_service_names(
+    sandbox_workspace_mode: moa_config::SandboxWorkspaceMode,
+) -> Vec<&'static str> {
     let mut names = Vec::new();
     names.extend(CORE_HEAD_SERVICE_NAMES.iter().copied());
+    if sandbox_workspace_mode.maintenance_enabled() {
+        names.push("SandboxWorkspaces");
+    }
     names.push("Experiments");
     names.extend(CORE_BODY_SERVICE_NAMES.iter().copied());
     names.push("SkillLearning");
@@ -595,10 +643,14 @@ pub fn expected_service_names() -> Vec<&'static str> {
     names
 }
 
-/// Returns true when any Restate deployment contains every expected service.
+/// Returns true when a Restate deployment contains every service required by
+/// the selected sandbox-workspace rollout mode.
 #[must_use]
-pub fn services_registered(deployments: &[RegisteredDeployment]) -> bool {
-    let expected_services = expected_service_names();
+pub fn services_registered_for_mode(
+    deployments: &[RegisteredDeployment],
+    sandbox_workspace_mode: moa_config::SandboxWorkspaceMode,
+) -> bool {
+    let expected_services = expected_service_names(sandbox_workspace_mode);
     services_registered_with_expected(deployments, &expected_services)
 }
 
@@ -627,9 +679,11 @@ mod tests {
         INGRESS_PRIVATE_SERVICE_NAMES, RegisteredDeployment, RegisteredService,
         bootstrap_entry_service_options, expected_service_names,
         high_cost_internal_service_options, high_cost_internal_workflow_options,
-        services_registered, services_registered_with_expected,
+        high_cost_public_workflow_options, sandbox_workspace_service_options,
+        services_registered_for_mode, services_registered_with_expected,
     };
     use crate::services::health::{Health, HealthImpl};
+    use moa_config::{MoaConfig, SandboxWorkspaceMode};
 
     #[restate_sdk::service]
     #[name = "ServicePolicyProbe"]
@@ -654,6 +708,20 @@ mod tests {
     struct WorkflowPolicyProbeImpl;
 
     impl WorkflowPolicyProbe for WorkflowPolicyProbeImpl {
+        async fn run(&self, _ctx: WorkflowContext<'_>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[restate_sdk::workflow]
+    #[name = "TenantPurge"]
+    trait TenantPurgePolicyProbe {
+        async fn run() -> Result<(), HandlerError>;
+    }
+
+    struct TenantPurgePolicyProbeImpl;
+
+    impl TenantPurgePolicyProbe for TenantPurgePolicyProbeImpl {
         async fn run(&self, _ctx: WorkflowContext<'_>) -> Result<(), HandlerError> {
             Ok(())
         }
@@ -691,7 +759,7 @@ mod tests {
     fn expected_service_names_are_unique_for_compiled_features() {
         let mut names = HashSet::new();
 
-        for name in expected_service_names() {
+        for name in expected_service_names(SandboxWorkspaceMode::Admit) {
             assert!(names.insert(name), "duplicate Restate binding name {name}");
         }
     }
@@ -719,6 +787,58 @@ mod tests {
         assert_eq!(service["retryPolicyMaxAttempts"], 70);
         assert_eq!(service["retryPolicyOnMaxAttempts"], "PAUSE");
         assert_eq!(service["ingressPrivate"], true);
+    }
+
+    #[tokio::test]
+    async fn v4_discovery_reports_exact_public_tenant_purge_policy() {
+        // Pins: tenant offboarding is public through the authenticated edge but
+        // its separated absence observations must outlive generic 1s defaults.
+        let endpoint = Endpoint::builder()
+            .bind_with_options(
+                TenantPurgePolicyProbeImpl.serve(),
+                high_cost_public_workflow_options(),
+            )
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+        let service = &manifest["services"][0];
+
+        assert_eq!(service["name"], "TenantPurge");
+        assert_eq!(service["inactivityTimeout"], 360_000);
+        assert_eq!(service["abortTimeout"], 60_000);
+        assert_eq!(service["idempotencyRetention"], 86_400_000);
+        assert_eq!(service["journalRetention"], 86_400_000);
+        assert_eq!(service["retryPolicyInitialInterval"], 50);
+        assert_eq!(service["retryPolicyExponentiationFactor"], 2.0);
+        assert_eq!(service["retryPolicyMaxInterval"], 60_000);
+        assert_eq!(service["retryPolicyMaxAttempts"], 70);
+        assert_eq!(service["retryPolicyOnMaxAttempts"], "PAUSE");
+        assert_ne!(service["ingressPrivate"], true);
+        let run = service["handlers"]
+            .as_array()
+            .expect("workflow handlers should be an array")
+            .iter()
+            .find(|handler| handler["name"] == "run")
+            .expect("workflow run handler should exist");
+        assert_eq!(run["workflowCompletionRetention"], 86_400_000);
+    }
+
+    #[tokio::test]
+    async fn sandbox_workspace_service_uses_configured_durable_retention() {
+        // Pins: Restate cannot evict a workspace operation owner on the generic
+        // one-day service default while Postgres still requires reconciliation.
+        let mut config = MoaConfig::default();
+        config.sandbox_workspaces.operation_retention_seconds = 9 * 24 * 60 * 60;
+        let endpoint = Endpoint::builder()
+            .bind_with_options(
+                ServicePolicyProbeImpl.serve(),
+                sandbox_workspace_service_options(&config),
+            )
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+        let service = &manifest["services"][0];
+
+        assert_eq!(service["idempotencyRetention"], 777_600_000);
+        assert_eq!(service["journalRetention"], 777_600_000);
     }
 
     #[tokio::test]
@@ -774,7 +894,7 @@ mod tests {
 
     #[test]
     fn product_expected_services_include_experiments() {
-        let names = expected_service_names();
+        let names = expected_service_names(SandboxWorkspaceMode::Disabled);
 
         assert!(
             !names.contains(&"Eval"),
@@ -816,22 +936,28 @@ mod tests {
 
     #[test]
     fn registration_check_requires_all_expected_services() {
-        let names = expected_service_names();
+        let names = expected_service_names(SandboxWorkspaceMode::Disabled);
         let deployments = vec![deployment_with_services(&names)];
 
-        assert!(services_registered(&deployments));
+        assert!(services_registered_for_mode(
+            &deployments,
+            SandboxWorkspaceMode::Disabled,
+        ));
     }
 
     #[test]
     fn registration_check_rejects_partial_deployments() {
         let deployments = vec![deployment_with_services(&["Health", "SessionStore"])];
 
-        assert!(!services_registered(&deployments));
+        assert!(!services_registered_for_mode(
+            &deployments,
+            SandboxWorkspaceMode::Disabled,
+        ));
     }
 
     #[test]
     fn registration_check_rejects_deployment_missing_product_services() {
-        let names = expected_service_names();
+        let names = expected_service_names(SandboxWorkspaceMode::Disabled);
         let deployment_without_experiments = names
             .iter()
             .copied()
@@ -875,7 +1001,7 @@ mod tests {
     fn skill_learning_workflow_is_always_expected() {
         // Pins: skill learning is always on — readiness requires the SkillLearning
         // workflow in every build, exactly once.
-        let names = expected_service_names();
+        let names = expected_service_names(SandboxWorkspaceMode::Disabled);
 
         assert_eq!(
             names
@@ -885,5 +1011,34 @@ mod tests {
             1,
             "readiness must expect SkillLearning exactly once"
         );
+    }
+
+    #[test]
+    fn workspace_registration_expectation_matches_rollout_mode() {
+        // Pins: a dark deployment neither binds nor waits forever for the
+        // workspace service, while cleanup and admission deployments must prove
+        // that the service was registered.
+        let disabled = expected_service_names(SandboxWorkspaceMode::Disabled);
+        assert!(!disabled.contains(&"SandboxWorkspaces"));
+        assert!(services_registered_for_mode(
+            &[deployment_with_services(&disabled)],
+            SandboxWorkspaceMode::Disabled,
+        ));
+
+        for mode in [
+            SandboxWorkspaceMode::Maintenance,
+            SandboxWorkspaceMode::Admit,
+        ] {
+            let enabled = expected_service_names(mode);
+            assert!(enabled.contains(&"SandboxWorkspaces"));
+            assert!(!services_registered_for_mode(
+                &[deployment_with_services(&disabled)],
+                mode,
+            ));
+            assert!(services_registered_for_mode(
+                &[deployment_with_services(&enabled)],
+                mode,
+            ));
+        }
     }
 }

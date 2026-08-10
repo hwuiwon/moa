@@ -51,10 +51,14 @@ use sqlx::postgres::{PgConnection, PgListener};
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+#[ignore = "requires Docker for isolated Postgres, Restate, OpenFGA, Valkey, and RustFS"]
 async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Result<()> {
     // Pins: action-policy E2E scenarios share one scripted fixture process.
-    let fixture = OrchestratorTestFixture::with_script(action_policy_script()).await?;
+    let fixture = OrchestratorTestFixture::with_sandbox_workspace_fixture(
+        action_policy_script(),
+        action_review_workspace_env(),
+    )
+    .await?;
     action_policy_auto_mode_executes_shell_without_user_approval(&fixture).await?;
     admin_review_policy_records_pending_review_and_turn_continues(&fixture).await?;
     tenant_admin_clear_executes_stored_review_action(&fixture).await?;
@@ -66,24 +70,76 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     superseded_coordinator_review_produces_no_continuation(&fixture).await?;
     pending_worker_review_holds_its_report_until_the_clear_continues_it(&fixture).await?;
     claimed_execution_review_exact_replay_resumes_and_conflict_rejects(&fixture).await?;
+    fixture.cleanup_sandbox_workspace_namespace().await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+#[ignore = "requires Docker for isolated Postgres, Restate, OpenFGA, Valkey, and RustFS"]
 async fn recovery_matrix_action_review_decision_restarts_resume_coordinator_and_worker_once()
 -> Result<()> {
     // Pins: a hard process restart on both sides of the durable review-decision
     // boundary neither loses nor duplicates a coordinator or worker continuation.
     let worker_effect = tempfile::NamedTempFile::new()
         .context("create worker action-review recovery effect probe")?;
-    let fixture =
-        OrchestratorTestFixture::with_script(recovery_action_policy_script(worker_effect.path())?)
-            .await?;
+    let fixture = OrchestratorTestFixture::with_sandbox_workspace_fixture(
+        recovery_action_policy_script(worker_effect.path())?,
+        action_review_workspace_env(),
+    )
+    .await?;
 
     recovery_matrix_coordinator_review_restarts_once(&fixture).await?;
     recovery_matrix_worker_review_restarts_once(&fixture, worker_effect.path()).await?;
+    fixture.cleanup_sandbox_workspace_namespace().await?;
     Ok(())
+}
+
+fn action_review_workspace_env() -> Vec<(String, String)> {
+    const ACCOUNT_ID: &str = "d1111111-1111-7111-8111-111111111111";
+    const TENANT_ID: &str = "20000000-0000-0000-0000-000000000001";
+    vec![
+        (
+            "MOA_LOCAL_PROVIDER_ACCOUNT_JSON".to_string(),
+            json!({
+                "provider_account_id": ACCOUNT_ID,
+                "generation": 1,
+                "isolation_cell": "action-review-recovery"
+            })
+            .to_string(),
+        ),
+        ("MOA_LOCAL_DOCKER_ENABLED".to_string(), "false".to_string()),
+        (
+            "MOA_SANDBOX_WORKSPACE_MODE".to_string(),
+            "admit".to_string(),
+        ),
+        (
+            "MOA_SANDBOX_WORKSPACE_CANARY_JSON".to_string(),
+            json!({
+                "provider_account_id": ACCOUNT_ID,
+                "provider_account_generation": 1,
+                "isolation_cell": "action-review-recovery",
+                "tenant_allowlist": [TENANT_ID]
+            })
+            .to_string(),
+        ),
+        (
+            "MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON".to_string(),
+            json!([{
+                "tenant_id": TENANT_ID,
+                "provider_account_id": ACCOUNT_ID,
+                "provider_account_generation": 1,
+                "max_workspaces": 8,
+                "max_active_hands": 4,
+                "max_checkpoints": 16,
+                "max_logical_bytes": 268_435_456_u64
+            }])
+            .to_string(),
+        ),
+        (
+            "MOA_AUTHZ_OPENFGA_MODEL_VERSION".to_string(),
+            "7".to_string(),
+        ),
+    ]
 }
 
 async fn recovery_matrix_coordinator_review_restarts_once(

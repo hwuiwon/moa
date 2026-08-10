@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # The 1,000-tenant workspace soak is intentionally absent from PRs.
+    - cron: "23 7 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -130,6 +133,9 @@ jobs:
       - name: Install PyYAML
         run: python3 -m pip install --quiet --disable-pip-version-check pyyaml
 
+      - name: Validate Compose deployment config
+        run: docker compose config --quiet
+
       # Renders every overlay and validates it against real schemas, including the
       # vendored Restate and PrometheusRule CRDs, with no missing-schema ignore.
       - name: Validate rendered manifests
@@ -220,6 +226,131 @@ jobs:
 
       - name: Run DB memory tests
         run: cargo nextest run --locked --profile db-memory
+
+      # The hand lease/workspace lane is ignored by default because it needs
+      # the provisioned Postgres role and RLS setup. Run it explicitly so those
+      # release-blocking isolation checks cannot remain silently unscheduled.
+      - name: Migrate direct hand repository database
+        run: >-
+          MOA_DATABASE_ADMIN_URL="$MOA_DATABASE_URL"
+          cargo run -p moa-orchestrator --bin moa-orchestrator-bin --locked -- migrate
+
+      - name: Provision workspace maintenance login
+        run: |
+          docker compose exec -T postgres psql -U moa_owner -d moa -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE moa_ci_workspace_maintenance
+              LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS
+              NOCREATEDB NOCREATEROLE NOREPLICATION
+              PASSWORD 'dev';
+          GRANT moa_workspace_maintenance TO moa_ci_workspace_maintenance;
+          SQL
+          echo "MOA_DATABASE_MAINTENANCE_URL=postgres://moa_ci_workspace_maintenance:dev@localhost:10040/moa" >> "$GITHUB_ENV"
+
+      - name: Run hand lease and workspace DB tests
+        run: >-
+          cargo nextest run --locked -p moa-hands --test hands_db
+          --run-ignored all --no-tests fail
+
+      - name: Run hand storage migration DB tests
+        run: >-
+          cargo nextest run --locked -p moa-migrations --test run_idempotency_db
+          --run-ignored all --no-tests fail
+          -E 'test(/hand_(lease|storage|provisioning).+_db|sandbox_workspace_purge_boundary_requires_exact_maintenance_role_and_operation_db/)'
+
+      - name: Dump Postgres logs
+        if: failure()
+        run: docker compose logs postgres
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose down -v
+
+  sandbox-workspace-recovery:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # This lane is hermetic and unbilled. The test owns disposable Postgres,
+      # Restate, OpenFGA, Valkey, and RustFS containers and hard-restarts only
+      # its orchestrator child at each feature-gated workspace barrier.
+      - name: Run sandbox workspace crash recovery matrix
+        run: >-
+          cargo nextest run -p moa-orchestrator --locked
+          --features provider-overrides,integration,sandbox-workspace-failpoints
+          --profile restate-recovery-pr --run-ignored ignored-only --no-tests fail
+          -E 'binary(recovery_matrix_sandbox_workspace_service_e2e) & test(/recovery_matrix_sandbox_workspace_/)'
+
+  sandbox-workspace-soak:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:10040/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Start Postgres
+        run: docker compose up -d --build postgres
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T postgres pg_isready -U moa_owner -d moa >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose logs postgres
+          exit 1
+
+      - name: Migrate workspace soak database
+        run: >-
+          MOA_DATABASE_ADMIN_URL="$MOA_DATABASE_URL"
+          cargo run -p moa-orchestrator --bin moa-orchestrator-bin --locked -- migrate
+
+      - name: Run 1,000-tenant workspace soak
+        run: >-
+          cargo nextest run -p moa-orchestrator --locked
+          --features provider-overrides,integration
+          --profile sandbox-workspace-soak --run-ignored ignored-only --no-tests fail
+          -E 'binary(sandbox_workspace_soak_service_e2e) & test(/sandbox_workspace_1000_tenant_soak/)'
 
       - name: Dump Postgres logs
         if: failure()

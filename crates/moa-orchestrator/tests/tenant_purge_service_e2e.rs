@@ -1,13 +1,18 @@
 //! Service-level coverage for tenant-keyed durable purge execution.
 
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+use std::{fs, io};
 
 use anyhow::{Context, Result, bail};
 use moa_core::types::identifiers::TenantId;
 use moa_test_support::postgres::bootstrap_test_db;
+use moa_test_support::{SandboxWorkspaceFixture, provision_workspace_maintenance_login};
 use moa_wire::tenants::{
     TenantPurgeRequest, TenantPurgeStatus, TenantPurgeStatusRequest, TenantPurgeStatusResponse,
 };
+use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -23,10 +28,16 @@ mod support;
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
     memory_dir: &TempDir,
-    sandbox_dir: &TempDir,
     database_url: &str,
+    workspace_env: &[(String, String)],
+    log_path: &Path,
 ) -> Result<Child> {
-    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
+    let log = fs::File::create(log_path).context("create tenant purge orchestrator log")?;
+    let stderr = log
+        .try_clone()
+        .context("clone tenant purge orchestrator log")?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"));
+    command
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")
@@ -37,10 +48,11 @@ fn spawn_orchestrator(
         .arg(ports.credential.to_string())
         .env("MOA_DATABASE_URL", database_url)
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
-        .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        // Tenant purge owns external sandbox deletion and therefore must run
+        // with the production maintenance owners enabled.
+        .env("MOA_SANDBOX_WORKSPACE_MODE", "maintenance")
         .env("MOA_SECURITY_PROFILE", "local")
-        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env(
             "MOA_AUTHZ_OPENFGA_URL",
             std::env::var("MOA_AUTHZ_OPENFGA_URL")
@@ -71,9 +83,11 @@ fn spawn_orchestrator(
                 .unwrap_or_else(|_| "redis://127.0.0.1:10051".to_string()),
         )
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .env("RUST_LOG", "info");
+    command
+        .envs(workspace_env.iter().map(|(key, value)| (key, value)))
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .context("spawn orchestrator for tenant purge e2e")
 }
@@ -84,7 +98,6 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
     // Pins: one tenant-keyed workflow commits inverse tuples with deletion, reports durable status, and reaches analytics_purged.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
-    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let test_db = bootstrap_test_db()
         .await
         .context("bootstrap isolated tenant purge e2e database")?;
@@ -92,12 +105,59 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
     let ports = reserve_orchestrator_ports()?;
     let endpoint_url = deployment_endpoint_url(ports.restate);
     let ingress = restate_ingress_url();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .context("build bounded tenant purge e2e client")?;
     let tenant_id = TenantId::new();
     let user_id = Uuid::new_v4();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &database_url)?;
+    let provider_account_id = Uuid::now_v7();
+    let sandbox_workspace = SandboxWorkspaceFixture::start()
+        .await
+        .context("start tenant purge sandbox-workspace dependencies")?;
+    let maintenance_url = provision_workspace_maintenance_login(&database_url)
+        .await
+        .context("provision tenant purge maintenance login")?;
+    let mut workspace_env = sandbox_workspace.orchestrator_env();
+    workspace_env.extend([
+        ("MOA_DATABASE_MAINTENANCE_URL".to_string(), maintenance_url),
+        (
+            "MOA_LOCAL_PROVIDER_ACCOUNT_JSON".to_string(),
+            json!({
+                "provider_account_id": provider_account_id,
+                "generation": 1,
+                "isolation_cell": "tenant-purge-e2e"
+            })
+            .to_string(),
+        ),
+        (
+            "MOA_SANDBOX_WORKSPACE_QUOTA_ROUTES_JSON".to_string(),
+            json!([{
+                "tenant_id": tenant_id,
+                "provider_account_id": provider_account_id,
+                "provider_account_generation": 1,
+                "max_workspaces": 8,
+                "max_active_hands": 4,
+                "max_checkpoints": 32,
+                "max_logical_bytes": 67_108_864_u64
+            }])
+            .to_string(),
+        ),
+        (
+            "MOA_AUTHZ_OPENFGA_MODEL_VERSION".to_string(),
+            "7".to_string(),
+        ),
+    ]);
+    let orchestrator_log = memory_dir.path().join("orchestrator.log");
+    let mut orchestrator = spawn_orchestrator(
+        ports,
+        &memory_dir,
+        &database_url,
+        &workspace_env,
+        &orchestrator_log,
+    )?;
     let pool = match sqlx::PgPool::connect(&database_url).await {
         Ok(pool) => pool,
         Err(error) => {
@@ -108,7 +168,14 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
         }
     };
 
-    let result = async {
+    let result: Result<()> = async {
+        wait_for_orchestrator_live(
+            &client,
+            ports.health,
+            &mut orchestrator,
+            &orchestrator_log,
+        )
+        .await?;
         register_deployment(&restate_test_admin_url(), &endpoint_url).await?;
         sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, 'purge e2e')")
             .bind(tenant_id.0)
@@ -194,7 +261,59 @@ async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2
     let _ = orchestrator.wait();
     pool.close().await;
     drop(test_db);
-    result
+    result.with_context(|| orchestrator_log_tail(&orchestrator_log))
+}
+
+async fn wait_for_orchestrator_live(
+    client: &reqwest::Client,
+    health_port: u16,
+    child: &mut Child,
+    log_path: &Path,
+) -> Result<()> {
+    let url = format!("http://127.0.0.1:{health_port}/_health/live");
+    let mut last_observation = "not yet checked".to_string();
+    for _attempt in 0..120 {
+        if let Some(status) = child.try_wait().context("poll spawned orchestrator")? {
+            bail!(
+                "spawned orchestrator exited before health check passed: {status}\n{}",
+                orchestrator_log_tail(log_path)
+            );
+        }
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => last_observation = format!("health returned {}", response.status()),
+            Err(error) => last_observation = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    bail!(
+        "timed out waiting for spawned orchestrator health at {url}: {last_observation}\n{}",
+        orchestrator_log_tail(log_path)
+    )
+}
+
+fn orchestrator_log_tail(log_path: &Path) -> String {
+    match fs::read_to_string(log_path) {
+        Ok(contents) if contents.trim().is_empty() => {
+            format!("orchestrator log {} was empty", log_path.display())
+        }
+        Ok(contents) => {
+            let mut lines = contents.lines().rev().take(120).collect::<Vec<_>>();
+            lines.reverse();
+            format!(
+                "orchestrator log tail from {}:\n{}",
+                log_path.display(),
+                lines.join("\n")
+            )
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            format!("orchestrator log {} was not created", log_path.display())
+        }
+        Err(error) => format!(
+            "failed to read orchestrator log {}: {error}",
+            log_path.display()
+        ),
+    }
 }
 
 async fn call<Req, Resp>(

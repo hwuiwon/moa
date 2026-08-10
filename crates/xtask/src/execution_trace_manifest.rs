@@ -453,6 +453,20 @@ const SENDERS: &[SenderManifestEntry] = &[
         "append_event"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
+        "deliver_one",
+        TRACE_HELPER,
+        "ExecutionCompensationClient",
+        "resolve_action_review"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
+        "deliver_one",
+        TRACE_HELPER,
+        "ExecutionTaskClient",
+        "resolve_action_review"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/services/action_reviews.rs",
         "decide",
         TRACE_HELPER,
@@ -574,13 +588,6 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "cancel",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "cancel"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
         "decide_review",
         TRACE_HELPER,
         "ExecutionTaskClient",
@@ -669,6 +676,27 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "KnowledgeSyncIngestionClient",
         "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/llm_gateway.rs",
+        "cancel_completion_owner",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "cancel_owner"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/llm_gateway.rs",
+        "cancel_completion_owner_from_service",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "cancel_owner"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/llm_gateway.rs",
+        "cancel_completion_owner_from_workflow",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "cancel_owner"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/llm_gateway.rs",
@@ -769,6 +797,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/status_migration_dispatcher.rs",
+        "migrate",
+        TRACE_HELPER,
+        "SessionStatusMigratorClient",
+        "migrate_status_idle"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",
         "append_session_event",
         TRACE_HELPER,
@@ -787,7 +822,8 @@ const SENDERS: &[SenderManifestEntry] = &[
         "execute_allowed_tool",
         TRACE_HELPER,
         "ToolExecutorClient",
-        "execute_execution"
+        "execute_execution",
+        2
     ),
     sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",
@@ -832,6 +868,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "mark_consolidation_started"
     ),
     sender!(
+        "crates/moa-orchestrator/src/workflows/execution_compensation.rs",
+        "cleanup_compensation_hands",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "release_execution_compensation_hands"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/workflows/execution_run.rs",
         "complete",
         TRACE_HELPER,
@@ -870,9 +913,8 @@ const SENDERS: &[SenderManifestEntry] = &[
         "crates/moa-orchestrator/src/workflows/execution_run.rs",
         "run",
         TRACE_HELPER,
-        "ExecutionTaskClient",
-        "cancel",
-        2
+        "ExecutionCompensationClient",
+        "run"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/execution_run.rs",
@@ -880,6 +922,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "ExecutionTaskClient",
         "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_run.rs",
+        "signal_task_cancellation",
+        TRACE_HELPER,
+        "ExecutionTaskClient",
+        "cancel"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/execution_task.rs",
@@ -894,6 +943,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "LLMGatewayClient",
         "complete"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task.rs",
+        "invoke_capability_tool",
+        TRACE_HELPER,
+        "ActionReviewsClient",
+        "settle_execution_owner_review"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/execution_task.rs",
@@ -1169,28 +1225,28 @@ const SENDERS: &[SenderManifestEntry] = &[
         "ingest_turn"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
+        "crates/moa-orchestrator/src/workflows/turn_execution/reporting.rs",
         "maybe_append_turn_metrics",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
+        "crates/moa-orchestrator/src/workflows/turn_execution/reporting.rs",
         "notify_session_of_outcome",
         IDENTITY_TRACE_HELPER,
         "SessionClient",
         "record_turn_outcome"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
+        "crates/moa-orchestrator/src/workflows/turn_execution/reporting.rs",
         "record_response",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "record_segment_turn_usage"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
+        "crates/moa-orchestrator/src/workflows/turn_execution/reporting.rs",
         "record_selected_segment_skills",
         TRACE_HELPER,
         "RestateSessionStoreClient",
@@ -1259,6 +1315,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "SessionClient",
         "apply_security_assessment"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/turn_execution/tools.rs",
+        "await_coordinator_security_input",
+        TRACE_HELPER,
+        "SessionClient",
+        "clear_coordinator_input"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/tools.rs",
@@ -1384,13 +1447,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run_worker_inside_workflow",
         TRACE_HELPER,
         "WorkerClient",
-        "cancel"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
-        "run_worker_inside_workflow",
-        TRACE_HELPER,
-        "WorkerClient",
         "prepare_turn"
     ),
     sender!(
@@ -1406,14 +1462,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "WorkerClient",
         "apply_turn_outcome",
-        2
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
-        "run_worker_iteration",
-        TRACE_HELPER,
-        "WorkerClient",
-        "cancel",
         2
     ),
     sender!(
@@ -1470,6 +1518,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "ExecutionClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/services/execution/handlers.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionCompensationClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/workflows/execution_compensation.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
@@ -1558,6 +1614,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "SessionClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/objects/session/handlers.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "SessionStatusMigratorClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/objects/session_status_migrator.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
@@ -1656,17 +1720,31 @@ const RAW_SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/services/action_reviews_reaper.rs",
-        "dispatch_execution_review_resolutions",
-        REQWEST_VALIDATED_TRACE_HELPER,
-        "ExecutionTaskClient",
-        "resolve_action_review"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/action_reviews_reaper.rs",
         "dispatch_action_review_releases",
         REQWEST_VALIDATED_TRACE_HELPER,
         "SessionClient",
         "release_action_review"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/action_reviews_reaper.rs",
+        "trigger_execution_review_dispatch",
+        REQWEST_TRACE_HELPER,
+        "raw:restate_ingress_proxy",
+        "forward"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/runtime/bootstrap.rs",
+        "check_public_health",
+        REQWEST_TRACE_HELPER,
+        "raw:restate_ingress_proxy",
+        "forward"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/runtime/bootstrap.rs",
+        "migrate_session",
+        REQWEST_TRACE_HELPER,
+        "raw:restate_ingress_proxy",
+        "forward"
     ),
     sender!(
         "crates/moa-orchestrator/src/runtime/jobs.rs",

@@ -27,6 +27,8 @@ pub enum ObjectType {
     Agent,
     /// A tenant-owned installed connector account.
     ConnectorConnection,
+    /// Durable tenant-owned sandbox filesystem state.
+    SandboxWorkspace,
 }
 
 /// Subject types on the subject side of an OpenFGA tuple.
@@ -38,6 +40,10 @@ pub enum ObjectType {
 pub enum UserType {
     /// A deployment workspace object used as a tuple subject.
     Workspace,
+    /// A tenant object used as a parent tuple subject.
+    Tenant,
+    /// A session object used as a workspace-scope tuple subject.
+    Session,
     /// A human operator.
     Operator,
     /// A service principal.
@@ -74,6 +80,8 @@ pub enum Relation {
     CanActAs,
     /// Parent tenant relationship.
     Tenant,
+    /// Owning session relationship.
+    Session,
     /// Parent workspace relationship.
     Workspace,
     /// Contact object relationship.
@@ -179,6 +187,7 @@ mod tests {
             (ObjectType::ApiKey, "api_key"),
             (ObjectType::Agent, "agent"),
             (ObjectType::ConnectorConnection, "connector_connection"),
+            (ObjectType::SandboxWorkspace, "sandbox_workspace"),
         ];
         for (value, label) in object_types {
             assert_eq!(value.to_string(), label);
@@ -186,6 +195,8 @@ mod tests {
 
         let user_types = [
             (UserType::Workspace, "workspace"),
+            (UserType::Tenant, "tenant"),
+            (UserType::Session, "session"),
             (UserType::Operator, "operator"),
             (UserType::Service, "service"),
             (UserType::Contact, "contact"),
@@ -203,6 +214,7 @@ mod tests {
             (Relation::Participant, "participant"),
             (Relation::CanActAs, "can_act_as"),
             (Relation::Tenant, "tenant"),
+            (Relation::Session, "session"),
             (Relation::Workspace, "workspace"),
             (Relation::Contact, "contact"),
             (Relation::Manage, "manage"),
@@ -299,8 +311,8 @@ mod tests {
     fn schema_v1_json_contains_security_contract_types_and_delegation() {
         // Pins: the deployed OpenFGA JSON model includes the auth object set and agent delegation.
         assert_eq!(
-            MODEL_VERSION, 6,
-            "connector connection relations require a new outbox model version"
+            MODEL_VERSION, 7,
+            "sandbox workspace relations require a new outbox model version"
         );
         let schema: serde_json::Value =
             serde_json::from_str(SCHEMA_V1_JSON).expect("schema_v1.json must parse");
@@ -326,6 +338,7 @@ mod tests {
                 "connector_connection",
                 "contact",
                 "operator",
+                "sandbox_workspace",
                 "service",
                 "session",
                 "tenant",
@@ -440,6 +453,142 @@ mod tests {
                 "manage": {
                     "union": {
                         "child": [
+                            { "computedUserset": { "relation": "owner" } },
+                            {
+                                "tupleToUserset": {
+                                    "tupleset": { "relation": "tenant" },
+                                    "computedUserset": { "relation": "admin" }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "use": {
+                    "union": {
+                        "child": [
+                            { "this": {} },
+                            { "computedUserset": { "relation": "manage" } }
+                        ]
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn sandbox_workspace_tuple_wire_formats_parent_scope_and_agent_use() {
+        // Pins: the desired-tuple ledger can construct the tenant parent,
+        // session scope, and explicit delegated-agent use grants without ad
+        // hoc OpenFGA subject or object strings.
+        let subject_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("fixture subject UUID should parse");
+        let workspace_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+            .expect("fixture sandbox workspace UUID should parse");
+
+        let tuples = [
+            TupleKey::new(
+                UserType::Tenant,
+                subject_id,
+                Relation::Tenant,
+                ObjectType::SandboxWorkspace,
+                workspace_id,
+            ),
+            TupleKey::new(
+                UserType::Session,
+                subject_id,
+                Relation::Session,
+                ObjectType::SandboxWorkspace,
+                workspace_id,
+            ),
+            TupleKey::new(
+                UserType::Agent,
+                subject_id,
+                Relation::Use,
+                ObjectType::SandboxWorkspace,
+                workspace_id,
+            ),
+        ];
+
+        assert_eq!(
+            tuples.map(|tuple| tuple.to_wire()),
+            [
+                TupleKeyWire {
+                    user: "tenant:11111111-1111-1111-1111-111111111111".to_string(),
+                    relation: "tenant".to_string(),
+                    object: "sandbox_workspace:22222222-2222-2222-2222-222222222222".to_string(),
+                },
+                TupleKeyWire {
+                    user: "session:11111111-1111-1111-1111-111111111111".to_string(),
+                    relation: "session".to_string(),
+                    object: "sandbox_workspace:22222222-2222-2222-2222-222222222222".to_string(),
+                },
+                TupleKeyWire {
+                    user: "agent:11111111-1111-1111-1111-111111111111".to_string(),
+                    relation: "use".to_string(),
+                    object: "sandbox_workspace:22222222-2222-2222-2222-222222222222".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_workspace_schema_pins_private_use_and_admin_management() {
+        // Pins: a workspace binds its session separately from explicit owner
+        // grants, tenant admins inherit management, and agents receive no use
+        // path other than a direct workspace grant checked alongside
+        // `can_act_as` by the delegated authorization helper.
+        let schema: serde_json::Value =
+            serde_json::from_str(SCHEMA_V1_JSON).expect("schema_v1.json must parse");
+        let definitions = schema["type_definitions"]
+            .as_array()
+            .expect("schema_v1.json type_definitions must be an array");
+        let workspace = definitions
+            .iter()
+            .find(|definition| definition["type"] == "sandbox_workspace")
+            .expect("schema_v1.json must define sandbox_workspace");
+
+        assert_eq!(
+            workspace["metadata"]["relations"],
+            serde_json::json!({
+                "tenant": {
+                    "directly_related_user_types": [{ "type": "tenant" }]
+                },
+                "session": {
+                    "directly_related_user_types": [{ "type": "session" }]
+                },
+                "owner": {
+                    "directly_related_user_types": [
+                        { "type": "contact" },
+                        { "type": "operator" },
+                        { "type": "api_key" }
+                    ]
+                },
+                "manage": {
+                    "directly_related_user_types": [
+                        { "type": "operator" },
+                        { "type": "api_key" }
+                    ]
+                },
+                "use": {
+                    "directly_related_user_types": [
+                        { "type": "contact" },
+                        { "type": "agent" },
+                        { "type": "operator" },
+                        { "type": "api_key" }
+                    ]
+                }
+            })
+        );
+        assert_eq!(
+            workspace["relations"],
+            serde_json::json!({
+                "tenant": { "this": {} },
+                "session": { "this": {} },
+                "owner": { "this": {} },
+                "manage": {
+                    "union": {
+                        "child": [
+                            { "this": {} },
                             { "computedUserset": { "relation": "owner" } },
                             {
                                 "tupleToUserset": {

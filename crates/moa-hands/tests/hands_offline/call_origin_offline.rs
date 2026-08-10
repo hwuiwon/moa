@@ -12,7 +12,8 @@ use moa_config::MoaConfig;
 use moa_core::{
     traits::HandProvider, traits::Identity, traits::IdentityType, types::action_policy::CallOrigin,
     types::completion::ToolInvocation, types::identifiers::ModelId, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::identifiers::ToolCallId, types::sandbox_workspace::SandboxWorkspaceScope,
+    types::session::SessionMeta,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use serde_json::json;
@@ -181,7 +182,7 @@ async fn an_experiment_origin_call_cannot_reach_a_production_connector_offline()
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &connector_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -199,7 +200,7 @@ async fn an_experiment_origin_call_cannot_reach_a_production_connector_offline()
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &connector_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -226,7 +227,7 @@ async fn an_experiment_origin_call_cannot_reach_a_production_connector_offline()
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &connector_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -276,7 +277,7 @@ async fn a_trial_owned_session_loses_the_connector_on_a_production_router_offlin
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &trial_session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &connector_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -298,7 +299,7 @@ async fn a_trial_owned_session_loses_the_connector_on_a_production_router_offlin
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &session(),
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &connector_invocation(),
             tool_call_id: ToolCallId::new(),
             active_canary: None,
@@ -322,16 +323,23 @@ async fn an_experiment_origin_fails_closed_on_the_host_tier_offline() {
         .await
         .expect("local router")
         .with_call_origin(trial_origin());
+    let session = session();
+    let caller_identity = identity();
+    let workspace_scope = SandboxWorkspaceScope::Worker {
+        session_id: session.id,
+        worker_id: "experiment-host-tier-worker".to_string(),
+    };
+    let invocation = ToolInvocation {
+        id: None,
+        name: "file_write".to_string(),
+        input: json!({ "path": "fixture.txt", "content": "trial fixture" }),
+    };
     let error = router
         .execute_authorized(moa_hands::AuthorizedToolCall {
-            session: &session(),
-            caller_identity: &identity(),
-            worker_id: None,
-            invocation: &ToolInvocation {
-                id: None,
-                name: "file_write".to_string(),
-                input: json!({ "path": "fixture.txt", "content": "trial fixture" }),
-            },
+            session: &session,
+            caller_identity: &caller_identity,
+            workspace_scope: Some(&workspace_scope),
+            invocation: &invocation,
             tool_call_id: ToolCallId::new(),
             active_canary: None,
             catalog: None,
@@ -383,11 +391,26 @@ async fn an_over_limit_bash_timeout_never_reaches_the_executor_offline() {
         .expect("local hand provider");
     let spec = moa_core::types::hands::HandSpec {
         provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId::new(),
+        workspace: moa_core::types::sandbox_workspace::WorkspaceBinding {
+            tenant_id: moa_core::types::identifiers::TenantId::new(),
+            scope: moa_core::types::sandbox_workspace::SandboxWorkspaceScope::Worker {
+                session_id: moa_core::types::identifiers::SessionId::new(),
+                worker_id: "origin-test-worker".to_string(),
+            },
+            workspace_id: moa_core::types::identifiers::SandboxWorkspaceId::new(),
+            provider_account_id: moa_core::types::identifiers::ProviderAccountId::new(),
+            provider_account_generation: 1,
+            durability_class:
+                moa_core::types::sandbox_workspace::DurabilityClass::PortableFilesystem,
+            writer_epoch: 1,
+            instance_generation: 1,
+            current_revision: None,
+        },
         budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
         sandbox_tier: moa_core::types::hands::SandboxTier::Local,
         image: None,
         env: std::collections::HashMap::new(),
-        workspace_mount: None,
+        filesystem: moa_core::types::sandbox_workspace::SandboxFilesystemLayout::standard(),
         effective_profile: moa_core::types::hands::resolve_effective_sandbox_profile(
             &MoaConfig::default()
                 .sandbox_policy

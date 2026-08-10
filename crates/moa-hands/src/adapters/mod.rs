@@ -5,3 +5,4 @@ pub mod e2b;
 pub(crate) mod http_util;
 pub mod local;
 pub mod mcp;
+pub(crate) mod trusted_command;

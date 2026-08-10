@@ -97,6 +97,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
             llm_provider: provider.clone(),
             pipeline: &pipeline,
             tool_router: Some(router.clone()),
+            workspace_scope: None,
         })
         .await?,
         TurnResult::Complete
@@ -126,6 +127,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
             llm_provider: provider.clone(),
             pipeline: &pipeline,
             tool_router: Some(router),
+            workspace_scope: None,
         })
         .await?,
         TurnResult::Complete

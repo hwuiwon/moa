@@ -23,25 +23,35 @@ use futures_util::{StreamExt, stream};
 use moa_core::types::hands::HandHandle;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider,
-    types::identifiers::HandProvisioningOperationId, types::identifiers::SessionId,
+    types::identifiers::HandProvisioningOperationId, types::identifiers::ProviderAccountId,
+    types::identifiers::SandboxWorkspaceId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::WorkspaceCheckpointId,
 };
-use sqlx::{PgPool, Row};
+use moa_db::ScopedConn;
+use sqlx::{PgConnection, PgPool, Row};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::leases::{
-    LeaseHandle, PROVISIONING_EMPTY_CONFIRMATION, PROVISIONING_VISIBILITY_GRACE, map_sqlx_error,
+    HandLeaseWorkspaceAttachment, LeaseHandle, PROVISIONING_EMPTY_CONFIRMATION,
+    PROVISIONING_VISIBILITY_GRACE, map_sqlx_error,
 };
 
 /// One generation the reaper owns and must destroy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedHandLease {
+    /// Tenant that owns the lease; maintenance updates repeat it in every fence.
+    pub tenant_id: TenantId,
     /// Session that owned the hand.
     pub session_id: SessionId,
     /// Worker scope within the session.
     pub worker_id: String,
     /// Provider that owns the sandbox.
     pub provider: String,
+    /// Persisted provider account used for discovery after restart.
+    pub provider_account_id: ProviderAccountId,
+    /// Persisted provider-account generation used for discovery.
+    pub provider_account_generation: u64,
     /// Fenced generation. Finalization matches on it exactly.
     pub generation: i64,
     /// Durable provider-visible create identity for this generation.
@@ -50,6 +60,12 @@ pub struct ClaimedHandLease {
     pub claim_token: Uuid,
     /// Durable handle to destroy, when activation recorded one.
     pub handle: Option<LeaseHandle>,
+    /// Exact workspace attachment present when this generation was claimed.
+    ///
+    /// Terminal legacy rows may have no attachment. Any attached row carries
+    /// all four fields together so later renew, retry, and finalize updates
+    /// cannot alter or release a newer workspace attachment.
+    pub attachment: Option<HandLeaseWorkspaceAttachment>,
     /// Earliest durable time at which an ambiguous create may be reconciled.
     pub reconcile_not_before: Option<DateTime<Utc>>,
     /// Why this generation was claimed, for telemetry only.
@@ -129,6 +145,13 @@ impl PostgresExpiredHandLeaseClaims {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    /// Begins the closed fleet-maintenance transaction used only by the reaper.
+    async fn begin_maintenance(&self) -> Result<ScopedConn<'_>> {
+        let mut conn = ScopedConn::begin_control_plane(&self.pool).await?;
+        conn.assume_app_role().await?;
+        Ok(conn)
+    }
 }
 
 #[async_trait::async_trait]
@@ -143,11 +166,14 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         // instead of blocking, and the outer UPDATE re-states the generation so
         // a row that changed generation between select and update is not
         // claimed. `LIMIT` keeps one pass bounded.
+        let mut conn = self.begin_maintenance().await?;
         let rows = sqlx::query(
             r#"
             WITH claimable AS (
-                SELECT session_id, worker_id, provider, generation,
-                       provisioning_operation_id, status, handle
+                SELECT tenant_id, session_id, worker_id, provider, generation,
+                       provisioning_operation_id, status, handle,
+                       workspace_id, workspace_writer_epoch,
+                       workspace_instance_generation, restored_checkpoint_id
                 FROM moa.hand_leases
                 WHERE (
                         status = 'provisioning'
@@ -178,40 +204,75 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
                 reap_claim_expires_at = now() + make_interval(secs => $2)
             FROM claimable
             WHERE lease.session_id = claimable.session_id
+              AND lease.tenant_id = claimable.tenant_id
               AND lease.worker_id = claimable.worker_id
               AND lease.provider = claimable.provider
               AND lease.generation = claimable.generation
               AND lease.provisioning_operation_id = claimable.provisioning_operation_id
               AND lease.status = claimable.status
               AND lease.handle IS NOT DISTINCT FROM claimable.handle
-            RETURNING lease.session_id, lease.worker_id, lease.provider, lease.generation,
-                      lease.provisioning_operation_id, lease.handle,
+              AND lease.workspace_id IS NOT DISTINCT FROM claimable.workspace_id
+              AND lease.workspace_writer_epoch IS NOT DISTINCT FROM claimable.workspace_writer_epoch
+              AND lease.workspace_instance_generation IS NOT DISTINCT FROM claimable.workspace_instance_generation
+              AND lease.restored_checkpoint_id IS NOT DISTINCT FROM claimable.restored_checkpoint_id
+            RETURNING lease.tenant_id, lease.session_id, lease.worker_id, lease.provider, lease.generation,
+                      lease.provisioning_operation_id, lease.handle, lease.status,
+                      lease.workspace_id, lease.workspace_writer_epoch,
+                      lease.workspace_instance_generation, lease.restored_checkpoint_id,
+                      (SELECT workspace.provider_account_id
+                         FROM moa.sandbox_workspaces AS workspace
+                        WHERE workspace.workspace_id = lease.workspace_id
+                          AND workspace.tenant_id = lease.tenant_id) AS provider_account_id,
+                      (SELECT workspace.provider_account_generation
+                         FROM moa.sandbox_workspaces AS workspace
+                        WHERE workspace.workspace_id = lease.workspace_id
+                          AND workspace.tenant_id = lease.tenant_id) AS provider_account_generation,
                       lease.hard_expires_at, lease.idle_expires_at,
                       lease.reap_not_before, lease.reap_attempts, lease.reap_claim_token
             "#,
         )
         .bind(limit)
         .bind(claim_ttl.as_secs_f64())
-        .fetch_all(&self.pool)
+        .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
 
         let now = Utc::now();
-        rows.iter()
+        let claimed = rows
+            .iter()
             .map(|row| {
                 let handle = row
                     .try_get::<Option<sqlx::types::Json<LeaseHandle>>, _>("handle")
                     .map_err(map_sqlx_error)?;
+                let attachment = claimed_attachment_from_row(row)?;
+                let handle_account = handle
+                    .as_ref()
+                    .and_then(|handle| handle.0.handle.provider_account());
+                let provider_account_id = row
+                    .try_get::<Option<ProviderAccountId>, _>("provider_account_id")
+                    .map_err(map_sqlx_error)?
+                    .or_else(|| handle_account.map(|context| context.0))
+                    .unwrap_or(ProviderAccountId(Uuid::nil()));
+                let provider_account_generation = row
+                    .try_get::<Option<i64>, _>("provider_account_generation")
+                    .map_err(map_sqlx_error)?
+                    .and_then(|generation| u64::try_from(generation).ok())
+                    .or_else(|| handle_account.map(|context| context.1))
+                    .unwrap_or(0);
                 Ok(ClaimedHandLease {
+                    tenant_id: row.try_get("tenant_id").map_err(map_sqlx_error)?,
                     session_id: row.try_get("session_id").map_err(map_sqlx_error)?,
                     worker_id: row.try_get("worker_id").map_err(map_sqlx_error)?,
                     provider: row.try_get("provider").map_err(map_sqlx_error)?,
+                    provider_account_id,
+                    provider_account_generation,
                     generation: row.try_get("generation").map_err(map_sqlx_error)?,
                     provisioning_operation_id: row
                         .try_get("provisioning_operation_id")
                         .map_err(map_sqlx_error)?,
                     claim_token: row.try_get("reap_claim_token").map_err(map_sqlx_error)?,
                     handle: handle.map(|handle| handle.0),
+                    attachment,
                     reconcile_not_before: row.try_get("reap_not_before").map_err(map_sqlx_error)?,
                     reason: HandLeaseDestroyReason::classify(
                         now,
@@ -221,15 +282,26 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
                     attempts: row.try_get("reap_attempts").map_err(map_sqlx_error)?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        conn.commit().await?;
+        Ok(claimed)
     }
 
     async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<bool> {
+        let mut conn = self.begin_maintenance().await?;
+        if !transition_attached_workspace_after_destroy(conn.as_mut(), claimed).await? {
+            conn.rollback().await?;
+            return Ok(false);
+        }
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
             SET status = 'destroyed',
                 handle = NULL,
+                workspace_id = NULL,
+                workspace_writer_epoch = NULL,
+                workspace_instance_generation = NULL,
+                restored_checkpoint_id = NULL,
                 updated_at = now(),
                 reap_attempts = 0,
                 reap_not_before = NULL,
@@ -243,6 +315,11 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
               AND status = 'reaping'
               AND handle IS NOT DISTINCT FROM $6
               AND reap_claim_token = $7
+              AND tenant_id = $8
+              AND workspace_id IS NOT DISTINCT FROM $9
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $10
+              AND workspace_instance_generation IS NOT DISTINCT FROM $11
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $12
             "#,
         )
         .bind(claimed.session_id)
@@ -252,10 +329,36 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         .bind(claimed.provisioning_operation_id)
         .bind(claimed.handle.clone().map(sqlx::types::Json))
         .bind(claimed.claim_token)
-        .execute(&self.pool)
+        .bind(claimed.tenant_id)
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_id),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_writer_epoch),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_instance_generation),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .and_then(|attachment| attachment.restored_checkpoint_id),
+        )
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
@@ -273,6 +376,7 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         // future, and a bare `now() + retry_after` would both violate the
         // cleanup-schedule invariant and retry before the provider could have
         // made a late create observable.
+        let mut conn = self.begin_maintenance().await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -293,6 +397,11 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
               AND status = 'reaping'
               AND handle IS NOT DISTINCT FROM $6
               AND reap_claim_token = $8
+              AND tenant_id = $10
+              AND workspace_id IS NOT DISTINCT FROM $11
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $12
+              AND workspace_instance_generation IS NOT DISTINCT FROM $13
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $14
             "#,
         )
         .bind(claimed.session_id)
@@ -304,14 +413,41 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         .bind(retry_after.as_secs_f64())
         .bind(claimed.claim_token)
         .bind(PROVISIONING_VISIBILITY_GRACE.as_secs_f64())
-        .execute(&self.pool)
+        .bind(claimed.tenant_id)
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_id),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_writer_epoch),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_instance_generation),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .and_then(|attachment| attachment.restored_checkpoint_id),
+        )
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
     }
 
     async fn renew_claim(&self, claimed: &ClaimedHandLease, claim_ttl: Duration) -> Result<bool> {
+        let mut conn = self.begin_maintenance().await?;
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -326,6 +462,11 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
               AND handle IS NOT DISTINCT FROM $6
               AND reap_claim_token = $7
               AND reap_claim_expires_at > now()
+              AND tenant_id = $9
+              AND workspace_id IS NOT DISTINCT FROM $10
+              AND workspace_writer_epoch IS NOT DISTINCT FROM $11
+              AND workspace_instance_generation IS NOT DISTINCT FROM $12
+              AND restored_checkpoint_id IS NOT DISTINCT FROM $13
             "#,
         )
         .bind(claimed.session_id)
@@ -336,11 +477,144 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         .bind(claimed.handle.clone().map(sqlx::types::Json))
         .bind(claimed.claim_token)
         .bind(claim_ttl.as_secs_f64())
-        .execute(&self.pool)
+        .bind(claimed.tenant_id)
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_id),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_writer_epoch),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.workspace_instance_generation),
+        )
+        .bind(
+            claimed
+                .attachment
+                .as_ref()
+                .and_then(|attachment| attachment.restored_checkpoint_id),
+        )
+        .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
+        conn.commit().await?;
         Ok(affected == 1)
+    }
+}
+
+/// Atomically detaches the exact workspace generation whose compute was destroyed.
+async fn transition_attached_workspace_after_destroy(
+    conn: &mut PgConnection,
+    claimed: &ClaimedHandLease,
+) -> Result<bool> {
+    let Some(attachment) = &claimed.attachment else {
+        // Legacy terminal leases may predate durable workspaces. There is no
+        // workspace ownership row for this reaper generation to transition.
+        return Ok(true);
+    };
+    let affected = sqlx::query(
+        r#"
+        UPDATE moa.sandbox_workspaces AS workspace
+        SET lifecycle_state = CASE
+                WHEN workspace.lifecycle_state IN ('creating', 'quiescing', 'committing', 'reconciling')
+                  OR EXISTS (
+                        SELECT 1
+                        FROM moa.sandbox_workspace_operations AS operation
+                        WHERE operation.tenant_id = workspace.tenant_id
+                          AND operation.workspace_id = workspace.workspace_id
+                          AND operation.provider_account_id = workspace.provider_account_id
+                          AND operation.provider_account_generation = workspace.provider_account_generation
+                          AND operation.expected_writer_epoch = workspace.writer_epoch
+                          AND operation.expected_instance_generation = workspace.instance_generation
+                          AND operation.outcome_class IN ('not_sent', 'unknown')
+                          AND operation.operation_kind <> 'delete'
+                    )
+                THEN 'reconciling'
+                WHEN workspace.lifecycle_state = 'failed' THEN 'failed'
+                ELSE 'ready'
+            END,
+            updated_at = now()
+        WHERE workspace.tenant_id = $1 AND workspace.workspace_id = $2
+          AND workspace.provider_account_id = $3
+          AND workspace.provider_account_generation = $4
+          AND workspace.writer_epoch = $5
+          AND workspace.instance_generation = $6
+          AND workspace.current_checkpoint_id IS NOT DISTINCT FROM $7
+          AND workspace.lifecycle_state NOT IN ('deleting', 'deleted')
+        "#,
+    )
+    .bind(claimed.tenant_id)
+    .bind(attachment.workspace_id)
+    .bind(claimed.provider_account_id)
+    .bind(i64::try_from(claimed.provider_account_generation).map_err(|_| {
+        MoaError::ValidationError(
+            "reaper provider-account generation exceeds Postgres bigint".to_string(),
+        )
+    })?)
+    .bind(attachment.workspace_writer_epoch)
+    .bind(attachment.workspace_instance_generation)
+    .bind(attachment.restored_checkpoint_id)
+    .execute(conn)
+    .await
+    .map_err(map_sqlx_error)?
+    .rows_affected();
+    Ok(affected == 1)
+}
+
+/// Decodes the all-or-none workspace attachment captured by a reaper claim.
+fn claimed_attachment_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<Option<HandLeaseWorkspaceAttachment>> {
+    let workspace_id = row
+        .try_get::<Option<SandboxWorkspaceId>, _>("workspace_id")
+        .map_err(map_sqlx_error)?;
+    let writer_epoch = row
+        .try_get::<Option<i64>, _>("workspace_writer_epoch")
+        .map_err(map_sqlx_error)?;
+    let instance_generation = row
+        .try_get::<Option<i64>, _>("workspace_instance_generation")
+        .map_err(map_sqlx_error)?;
+    let restored_checkpoint_id = row
+        .try_get::<Option<WorkspaceCheckpointId>, _>("restored_checkpoint_id")
+        .map_err(map_sqlx_error)?;
+
+    claimed_attachment(
+        workspace_id,
+        writer_epoch,
+        instance_generation,
+        restored_checkpoint_id,
+    )
+}
+
+fn claimed_attachment(
+    workspace_id: Option<SandboxWorkspaceId>,
+    writer_epoch: Option<i64>,
+    instance_generation: Option<i64>,
+    restored_checkpoint_id: Option<WorkspaceCheckpointId>,
+) -> Result<Option<HandLeaseWorkspaceAttachment>> {
+    match (workspace_id, writer_epoch, instance_generation) {
+        (Some(workspace_id), Some(writer_epoch), Some(instance_generation)) => {
+            HandLeaseWorkspaceAttachment::new(
+                workspace_id,
+                writer_epoch,
+                instance_generation,
+                restored_checkpoint_id,
+            )
+            .map(Some)
+        }
+        (None, None, None) if restored_checkpoint_id.is_none() => Ok(None),
+        _ => Err(MoaError::StorageError(
+            "reaper claim contains a partial durable workspace attachment".to_string(),
+        )),
     }
 }
 
@@ -499,6 +773,8 @@ impl HandLeaseReaper {
         }
         destroy_provisioning_operations(
             provider.as_ref(),
+            lease.provider_account_id,
+            lease.provider_account_generation,
             lease.provisioning_operation_id,
             lease.handle.as_ref(),
             ProvisioningAbsenceProof::Delayed,
@@ -507,6 +783,16 @@ impl HandLeaseReaper {
     }
 
     async fn destroy_claimed_with_renewal(&self, lease: &ClaimedHandLease) -> Result<()> {
+        if !self
+            .claims
+            .renew_claim(lease, self.config.claim_ttl)
+            .await?
+        {
+            return Err(MoaError::StorageError(format!(
+                "durable hand reaper lost claim before destroy for session {} provider {} generation {}",
+                lease.session_id, lease.provider, lease.generation
+            )));
+        }
         let heartbeat = (self.config.claim_ttl / 3).max(Duration::from_millis(1));
         let mut ticker = tokio::time::interval(heartbeat);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -564,6 +850,8 @@ pub(super) enum ProvisioningAbsenceProof {
 /// empty enumeration or ambiguous cleanup needs delayed confirmation.
 pub(super) async fn destroy_provisioning_operations(
     provider: &dyn HandProvider,
+    provider_account_id: ProviderAccountId,
+    provider_account_generation: u64,
     current_operation_id: HandProvisioningOperationId,
     stored_handle: Option<&LeaseHandle>,
     absence_proof: ProvisioningAbsenceProof,
@@ -581,7 +869,14 @@ pub(super) async fn destroy_provisioning_operations(
     }
     let mut first_error = None;
     for operation_id in &operation_ids {
-        match provider.provisioned_hands(*operation_id).await {
+        match provider
+            .provisioned_hands(
+                provider_account_id,
+                provider_account_generation,
+                *operation_id,
+            )
+            .await
+        {
             Ok(discovered) => {
                 for handle in discovered {
                     if !handles.contains(&handle) {
@@ -608,22 +903,42 @@ pub(super) async fn destroy_provisioning_operations(
     if let Some(error) = first_error {
         return Err(error);
     }
-    ensure_provisioning_operations_absent(provider, &operation_ids).await?;
+    ensure_provisioning_operations_absent(
+        provider,
+        provider_account_id,
+        provider_account_generation,
+        &operation_ids,
+    )
+    .await?;
     match absence_proof {
         ProvisioningAbsenceProof::Immediate => Ok(()),
         ProvisioningAbsenceProof::Delayed => {
             tokio::time::sleep(PROVISIONING_EMPTY_CONFIRMATION).await;
-            ensure_provisioning_operations_absent(provider, &operation_ids).await
+            ensure_provisioning_operations_absent(
+                provider,
+                provider_account_id,
+                provider_account_generation,
+                &operation_ids,
+            )
+            .await
         }
     }
 }
 
 async fn ensure_provisioning_operations_absent(
     provider: &dyn HandProvider,
+    provider_account_id: ProviderAccountId,
+    provider_account_generation: u64,
     operation_ids: &[HandProvisioningOperationId],
 ) -> Result<()> {
     for operation_id in operation_ids {
-        let remaining = provider.provisioned_hands(*operation_id).await?;
+        let remaining = provider
+            .provisioned_hands(
+                provider_account_id,
+                provider_account_generation,
+                *operation_id,
+            )
+            .await?;
         if !remaining.is_empty() {
             return Err(MoaError::ProviderError(format!(
                 "hand provider {} still reports {} resource(s) for provisioning operation {operation_id} after destroy",
@@ -693,6 +1008,7 @@ mod tests {
 
     struct StubProvider {
         destroy_fails: bool,
+        panic_on_reconcile: bool,
     }
 
     #[async_trait::async_trait]
@@ -714,8 +1030,14 @@ mod tests {
 
         async fn provisioned_hands(
             &self,
+            _provider_account_id: ProviderAccountId,
+            _provider_account_generation: u64,
             _operation_id: HandProvisioningOperationId,
         ) -> Result<Vec<HandHandle>> {
+            assert!(
+                !self.panic_on_reconcile,
+                "a stale reaper claim must be fenced before any provider reconciliation"
+            );
             Ok(Vec::new())
         }
 
@@ -751,9 +1073,12 @@ mod tests {
     fn claimed(generation: i64, attempts: i32) -> ClaimedHandLease {
         let provisioning_operation_id = HandProvisioningOperationId::new();
         ClaimedHandLease {
+            tenant_id: TenantId::new(),
             session_id: SessionId::new(),
             worker_id: String::new(),
             provider: "local".to_string(),
+            provider_account_id: ProviderAccountId(Uuid::nil()),
+            provider_account_generation: 0,
             generation,
             provisioning_operation_id,
             claim_token: Uuid::new_v4(),
@@ -761,6 +1086,10 @@ mod tests {
                 provisioning_operation_id,
                 HandHandle::local(std::path::PathBuf::from("/tmp/moa-reap")),
             )),
+            attachment: Some(
+                HandLeaseWorkspaceAttachment::new(SandboxWorkspaceId::new(), 1, 1, None)
+                    .expect("test attachment validates"),
+            ),
             reconcile_not_before: None,
             reason: HandLeaseDestroyReason::HardLifetime,
             attempts,
@@ -778,6 +1107,7 @@ mod tests {
             claims.clone(),
             vec![Arc::new(StubProvider {
                 destroy_fails: false,
+                panic_on_reconcile: false,
             })],
             HandLeaseReaperConfig::default(),
         );
@@ -804,6 +1134,7 @@ mod tests {
             claims.clone(),
             vec![Arc::new(StubProvider {
                 destroy_fails: true,
+                panic_on_reconcile: false,
             })],
             config,
         );
@@ -816,6 +1147,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lost_attachment_claim_is_fenced_before_provider_destruction() {
+        // Pins: the reaper re-validates its exact durable claim immediately
+        // before provider I/O, so a claim that lost its attachment fence cannot
+        // destroy compute belonging to a retained or replacement attachment.
+        struct LostClaim;
+
+        #[async_trait::async_trait]
+        impl ExpiredHandLeaseClaims for LostClaim {
+            async fn claim_expired(
+                &self,
+                _limit: i64,
+                _claim_ttl: Duration,
+            ) -> Result<Vec<ClaimedHandLease>> {
+                Ok(vec![claimed(11, 0)])
+            }
+
+            async fn finalize_destroyed(&self, _claimed: &ClaimedHandLease) -> Result<bool> {
+                panic!("a lost claim must not finalize")
+            }
+
+            async fn release_for_retry(
+                &self,
+                _claimed: &ClaimedHandLease,
+                _retry_after: Duration,
+            ) -> Result<bool> {
+                Ok(false)
+            }
+
+            async fn renew_claim(
+                &self,
+                _claimed: &ClaimedHandLease,
+                _claim_ttl: Duration,
+            ) -> Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let reaper = HandLeaseReaper::new(
+            Arc::new(LostClaim),
+            vec![Arc::new(StubProvider {
+                destroy_fails: false,
+                panic_on_reconcile: true,
+            })],
+            HandLeaseReaperConfig::default(),
+        );
+
+        assert_eq!(
+            reaper.sweep().await.expect("lost claim is a fenced no-op"),
+            0
+        );
+    }
+
     #[test]
     fn retry_backoff_grows_and_is_capped() {
         // Pins: repeated destroy failures back off exponentially and stop at the
@@ -825,6 +1209,25 @@ mod tests {
         assert_eq!(config.retry_delay(1), Duration::from_secs(30));
         assert_eq!(config.retry_delay(2), Duration::from_secs(60));
         assert_eq!(config.retry_delay(64), config.max_retry_delay);
+    }
+
+    #[test]
+    fn claim_decoder_rejects_partial_workspace_attachments() {
+        // Pins: the reaper never turns a partial durable row into a claim with
+        // invented fence values; legacy absence is all-null and attachment is
+        // otherwise all-or-none.
+        let error = claimed_attachment(Some(SandboxWorkspaceId::new()), None, Some(1), None)
+            .expect_err("partial attachment must fail closed");
+        assert!(
+            matches!(error, MoaError::StorageError(message) if message ==
+            "reaper claim contains a partial durable workspace attachment")
+        );
+
+        assert_eq!(
+            claimed_attachment(None, None, None, None)
+                .expect("all-null legacy attachment is valid"),
+            None
+        );
     }
 
     #[test]

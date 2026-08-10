@@ -65,8 +65,13 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_SESSION_ATTACHMENT_ENDPOINT
+    name: MOA_OBJECT_STORE_ENDPOINT
     value: http://rustfs:9000
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_OBJECT_STORE_CREDENTIAL_MODE
+    value: static
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
@@ -78,7 +83,7 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_SESSION_ATTACHMENT_REGION
+    name: MOA_OBJECT_STORE_REGION
     valueFrom:
       secretKeyRef:
         name: moa-session-attachments
@@ -86,7 +91,7 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID
+    name: MOA_OBJECT_STORE_ACCESS_KEY_ID
     valueFrom:
       secretKeyRef:
         name: moa-session-attachments
@@ -94,7 +99,7 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY
+    name: MOA_OBJECT_STORE_SECRET_ACCESS_KEY
     valueFrom:
       secretKeyRef:
         name: moa-session-attachments
@@ -102,13 +107,26 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_SESSION_ATTACHMENT_ALLOW_HTTP
+    name: MOA_OBJECT_STORE_ALLOW_HTTP
     value: "true"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE
+    name: MOA_OBJECT_STORE_VIRTUAL_HOSTED_STYLE
     value: "false"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SANDBOX_CHECKPOINT_BUCKET
+    valueFrom:
+      secretKeyRef:
+        name: moa-session-attachments
+        key: checkpoint-bucket
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SANDBOX_CHECKPOINT_PREFIX
+    value: workspace-checkpoints
 - op: add
   path: /spec/template/spec/containers/0/volumeMounts/-
   value:

@@ -336,7 +336,13 @@ pub fn build_admitted_http_client(
         .map_err(|_| OutboundHttpClientError::ConstructionFailed)
 }
 
-fn parse_canonical_origin(origin: &str) -> Result<Url, OutboundHttpAdmissionError> {
+/// Parses one already-canonical fixed HTTP(S) origin.
+///
+/// The input must contain only a scheme, host, and optional non-default port.
+/// User information, paths, queries, fragments, wildcard syntax, control
+/// characters, and non-canonical host spellings are rejected. A lone trailing
+/// slash is accepted because it does not change the origin.
+pub fn parse_canonical_origin(origin: &str) -> Result<Url, OutboundHttpAdmissionError> {
     if origin.is_empty()
         || origin.trim() != origin
         || origin.contains(['*', '{', '}'])

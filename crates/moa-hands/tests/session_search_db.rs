@@ -51,7 +51,7 @@ async fn session_search_finds_prior_events() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: None,
                 name: "session_search".to_string(),
@@ -122,7 +122,7 @@ async fn session_search_filters_error_events() {
         .execute_authorized(moa_hands::AuthorizedToolCall {
             session: &session,
             caller_identity: &identity(),
-            worker_id: None,
+            workspace_scope: None,
             invocation: &ToolInvocation {
                 id: None,
                 name: "session_search".to_string(),

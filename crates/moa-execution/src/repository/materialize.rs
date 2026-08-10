@@ -32,6 +32,7 @@ impl ExecutionRepository {
         }
         if current.status != ExecutionRunStatus::AwaitingConfirmation {
             let outcome = if current.status.is_terminal()
+                || current.pending_terminal.is_some()
                 || current.confirmed_at.is_none()
                 || current.confirmed_plan_hash.as_ref() != Some(expected_plan_hash)
             {

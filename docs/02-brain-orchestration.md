@@ -16,6 +16,7 @@ _Restate orchestration, hosted API runtime mode, turn execution, and workers._
 - Execution workflows: `crates/moa-orchestrator/src/workflows/execution_run.rs` and `crates/moa-orchestrator/src/workflows/execution_task.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
+- Sandbox workspace contract: `docs/25-sandbox-workspaces.md`
 
 ## Cloud Runtime
 
@@ -72,6 +73,9 @@ Product-visible history is written to Postgres. Kubernetes traffic is
 non-sticky, so correctness state shared across incoming requests must live in
 Postgres, Restate, or the orchestrator's required Redis-compatible Valkey
 runtime cache; process memory is only a local cache.
+Arbitrary files created inside a sandbox are not Restate or session state.
+They become durable only after the `SandboxWorkspace` commit barrier publishes a
+verified portable checkpoint; see [Sandbox Workspaces](25-sandbox-workspaces.md).
 
 `Artifacts` owns import, export, listing, validation, and publish for canonical
 skills, connectors, actions, and agents. `moa-execution` owns execution-plan
@@ -438,9 +442,11 @@ frames; the next plain user reply is forwarded by the session to the worker as
 
 After a child reports terminal (cached result + result-waiter awakeable + events +
 idle-wake), it schedules a generation-guarded delayed `Worker::cleanup` self-call
-after `worker_cleanup_grace_ms`. Cleanup releases the child's own sandbox,
-removes it from the parent's fan-out, and clears VO state — bottom-up and only once
-the result is durable on the parent. A follow-up that arrives during the grace
+after `worker_cleanup_grace_ms`. Cleanup checkpoints according to workspace
+policy, releases the child's ephemeral compute attachment, retains the durable
+workspace or reconciliation owner independently, removes the child from the
+parent's fan-out, and clears VO state — bottom-up and only once the result is
+durable on the parent. A follow-up that arrives during the grace
 window revives the child instead, and messages to a cleaned/terminal child are
 rejected rather than re-bootstrapped. Separately, the `Session` VO arms a
 generation-guarded `check_child_liveness` watchdog per active child; on a stale
@@ -474,6 +480,13 @@ reservation starts no work. It resolves only compiler-approved references,
 executes one governed capability or bounded agent task, reconciles actual usage,
 persists citations and output, and completes through a generation fence so a
 stale attempt cannot overwrite newer work.
+
+A sandbox-using worker or execution task is also the only valid owner of a
+`SandboxWorkspace`; a coordinator/bare session is not. Mutating sandbox tools
+cannot publish a successful `ToolResult` until the workspace commit barrier has
+quiesced the writer and advanced a verified immutable portable checkpoint.
+Sandbox dispatch without a typed worker or execution-task workspace scope is
+rejected before workspace reads or provider I/O.
 
 The plan is an acyclic graph with exactly `Capability`, `Agent`, `Map`,
 `Reduce`, `Review`, `WaitSignal`, and `Output`. A map task is only a capability

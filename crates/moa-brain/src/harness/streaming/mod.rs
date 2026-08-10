@@ -12,7 +12,7 @@ use moa_core::{
     types::model::TokenPricing, types::observability::TraceContext,
     types::observability::genai_operation_name, types::observability::genai_provider_name,
     types::provider::ModelTask, types::resource::ResourceAmounts, types::resource::ResourceBudget,
-    types::session::SessionMeta,
+    types::sandbox_workspace::SandboxWorkspaceScope, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -49,6 +49,7 @@ pub(super) async fn run_streamed_turn(
                 llm_provider,
                 pipeline,
                 tool_router,
+                workspace_scope,
             },
         runtime_tx,
         event_tx,
@@ -126,7 +127,13 @@ pub(super) async fn run_streamed_turn(
             .instrument(pipeline_compile_span.clone())
             .await?;
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
-            register_selected_skill_files(tool_router.as_deref(), &session, &mut ctx).await;
+            register_selected_skill_files(
+                tool_router.as_deref(),
+                &session,
+                workspace_scope.as_ref(),
+                &mut ctx,
+            )
+            .await;
             augment_agentic_memory_tools(&mut ctx, tool_router.as_deref());
             let citation_sources = emit_context_lineage(
                 lineage.as_ref(),
@@ -385,6 +392,7 @@ pub(super) async fn run_streamed_turn(
                                 &session,
                                 session_store.clone(),
                                 tool_router.as_deref(),
+                                workspace_scope.as_ref(),
                                 call,
                                 active_canary.as_deref(),
                                 event_tx,
@@ -683,6 +691,7 @@ fn spawn_incident_capture(
 async fn register_selected_skill_files(
     tool_router: Option<&ToolRouter>,
     session: &SessionMeta,
+    workspace_scope: Option<&SandboxWorkspaceScope>,
     ctx: &mut WorkingContext,
 ) {
     let Some(router) = tool_router else {
@@ -690,7 +699,15 @@ async fn register_selected_skill_files(
     };
     let files = ctx.take_trusted_sandbox_files();
     let file_count = files.len();
-    router.set_trusted_sandbox_files(session, None, files).await;
+    let owner_key = workspace_scope.map(|scope| match scope {
+        SandboxWorkspaceScope::Worker { worker_id, .. } => worker_id.clone(),
+        SandboxWorkspaceScope::ExecutionTask { run_id, task_id } => {
+            format!("execution:{run_id}:{task_id}")
+        }
+    });
+    router
+        .set_trusted_sandbox_files(session, owner_key.as_deref(), files)
+        .await;
     tracing::info!(
         session_id = %session.id,
         tenant_id = %session.tenant_id,

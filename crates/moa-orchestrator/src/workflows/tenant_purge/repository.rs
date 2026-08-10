@@ -97,6 +97,14 @@ pub async fn purge_relational(
     operation_id: &str,
 ) -> Result<RelationalPurgeOutcome, String> {
     start_fenced_purge(pool, tenant_id, operation_id).await?;
+    sqlx::query("SELECT moa.require_sandbox_external_absence_for_tenant_purge($1, $2)")
+        .bind(tenant_id)
+        .bind(operation_id)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("verify sandbox external absence before relational purge: {error}")
+        })?;
     let progress: PurgeProgress = sqlx::query_as(
         "SELECT status, current_stage \
          FROM moa.tenant_purge_operations \

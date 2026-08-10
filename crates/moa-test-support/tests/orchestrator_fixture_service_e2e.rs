@@ -169,6 +169,9 @@ async fn fixture_round_trips_accepted_execution_run_through_restate() -> anyhow:
 }
 
 fn execution_candidate(objective: &str) -> String {
+    // Park the detached run before its output node. An immediately terminal
+    // plan legitimately dispatches its synthesis turn before the fixture can
+    // observe the admitted-run state this test pins.
     json!({
         "goal": {
             "objective": objective,
@@ -191,25 +194,46 @@ fn execution_candidate(objective: &str) -> String {
             "cancel_policy": "retain_effects",
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
-            "nodes": [{
-                "id": "output",
-                "requirement_ids": ["req_report"],
-                "depends_on": [],
-                "when": null,
-                "input": {},
-                "output_schema": { "type": "object" },
-                "operation": {
-                    "kind": "output",
-                    "value": { "status": "complete" }
+            "nodes": [
+                {
+                    "id": "fixture_release",
+                    "requirement_ids": ["req_report"],
+                    "depends_on": [],
+                    "when": null,
+                    "input": {},
+                    "output_schema": { "type": "object" },
+                    "operation": {
+                        "kind": "wait_signal",
+                        "signal_name": "fixture_release"
+                    },
+                    "compensation": null,
+                    "retry": {
+                        "max_attempts": 1,
+                        "initial_backoff_ms": 0,
+                        "max_backoff_ms": 0
+                    },
+                    "budget": null
                 },
-                "compensation": null,
-                "retry": {
-                    "max_attempts": 1,
-                    "initial_backoff_ms": 0,
-                    "max_backoff_ms": 0
-                },
-                "budget": null
-            }]
+                {
+                    "id": "output",
+                    "requirement_ids": ["req_report"],
+                    "depends_on": ["fixture_release"],
+                    "when": null,
+                    "input": {},
+                    "output_schema": { "type": "object" },
+                    "operation": {
+                        "kind": "output",
+                        "value": { "status": "complete" }
+                    },
+                    "compensation": null,
+                    "retry": {
+                        "max_attempts": 1,
+                        "initial_backoff_ms": 0,
+                        "max_backoff_ms": 0
+                    },
+                    "budget": null
+                }
+            ]
         },
         "run_input": {}
     })

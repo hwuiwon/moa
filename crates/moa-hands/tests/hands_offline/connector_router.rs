@@ -278,7 +278,7 @@ async fn generic_recovery_never_invokes_installed_connector_runtime_offline() {
         .execute_authorized_with_recovery(moa_hands::AuthorizedToolCall {
             session: &fixture.session(),
             caller_identity: &fixture.identity,
-            worker_id: None,
+            workspace_scope: None,
             invocation: &fixture.invocation(),
             tool_call_id: ToolCallId(Uuid::from_u128(0xc411)),
             active_canary: None,
@@ -323,7 +323,7 @@ async fn dedicated_pending_dispatch_invokes_connector_runtime_once_offline() {
         .execute_installed_connector_pending(moa_hands::AuthorizedToolCall {
             session: &fixture.session(),
             caller_identity: &fixture.identity,
-            worker_id: None,
+            workspace_scope: None,
             invocation: &fixture.invocation(),
             tool_call_id: ToolCallId(Uuid::from_u128(0xc412)),
             active_canary: None,

@@ -1,85 +1,168 @@
 {
-  "title": "MOA Sandbox Fleet",
-  "uid": "moa-sandbox-fleet",
-  "schemaVersion": 39,
-  "version": 1,
-  "editable": true,
-  "timezone": "browser",
-  "time": {
-    "from": "now-6h",
-    "to": "now"
-  },
   "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
   "panels": [
     {
       "id": 1,
-      "title": "Sandbox Provision Rate",
+      "title": "Workspace Lifecycle Outcomes",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(moa_sandbox_provision_seconds_count[5m])) by (provider, tier)",
-          "legendFormat": "{{provider}} {{tier}}",
-          "refId": "A"
-        }
-      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "sum(rate(moa_sandbox_workspace_lifecycle_total[5m])) by (provider_kind, operation, result)",
+        "legendFormat": "{{provider_kind}} {{operation}} {{result}}",
+        "refId": "A"
+      }],
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
     },
     {
       "id": 2,
-      "title": "Sandbox Provision p95",
+      "title": "Workspace Lifecycle p95",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(moa_sandbox_provision_seconds_bucket[5m])) by (le, provider, tier))",
-          "legendFormat": "{{provider}} {{tier}}",
-          "refId": "A"
-        }
-      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(moa_sandbox_workspace_lifecycle_duration_seconds_bucket[5m])) by (le, provider_kind, operation))",
+        "legendFormat": "{{provider_kind}} {{operation}}",
+        "refId": "A"
+      }],
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
     },
     {
       "id": 3,
-      "title": "Tool Calls / Category",
+      "title": "Durable Workspace States",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "sum(moa_sandbox_workspace_inventory_drift) by (provider_kind, classification)",
+        "legendFormat": "{{provider_kind}} {{state}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "id": 4,
+      "title": "Storage Resource States",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "sum(moa_sandbox_workspace_storage_resource_state) by (provider_kind, state)",
+        "legendFormat": "{{provider_kind}} {{state}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "id": 5,
+      "title": "Quota Rejections",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "sum(rate(moa_sandbox_workspace_quota_decisions_total{decision=\"rejected\"}[5m])) by (dimension)",
+        "legendFormat": "{{dimension}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "id": 6,
+      "title": "Fleet Quota Utilization",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "max": 1, "min": 0, "unit": "percentunit" }, "overrides": [] },
+      "targets": [{
+        "expr": "max(moa_sandbox_workspace_quota_utilization_ratio) by (dimension)",
+        "legendFormat": "{{dimension}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "id": 7,
+      "title": "Workspace Reaper Readiness",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "min(moa_sandbox_workspace_reaper_ready)", "refId": "A" }],
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 24 }
+    },
+    {
+      "id": 8,
+      "title": "Workspace Reaper Heartbeat Age",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "max(moa_sandbox_workspace_reaper_heartbeat_age_seconds)", "refId": "A" }],
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 24 }
+    },
+    {
+      "id": 9,
+      "title": "Workspace Reaper Backlog",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        {
-          "expr": "sum(rate(moa_tool_calls_total[5m])) by (tool_name, status)",
-          "legendFormat": "{{tool_name}} {{status}}",
-          "refId": "A"
-        }
+        { "expr": "sum(moa_sandbox_workspace_reaper_backlog)", "legendFormat": "backlog", "refId": "A" },
+        { "expr": "max(moa_sandbox_workspace_reaper_oldest_work_age_seconds)", "legendFormat": "oldest seconds", "refId": "B" }
       ],
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 }
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 24 }
+    },
+    {
+      "id": 10,
+      "title": "Checkpoint Byte Throughput",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "sum(rate(moa_sandbox_workspace_checkpoint_bytes_total[5m])) by (provider_kind, operation, result)",
+        "legendFormat": "{{provider_kind}} {{operation}} {{result}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 }
+    },
+    {
+      "id": 11,
+      "title": "Checkpoint p95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(moa_sandbox_workspace_checkpoint_duration_seconds_bucket[5m])) by (le, provider_kind, operation))",
+        "legendFormat": "{{provider_kind}} {{operation}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 }
+    },
+    {
+      "id": 12,
+      "title": "Unresolved Provider Inventory Drift",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{
+        "expr": "sum(moa_sandbox_workspace_state) by (provider_kind, state)",
+        "legendFormat": "{{provider_kind}} {{classification}}",
+        "refId": "A"
+      }],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 }
     }
   ],
   "refresh": "30s",
-  "tags": ["moa", "operations", "sandboxes"],
+  "schemaVersion": 39,
+  "tags": ["moa", "operations", "sandboxes", "workspaces"],
   "templating": {
-    "list": [
-      {
-        "current": {},
-        "hide": 0,
-        "includeAll": false,
-        "label": "Prometheus datasource",
-        "multi": false,
-        "name": "DS_PROMETHEUS",
-        "options": [],
-        "query": "prometheus",
-        "refresh": 1,
-        "regex": "",
-        "type": "datasource"
-      }
-    ]
-  }
+    "list": [{
+      "current": {},
+      "hide": 0,
+      "includeAll": false,
+      "label": "Prometheus datasource",
+      "multi": false,
+      "name": "DS_PROMETHEUS",
+      "options": [],
+      "query": "prometheus",
+      "refresh": 1,
+      "regex": "",
+      "type": "datasource"
+    }]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "MOA Sandbox Workspace Fleet",
+  "uid": "moa-sandbox-fleet",
+  "version": 2
 }

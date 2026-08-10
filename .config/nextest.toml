@@ -104,8 +104,30 @@ binary(/^orchestrator_fixture_service_e2e$/)
 inherits = "default"
 test-threads = 1
 junit.path = "junit.xml"
-default-filter = 'package(moa-orchestrator) & test(/recovery_matrix_/)'
+default-filter = '''
+package(moa-orchestrator)
+  & (
+      (binary(/^recovery_matrix_sandbox_workspace_service_e2e$/)
+        & test(/recovery_matrix_sandbox_workspace_/))
+      | (test(/recovery_matrix_/) - binary(/^sandbox_workspace_soak_service_e2e$/))
+    )
+'''
 slow-timeout = { period = "120s", terminate-after = 5 }
+
+# Scheduled-only 1,000-tenant workspace capacity and inventory convergence. It
+# is deliberately disjoint from the PR recovery profile: the test is ignored,
+# serial, and makes enough database writes to model fleet headroom rather than
+# a merge-time smoke.
+[profile.sandbox-workspace-soak]
+inherits = "default"
+test-threads = 1
+junit.path = "target/nextest/sandbox-workspace-soak/junit.xml"
+default-filter = '''
+package(moa-orchestrator)
+  & binary(/^sandbox_workspace_soak_service_e2e$/)
+  & test(/^sandbox_workspace_1000_tenant_soak/)
+'''
+slow-timeout = { period = "120s", terminate-after = 15 }
 
 # --- Behavior Lab lanes -------------------------------------------------------
 #

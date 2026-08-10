@@ -863,6 +863,7 @@ async fn run_turn(
         llm_provider: provider,
         pipeline,
         tool_router,
+        workspace_scope: None,
     })
     .await?;
 

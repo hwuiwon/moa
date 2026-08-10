@@ -16,7 +16,10 @@ pub use propagation::{
 };
 pub use restate_observability::{current_trace_id, trace_ids_for_span};
 pub use runtime_metrics::{
-    SESSION_EVENT_APPEND_PHASE_METRIC, SessionEventAppendPhase, TURN_LATENCY_REPORT_STEPS,
+    SESSION_EVENT_APPEND_PHASE_METRIC, SandboxStorageResourceMetricState,
+    SandboxWorkspaceCheckpointOperation, SandboxWorkspaceInventoryDrift,
+    SandboxWorkspaceLifecycleOperation, SandboxWorkspaceMetricResult, SandboxWorkspaceProviderKind,
+    SandboxWorkspaceQuotaDecision, SessionEventAppendPhase, TURN_LATENCY_REPORT_STEPS,
     TURN_STEP_DURATION_METRIC, TurnLatencyStep, init_metrics, metrics_endpoint_url,
     record_action_review_decision, record_action_review_oldest_pending_age,
     record_action_review_pending_depth, record_action_review_requested, record_approval_wait,
@@ -26,7 +29,11 @@ pub use runtime_metrics::{
     record_experiment_trial, record_genai_client_operation_duration,
     record_genai_client_time_to_first_chunk, record_genai_client_token_usage,
     record_knowledge_sync_run, record_llm_cost_cents, record_memory_operation,
-    record_sandbox_provision_duration, record_session_error, record_session_event_append,
+    record_sandbox_provision_duration, record_sandbox_storage_resource_state,
+    record_sandbox_workspace_checkpoint, record_sandbox_workspace_inventory_drift,
+    record_sandbox_workspace_lifecycle, record_sandbox_workspace_quota_decision,
+    record_sandbox_workspace_quota_utilization, record_sandbox_workspace_reaper,
+    record_sandbox_workspace_state, record_session_error, record_session_event_append,
     record_session_event_append_phase_duration, record_sessions_active,
     record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
     record_tool_call, record_tool_failure, record_tool_reprovision, record_turn_completed,

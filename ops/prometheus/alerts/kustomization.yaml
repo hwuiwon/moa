@@ -10,3 +10,4 @@ resources:
   - moa-durability.yaml
   - moa-lineage.yaml
   - moa-restate.yaml
+  - sandbox-workspaces.yaml

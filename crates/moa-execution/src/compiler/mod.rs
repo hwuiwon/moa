@@ -6,16 +6,20 @@ mod validation;
 
 use amendment::*;
 use estimate::*;
-use validation::*;
+use validation::schema_references::{validate_declared_reference_paths, validate_schemas};
+use validation::{
+    append_artifact_reports, append_error, validate_amendment_reference_narrowing,
+    validate_authorization, validate_catalog, validate_goal_plan_links, validate_plan_references,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::{
     execution_plan::{
-        CompletionCheckKind, ExecutionBudgetLimit, ExecutionCondition, ExecutionGoalContract,
-        ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, MapTask,
-        PlanAmendment, PlanAmendmentOperation,
+        CompletionCheckKind, ExecutionBudgetLimit, ExecutionGoalContract, ExecutionNode,
+        ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, MapTask, PlanAmendment,
+        PlanAmendmentOperation,
     },
     reference::ArtifactRef,
     validation::{validate_execution_goal_contract, validate_execution_plan_definition},
@@ -33,7 +37,7 @@ use crate::{
         ExecutionAuthorizationEnvelope, ExecutionCapability, ExecutionCapabilityCatalog,
         ExecutionEstimate, ExecutionHash, canonical_sort_key, catalog_hash, plan_hash,
     },
-    schema::{validate_instance, validate_schema},
+    schema::validate_instance,
     state::{ExecutionNodeStatus, ExecutionProjection, ExecutionTaskStatus},
 };
 

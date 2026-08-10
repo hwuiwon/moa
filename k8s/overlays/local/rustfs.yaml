@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: rustfs
-          image: rustfs/rustfs:latest
+          image: rustfs/rustfs:latest@sha256:fa19210ac4697c79d7ccca1ec9b0eb91aebacc6691991ffb14014bb3c67e6cc3
           args:
             - /data
           ports:
@@ -53,6 +53,23 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          startupProbe:
+            httpGet:
+              path: /health
+              port: s3
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 15
+            periodSeconds: 15
           resources:
             requests:
               cpu: 100m
@@ -62,7 +79,23 @@ spec:
               memory: 512Mi
       volumes:
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: rustfs-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rustfs-data
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: moa
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
 ---
 apiVersion: v1
 kind: Service
@@ -89,7 +122,7 @@ kind: Job
 metadata:
   # Job pod templates are immutable. This identity belongs to the initializer
   # revision which creates both the attachment and Restate snapshot buckets.
-  name: rustfs-init-snapshots-v1
+  name: rustfs-init-durable-buckets-v2
   namespace: moa-system
   labels:
     app.kubernetes.io/name: rustfs-init
@@ -104,34 +137,41 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: rustfs-init
-          image: rustfs/rc:latest
+          image: rustfs/rc:latest@sha256:7e488f0b71de2f5152777cbc8a8dd5b8370d99d3019fbfc7e196bdc6e3fa0285
           command:
             - /bin/sh
             - -c
             - |
               set -eu
-              until rc alias set --quiet --bucket-lookup path --region "${MOA_SESSION_ATTACHMENT_REGION}" rustfs http://rustfs:9000 "${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID}" "${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY}"; do
+              until rc alias set --quiet --bucket-lookup path --region "${MOA_OBJECT_STORE_REGION}" rustfs http://rustfs:9000 "${MOA_OBJECT_STORE_ACCESS_KEY_ID}" "${MOA_OBJECT_STORE_SECRET_ACCESS_KEY}"; do
                 sleep 1
               done
-              rc bucket create --ignore-existing --region "${MOA_SESSION_ATTACHMENT_REGION}" "rustfs/${MOA_SESSION_ATTACHMENT_BUCKET}"
-              rc bucket create --ignore-existing --region "${MOA_SESSION_ATTACHMENT_REGION}" "rustfs/moa-restate-snapshots"
+              rc bucket create --ignore-existing --region "${MOA_OBJECT_STORE_REGION}" "rustfs/${MOA_SESSION_ATTACHMENT_BUCKET}"
+              rc bucket create --ignore-existing --region "${MOA_OBJECT_STORE_REGION}" "rustfs/${MOA_SANDBOX_CHECKPOINT_BUCKET}"
+              rc bucket version info --json "rustfs/${MOA_SANDBOX_CHECKPOINT_BUCKET}" | grep -Eq '"enabled"[[:space:]]*:[[:space:]]*null'
+              rc bucket create --ignore-existing --region "${MOA_OBJECT_STORE_REGION}" "rustfs/moa-restate-snapshots"
           env:
             - name: MOA_SESSION_ATTACHMENT_BUCKET
               valueFrom:
                 secretKeyRef:
                   name: moa-session-attachments
                   key: bucket
-            - name: MOA_SESSION_ATTACHMENT_REGION
+            - name: MOA_OBJECT_STORE_REGION
               valueFrom:
                 secretKeyRef:
                   name: moa-session-attachments
                   key: region
-            - name: MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID
+            - name: MOA_SANDBOX_CHECKPOINT_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: checkpoint-bucket
+            - name: MOA_OBJECT_STORE_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: moa-session-attachments
                   key: access-key-id
-            - name: MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY
+            - name: MOA_OBJECT_STORE_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: moa-session-attachments

@@ -1,5 +1,7 @@
 //! Wiremock offline counterpart for prompt-cache audit live coverage.
 
+#![recursion_limit = "256"]
+
 #[path = "support/offline_session_store.rs"]
 mod offline_session_store;
 #[path = "support/openai_wiremock.rs"]
@@ -64,6 +66,7 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage()
                 llm_provider: provider.clone(),
                 pipeline: &pipeline,
                 tool_router: None,
+                workspace_scope: None,
             })
             .await?,
             TurnResult::Complete

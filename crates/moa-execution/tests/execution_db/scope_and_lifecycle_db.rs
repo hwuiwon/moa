@@ -1247,7 +1247,7 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             rejected_run_edges += 1;
         }
     }
-    assert_eq!(rejected_run_edges, 112);
+    assert_eq!(rejected_run_edges, 111);
 
     let task_run = create_run(
         &repository,

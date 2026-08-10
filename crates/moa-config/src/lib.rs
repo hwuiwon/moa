@@ -25,6 +25,7 @@ mod llm_dlp;
 mod loader;
 mod memory;
 mod messaging;
+mod object_store;
 mod orchestrator;
 mod providers;
 mod runtime_cache;
@@ -71,6 +72,9 @@ pub use memory::{
     TurbopufferVectorType, VectorEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
+pub use object_store::{
+    ObjectStoreBackend, ObjectStoreConfig, ObjectStoreCredentialMode, ObjectStoreLocationConfig,
+};
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{
     ConcurrencyScope, CoordinationFailurePolicy, DeploymentProviderPolicyConfig, GeneralConfig,
@@ -78,15 +82,26 @@ pub use providers::{
     ProviderPacingConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
 };
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
+pub use sandbox::checkpoint::{
+    CheckpointBucketVersioningPolicy, CheckpointDeletionConfig, CheckpointRetentionConfig,
+    CheckpointVersioningObservationConfig, SANDBOX_TENANT_PURGE_INACTIVITY_TIMEOUT_SECONDS,
+    SandboxCheckpointConfig,
+};
+pub use sandbox::cloud::{
+    CloudConfig, CloudHandProviderAccountConfig, CloudHandProviderKind, CloudHandsConfig,
+    DaytonaStorageAccountConfig, DaytonaStorageConfig, ProviderSecretFileSelector,
+};
+pub use sandbox::workspace::{
+    SandboxWorkspaceCanaryConfig, SandboxWorkspaceMode, SandboxWorkspaceProviderAccountRef,
+    SandboxWorkspaceQuotaRouteConfig, SandboxWorkspacesConfig,
+};
 pub use sandbox::{
-    CloudConfig, CloudHandsConfig, LOCAL_DEVELOPMENT_SANDBOX_REVISION, LocalConfig,
+    LOCAL_DEVELOPMENT_SANDBOX_REVISION, LocalConfig, LocalHandProviderAccountConfig,
     McpCredentialConfig, McpDiscoveryMode, McpServerConfig, SandboxPolicyConfig,
     SandboxProfileConfig,
 };
 pub use security::{PermissionsConfig, SecurityProfile};
-pub use session::{
-    SessionAttachmentBackend, SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig,
-};
+pub use session::{SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig};
 pub use telemetry::{
     MetricsConfig, MetricsExporter, ObservabilityConfig, OtlpProtocol, OtlpSignal,
     otlp_signal_endpoint,
@@ -142,6 +157,12 @@ pub struct MoaConfig {
     pub permissions: PermissionsConfig,
     /// Session storage settings.
     pub session: SessionConfig,
+    /// Shared transport and credentials for durable object-store owners.
+    pub object_store: ObjectStoreConfig,
+    /// Encrypted portable sandbox-checkpoint settings.
+    pub sandbox_checkpoints: SandboxCheckpointConfig,
+    /// Durable sandbox-workspace rollout, canary, and capacity policy.
+    pub sandbox_workspaces: SandboxWorkspacesConfig,
     /// Ephemeral runtime cache settings.
     pub runtime_cache: RuntimeCacheConfig,
     /// Session-history compaction settings.
@@ -374,6 +395,10 @@ impl MoaConfig {
         }
 
         self.session.validate()?;
+        self.object_store.validate()?;
+        self.sandbox_checkpoints.validate()?;
+        self.sandbox_workspaces.validate()?;
+        self.cloud.daytona_storage.validate()?;
         self.providers.validate()?;
         self.metrics.validate()?;
         self.observability.lineage.validate()?;
@@ -433,6 +458,7 @@ mod tests {
         "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
         "MOA_AUTHZ_OPENFGA_STORE_ID",
         "MOA_AUTHZ_OPENFGA_MODEL_ID",
+        "MOA_AUTHZ_OPENFGA_MODEL_VERSION",
         "MOA_AUTHZ_OPENFGA_TIMEOUT_MS",
         "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX",
         "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX",
@@ -557,6 +583,7 @@ mod tests {
             std::env::set_var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY", "dev-key");
             std::env::set_var("MOA_AUTHZ_OPENFGA_STORE_ID", "store-1");
             std::env::set_var("MOA_AUTHZ_OPENFGA_MODEL_ID", "model-1");
+            std::env::set_var("MOA_AUTHZ_OPENFGA_MODEL_VERSION", "7");
             std::env::set_var("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "1234");
         }
 
@@ -573,6 +600,7 @@ mod tests {
         assert_eq!(openfga.preshared_key, "dev-key");
         assert_eq!(openfga.store_id, "store-1");
         assert_eq!(openfga.model_id, "model-1");
+        assert_eq!(openfga.model_version, 7);
         assert_eq!(openfga.timeout_ms, 1234);
     }
 

@@ -99,6 +99,9 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("RUST_LOG", "info")
         .env_remove("MOA_COHERE_API_KEY")
@@ -156,7 +159,7 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
         &orchestrator_log,
     )?;
 
-    let result = async {
+    let result: Result<()> = async {
         wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
             .await?;
         register_deployment(&restate_test_admin_url(), endpoint_url.as_str()).await?;
@@ -193,7 +196,7 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
     let _ = orchestrator.kill();
     let _ = orchestrator.wait();
 
-    result
+    result.with_context(|| orchestrator_log_tail(&orchestrator_log))
 }
 
 async fn activate_refund_skill_fixture(storage_partition_id: &StoragePartitionId) -> Result<()> {
@@ -433,7 +436,7 @@ async fn wait_for_brain_response_text(
 
     bail!(
         "timed out waiting for BrainResponse `{expected_text}` in session {session_id}; observed events: {}",
-        summarize_events(&last_events)
+        detailed_event_summary(&last_events)
     )
 }
 
@@ -505,18 +508,6 @@ fn skill_file_read_counts(events: &[EventRecord]) -> (usize, usize) {
     (read_tool_ids.len(), successful_results)
 }
 
-fn summarize_events(events: &[EventRecord]) -> String {
-    if events.is_empty() {
-        return "<none>".to_string();
-    }
-
-    events
-        .iter()
-        .map(|record| format!("#{} {:?}", record.sequence_num, record.event_type))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn detailed_event_summary(events: &[EventRecord]) -> String {
     if events.is_empty() {
         return "<none>".to_string();
@@ -560,6 +551,11 @@ fn detailed_event_summary(events: &[EventRecord]) -> String {
                 "#{} BrainResponse text={}",
                 record.sequence_num,
                 truncate_for_summary(text)
+            ),
+            Event::TurnFailed { class, summary, .. } => format!(
+                "#{} TurnFailed class={class:?} summary={}",
+                record.sequence_num,
+                truncate_for_summary(summary)
             ),
             _ => format!("#{} {:?}", record.sequence_num, record.event_type),
         })

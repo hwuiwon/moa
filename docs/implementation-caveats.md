@@ -5,6 +5,19 @@ fix before later work builds on top of them. It intentionally does not include
 deliberate trade-offs, future-only extension points, or stale caveats already
 addressed by the current code.
 
+## E2B Workspace Persistence
+
+E2B's public pause/resume and reusable-snapshot contracts preserve process
+memory as well as the filesystem. They are therefore not valid implementations
+of MOA's filesystem-only durability class. Production E2B workspace routing
+sets automatic pause/resume off, inspects the exact sandbox and ownership
+metadata before obtaining an access token, exports only
+`/home/user/moa-data` through a bounded host-side temporary root, publishes the
+validated encrypted portable checkpoint, and kills the source sandbox. Restore
+decrypts into a new permission-restricted host temporary root and uploads the
+validated entries into a separately provisioned fresh hand. E2B volumes are
+not a selectable storage mode.
+
 ---
 
 ## Security And Tool Execution

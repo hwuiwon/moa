@@ -68,6 +68,8 @@ pub struct OpenFgaConfig {
     pub store_id: String,
     /// OpenFGA authorization model ID.
     pub model_id: String,
+    /// Logical authorization-model version expected at the configured model ID.
+    pub model_version: u32,
     /// Per-request HTTP timeout in milliseconds. Kept short because authz is a
     /// fail-closed hot path; a slow OpenFGA should fail fast, not stall requests.
     #[serde(default = "default_timeout_ms")]

@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::{
     AdmittedHttpDestination, OutboundHostResolutionError, OutboundHostResolver,
-    OutboundHttpAdmissionError, OutboundHttpPolicy,
+    OutboundHttpAdmissionError, OutboundHttpClientLimits, OutboundHttpPolicy,
+    build_admitted_http_client,
 };
 
 #[derive(Default)]
@@ -305,4 +307,53 @@ async fn outbound_http_empty_or_wrong_port_resolution_fails_closed() {
         .await,
     );
     assert_eq!(wrong_port, OutboundHttpAdmissionError::PortMismatch);
+}
+
+#[tokio::test]
+async fn outbound_http_admitted_client_never_follows_redirects() {
+    // Pins: provider authorization cannot be forwarded to a redirect target;
+    // callers receive the redirect response and must re-admit any next origin.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("redirect fixture bind");
+    let address = listener.local_addr().expect("redirect fixture address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("first request");
+        let mut buffer = [0_u8; 2048];
+        let count = socket.read(&mut buffer).await.expect("read first request");
+        let request = String::from_utf8_lossy(&buffer[..count]);
+        assert!(request.starts_with("GET /start "));
+        socket
+            .write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: /credential-leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write redirect");
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    });
+    let policy =
+        OutboundHttpPolicy::loopback_http_for_tests(FakeResolver::with_answers([vec![address]]));
+    let origin = format!("http://{address}");
+    let admitted = policy
+        .admit(&origin, Duration::from_secs(1))
+        .await
+        .expect("loopback fixture admission");
+    let client = build_admitted_http_client(
+        &admitted,
+        OutboundHttpClientLimits::new(Duration::from_secs(1), Duration::from_secs(2), 8192)
+            .expect("client limits"),
+    )
+    .expect("admitted client");
+
+    let response = client
+        .get(format!("{origin}/start"))
+        .header("authorization", "Bearer must-not-forward")
+        .send()
+        .await
+        .expect("redirect response");
+
+    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    assert!(server.await.expect("redirect fixture task"));
 }

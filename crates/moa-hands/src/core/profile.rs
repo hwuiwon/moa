@@ -210,6 +210,10 @@ pub(crate) mod test_support {
         BuiltinPolicyRevision, HandSpec, SandboxPolicySnapshot, SandboxProfile, SandboxTier,
         resolve_effective_sandbox_profile,
     };
+    use moa_core::types::sandbox_workspace::{
+        DurabilityClass, SandboxFilesystemLayout, SandboxWorkspaceScope, WorkspaceBinding,
+        WorkspaceRevisionRef,
+    };
 
     /// Builds a hand spec through the production resolution path, so a test
     /// spec is admissible for exactly the reasons a real one is.
@@ -226,11 +230,29 @@ pub(crate) mod test_support {
         HandSpec {
             provisioning_operation_id:
                 moa_core::types::identifiers::HandProvisioningOperationId::new(),
+            workspace: WorkspaceBinding {
+                tenant_id: moa_core::types::identifiers::TenantId::new(),
+                scope: SandboxWorkspaceScope::Worker {
+                    session_id: moa_core::types::identifiers::SessionId::new(),
+                    worker_id: "test-worker".to_string(),
+                },
+                workspace_id: moa_core::types::identifiers::SandboxWorkspaceId::new(),
+                provider_account_id: moa_core::types::identifiers::ProviderAccountId::new(),
+                provider_account_generation: 1,
+                durability_class: DurabilityClass::PortableFilesystem,
+                writer_epoch: 1,
+                instance_generation: 1,
+                current_revision: Some(WorkspaceRevisionRef {
+                    checkpoint_id: moa_core::types::identifiers::WorkspaceCheckpointId::new(),
+                    generation: 0,
+                    format_version: 1,
+                }),
+            },
             budget: moa_core::types::resource::ResourceBudget::UNBOUNDED,
             sandbox_tier: tier,
             image: None,
             env: std::collections::HashMap::new(),
-            workspace_mount: None,
+            filesystem: SandboxFilesystemLayout::standard(),
             effective_profile,
         }
     }
@@ -299,6 +321,8 @@ mod tests {
 
         async fn provisioned_hands(
             &self,
+            _provider_account_id: moa_core::types::identifiers::ProviderAccountId,
+            _provider_account_generation: u64,
             _operation_id: moa_core::types::identifiers::HandProvisioningOperationId,
         ) -> Result<Vec<moa_core::types::hands::HandHandle>> {
             Ok(Vec::new())

@@ -108,6 +108,7 @@ async fn live_brain_turn_completes() -> Result<()> {
         llm_provider: provider,
         pipeline: &pipeline,
         tool_router: None,
+        workspace_scope: None,
     })
     .await?;
     let events = store.get_events(session_id, EventRange::all()).await?;

@@ -7,3 +7,4 @@ pub mod deps;
 pub mod endpoint;
 pub mod jobs;
 pub mod kms;
+pub mod sandbox_workspace_rollout;

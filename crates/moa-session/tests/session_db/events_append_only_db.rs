@@ -358,8 +358,8 @@ mod failpoint_db {
 
     #[tokio::test]
     async fn append_pre_write_failure_then_retry_appends_exactly_once_db() {
-        // Pins: a failure injected before any write surfaces as StorageError,
-        // and the retried append persists exactly one event.
+        // Pins: a failure injected before any write surfaces as a typed transient
+        // storage failure, and the retried append persists exactly one event.
         let test_db = test_db().await;
         let session_id = new_session(&test_db).await;
         failpoints::arm("event_append_pre", 1);
@@ -372,10 +372,13 @@ mod failpoint_db {
                 Some("failpoint-pre".to_string()),
             )
             .await;
-        assert!(
-            matches!(first, Err(MoaError::StorageError(_))),
-            "armed pre-write failpoint must fail the first append: {first:?}"
-        );
+        match first {
+            Err(MoaError::StorageUnavailable(detail)) => assert_eq!(
+                detail, "failpoint event_append_pre injected failure 1/1",
+                "pre-write failure must identify the exact armed failpoint"
+            ),
+            other => panic!("armed pre-write failpoint must fail the first append: {other:?}"),
+        }
 
         let retried = test_db
             .store()
@@ -415,10 +418,13 @@ mod failpoint_db {
                 Some("failpoint-post".to_string()),
             )
             .await;
-        assert!(
-            matches!(first, Err(MoaError::StorageError(_))),
-            "armed post-commit failpoint must fail the ack: {first:?}"
-        );
+        match first {
+            Err(MoaError::StorageUnavailable(detail)) => assert_eq!(
+                detail, "failpoint event_append_post_commit injected failure 1/1",
+                "post-commit failure must identify the exact armed failpoint"
+            ),
+            other => panic!("armed post-commit failpoint must fail the ack: {other:?}"),
+        }
 
         let retried = test_db
             .store()
