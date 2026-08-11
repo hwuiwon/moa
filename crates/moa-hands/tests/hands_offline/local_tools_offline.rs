@@ -374,63 +374,6 @@ async fn file_search_skips_python_virtualenvs_in_active_workspace() {
 }
 
 #[tokio::test]
-async fn file_search_respects_moaignore_in_active_workspace() {
-    // Pins: `.moaignore` changes authored after workspace activation affect the next search.
-    let dir = tempdir().unwrap();
-    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-    for (path, content) in [
-        (".moaignore", "data\n"),
-        ("data/fixtures.json", "{}"),
-        ("src/lib.rs", "pub fn demo() {}"),
-    ] {
-        router
-            .execute_authorized(moa_hands::AuthorizedToolCall {
-                session: &session,
-                caller_identity: &identity(),
-                workspace_scope: Some(&workspace_scope(&session)),
-                invocation: &ToolInvocation {
-                    id: None,
-                    name: "file_write".to_string(),
-                    input: json!({ "path": path, "content": content }),
-                },
-                tool_call_id: ToolCallId::new(),
-                active_canary: None,
-                catalog: None,
-                scope: moa_hands::ToolCallScope::unbounded(),
-            })
-            .await
-            .unwrap();
-    }
-
-    let secured_8 = router
-        .execute_authorized(moa_hands::AuthorizedToolCall {
-            session: &session,
-            caller_identity: &identity(),
-            workspace_scope: Some(&workspace_scope(&session)),
-            invocation: &ToolInvocation {
-                id: None,
-                name: "file_search".to_string(),
-                input: json!({ "pattern": "**/*" }),
-            },
-            tool_call_id: ToolCallId::new(),
-            active_canary: None,
-            catalog: None,
-            scope: moa_hands::ToolCallScope::unbounded(),
-        })
-        .await
-        .unwrap();
-
-    let output = secured_8.safe_output;
-
-    let rendered = output.to_text();
-    assert!(rendered.contains("src/lib.rs"));
-    assert!(!rendered.contains("data/fixtures.json"));
-}
-
-#[tokio::test]
 async fn file_search_truncates_pathological_match_sets() {
     let dir = tempdir().unwrap();
     let router = ToolRouter::new_local(dir.path()).await.unwrap();

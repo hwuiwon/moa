@@ -185,7 +185,6 @@ fn docker_memory_support() -> ResourceSupport {
 struct LocalSandbox {
     execution_root: PathBuf,
     trusted_root: PathBuf,
-    extra_search_skips: Vec<String>,
     /// Absolute instant this sandbox's maximum lifetime expires.
     ///
     /// `None` means the resolved profile declared an explicitly unbounded
@@ -199,7 +198,6 @@ struct DockerSandbox {
     sandbox_dir: PathBuf,
     trusted_root: PathBuf,
     mutable_root: String,
-    extra_search_skips: Vec<String>,
     /// Absolute instant this container's maximum lifetime expires.
     hard_deadline: Option<DateTime<Utc>>,
     inventory_identity: Option<LocalInventoryIdentity>,
@@ -536,7 +534,6 @@ impl LocalHandProvider {
         hard_deadline: Option<DateTime<Utc>>,
         inventory_identity: &LocalInventoryIdentity,
     ) -> Result<HandHandle> {
-        let extra_search_skips = file_search::load_moaignore(sandbox_dir).await;
         self.docker_sandboxes.write().await.insert(
             container_id.clone(),
             DockerSandbox {
@@ -550,7 +547,6 @@ impl LocalHandProvider {
                     })?,
                 ),
                 mutable_root: workspace_mount.to_string_lossy().into_owned(),
-                extra_search_skips,
                 hard_deadline,
                 inventory_identity: Some(inventory_identity.clone()),
             },
@@ -715,13 +711,11 @@ impl LocalHandProvider {
     ) -> Result<HandHandle> {
         reject_unenforceable_host_profile(spec.effective_profile.profile())?;
         let execution_root = sandbox_dir.clone();
-        let extra_search_skips = file_search::load_moaignore(&execution_root).await;
         self.local_sandboxes.write().await.insert(
             sandbox_dir.clone(),
             LocalSandbox {
                 execution_root,
                 trusted_root: self.trusted_dir(spec.provisioning_operation_id),
-                extra_search_skips,
                 hard_deadline: marker.hard_deadline,
                 inventory_identity: Some(marker.inventory_identity.clone()),
             },
@@ -740,7 +734,6 @@ impl LocalHandProvider {
                 trusted_root: operation_id_from_sandbox_dir(sandbox_dir)
                     .map(|operation_id| self.trusted_dir(operation_id))
                     .unwrap_or_else(|| self.work_dir.join(HAND_TRUSTED_DIRECTORY).join("unknown")),
-                extra_search_skips: Vec::new(),
                 hard_deadline: None,
                 inventory_identity: None,
             })
@@ -787,8 +780,7 @@ impl LocalHandProvider {
                 Ok(output)
             }
             Some(SandboxToolCapability::Grep) => {
-                let extra_search_skips = file_search::load_moaignore(&sandbox.execution_root).await;
-                grep::execute(&sandbox.execution_root, input, &extra_search_skips).await
+                grep::execute(&sandbox.execution_root, input).await
             }
             Some(SandboxToolCapability::FileOutline) => {
                 file_outline::execute(&sandbox.execution_root, input).await
@@ -808,8 +800,7 @@ impl LocalHandProvider {
                 file_write::execute(&sandbox.execution_root, input).await
             }
             Some(SandboxToolCapability::FileSearch) => {
-                let extra_search_skips = file_search::load_moaignore(&sandbox.execution_root).await;
-                file_search::execute(&sandbox.execution_root, input, &extra_search_skips).await
+                file_search::execute(&sandbox.execution_root, input).await
             }
             None => Err(MoaError::ToolError(format!(
                 "unsupported local hand tool: {tool}"
@@ -861,9 +852,7 @@ impl LocalHandProvider {
                 }
                 Ok(output)
             }
-            Some(SandboxToolCapability::Grep) => {
-                grep::execute(&sandbox.sandbox_dir, input, &sandbox.extra_search_skips).await
-            }
+            Some(SandboxToolCapability::Grep) => grep::execute(&sandbox.sandbox_dir, input).await,
             Some(SandboxToolCapability::FileOutline) => {
                 file_outline::execute_docker(
                     container_id,
@@ -909,7 +898,6 @@ impl LocalHandProvider {
                     container_id,
                     &sandbox.mutable_root,
                     input,
-                    &sandbox.extra_search_skips,
                     self.command_timeout,
                     hard_cancel_token,
                 )
@@ -1045,7 +1033,6 @@ impl LocalHandProvider {
                         "kind": "local",
                         "execution_root": sandbox.execution_root,
                         "trusted_root": sandbox.trusted_root,
-                        "extra_search_skips": sandbox.extra_search_skips,
                         "hard_deadline": sandbox.hard_deadline,
                         "inventory_identity": sandbox.inventory_identity,
                     }),
@@ -1071,7 +1058,6 @@ impl LocalHandProvider {
                         "sandbox_dir": sandbox.sandbox_dir,
                         "trusted_root": sandbox.trusted_root,
                         "mutable_root": sandbox.mutable_root,
-                        "extra_search_skips": sandbox.extra_search_skips,
                         "hard_deadline": sandbox.hard_deadline,
                         "inventory_identity": sandbox.inventory_identity,
                     }),
@@ -1097,11 +1083,6 @@ impl LocalHandProvider {
                     .and_then(serde_json::Value::as_str)
                     .map(PathBuf::from)
                     .unwrap_or_else(|| sandbox_dir.clone());
-                let extra_search_skips = metadata
-                    .get("extra_search_skips")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|values| string_vec_from_json_array(values))
-                    .unwrap_or_default();
                 self.local_sandboxes.write().await.insert(
                     sandbox_dir.clone(),
                     LocalSandbox {
@@ -1115,7 +1096,6 @@ impl LocalHandProvider {
                                     "local hand lease is missing trusted_root".to_string(),
                                 )
                             })?,
-                        extra_search_skips,
                         hard_deadline: hard_deadline_from_metadata(metadata),
                         inventory_identity: Some(inventory_identity_from_metadata(metadata)?),
                     },
@@ -1155,18 +1135,12 @@ impl LocalHandProvider {
                             "docker hand lease {container_id} is missing trusted_root"
                         ))
                     })?;
-                let extra_search_skips = metadata
-                    .get("extra_search_skips")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|values| string_vec_from_json_array(values))
-                    .unwrap_or_default();
                 self.docker_sandboxes.write().await.insert(
                     container_id.clone(),
                     DockerSandbox {
                         sandbox_dir,
                         trusted_root,
                         mutable_root,
-                        extra_search_skips,
                         hard_deadline: hard_deadline_from_metadata(metadata),
                         inventory_identity: Some(inventory_identity_from_metadata(metadata)?),
                     },
@@ -1436,13 +1410,11 @@ impl HandProvider for LocalHandProvider {
         if let Some(marker) = marker.as_ref()
             && marker.sandbox_tier != SandboxTier::Container
         {
-            let extra_search_skips = file_search::load_moaignore(&sandbox_dir).await;
             self.local_sandboxes.write().await.insert(
                 sandbox_dir.clone(),
                 LocalSandbox {
                     execution_root: sandbox_dir.clone(),
                     trusted_root: self.trusted_dir(operation_id),
-                    extra_search_skips,
                     hard_deadline: marker.hard_deadline,
                     inventory_identity: Some(marker.inventory_identity.clone()),
                 },
@@ -1674,14 +1646,6 @@ async fn promote_into_empty_compute_root(staging: &Path, root: &Path) -> Result<
         return Err(error.into());
     }
     Ok(())
-}
-
-fn string_vec_from_json_array(values: &[serde_json::Value]) -> Vec<String> {
-    values
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn sandbox_install_path(root: &Path, relative_path: &str) -> Result<PathBuf> {

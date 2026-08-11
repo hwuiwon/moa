@@ -22,7 +22,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-url.workspace = true
 uuid.workspace = true
 workspace-hack = { workspace = true }
 

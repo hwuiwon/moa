@@ -13,7 +13,6 @@ async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-metrics.workspace = true
 moa-artifacts = { workspace = true }
 moa-core = { workspace = true }
 moa-config = { workspace = true }
@@ -35,14 +34,12 @@ moa-retrieval = { workspace = true }
 moa-security = { workspace = true }
 moa-skills = { workspace = true }
 moka.workspace = true
-rust-stemmers.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 strum.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

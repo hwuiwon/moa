@@ -13,7 +13,6 @@ auth0 = []
 argon2.workspace = true
 async-trait.workspace = true
 base64.workspace = true
-blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 crc32fast.workspace = true
 hex.workspace = true
@@ -24,7 +23,6 @@ moa-core.workspace = true
 moa-config.workspace = true
 moa-crypto.workspace = true
 moa-db.workspace = true
-moa-observability.workspace = true
 moka.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["form"] }

@@ -19,11 +19,7 @@ const MAX_CONTEXT_LINES: usize = 5;
 const MAX_LINE_LENGTH: usize = 500;
 
 /// Executes the `grep` tool against a sandbox directory.
-pub async fn execute(
-    sandbox_dir: &Path,
-    input: &str,
-    extra_skips: &[String],
-) -> Result<ToolOutput> {
+pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: GrepInput = serde_json::from_str(input)?;
     let search_root = resolve_search_root(sandbox_dir, params.path.as_deref())?;
     let pattern = if params.literal.unwrap_or(false) {
@@ -37,16 +33,9 @@ pub async fn execute(
 
     let sandbox_dir = sandbox_dir.to_path_buf();
     let search_root = search_root.to_path_buf();
-    let extra_skips = extra_skips.to_vec();
     let started = Instant::now();
     let outcome = tokio::task::spawn_blocking(move || {
-        search_workspace(
-            &sandbox_dir,
-            &search_root,
-            &regex,
-            context_lines,
-            &extra_skips,
-        )
+        search_workspace(&sandbox_dir, &search_root, &regex, context_lines)
     })
     .await
     .map_err(|error| MoaError::ToolError(format!("grep search task failed: {error}")))?;
@@ -116,7 +105,6 @@ fn search_workspace(
     search_root: &Path,
     regex: &Regex,
     context_lines: usize,
-    extra_skips: &[String],
 ) -> SearchOutcome {
     let mut matches = Vec::new();
     let mut files_searched = 0usize;
@@ -150,7 +138,7 @@ fn search_workspace(
 
         let path = entry.path();
         let relative_path = path.strip_prefix(sandbox_dir).unwrap_or(path);
-        if should_skip_search_path_static(relative_path, extra_skips) {
+        if should_skip_search_path_static(relative_path) {
             continue;
         }
 
@@ -342,7 +330,7 @@ mod tests {
         .await
         .expect("write file");
 
-        let output = execute(dir.path(), r#"{"pattern":"class.*ViewSet"}"#, &[])
+        let output = execute(dir.path(), r#"{"pattern":"class.*ViewSet"}"#)
             .await
             .expect("grep");
 
@@ -369,7 +357,6 @@ mod tests {
         let output = execute(
             dir.path(),
             r#"{"pattern":"router.register(r\"calls\", views.CallViewSet, basename=\"calls\")","literal":true}"#,
-            &[],
         )
         .await
         .expect("grep");
@@ -387,13 +374,9 @@ mod tests {
         .await
         .expect("write file");
 
-        let output = execute(
-            dir.path(),
-            r#"{"pattern":"CallViewSet","context_lines":2}"#,
-            &[],
-        )
-        .await
-        .expect("grep");
+        let output = execute(dir.path(), r#"{"pattern":"CallViewSet","context_lines":2}"#)
+            .await
+            .expect("grep");
         let text = output.to_text();
 
         assert!(text.contains("demo.py:3"));
@@ -415,7 +398,7 @@ mod tests {
             .await
             .expect("write visible file");
 
-        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#, &[])
+        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#)
             .await
             .expect("grep");
         let text = output.to_text();
@@ -440,7 +423,7 @@ mod tests {
             .await
             .expect("write visible file");
 
-        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#, &[])
+        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#)
             .await
             .expect("grep");
         let text = output.to_text();
@@ -460,7 +443,7 @@ mod tests {
             .await
             .expect("write file");
 
-        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#, &[])
+        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#)
             .await
             .expect("grep");
 
@@ -487,13 +470,9 @@ mod tests {
             .await
             .expect("write file");
 
-        let output = execute(
-            dir.path(),
-            r#"{"pattern":"CallViewSet","path":"server"}"#,
-            &[],
-        )
-        .await
-        .expect("grep");
+        let output = execute(dir.path(), r#"{"pattern":"CallViewSet","path":"server"}"#)
+            .await
+            .expect("grep");
         let text = output.to_text();
 
         assert!(text.contains("server/core/views.py:1:CallViewSet"));
@@ -507,7 +486,7 @@ mod tests {
             .await
             .expect("write binary file");
 
-        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#, &[])
+        let output = execute(dir.path(), r#"{"pattern":"CallViewSet"}"#)
             .await
             .expect("grep");
 

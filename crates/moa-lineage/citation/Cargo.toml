@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-chrono.workspace = true
-metrics.workspace = true
 moa-lineage-core = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true

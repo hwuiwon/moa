@@ -68,43 +68,17 @@ pub fn default_skipped_dirs() -> &'static [&'static str] {
     SKIPPED_SEARCH_DIRS
 }
 
-/// Loads additional skip directory names from a `.moaignore` file in the workspace root.
-pub async fn load_moaignore(workspace_root: &Path) -> Vec<String> {
-    let moaignore_path = workspace_root.join(".moaignore");
-    match fs::read_to_string(moaignore_path).await {
-        Ok(content) => content
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(String::from)
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 /// Executes the `file_search` tool against a sandbox directory.
-pub async fn execute(
-    sandbox_dir: &Path,
-    input: &str,
-    extra_skips: &[String],
-) -> Result<ToolOutput> {
+pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: FileSearchInput = serde_json::from_str(input)?;
     let matcher = Glob::new(&params.pattern)
         .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?
         .compile_matcher();
     let mut matches = Vec::new();
-    let hit_limit = collect_matches(
-        sandbox_dir,
-        sandbox_dir,
-        &matcher,
-        extra_skips,
-        &mut matches,
-    )
-    .await?;
+    let hit_limit = collect_matches(sandbox_dir, sandbox_dir, &matcher, &mut matches).await?;
     Ok(build_file_search_output(
         matches,
         hit_limit,
-        extra_skips,
         Duration::default(),
     ))
 }
@@ -114,7 +88,6 @@ pub async fn execute_docker(
     container_id: &str,
     workspace_root: &str,
     input: &str,
-    extra_skips: &[String],
     timeout: Duration,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
@@ -129,7 +102,7 @@ pub async fn execute_docker(
     .await?;
     matches = matches
         .into_iter()
-        .filter(|path| !should_skip_search_path_static(Path::new(path), extra_skips))
+        .filter(|path| !should_skip_search_path_static(Path::new(path)))
         .collect::<Vec<_>>();
     let hit_limit = matches.len() > MAX_FILE_SEARCH_MATCHES;
     matches.truncate(MAX_FILE_SEARCH_MATCHES);
@@ -137,7 +110,6 @@ pub async fn execute_docker(
     Ok(build_file_search_output(
         matches,
         hit_limit,
-        extra_skips,
         Duration::default(),
     ))
 }
@@ -146,7 +118,6 @@ async fn collect_matches(
     root: &Path,
     current: &Path,
     matcher: &GlobMatcher,
-    extra_skips: &[String],
     matches: &mut Vec<String>,
 ) -> Result<bool> {
     let mut entries = match fs::read_dir(current).await {
@@ -173,10 +144,10 @@ async fn collect_matches(
         };
 
         if file_type.is_dir() {
-            if should_skip_search_path_static(relative_path, extra_skips) {
+            if should_skip_search_path_static(relative_path) {
                 continue;
             }
-            if Box::pin(collect_matches(root, &path, matcher, extra_skips, matches)).await? {
+            if Box::pin(collect_matches(root, &path, matcher, matches)).await? {
                 return Ok(true);
             }
             continue;
@@ -184,7 +155,7 @@ async fn collect_matches(
         if !file_type.is_file() {
             continue;
         }
-        if should_skip_search_path_static(relative_path, extra_skips) {
+        if should_skip_search_path_static(relative_path) {
             continue;
         }
 
@@ -204,16 +175,11 @@ fn should_ignore_search_io_error(error: &std::io::Error) -> bool {
 }
 
 /// Returns whether a path should be skipped during repository searches.
-pub fn should_skip_search_path_static(path: &Path, extra_skips: &[String]) -> bool {
+pub fn should_skip_search_path_static(path: &Path) -> bool {
     path.components().any(|component| match component {
-        Component::Normal(segment) => {
-            SKIPPED_SEARCH_DIRS
-                .iter()
-                .any(|ignored| segment == OsStr::new(ignored))
-                || extra_skips
-                    .iter()
-                    .any(|ignored| segment == OsStr::new(ignored.as_str()))
-        }
+        Component::Normal(segment) => SKIPPED_SEARCH_DIRS
+            .iter()
+            .any(|ignored| segment == OsStr::new(ignored)),
         _ => false,
     })
 }
@@ -221,11 +187,10 @@ pub fn should_skip_search_path_static(path: &Path, extra_skips: &[String]) -> bo
 fn build_file_search_output(
     mut matches: Vec<String>,
     hit_limit: bool,
-    extra_skips: &[String],
     duration: Duration,
 ) -> ToolOutput {
     matches.sort();
-    let skipped_directories = skipped_directory_names(extra_skips);
+    let skipped_directories = default_skipped_dirs();
 
     let structured_matches = matches
         .iter()
@@ -234,7 +199,7 @@ fn build_file_search_output(
     let structured = serde_json::json!({
         "matches": structured_matches,
         "truncated": hit_limit,
-        "skipped_directories": skipped_directories.clone(),
+        "skipped_directories": skipped_directories,
     });
 
     let summary = if matches.is_empty() {
@@ -282,19 +247,6 @@ struct FileSearchInput {
     pattern: String,
 }
 
-fn skipped_directory_names(extra_skips: &[String]) -> Vec<String> {
-    let mut names = default_skipped_dirs()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect::<Vec<_>>();
-    for ignored in extra_skips {
-        if !names.iter().any(|name| name == ignored) {
-            names.push(ignored.clone());
-        }
-    }
-    names
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
@@ -305,45 +257,38 @@ mod tests {
     use tokio::fs;
 
     use super::{
-        default_skipped_dirs, execute, load_moaignore, should_ignore_search_io_error,
-        should_skip_search_path_static, skipped_directory_names,
+        default_skipped_dirs, execute, should_ignore_search_io_error,
+        should_skip_search_path_static,
     };
 
     #[test]
     fn skips_python_venv_directory() {
         let path = Path::new(".venv/lib/python3.12/site-packages/requests/api.py");
-        assert!(should_skip_search_path_static(path, &[]));
+        assert!(should_skip_search_path_static(path));
     }
 
     #[test]
     fn skips_pycache_directory() {
         let path = Path::new("server/core/__pycache__/views.cpython-312.pyc");
-        assert!(should_skip_search_path_static(path, &[]));
-    }
-
-    #[test]
-    fn skips_custom_moaignore_entry() {
-        let path = Path::new("data/fixtures/large-dataset.json");
-        let extra = vec!["data".to_string()];
-        assert!(should_skip_search_path_static(path, &extra));
+        assert!(should_skip_search_path_static(path));
     }
 
     #[test]
     fn does_not_skip_normal_source_files() {
         let path = Path::new("server/core/views.py");
-        assert!(!should_skip_search_path_static(path, &[]));
+        assert!(!should_skip_search_path_static(path));
     }
 
     #[test]
     fn skips_gradle_directory() {
         let path = Path::new(".gradle/caches/modules-2/files-2.1/com.google/guava.jar");
-        assert!(should_skip_search_path_static(path, &[]));
+        assert!(should_skip_search_path_static(path));
     }
 
     #[test]
     fn skips_vendor_directory() {
         let path = Path::new("vendor/github.com/pkg/errors/errors.go");
-        assert!(should_skip_search_path_static(path, &[]));
+        assert!(should_skip_search_path_static(path));
     }
 
     #[test]
@@ -358,20 +303,6 @@ mod tests {
     fn missing_entries_are_ignored_during_search() {
         let error = std::io::Error::new(ErrorKind::NotFound, "disappeared");
         assert!(should_ignore_search_io_error(&error));
-    }
-
-    #[tokio::test]
-    async fn load_moaignore_reads_directory_names_and_ignores_comments() {
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join(".moaignore"),
-            "# comment\n\n data \nfixtures\n",
-        )
-        .await
-        .unwrap();
-
-        let ignored = load_moaignore(dir.path()).await;
-        assert_eq!(ignored, vec!["data".to_string(), "fixtures".to_string()]);
     }
 
     #[tokio::test]
@@ -390,54 +321,12 @@ mod tests {
             .await
             .unwrap();
 
-        let output = execute(
-            dir.path(),
-            &json!({ "pattern": "**/*.py" }).to_string(),
-            &[],
-        )
-        .await
-        .unwrap();
+        let output = execute(dir.path(), &json!({ "pattern": "**/*.py" }).to_string())
+            .await
+            .unwrap();
         let rendered = output.to_text();
 
         assert!(rendered.contains("server/core/views.py"));
         assert!(!rendered.contains(".venv/lib/ignored.py"));
-    }
-
-    #[tokio::test]
-    async fn execute_respects_custom_skip_directories() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("data")).await.unwrap();
-        fs::create_dir_all(dir.path().join("src")).await.unwrap();
-        fs::write(dir.path().join("data/fixtures.json"), "{}")
-            .await
-            .unwrap();
-        fs::write(dir.path().join("src/lib.rs"), "pub fn demo() {}")
-            .await
-            .unwrap();
-
-        let output = execute(
-            dir.path(),
-            &json!({ "pattern": "**/*" }).to_string(),
-            &["data".to_string()],
-        )
-        .await
-        .unwrap();
-        let rendered = output.to_text();
-
-        assert!(rendered.contains("src/lib.rs"));
-        assert!(!rendered.contains("data/fixtures.json"));
-    }
-
-    #[test]
-    fn skipped_directory_names_appends_custom_entries_once() {
-        let skipped = skipped_directory_names(&["data".to_string(), "target".to_string()]);
-        assert!(skipped.contains(&"data".to_string()));
-        assert_eq!(
-            skipped
-                .iter()
-                .filter(|name| name.as_str() == "target")
-                .count(),
-            1
-        );
     }
 }
