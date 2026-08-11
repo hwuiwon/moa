@@ -55,6 +55,7 @@ It does not own:
 - authoring or extending individual tests; use `test-authoring`
 - diagnosing why a specific failing test fails; hand off to `runtime-forensics` after triage
 - general Rust quality review; use `rust`
+- broad repository, architecture, modularity, debt, or diff audits; use `moa-audit`
 
 ## Modes
 

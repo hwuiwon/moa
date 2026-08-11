@@ -10,7 +10,8 @@ description: >
   (use `memory-pack`), repo-wide architecture audits, memory-eval baseline or
   scorecard work, release-time test selection (use `certify`), runtime regression
   diagnosis (use `runtime-forensics`), provider integration (use `provider-integration`),
-  or test authoring (use `test-authoring`).
+  or test authoring (use `test-authoring`). For repo-wide architecture or
+  lean-down audits, use `moa-audit`.
 allowed-tools:
   - Read
   - Grep
@@ -39,7 +40,7 @@ Do not use this skill for:
 - diagnosing a runtime regression or adapter drift; use `runtime-forensics`
 - adding a new LLM, embedding, hand, MCP, or platform provider; use `provider-integration`
 - authoring or extending tests; use `test-authoring`
-- repo-wide architecture or lean-down audits; use a dedicated architecture-audit workflow when available
+- repo-wide architecture or lean-down audits; use `moa-audit`
 - memory-retrieval baselines, ranking scorecards, query-rewrite gating validation, or live memory-eval lanes; use `certify` for validation until a dedicated memory-eval workflow exists
 
 ## Load Order

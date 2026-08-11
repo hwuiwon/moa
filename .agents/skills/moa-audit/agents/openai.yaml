@@ -1,0 +1,4 @@
+interface:
+  display_name: "MOA Audit"
+  short_description: "Audit MOA changes with evidence and a safe remediation path."
+  default_prompt: "Use $moa-audit to audit this MOA change and produce evidence-backed findings, a plan, and verification gates."
