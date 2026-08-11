@@ -2,7 +2,7 @@
 
 use std::error::Error as StdError;
 
-use jsonschema::{Draft, Retrieve, Uri};
+use jsonschema::{Retrieve, Uri};
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionEnvelope,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewField,
@@ -264,13 +264,14 @@ impl ToolRouter {
     }
 }
 
-/// Validates one invocation against its registered Draft 2020-12 input schema.
+/// Validates one invocation against its registered schema dialect.
+///
+/// A declared `$schema` is honored; schemas without one default to Draft 2020-12.
 pub(super) fn validate_tool_invocation(
     definition: &moa_core::types::tools::ToolDefinition,
     invocation: &ToolInvocation,
 ) -> Result<()> {
     let validator = jsonschema::options()
-        .with_draft(Draft::Draft202012)
         .with_retriever(RejectExternalSchemaRetriever)
         .build(&definition.schema)
         .map_err(|error| {
@@ -457,5 +458,112 @@ mod tests {
             }
             other => panic!("expected ValidationError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn registered_tool_schema_honors_an_explicit_draft_7_dialect() {
+        // Pins: MCP inputSchema may declare a supported JSON Schema dialect;
+        // Draft 7 tuple validation must not be compiled as Draft 2020-12.
+        let mut registry = ToolRegistry::new();
+        registry.register_hand(
+            "draft_7_tuple",
+            "Tool with a Draft 7 tuple schema",
+            json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "values": {
+                        "type": "array",
+                        "items": [{"type": "string"}],
+                        "additionalItems": false
+                    }
+                },
+                "required": ["values"]
+            }),
+            admin_review_json_policy(),
+            IdempotencyClass::NonIdempotent,
+        );
+        let router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
+
+        router
+            .check_policy(
+                &session(),
+                &ToolInvocation {
+                    id: None,
+                    name: "draft_7_tuple".to_string(),
+                    input: json!({"values": ["valid"]}),
+                },
+            )
+            .await
+            .expect("declared Draft 7 tuple schema should compile and accept its first item");
+        let error = router
+            .check_policy(
+                &session(),
+                &ToolInvocation {
+                    id: None,
+                    name: "draft_7_tuple".to_string(),
+                    input: json!({"values": ["valid", "extra"]}),
+                },
+            )
+            .await
+            .expect_err("Draft 7 additionalItems=false must reject a second tuple item");
+        assert!(error.to_string().contains("draft_7_tuple"));
+    }
+
+    #[tokio::test]
+    async fn registered_tool_schema_without_dialect_defaults_to_draft_2020_12() {
+        // Pins: MCP inputSchema defaults to Draft 2020-12 when `$schema` is
+        // absent, so prefixItems remains active without an explicit dialect.
+        let mut registry = ToolRegistry::new();
+        registry.register_hand(
+            "default_2020_tuple",
+            "Tool with an implicit Draft 2020-12 tuple schema",
+            json!({
+                "type": "object",
+                "properties": {
+                    "values": {
+                        "type": "array",
+                        "prefixItems": [{"type": "string"}],
+                        "items": false
+                    }
+                },
+                "required": ["values"]
+            }),
+            admin_review_json_policy(),
+            IdempotencyClass::NonIdempotent,
+        );
+        let router = ToolRouter::new(
+            registry,
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
+
+        router
+            .check_policy(
+                &session(),
+                &ToolInvocation {
+                    id: None,
+                    name: "default_2020_tuple".to_string(),
+                    input: json!({"values": ["valid"]}),
+                },
+            )
+            .await
+            .expect("implicit Draft 2020-12 prefixItems should accept the first item");
+        let error = router
+            .check_policy(
+                &session(),
+                &ToolInvocation {
+                    id: None,
+                    name: "default_2020_tuple".to_string(),
+                    input: json!({"values": ["valid", "extra"]}),
+                },
+            )
+            .await
+            .expect_err("Draft 2020-12 items=false must reject items after prefixItems");
+        assert!(error.to_string().contains("default_2020_tuple"));
     }
 }

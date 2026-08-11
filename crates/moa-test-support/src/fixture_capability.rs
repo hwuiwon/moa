@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header::RETRY_AFTER};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -31,7 +31,12 @@ use tokio::task::JoinHandle;
 #[cfg(feature = "orchestrator-fixture")]
 use uuid::Uuid;
 
-const FIXTURE_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+const FIXTURE_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+const FIXTURE_MCP_TTL_MS: u64 = 60_000;
+const FIXTURE_MCP_SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
+const FIXTURE_MCP_CLIENT_PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+const FIXTURE_MCP_CLIENT_INFO_META: &str = "io.modelcontextprotocol/clientInfo";
+const FIXTURE_MCP_CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 
 /// Stable registered name of the deterministic reversible fixture effect.
 pub const REVERSIBLE_FIXTURE_FORWARD_TOOL: &str = "fixture_effect_apply";
@@ -678,6 +683,7 @@ enum RecordCall {
 
 async fn handle_mcp(
     State(state): State<Arc<FixtureCapabilityState>>,
+    headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -685,20 +691,91 @@ async fn handle_mcp(
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if let Err(message) = validate_modern_request(&headers, &request, method) {
+        return json_rpc_error(id, -32600, message);
+    }
     match method {
-        "initialize" => json_rpc_result(
+        "server/discover" => json_rpc_result(
             id,
             json!({
-                "protocolVersion": FIXTURE_MCP_PROTOCOL_VERSION,
+                "supportedVersions": [FIXTURE_MCP_PROTOCOL_VERSION],
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "moa-fixture-capability", "version": "1" }
+                "ttlMs": FIXTURE_MCP_TTL_MS,
+                "cacheScope": "private"
             }),
         ),
-        "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
-        "tools/list" => json_rpc_result(id, json!({ "tools": state.listed_tools() })),
+        "tools/list" => json_rpc_result(
+            id,
+            json!({
+                "tools": state.listed_tools(),
+                "ttlMs": FIXTURE_MCP_TTL_MS,
+                "cacheScope": "private"
+            }),
+        ),
         "tools/call" => handle_tool_call(state, id, request.get("params")).await,
         _ => json_rpc_error(id, -32601, format!("unknown fixture MCP method `{method}`")),
     }
+}
+
+fn validate_modern_request(
+    headers: &HeaderMap,
+    request: &Value,
+    method: &str,
+) -> std::result::Result<(), String> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    if header("mcp-protocol-version").as_deref() != Some(FIXTURE_MCP_PROTOCOL_VERSION) {
+        return Err(format!(
+            "MCP-Protocol-Version must be {FIXTURE_MCP_PROTOCOL_VERSION}"
+        ));
+    }
+    if header("mcp-method").as_deref() != Some(method) {
+        return Err("Mcp-Method must match the JSON-RPC method".to_string());
+    }
+
+    let meta = request
+        .pointer("/params/_meta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "request params._meta must be an object".to_string())?;
+    if meta
+        .get(FIXTURE_MCP_CLIENT_PROTOCOL_VERSION_META)
+        .and_then(Value::as_str)
+        != Some(FIXTURE_MCP_PROTOCOL_VERSION)
+    {
+        return Err(format!(
+            "request _meta protocol version must be {FIXTURE_MCP_PROTOCOL_VERSION}"
+        ));
+    }
+    let client_info = meta
+        .get(FIXTURE_MCP_CLIENT_INFO_META)
+        .and_then(Value::as_object)
+        .ok_or_else(|| "request _meta clientInfo must be an object".to_string())?;
+    if client_info.get("name").and_then(Value::as_str).is_none()
+        || client_info.get("version").and_then(Value::as_str).is_none()
+    {
+        return Err("request _meta clientInfo must name and version the client".to_string());
+    }
+    if !meta
+        .get(FIXTURE_MCP_CLIENT_CAPABILITIES_META)
+        .is_some_and(Value::is_object)
+    {
+        return Err("request _meta clientCapabilities must be an object".to_string());
+    }
+
+    if method == "tools/call" {
+        let name = request
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "tools/call params.name must be a string".to_string())?;
+        if header("mcp-name").as_deref() != Some(name) {
+            return Err("Mcp-Name must match tools/call params.name".to_string());
+        }
+    }
+    Ok(())
 }
 
 async fn handle_tool_call(
@@ -817,12 +894,35 @@ fn successful_tool_response(id: Value, output: Value) -> Response {
 }
 
 fn json_rpc_result(id: Value, result: Value) -> Response {
+    let mut result = match result {
+        Value::Object(result) => result,
+        other => {
+            return json_rpc_error(
+                id,
+                -32603,
+                format!("fixture MCP result must be an object, got {other}"),
+            );
+        }
+    };
+    result.insert(
+        "resultType".to_string(),
+        Value::String("complete".to_string()),
+    );
+    result.insert(
+        "_meta".to_string(),
+        json!({
+            (FIXTURE_MCP_SERVER_INFO_META): {
+                "name": "moa-fixture-capability",
+                "version": "1"
+            }
+        }),
+    );
     (
         StatusCode::OK,
         Json(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": result
+            "result": Value::Object(result)
         })),
     )
         .into_response()
@@ -902,13 +1002,55 @@ mod tests {
         }
     }
 
-    fn request(id: u64, method: &str, params: Value) -> Value {
+    fn request(id: u64, method: &str, mut params: Value) -> Value {
+        let params = params
+            .as_object_mut()
+            .expect("fixture MCP request params should be an object");
+        let meta = params.entry("_meta").or_insert_with(|| json!({}));
+        let meta = meta
+            .as_object_mut()
+            .expect("fixture MCP request _meta should be an object");
+        meta.insert(
+            super::FIXTURE_MCP_CLIENT_PROTOCOL_VERSION_META.to_string(),
+            json!(super::FIXTURE_MCP_PROTOCOL_VERSION),
+        );
+        meta.insert(
+            super::FIXTURE_MCP_CLIENT_INFO_META.to_string(),
+            json!({ "name": "moa-test-support", "version": env!("CARGO_PKG_VERSION") }),
+        );
+        meta.insert(
+            super::FIXTURE_MCP_CLIENT_CAPABILITIES_META.to_string(),
+            json!({}),
+        );
         json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
             "params": params,
         })
+    }
+
+    fn post_mcp(
+        client: &reqwest::Client,
+        endpoint: &str,
+        request: &Value,
+    ) -> reqwest::RequestBuilder {
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .expect("fixture MCP request should name its method");
+        let mut builder = client
+            .post(endpoint)
+            .header("MCP-Protocol-Version", super::FIXTURE_MCP_PROTOCOL_VERSION)
+            .header("Mcp-Method", method);
+        if method == "tools/call" {
+            let name = request
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .expect("fixture tools/call request should name its tool");
+            builder = builder.header("Mcp-Name", name);
+        }
+        builder.json(request)
     }
 
     #[tokio::test]
@@ -923,27 +1065,34 @@ mod tests {
         .expect("start fixture capability server");
         let client = reqwest::Client::new();
 
-        let initialized = client
-            .post(runtime.endpoint())
-            .json(&request(
-                1,
-                "initialize",
-                json!({ "protocolVersion": "2025-03-26" }),
-            ))
+        let discovery = request(1, "server/discover", json!({}));
+        let discovered = post_mcp(&client, runtime.endpoint(), &discovery)
             .send()
             .await
-            .expect("initialize fixture MCP server")
+            .expect("discover fixture MCP server")
             .json::<Value>()
             .await
-            .expect("decode initialize response");
+            .expect("decode discovery response");
         assert_eq!(
-            initialized.pointer("/result/protocolVersion"),
-            Some(&json!("2025-03-26"))
+            discovered.pointer("/result/supportedVersions"),
+            Some(&json!(["2026-07-28"]))
+        );
+        assert_eq!(
+            discovered.pointer("/result/resultType"),
+            Some(&json!("complete"))
+        );
+        assert_eq!(discovered.pointer("/result/ttlMs"), Some(&json!(60_000)));
+        assert_eq!(
+            discovered.pointer("/result/cacheScope"),
+            Some(&json!("private"))
+        );
+        assert_eq!(
+            discovered.pointer("/result/_meta/io.modelcontextprotocol~1serverInfo/name"),
+            Some(&json!("moa-fixture-capability"))
         );
 
-        let listed = client
-            .post(runtime.endpoint())
-            .json(&request(2, "tools/list", json!({})))
+        let list = request(2, "tools/list", json!({}));
+        let listed = post_mcp(&client, runtime.endpoint(), &list)
             .send()
             .await
             .expect("list fixture MCP tools")
@@ -957,6 +1106,15 @@ mod tests {
         assert_eq!(
             listed.pointer("/result/tools/0/annotations/idempotentHint"),
             Some(&json!(true))
+        );
+        assert_eq!(
+            listed.pointer("/result/resultType"),
+            Some(&json!("complete"))
+        );
+        assert_eq!(listed.pointer("/result/ttlMs"), Some(&json!(60_000)));
+        assert_eq!(
+            listed.pointer("/result/cacheScope"),
+            Some(&json!("private"))
         );
 
         let call = request(
@@ -972,12 +1130,12 @@ mod tests {
             let client = client.clone();
             let endpoint = runtime.endpoint().to_string();
             let call = call.clone();
-            async move { client.post(endpoint).json(&call).send().await }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
         let second = tokio::spawn({
             let client = client.clone();
             let endpoint = runtime.endpoint().to_string();
-            async move { client.post(endpoint).json(&call).send().await }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
 
         let calls = runtime
@@ -1042,6 +1200,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streamable_http_server_rejects_legacy_handshake_and_missing_modern_headers() {
+        // Pins: the shared fake is a strict 2026-07-28 peer, so tests cannot silently
+        // keep exercising initialization or omit the self-describing HTTP headers.
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![tool()],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start strict fixture capability server");
+        let client = reqwest::Client::new();
+
+        let legacy = request(1, "initialize", json!({}));
+        let legacy = post_mcp(&client, runtime.endpoint(), &legacy)
+            .send()
+            .await
+            .expect("send prohibited initialize request")
+            .json::<Value>()
+            .await
+            .expect("decode initialize rejection");
+        assert_eq!(legacy.pointer("/error/code"), Some(&json!(-32601)));
+        assert_eq!(
+            legacy.pointer("/error/message"),
+            Some(&json!("unknown fixture MCP method `initialize`"))
+        );
+
+        let discovery = request(2, "server/discover", json!({}));
+        let missing_headers = client
+            .post(runtime.endpoint())
+            .json(&discovery)
+            .send()
+            .await
+            .expect("send discovery without MCP headers")
+            .json::<Value>()
+            .await
+            .expect("decode missing-header rejection");
+        assert_eq!(missing_headers.pointer("/error/code"), Some(&json!(-32600)));
+        assert_eq!(
+            missing_headers.pointer("/error/message"),
+            Some(&json!("MCP-Protocol-Version must be 2026-07-28"))
+        );
+    }
+
+    #[tokio::test]
     async fn disconnected_first_handler_cannot_strand_a_replayed_logical_effect() {
         // Pins: the controller, not an individual HTTP future, owns pending invocation state.
         let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
@@ -1064,7 +1265,7 @@ mod tests {
             let client = client.clone();
             let endpoint = runtime.endpoint().to_string();
             let call = call.clone();
-            async move { client.post(endpoint).json(&call).send().await }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
         runtime
             .controller()
@@ -1076,7 +1277,7 @@ mod tests {
 
         let replay = tokio::spawn({
             let endpoint = runtime.endpoint().to_string();
-            async move { client.post(endpoint).json(&call).send().await }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             while runtime.controller().transport_attempts().len() < 2 {
@@ -1117,9 +1318,8 @@ mod tests {
         .expect("start ambiguous non-idempotent capability");
         let client = reqwest::Client::new();
 
-        let listed = client
-            .post(runtime.endpoint())
-            .json(&request(1, "tools/list", json!({})))
+        let list = request(1, "tools/list", json!({}));
+        let listed = post_mcp(&client, runtime.endpoint(), &list)
             .send()
             .await
             .expect("list non-idempotent tool")
@@ -1142,7 +1342,7 @@ mod tests {
         );
         let request_task = tokio::spawn({
             let endpoint = runtime.endpoint().to_string();
-            async move { client.post(endpoint).json(&call).send().await }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
         runtime
             .controller()
@@ -1196,7 +1396,7 @@ mod tests {
             let client = client.clone();
             let endpoint = runtime.endpoint().to_string();
             let first_call = first_call.clone();
-            async move { client.post(endpoint).json(&first_call).send().await }
+            async move { post_mcp(&client, &endpoint, &first_call).send().await }
         });
         runtime
             .controller()
@@ -1210,9 +1410,7 @@ mod tests {
             .expect("first generation response");
         assert_eq!(first.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
-        let replay = client
-            .post(runtime.endpoint())
-            .json(&first_call)
+        let replay = post_mcp(&client, runtime.endpoint(), &first_call)
             .send()
             .await
             .expect("replay first generation");
@@ -1230,7 +1428,7 @@ mod tests {
         );
         let second = tokio::spawn({
             let endpoint = runtime.endpoint().to_string();
-            async move { client.post(endpoint).json(&second_call).send().await }
+            async move { post_mcp(&client, &endpoint, &second_call).send().await }
         });
         runtime
             .controller()
@@ -1281,7 +1479,7 @@ mod tests {
         );
         let response = tokio::spawn({
             let endpoint = runtime.endpoint().to_string();
-            async move { client.post(endpoint).json(&call).send().await }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
         runtime
             .controller()
@@ -1344,23 +1542,18 @@ mod tests {
         .await
         .expect("start fixture capability server");
         let client = reqwest::Client::new();
+        let call = request(
+            1,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "MSFT" },
+                "_meta": { "moa/toolInvocationId": "pending" }
+            }),
+        );
         let pending = tokio::spawn({
             let endpoint = runtime.endpoint().to_string();
-            async move {
-                client
-                    .post(endpoint)
-                    .json(&request(
-                        1,
-                        "tools/call",
-                        json!({
-                            "name": "fixture_map",
-                            "arguments": { "company": "MSFT" },
-                            "_meta": { "moa/toolInvocationId": "pending" }
-                        }),
-                    ))
-                    .send()
-                    .await
-            }
+            async move { post_mcp(&client, &endpoint, &call).send().await }
         });
         runtime
             .controller()

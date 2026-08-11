@@ -1,14 +1,16 @@
 # Tenant-Operations MCP
 
-MOA exposes a stateless Streamable HTTP MCP protected resource at `/mcp` for
-tenant admins and operators. It is an inbound product-control surface in
-`moa-edge`, not the outbound MCP client used by agent hands.
+MOA exposes a stateless MCP revision `2026-07-28` Streamable HTTP protected
+resource at `/mcp` for tenant admins and operators. It is an inbound
+product-control surface in `moa-edge`, not the outbound MCP client used by
+agent hands. Earlier protocol revisions and the deprecated HTTP+SSE transport
+are not supported.
 
 ## Connection And Trust Boundary
 
-Today, clients use the same API-key or OIDC bearer credentials accepted by
-`moa-edge`. Each HTTP message is authenticated before JSON-RPC parsing,
-contacts and agents are rejected, and OpenFGA must allow
+Clients use an API key, an OIDC bearer credential accepted by `moa-edge`, or a
+MOA-issued OAuth access token. Each HTTP message is authenticated before
+JSON-RPC parsing, contacts and agents are rejected, and OpenFGA must allow
 `tenant:<identity.tenant_id>#operator`. Tenant scope is implicit and no tool
 accepts a target-tenant override. Set exact comma-delimited values in
 `MOA_EDGE_MCP_ALLOWED_HOSTS` and `MOA_EDGE_MCP_ALLOWED_ORIGINS`; wildcards,
@@ -19,14 +21,34 @@ Access tokens stop at the edge. The internal Restate proxy removes
 identity headers. OpenFGA and the owning service retain resource-level and
 operation-specific checks, including stricter agent-principal admin checks.
 
-The endpoint is stateless JSON mode: clients do not receive an MCP session ID.
-Use `tools/list` for discovery and persist returned domain run IDs in the
-client. List limits are clamped to `1..=200`, analytics query results are
+`MOA_EDGE_MCP_TOOL_CALLS_PER_MINUTE` bounds `tools/call` for each authenticated
+tenant/principal pair. It defaults to 60 and must be greater than zero. The
+edge returns HTTP 429 plus `Retry-After` when the current minute window is
+exhausted. State is in-process and therefore per edge replica; configure a
+shared upstream limiter too if the deployment requires one fleet-wide quota.
+
+Every JSON-RPC message is a separate POST. Requests include
+`io.modelcontextprotocol/protocolVersion`,
+`io.modelcontextprotocol/clientInfo`, and
+`io.modelcontextprotocol/clientCapabilities` in `_meta`, plus matching
+`MCP-Protocol-Version` and `Mcp-Method` headers; `tools/call` also includes
+`Mcp-Name`. Clients advertise support for both `application/json` and
+`text/event-stream` responses. MOA may return a single JSON result; it does not
+expose a standalone GET stream.
+
+Call `server/discover` first. It returns the exact supported revision, the tools
+capability, server identity, `resultType: complete`, and public cache hints.
+Then use `tools/list` for the deterministic catalog. The endpoint has no MCP
+session ID, initialization handshake, prompts, resources, subscriptions,
+deprecated client features, or extensions. Persist returned domain run IDs in
+the client. List limits are clamped to `1..=200`, analytics query results are
 bounded to `1..=1000`, and session/event cursors are opaque URL-safe tokens.
 
 ## Model-Facing Contract
 
-`tools/list` is the canonical contract. Every advertised tool includes:
+`tools/list` is the canonical tool contract. Its complete result includes a
+five-minute `ttlMs`, `cacheScope: public`, and server identity metadata. Every
+advertised tool includes:
 
 - a selection description with `Use when:`, explicit side effects, `Returns:`,
   and a recommended `Next:` action;
@@ -56,12 +78,13 @@ Successful calls always return concise text plus this structured content:
 }
 ```
 
-`summary` is for a human or short model observation. `data` is the complete
-typed response from the owning MOA service and is the source for IDs, cursors,
-statuses, scores, and subsequent tool arguments. A tool execution failure is
-not a JSON-RPC transport failure: the result sets `isError: true` and returns
-structured content shaped as `{"error":"..."}`. Callers must branch on
-`isError` before reading `data`.
+The enclosing MCP result has `resultType: complete` and server identity in
+`_meta`. `summary` is for a human or short model observation. `data` is the
+complete typed response from the owning MOA service and is the source for IDs,
+cursors, statuses, scores, and subsequent tool arguments. A tool execution
+failure is not a JSON-RPC transport failure: the result sets `isError: true`
+and returns structured content shaped as `{"error":"..."}`. Callers must
+branch on `isError` before reading `data`.
 
 Tenant IDs, reviewer subjects, and internal dispatch tokens never appear in
 input schemas. The edge injects verified tenant and reviewer identity. Models
@@ -144,6 +167,8 @@ status tool: experiment or simulation `run_uid` with `experiment_status`;
 execution `run_uid` with
 `execution_run_status`. Read scores only after a terminal completed status;
 partial, blocked, and unsupported runs remain terminal but are not completed.
+MOA advertises no Tasks extension and returns no `input_required` result; user
+review and signals remain explicit domain tools.
 
 ## Operator Workflows
 
@@ -161,13 +186,23 @@ partial, blocked, and unsupported runs remain terminal but are not completed.
    simulate them, then explicitly install or deploy; manage agent principals
    through the distinct principal tools.
 
-## Future Dashboard OAuth
+## Inbound OAuth
 
-The canonical protected-resource URI remains `/mcp`. A future customer
-dashboard will provide login and consent as the authorization server, publish
-RFC 9728 protected-resource and RFC 8414/OIDC authorization-server metadata,
-use Authorization Code with PKCE plus RFC 8707 `resource`, and issue short-lived
-audience-bound tokens. Workspace admins must select exactly one target tenant
-during consent; the resulting token maps through the existing `AuthProvider`
-to an `Identity` bound to that tenant. OAuth does not add a second authorization
-stack or permit tool-level tenant selection.
+The canonical protected-resource URI is the configured absolute `/mcp` URL.
+MOA publishes RFC 9728 metadata at both the endpoint-derived and root
+well-known paths and RFC 8414 authorization-server metadata at
+`/.well-known/oauth-authorization-server`. The first-party server exposes
+`/oauth/authorize`, `/oauth/token`, `/oauth/introspect`, and `/oauth/revoke`,
+uses Authorization Code with S256 PKCE plus RFC 8707 `resource`, and issues
+short-lived audience-bound access tokens and rotating refresh tokens.
+
+OAuth clients are deployment-pre-registered through
+`MOA_AUTH_OAUTH_CLIENTS_JSON`; MOA does not expose dynamic client registration.
+The authenticated consent identity already carries exactly one tenant. The
+resulting token maps through the existing `AuthProvider` to an `Identity` bound
+to that tenant. `mcp:read` authorizes discovery, catalog, and tools annotated
+read-only; every other tool requires `mcp:write`. An HTTP 401
+`WWW-Authenticate` challenge points to the path-specific RFC 9728 document. An
+insufficient-scope HTTP 403 challenge identifies the missing scope so a client
+can re-authorize deliberately. OAuth does not add a second authorization stack
+or permit tool-level tenant selection.

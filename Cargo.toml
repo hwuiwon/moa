@@ -208,7 +208,7 @@ prost = "0.14"
 rand = "0.8"
 regex = "1"
 restate-sdk = "0.10"
-rmcp = { version = "=2.2.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "=3.1.2", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 rust-stemmers = "1"
 schemars = { version = "1.2", features = ["chrono04", "uuid1"] }
 reqwest = { version = "0.13", default-features = false, features = [

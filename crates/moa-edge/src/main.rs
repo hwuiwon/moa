@@ -63,6 +63,9 @@ struct Args {
         default_value = "http://localhost:10000,http://127.0.0.1:10000,http://[::1]:10000"
     )]
     mcp_allowed_origins: String,
+    /// Maximum inbound MCP tool calls admitted per authenticated principal each minute.
+    #[arg(long, env = "MOA_EDGE_MCP_TOOL_CALLS_PER_MINUTE", default_value_t = 60)]
+    mcp_tool_calls_per_minute: u32,
 }
 
 #[tokio::main]
@@ -82,7 +85,8 @@ async fn main() -> anyhow::Result<()> {
     let database_url = moa_config.database.url.clone();
     let upstream = edge_upstream_url(&moa_config, args.upstream);
     let mcp_config = McpHttpConfig::parse(&args.mcp_allowed_hosts, &args.mcp_allowed_origins)
-        .context("validate MCP Host and Origin allowlists")?;
+        .and_then(|config| config.with_tool_calls_per_minute(args.mcp_tool_calls_per_minute))
+        .context("validate MCP HTTP configuration")?;
     tracing::info!(bind = %args.bind, upstream = %upstream, "starting moa-edge");
 
     let pool = sqlx::postgres::PgPoolOptions::new()

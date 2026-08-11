@@ -120,26 +120,35 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
         .expect("bind mock MCP server");
     let addr = listener.local_addr().expect("mock server address");
     let server = tokio::spawn(async move {
-        for request_index in 0..4 {
+        for _ in 0..3 {
             let (mut socket, _) = listener.accept().await.expect("accept");
             let mut buffer = vec![0_u8; 4096];
-            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer)
+            let bytes = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer)
                 .await
                 .expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            let method = request
+                .split_once("\r\n\r\n")
+                .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+                .and_then(|body| {
+                    body.get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
             let call_result = format!(
-                r#"{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"{CONFIRMED_PAYLOAD}"}}]}}}}"#
+                r#"{{"jsonrpc":"2.0","id":3,"result":{{"resultType":"complete","content":[{{"type":"text","text":"{CONFIRMED_PAYLOAD}"}}],"_meta":{{"io.modelcontextprotocol/serverInfo":{{"name":"security-test-server","version":"1.0.0"}}}}}}}}"#
             );
-            let body = match request_index {
-                0 => {
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
+            let body = match method.as_deref() {
+                Some("server/discover") => {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"security-test-server","version":"1.0.0"}},"ttlMs":60000,"cacheScope":"private"}}"#
                         .to_string()
                 }
-                1 => "{}".to_string(),
-                2 => {
-                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"lookup","description":"Lookup","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
+                Some("tools/list") => {
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"lookup","description":"Lookup","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],"ttlMs":60000,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"security-test-server","version":"1.0.0"}}}}"#
                         .to_string()
                 }
-                _ => call_result,
+                Some("tools/call") => call_result,
+                other => panic!("unexpected MCP method in security fixture: {other:?}"),
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",

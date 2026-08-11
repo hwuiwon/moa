@@ -84,8 +84,9 @@ pub struct OidcAuthConfig {
 /// When [`OAuthServerConfig::clients`] is empty the Authorization Server has no
 /// registered client, so every `/oauth/*` request fails closed on client lookup.
 /// Configured clients are validated and converged into Postgres at startup;
-/// request-time lookup always uses that authoritative table. Dynamic client
-/// registration (RFC 7591) is a follow-up.
+/// request-time lookup always uses that authoritative table. Static
+/// pre-registration is intentional; deprecated Dynamic Client Registration
+/// (RFC 7591) is not supported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthServerConfig {
     /// Canonical authorization-server issuer URL.
@@ -142,7 +143,8 @@ impl OAuthServerConfig {
 fn validate_oauth_url(field: &str, value: &str, expected_path: &str) -> Result<(), String> {
     let parsed =
         url::Url::parse(value).map_err(|error| format!("invalid OAuth {field}: {error}"))?;
-    if parsed.cannot_be_a_base()
+    if parsed.scheme() != "https"
+        || parsed.cannot_be_a_base()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
         || !parsed.username().is_empty()
@@ -152,6 +154,43 @@ fn validate_oauth_url(field: &str, value: &str, expected_path: &str) -> Result<(
         return Err(format!("invalid OAuth {field} URL"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod oauth_tests {
+    use super::*;
+
+    #[test]
+    fn oauth_server_endpoints_require_https() {
+        // Pins: MCP permits loopback HTTP only for client redirects; the
+        // authorization server and protected resource remain HTTPS-only.
+        let insecure_issuer = OAuthServerConfig {
+            issuer: "http://localhost".to_string(),
+            ..OAuthServerConfig::default()
+        };
+        assert_eq!(
+            insecure_issuer.validate(),
+            Err("invalid OAuth issuer URL".to_string())
+        );
+
+        let insecure_resource = OAuthServerConfig {
+            issuer: "https://auth.example".to_string(),
+            resource: "http://127.0.0.1/mcp".to_string(),
+            ..OAuthServerConfig::default()
+        };
+        assert_eq!(
+            insecure_resource.validate(),
+            Err("invalid OAuth resource URL".to_string())
+        );
+
+        OAuthServerConfig {
+            issuer: "https://auth.example".to_string(),
+            resource: "https://mcp.example/mcp".to_string(),
+            ..OAuthServerConfig::default()
+        }
+        .validate()
+        .expect("HTTPS issuer and resource satisfy the transport contract");
+    }
 }
 
 /// One statically registered OAuth client.

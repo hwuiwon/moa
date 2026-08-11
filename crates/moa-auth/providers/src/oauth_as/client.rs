@@ -5,6 +5,7 @@
 //! the authoritative row from Postgres.
 
 use std::collections::HashSet;
+use std::net::IpAddr;
 
 use moa_config::{OAuthClientConfig, OAuthClientType};
 use secrecy::{ExposeSecret, SecretString};
@@ -45,6 +46,11 @@ impl OAuthClient {
             if parsed.fragment().is_some() {
                 return Err(OAuthError::InvalidClientConfiguration(format!(
                     "client {client_id} redirect URI must not contain a fragment"
+                )));
+            }
+            if !is_secure_redirect_uri(&parsed) {
+                return Err(OAuthError::InvalidClientConfiguration(format!(
+                    "client {client_id} redirect URI must use HTTPS or loopback HTTP"
                 )));
             }
         }
@@ -224,6 +230,23 @@ fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn is_secure_redirect_uri(uri: &reqwest::Url) -> bool {
+    match uri.scheme() {
+        "https" => uri.host_str().is_some(),
+        "http" => uri.host_str().is_some_and(|host| {
+            let ip_literal = host
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(host);
+            host.eq_ignore_ascii_case("localhost")
+                || ip_literal
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }),
+        _ => false,
+    }
+}
+
 fn config_hash(
     client_id: &str,
     client_type: OAuthClientType,
@@ -288,5 +311,42 @@ mod tests {
         })
         .expect("valid client");
         assert_eq!(first.config_hash, second.config_hash);
+    }
+
+    #[test]
+    fn client_redirects_require_https_or_loopback_http() {
+        // Pins: MCP OAuth clients cannot bootstrap an insecure remote or
+        // custom-scheme redirect while HTTPS and local loopback remain valid.
+        for redirect_uri in [
+            "https://app.example/callback",
+            "http://localhost:3000/callback",
+            "http://127.0.0.1:3000/callback",
+            "http://[::1]:3000/callback",
+        ] {
+            OAuthClient::from_config(&OAuthClientConfig {
+                client_id: format!("client-{redirect_uri}"),
+                client_type: OAuthClientType::Public,
+                redirect_uris: vec![redirect_uri.to_string()],
+                scopes: vec!["mcp:read".to_string()],
+                client_secret_sha256: None,
+            })
+            .expect("HTTPS and loopback HTTP redirects are valid");
+        }
+
+        for redirect_uri in [
+            "http://app.example/callback",
+            "mcp-client://callback",
+            "file:///tmp/callback",
+        ] {
+            let error = OAuthClient::from_config(&OAuthClientConfig {
+                client_id: format!("client-{redirect_uri}"),
+                client_type: OAuthClientType::Public,
+                redirect_uris: vec![redirect_uri.to_string()],
+                scopes: vec!["mcp:read".to_string()],
+                client_secret_sha256: None,
+            })
+            .expect_err("insecure remote and custom-scheme redirects must fail");
+            assert!(matches!(error, OAuthError::InvalidClientConfiguration(_)));
+        }
     }
 }

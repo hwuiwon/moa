@@ -19,7 +19,8 @@ pub mod telemetry;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_config::McpServerConfig;
@@ -36,7 +37,7 @@ use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
     UnmatchedPermissionPattern,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::local::LocalHandProvider;
@@ -328,6 +329,9 @@ struct McpOwner {
     health: RwLock<BTreeMap<String, McpConnectorHealth>>,
     credentials: McpDeploymentCredentials,
     egress_guard: Option<Arc<McpEgressGuard>>,
+    catalog_fresh_until: std::sync::RwLock<Option<Instant>>,
+    refresh_requested: AtomicBool,
+    refresh_notify: Notify,
 }
 
 impl Default for McpOwner {
@@ -337,6 +341,9 @@ impl Default for McpOwner {
             health: RwLock::new(BTreeMap::new()),
             credentials: McpDeploymentCredentials::default(),
             egress_guard: None,
+            catalog_fresh_until: std::sync::RwLock::new(None),
+            refresh_requested: AtomicBool::new(false),
+            refresh_notify: Notify::new(),
         }
     }
 }
@@ -379,6 +386,42 @@ impl McpOwner {
         let mut servers = self.servers.values().cloned().collect::<Vec<_>>();
         servers.sort_by(|left, right| left.name.cmp(&right.name));
         servers
+    }
+
+    /// Publishes the earliest expiry of every currently served MCP catalog entry.
+    fn publish_catalog_fresh_until(&self, fresh_until: Option<Instant>) {
+        *self
+            .catalog_fresh_until
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh_until;
+    }
+
+    /// Coalesces stale-catalog accesses into one wake-up for the refresh worker.
+    fn request_refresh_if_stale(&self) {
+        let fresh_until = *self
+            .catalog_fresh_until
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !fresh_until.is_some_and(|deadline| Instant::now() >= deadline) {
+            return;
+        }
+        if self
+            .refresh_requested
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.refresh_notify.notify_one();
+        }
+    }
+
+    /// Waits until a stale catalog access requests an early refresh.
+    async fn wait_for_refresh_request(&self) {
+        self.refresh_notify.notified().await;
+    }
+
+    /// Allows a later stale access to request another refresh attempt.
+    fn complete_refresh_request(&self) {
+        self.refresh_requested.store(false, Ordering::Release);
     }
 
     /// Clones the last observed connector health without retaining its lock.
@@ -727,5 +770,31 @@ mod tests {
         assert!(
             matches!(error, MoaError::BudgetExhausted(message) if message.contains("no tool calls"))
         );
+    }
+
+    #[tokio::test]
+    async fn expired_catalog_access_coalesces_and_rearms_refresh_requests_offline() {
+        // Pins: ttlMs=0 makes the next catalog access wake the refresh worker,
+        // while concurrent readers produce only one early-refresh request.
+        let owner = McpOwner::default();
+        owner.publish_catalog_fresh_until(Some(Instant::now()));
+
+        owner.request_refresh_if_stale();
+        owner.request_refresh_if_stale();
+        tokio::time::timeout(Duration::from_millis(50), owner.wait_for_refresh_request())
+            .await
+            .expect("an expired catalog should wake the refresh worker");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), owner.wait_for_refresh_request())
+                .await
+                .is_err(),
+            "stale readers must coalesce behind one refresh"
+        );
+
+        owner.complete_refresh_request();
+        owner.request_refresh_if_stale();
+        tokio::time::timeout(Duration::from_millis(50), owner.wait_for_refresh_request())
+            .await
+            .expect("a failed or immediately stale refresh must be retryable");
     }
 }

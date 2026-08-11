@@ -898,8 +898,8 @@ impl ToolRouter {
             let server = self.mcp.server(server_name).ok_or_else(|| {
                 MoaError::ProviderError(format!("unknown MCP server: {server_name}"))
             })?;
-            // Connecting is the expensive part of a cold MCP dispatch, so the
-            // scope bounds the handshake as well as the call.
+            // Connecting performs the up-front discovery probe on a cold MCP
+            // dispatch, so the scope bounds discovery as well as the call.
             let (client, generation) = self
                 .run_within_scope(
                     request.scope,
@@ -967,7 +967,7 @@ impl ToolRouter {
     ///
     /// Connections are opened lazily rather than held from startup, so a
     /// configured connector that is never invoked never costs a socket or a
-    /// handshake, and a connector whose transport died between refreshes is
+    /// discovery probe, and a connector whose transport died between refreshes is
     /// reconnected by the call that needs it instead of failing until the next
     /// catalog refresh.
     pub(super) async fn mcp_client(
@@ -984,7 +984,7 @@ impl ToolRouter {
         if let Some(client) = route.client.as_ref() {
             return Ok((Arc::clone(client), route.generation));
         }
-        // The route mutex deliberately covers one cold handshake. That makes
+        // The route mutex deliberately covers one cold discovery probe. That makes
         // all callers for this route observe the same installed client, while
         // the guard is dropped before this function returns and before any
         // remote tool request begins.
@@ -1010,7 +1010,7 @@ impl ToolRouter {
             .await?;
         // The route mutex deliberately remains held through connect/install for
         // single-flight replacement, but a waiter may have expired while the
-        // winning handshake held it. Re-admit before treating that waiter as a
+        // winning discovery probe held it. Re-admit before treating that waiter as a
         // harmless stale generation.
         scope.admit()?;
         if route.generation != expected_generation {
@@ -1133,7 +1133,7 @@ mod egress_dispatch_tests {
         );
     }
 
-    /// Spawns a fake MCP server that answers the initialize handshake and records
+    /// Spawns a fake MCP server that answers stateless discovery and records
     /// whether a `tools/call` request ever arrives. Returns the server URL and a
     /// flag set to `true` the moment an outbound tool call reaches the server, so
     /// a test can assert the underlying `call_tool` was (or was not) invoked.
@@ -1163,7 +1163,7 @@ mod egress_dispatch_tests {
                     .and_then(|value| value.get("method"))
                     .and_then(|method| method.as_str());
                 let body = match method {
-                    Some("initialize") => r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#.to_string(),
+                    Some("server/discover") => r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"moa-test-server","version":"1.0.0"}},"ttlMs":60000,"cacheScope":"private"}}"#.to_string(),
                     Some("tools/call") => {
                         let invocation_id = request_json
                             .as_ref()
@@ -1173,12 +1173,12 @@ mod egress_dispatch_tests {
                             .and_then(serde_json::Value::as_str);
                         if invocation_id == Some(MCP_TOOL_INVOCATION_ID) {
                             seen.store(true, Ordering::SeqCst);
-                            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#.to_string()
+                            r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[{"type":"text","text":"pong"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"moa-test-server","version":"1.0.0"}}}}"#.to_string()
                         } else {
                             r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"tools/call _meta.moa/toolInvocationId must equal the durable tool-call ID"}}"#.to_string()
                         }
                     }
-                    // `notifications/initialized` and anything else get an empty ack.
+                    // Any method outside this fixture's discovery/call surface gets an empty ack.
                     _ => "{}".to_string(),
                 };
                 let response = format!(
@@ -1195,16 +1195,16 @@ mod egress_dispatch_tests {
     #[derive(Clone, Copy)]
     enum TestMcpServerMode {
         CountOnly,
-        GateInitialize,
-        GateSecondInitialize,
+        GateDiscovery,
+        GateSecondDiscovery,
         BlockToolCall,
         FailToolCall,
     }
 
     struct TestMcpServer {
         url: String,
-        initialize_count: Arc<AtomicUsize>,
-        initialize_seen: Option<oneshot::Receiver<()>>,
+        discovery_count: Arc<AtomicUsize>,
+        discovery_seen: Option<oneshot::Receiver<()>>,
         call_seen: Option<oneshot::Receiver<()>>,
         release: Option<oneshot::Sender<()>>,
         shutdown: Option<oneshot::Sender<()>>,
@@ -1230,14 +1230,14 @@ mod egress_dispatch_tests {
             .await
             .expect("bind test MCP server");
         let addr = listener.local_addr().expect("read test MCP server address");
-        let (initialize_seen_tx, initialize_seen_rx) = oneshot::channel();
+        let (discovery_seen_tx, discovery_seen_rx) = oneshot::channel();
         let (call_seen_tx, call_seen_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        let initialize_count = Arc::new(AtomicUsize::new(0));
-        let observed_count = Arc::clone(&initialize_count);
+        let discovery_count = Arc::new(AtomicUsize::new(0));
+        let observed_count = Arc::clone(&discovery_count);
         let task = tokio::spawn(async move {
-            let mut initialize_seen_tx = Some(initialize_seen_tx);
+            let mut discovery_seen_tx = Some(discovery_seen_tx);
             let mut call_seen_tx = Some(call_seen_tx);
             let mut release_rx = Some(release_rx);
             loop {
@@ -1261,20 +1261,20 @@ mod egress_dispatch_tests {
                     .and_then(|value| value.get("method"))
                     .and_then(serde_json::Value::as_str);
                 let body = match method {
-                    Some("initialize") => {
-                        let initialize_number = observed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                        if matches!(mode, TestMcpServerMode::GateInitialize)
-                            || matches!(mode, TestMcpServerMode::GateSecondInitialize)
-                                && initialize_number == 2
+                    Some("server/discover") => {
+                        let discovery_number = observed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        if matches!(mode, TestMcpServerMode::GateDiscovery)
+                            || matches!(mode, TestMcpServerMode::GateSecondDiscovery)
+                                && discovery_number == 2
                         {
-                            if let Some(seen) = initialize_seen_tx.take() {
+                            if let Some(seen) = discovery_seen_tx.take() {
                                 let _ = seen.send(());
                             }
                             if let Some(release) = release_rx.take() {
                                 let _ = release.await;
                             }
                         }
-                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"moa-test-server","version":"1.0.0"}},"ttlMs":60000,"cacheScope":"private"}}"#
                     }
                     Some("tools/call") => {
                         if matches!(mode, TestMcpServerMode::BlockToolCall) {
@@ -1288,7 +1288,7 @@ mod egress_dispatch_tests {
                         if matches!(mode, TestMcpServerMode::FailToolCall) {
                             r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"remote failure"}}"#
                         } else {
-                            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#
+                            r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[{"type":"text","text":"pong"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"moa-test-server","version":"1.0.0"}}}}"#
                         }
                     }
                     _ => "{}",
@@ -1303,17 +1303,17 @@ mod egress_dispatch_tests {
         });
         TestMcpServer {
             url: format!("http://{addr}"),
-            initialize_count,
-            initialize_seen: matches!(
+            discovery_count,
+            discovery_seen: matches!(
                 mode,
-                TestMcpServerMode::GateInitialize | TestMcpServerMode::GateSecondInitialize
+                TestMcpServerMode::GateDiscovery | TestMcpServerMode::GateSecondDiscovery
             )
-            .then_some(initialize_seen_rx),
+            .then_some(discovery_seen_rx),
             call_seen: (matches!(mode, TestMcpServerMode::BlockToolCall)).then_some(call_seen_rx),
             release: matches!(
                 mode,
-                TestMcpServerMode::GateInitialize
-                    | TestMcpServerMode::GateSecondInitialize
+                TestMcpServerMode::GateDiscovery
+                    | TestMcpServerMode::GateSecondDiscovery
                     | TestMcpServerMode::BlockToolCall
             )
             .then_some(release_tx),
@@ -1604,10 +1604,10 @@ mod egress_dispatch_tests {
 
     #[tokio::test]
     async fn concurrent_cold_mcp_calls_share_one_route_client_offline() {
-        // Pins: eight cold callers on one route perform exactly one initialize
-        // handshake and all receive the same client allocation. Replacing this
+        // Pins: eight cold callers on one route perform exactly one stateless
+        // discovery probe and all receive the same client allocation. Replacing this
         // route mutex with the old check-then-connect shape must produce eight
-        // handshakes and fail the exact count and pointer assertions.
+        // discovery requests and fail the exact count and pointer assertions.
         let server = spawn_test_mcp_server(TestMcpServerMode::CountOnly).await;
         let router = Arc::new(router_with_mcp_server(
             http_server(server.url.clone(), Vec::new()),
@@ -1637,9 +1637,9 @@ mod egress_dispatch_tests {
         }
 
         assert_eq!(
-            server.initialize_count.load(Ordering::SeqCst),
+            server.discovery_count.load(Ordering::SeqCst),
             1,
-            "one route must single-flight its cold initialize handshake"
+            "one route must single-flight its cold discovery probe"
         );
         let first = clients.first().expect("at least one cold caller");
         assert!(
@@ -1651,11 +1651,11 @@ mod egress_dispatch_tests {
     }
 
     #[tokio::test]
-    async fn independent_mcp_routes_initialize_without_sharing_lock_offline() {
-        // Pins: a blocked handshake on route A must not prevent route B from
-        // completing its own cold handshake. A router-wide lock would leave B
+    async fn independent_mcp_routes_discover_without_sharing_lock_offline() {
+        // Pins: a blocked discovery probe on route A must not prevent route B from
+        // completing its own cold discovery. A router-wide lock would leave B
         // waiting until A is released and fail the bounded completion check.
-        let mut first_server = spawn_test_mcp_server(TestMcpServerMode::GateInitialize).await;
+        let mut first_server = spawn_test_mcp_server(TestMcpServerMode::GateDiscovery).await;
         let second_server = spawn_test_mcp_server(TestMcpServerMode::CountOnly).await;
         let mut first_config = http_server(first_server.url.clone(), Vec::new());
         first_config.name = "gated".to_string();
@@ -1682,11 +1682,11 @@ mod egress_dispatch_tests {
                 .await
         });
         first_server
-            .initialize_seen
+            .discovery_seen
             .take()
-            .expect("gated server should expose its handshake barrier")
+            .expect("gated server should expose its discovery barrier")
             .await
-            .expect("route A should reach its handshake");
+            .expect("route A should reach its discovery probe");
 
         let second_result = timeout(
             Duration::from_secs(1),
@@ -1703,22 +1703,22 @@ mod egress_dispatch_tests {
         let (_, first_generation) = first_task
             .await
             .expect("route A caller should join")
-            .expect("route A handshake should succeed");
+            .expect("route A discovery should succeed");
 
         assert!(
             second_completed,
-            "route B must finish while route A's handshake is blocked"
+            "route B must finish while route A's discovery is blocked"
         );
         assert_eq!(first_generation, 1);
         assert_eq!(
-            first_server.initialize_count.load(Ordering::SeqCst),
+            first_server.discovery_count.load(Ordering::SeqCst),
             1,
-            "route A should perform one handshake"
+            "route A should perform one discovery probe"
         );
         assert_eq!(
-            second_server.initialize_count.load(Ordering::SeqCst),
+            second_server.discovery_count.load(Ordering::SeqCst),
             1,
-            "route B should perform one handshake"
+            "route B should perform one discovery probe"
         );
 
         first_server.shutdown().await;
@@ -1730,7 +1730,7 @@ mod egress_dispatch_tests {
         // Pins: two recovery attempts carrying the same failed generation may
         // install only one replacement. The queued stale attempt must refuse
         // replacement after the first attempt advances the route generation;
-        // removing that check creates a third initialize and generation 3.
+        // removing that check creates a third discovery probe and generation 3.
         let server = spawn_test_mcp_server(TestMcpServerMode::CountOnly).await;
         let router = router_with_mcp_server(http_server(server.url.clone(), Vec::new()), None);
         let route = Arc::new(tokio::sync::Mutex::new(
@@ -1777,9 +1777,9 @@ mod egress_dispatch_tests {
             "the newer client must remain installed"
         );
         assert_eq!(
-            server.initialize_count.load(Ordering::SeqCst),
+            server.discovery_count.load(Ordering::SeqCst),
             2,
-            "initialization plus one replacement must be the exact handshake count"
+            "initial discovery plus one replacement must be the exact probe count"
         );
         drop(route);
 
@@ -1787,11 +1787,11 @@ mod egress_dispatch_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_mcp_reconnect_waiter_stops_before_handshake_completes_offline() {
-        // Pins: a reconnect queued behind the per-route handshake lock still
+    async fn cancelled_mcp_reconnect_waiter_stops_before_discovery_completes_offline() {
+        // Pins: a reconnect queued behind the per-route discovery lock still
         // belongs to its caller's scope. Cancellation must stop that waiter
         // before the winning reconnect advances the generation and releases it.
-        let mut server = spawn_test_mcp_server(TestMcpServerMode::GateSecondInitialize).await;
+        let mut server = spawn_test_mcp_server(TestMcpServerMode::GateSecondDiscovery).await;
         let router = Arc::new(router_with_mcp_server(
             http_server(server.url.clone(), Vec::new()),
             None,
@@ -1805,24 +1805,24 @@ mod egress_dispatch_tests {
             .expect("initial MCP connection should succeed");
         assert_eq!(initial_generation, 1);
 
-        let handshake_router = Arc::clone(&router);
-        let handshake_route = Arc::clone(&route);
-        let handshake = tokio::spawn(async move {
-            handshake_router
+        let discovery_router = Arc::clone(&router);
+        let discovery_route = Arc::clone(&route);
+        let discovery = tokio::spawn(async move {
+            discovery_router
                 .reconnect_mcp_client(
                     SERVER_NAME,
-                    &handshake_route,
+                    &discovery_route,
                     initial_generation,
                     ToolCallScope::unbounded(),
                 )
                 .await
         });
         server
-            .initialize_seen
+            .discovery_seen
             .take()
-            .expect("gated server should expose the reconnect handshake barrier")
+            .expect("gated server should expose the reconnect discovery barrier")
             .await
-            .expect("winning reconnect should hold the route handshake lock");
+            .expect("winning reconnect should hold the route discovery lock");
 
         let cancellation = CancellationToken::new();
         let waiter_token = cancellation.clone();
@@ -1848,15 +1848,15 @@ mod egress_dispatch_tests {
 
         let waiter_result = timeout(Duration::from_millis(250), waiter)
             .await
-            .expect("cancelled reconnect must not wait for the handshake lock")
+            .expect("cancelled reconnect must not wait for the discovery lock")
             .expect("contending reconnect task should join");
         assert!(
             matches!(waiter_result, Err(moa_core::error::MoaError::Cancelled)),
             "cancelled reconnect must return MoaError::Cancelled, got {waiter_result:?}"
         );
         assert!(
-            !handshake.is_finished(),
-            "the winning reconnect must still hold the handshake barrier"
+            !discovery.is_finished(),
+            "the winning reconnect must still hold the discovery barrier"
         );
 
         let _ = server
@@ -1865,20 +1865,20 @@ mod egress_dispatch_tests {
             .expect("gated server should expose its release")
             .send(());
         assert!(
-            handshake
+            discovery
                 .await
                 .expect("winning reconnect task should join")
                 .expect("winning reconnect should complete"),
             "the winning reconnect should install generation 2"
         );
-        assert_eq!(server.initialize_count.load(Ordering::SeqCst), 2);
+        assert_eq!(server.discovery_count.load(Ordering::SeqCst), 2);
 
         server.shutdown().await;
     }
 
     #[tokio::test]
     async fn mcp_route_lock_is_released_before_remote_tool_execution_offline() {
-        // Pins: once initialization returns, a blocked remote tools/call must
+        // Pins: once discovery returns, a blocked remote tools/call must
         // not hold the route mutex. A second route-state read must complete
         // before the fake server releases the remote call.
         let mut server = spawn_test_mcp_server(TestMcpServerMode::BlockToolCall).await;

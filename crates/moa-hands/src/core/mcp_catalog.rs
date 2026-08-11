@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_config::{McpServerConfig, MoaConfig};
@@ -61,7 +61,7 @@ pub enum McpConnectorHealth {
     Ready {
         /// Number of tools this connector contributes to the catalog.
         tools: usize,
-        /// Protocol revision negotiated during the successful handshake.
+        /// Fixed protocol revision used during successful discovery.
         protocol_version: String,
         /// When the successful discovery completed.
         observed_at: DateTime<Utc>,
@@ -167,7 +167,7 @@ impl McpConnectorHealth {
 /// a declared-policy violation, or a registration rejection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogDefect {
-    /// The connector could not be reached or did not complete the handshake.
+    /// The connector could not be reached or did not complete protocol discovery.
     Discovery {
         /// Transport or protocol failure detail.
         error: String,
@@ -453,11 +453,11 @@ pub enum ToolCatalogDrift {
 /// One candidate connector keyed by its revision and schema hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CandidateConnector {
-    /// Digest over the connector's configured identity and negotiated revision.
+    /// Digest over the connector's configured identity and fixed protocol revision.
     pub connector_revision: String,
     /// Digest over every tool schema the candidate published.
     pub schema_hash: String,
-    /// Protocol revision negotiated for this candidate.
+    /// Fixed protocol revision used for this candidate.
     pub protocol_version: String,
     /// Number of tools the candidate offers.
     pub tools: usize,
@@ -542,7 +542,7 @@ impl ToolRouter {
     /// rather than losing them to a transient error or a bad deploy.
     pub async fn refresh_mcp_catalog(&self) -> McpCatalogRefresh {
         let servers = self.configured_mcp_servers();
-        match self
+        let refresh = match self
             .run_mcp_discovery(&servers, DiscoveryPass::Refresh)
             .await
         {
@@ -574,7 +574,9 @@ impl ToolRouter {
                     },
                 }
             }
-        }
+        };
+        self.mcp.complete_refresh_request();
+        refresh
     }
 
     /// Returns the configured connectors in their authored order.
@@ -587,11 +589,14 @@ impl ToolRouter {
         servers: &[McpServerConfig],
         pass: DiscoveryPass,
     ) -> Result<McpCatalogRefresh> {
-        let mut registry = (*self.registry()).clone();
+        // A refresh must not count its own read as a stale-catalog access.
+        let mut registry = (*self.catalog.activated().registry).clone();
         let mut health = self.mcp.health_snapshot().await;
         let mut activated = BTreeMap::new();
         let mut quarantined: BTreeMap<String, Vec<CatalogDefect>> = BTreeMap::new();
         let mut warnings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut catalog_fresh_until: Option<Instant> = None;
+        let mut serving_stale_tools = false;
 
         for server in servers {
             if pass.defers(server) {
@@ -604,6 +609,11 @@ impl ToolRouter {
             let staged = self.stage_connector(server).await;
             match staged {
                 Ok(candidate) => {
+                    catalog_fresh_until = Some(
+                        catalog_fresh_until.map_or(candidate.catalog_fresh_until, |current| {
+                            current.min(candidate.catalog_fresh_until)
+                        }),
+                    );
                     if !candidate.warnings.is_empty() {
                         for warning in &candidate.warnings {
                             tracing::warn!(
@@ -656,6 +666,7 @@ impl ToolRouter {
                 }
                 Err(defects) => {
                     let retained = retained_tool_count(&registry, &server.name);
+                    serving_stale_tools |= retained > 0;
                     let last_good_at = health
                         .get(&server.name)
                         .and_then(McpConnectorHealth::last_good_at);
@@ -712,6 +723,12 @@ impl ToolRouter {
         self.publish_catalog_snapshot(snapshot);
         self.refresh_unmatched_permission_patterns();
         self.mcp.publish_health(health.clone()).await;
+        self.mcp
+            .publish_catalog_fresh_until(if serving_stale_tools {
+                Some(Instant::now())
+            } else {
+                catalog_fresh_until
+            });
         Ok(McpCatalogRefresh {
             health: health.clone(),
             revision,
@@ -755,7 +772,6 @@ impl ToolRouter {
 
         let policy = check_connector_policy(ConnectorCandidateFacts {
             server,
-            negotiated_protocol_version: &discovered.protocol_version,
             discovered_tools: discovered.tools.len(),
         });
         for violation in policy.defects {
@@ -796,6 +812,7 @@ impl ToolRouter {
                 protocol_version: discovered.protocol_version,
                 tools: discovered.tools,
                 client: discovered.client,
+                catalog_fresh_until: discovered.catalog_fresh_until,
                 warnings,
             })
         } else {
@@ -843,6 +860,7 @@ struct DiscoveredConnector {
     protocol_version: String,
     tools: Vec<McpDiscoveredToolRegistration>,
     client: Arc<MCPClient>,
+    catalog_fresh_until: Instant,
 }
 
 /// One candidate connector that cleared every deterministic check.
@@ -852,14 +870,15 @@ struct StagedConnector {
     protocol_version: String,
     tools: Vec<McpDiscoveredToolRegistration>,
     client: Arc<MCPClient>,
+    catalog_fresh_until: Instant,
     warnings: Vec<String>,
 }
 
 /// Connects to one connector and lists its tools.
 ///
-/// The handshake this performs is handed back rather than thrown away, so a
-/// connector discovered here does not pay a second handshake on its first tool
-/// call. Connectors that are never discovered — lazy ones, and ones added
+/// The client used for discovery is handed back rather than thrown away, so a
+/// connector discovered here reuses the same transport configuration on its first
+/// tool call. Connectors that are never discovered — lazy ones, and ones added
 /// between refreshes — are connected by [`ToolRouter::mcp_client`] on first use,
 /// so a configured connector nobody calls still holds no socket.
 async fn discover_server_tools(
@@ -874,16 +893,20 @@ async fn discover_server_tools(
     // property of the catalog rather than of the remote server's mood.
     tools.sort_by(|left, right| left.tool().name.cmp(&right.tool().name));
     tools.dedup_by(|left, right| left.tool().name == right.tool().name);
+    let catalog_fresh_until = client.catalog_fresh_until().ok_or_else(|| {
+        MoaError::StreamError("MCP server omitted catalog freshness metadata".to_string())
+    })?;
     Ok(DiscoveredConnector {
-        protocol_version: client.negotiated_protocol_version().to_string(),
+        protocol_version: client.protocol_version().to_string(),
         tools,
         client,
+        catalog_fresh_until,
     })
 }
 
 /// Computes the revision identifying one candidate connector.
 ///
-/// Covers the connector's configured identity and its negotiated protocol
+/// Covers the connector's configured identity and its fixed protocol
 /// revision but not its tool schemas, which the candidate's schema hash covers
 /// separately. Keeping them apart is what lets a report say "same connector,
 /// new schemas" instead of collapsing both into one opaque change.
@@ -966,7 +989,10 @@ pub fn spawn_mcp_catalog_refresh(
         // re-discover everything the composition root just discovered.
         ticker.tick().await;
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = router.mcp.wait_for_refresh_request() => {}
+            }
             let refresh = router.refresh_mcp_catalog().await;
             tracing::debug!(
                 revision = %refresh.revision,

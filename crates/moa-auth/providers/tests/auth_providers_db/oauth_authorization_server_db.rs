@@ -200,8 +200,17 @@ async fn oauth_consent_exchange_refresh_and_introspection_cross_replicas_db() {
         "a different client cannot revoke the grant"
     );
 
+    let wrong_target = first
+        .refresh_token_grant(
+            &client,
+            Some(&secret),
+            &grant.refresh_token,
+            "https://other.example/mcp",
+        )
+        .await;
+    assert!(matches!(wrong_target, Err(OAuthError::InvalidTarget)));
     let rotated = first
-        .refresh_token_grant(&client, Some(&secret), &grant.refresh_token)
+        .refresh_token_grant(&client, Some(&secret), &grant.refresh_token, RESOURCE)
         .await
         .expect("rotate refresh token");
     assert_eq!(rotated.resource, RESOURCE);

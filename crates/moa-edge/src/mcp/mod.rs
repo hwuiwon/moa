@@ -14,12 +14,17 @@ mod experiments;
 mod http;
 mod result;
 
+use std::borrow::Cow;
+
 use axum::http::HeaderMap;
 use axum::http::Method;
 use moa_core::traits::Identity;
 use moa_core::types::identifiers::TenantId;
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CacheScope, CallToolResponse, CallToolResult, DiscoverResult, Implementation, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+};
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, schemars, tool_handler};
 use serde::de::DeserializeOwned;
@@ -265,6 +270,24 @@ fn all_tools() -> ToolRouter<Server> {
 
 const MCP_READ_SCOPE: &str = "mcp:read";
 const MCP_WRITE_SCOPE: &str = "mcp:write";
+const MCP_DISCOVERY_TTL_MS: u64 = 3_600_000;
+const MCP_TOOL_CATALOG_TTL_MS: u64 = 300_000;
+
+fn server_implementation() -> Implementation {
+    Implementation::new("moa-edge", env!("CARGO_PKG_VERSION"))
+}
+
+fn server_result_meta() -> rmcp::model::MetaObject {
+    let mut meta = rmcp::model::MetaObject::new();
+    meta.insert(
+        "io.modelcontextprotocol/serverInfo".to_string(),
+        serde_json::json!({
+            "name": "moa-edge",
+            "version": env!("CARGO_PKG_VERSION"),
+        }),
+    );
+    meta
+}
 
 /// Derive the exact OAuth scope for one MCP HTTP message.
 pub(crate) fn required_oauth_scope(method: &Method, body: &[u8]) -> Result<&'static str, ()> {
@@ -296,11 +319,11 @@ pub(crate) fn required_oauth_scope(method: &Method, body: &[u8]) -> Result<&'sta
                 MCP_WRITE_SCOPE
             })
         }
-        Some("initialize")
-        | Some("ping")
-        | Some("tools/list")
-        | Some("notifications/initialized") => Ok(MCP_READ_SCOPE),
-        _ => Err(()),
+        Some("server/discover") | Some("tools/list") => Ok(MCP_READ_SCOPE),
+        // Unsupported methods have no side effects. Admit them through the
+        // read scope so the protocol service can return its required
+        // HTTP 404 / JSON-RPC -32601 response after validating transport headers.
+        _ => Ok(MCP_READ_SCOPE),
     }
 }
 
@@ -337,6 +360,18 @@ where
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
+    async fn initialize(
+        &self,
+        _request: rmcp::model::InitializeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::InitializeResult, rmcp::ErrorData> {
+        Err(rmcp::ErrorData::new(
+            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+            "Method not found",
+            None,
+        ))
+    }
+
     /// Dispatch one tool call, normalizing every errored result into the
     /// documented `{error}` structured envelope. The macro's generated
     /// dispatch is bypassed so rmcp-internal argument-deserialization
@@ -345,17 +380,47 @@ impl ServerHandler for Server {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let tool_call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router
             .call(tool_call)
             .await
-            .map(result::normalize)
+            .map(|response| result::normalize_response(response, server_result_meta()))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let mut tools = self.tool_router.list_all();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut result = ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(MCP_TOOL_CATALOG_TTL_MS)
+            .with_cache_scope(CacheScope::Public);
+        result.meta = Some(server_result_meta());
+        Ok(result)
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(&[ProtocolVersion::V_2026_07_28])
+    }
+
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, rmcp::ErrorData> {
+        Ok(
+            DiscoverResult::from_server_info(vec![ProtocolVersion::V_2026_07_28], self.get_info())
+                .with_ttl_ms(MCP_DISCOVERY_TTL_MS)
+                .with_cache_scope(CacheScope::Public),
+        )
     }
 
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("moa-edge", env!("CARGO_PKG_VERSION")))
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
+            .with_server_info(server_implementation())
             .with_instructions(
                 "MOA tenant operations. Tenant scope is always the authenticated tenant; never invent or supply a tenant ID. Each tool description states when to use it, side effects, its structured result, and the recommended next tool. Successful structuredContent is always {summary, data}; execution failures set isError and return {error}. Inspect before mutating, validate drafts before publishing, and poll accepted experiment, simulation, or execution runs by their returned ID.",
             )
@@ -525,6 +590,16 @@ mod tests {
             "params": { "name": "artifact_publish" }
         }))
         .expect("serialize write call");
+        let discover = serde_json::to_vec(&serde_json::json!({
+            "method": "server/discover",
+            "params": {}
+        }))
+        .expect("serialize discovery request");
+        let removed_initialize = serde_json::to_vec(&serde_json::json!({
+            "method": "initialize",
+            "params": {}
+        }))
+        .expect("serialize removed initialize request");
         assert_eq!(
             required_oauth_scope(&axum::http::Method::POST, &read),
             Ok("mcp:read")
@@ -532,6 +607,14 @@ mod tests {
         assert_eq!(
             required_oauth_scope(&axum::http::Method::POST, &write),
             Ok("mcp:write")
+        );
+        assert_eq!(
+            required_oauth_scope(&axum::http::Method::POST, &discover),
+            Ok("mcp:read")
+        );
+        assert_eq!(
+            required_oauth_scope(&axum::http::Method::POST, &removed_initialize),
+            Ok("mcp:read")
         );
     }
 

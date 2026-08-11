@@ -3,17 +3,16 @@
 //! Catalog discovery produces a *candidate*, not a replacement. Before a
 //! candidate connector may be activated it has to clear the checks in this
 //! module, which are the security-policy half of staging: they look only at the
-//! operator's declared configuration and at facts the handshake already
+//! operator's declared configuration and at facts the discovery pass already
 //! established, never at model behaviour and never at a second network call.
 //!
 //! The split between [`ConnectorPolicyDefect`] and [`ConnectorPolicyWarning`] is
 //! the whole point of the module. A defect is a deterministic policy violation
 //! and quarantines the connector, so the last-known-good catalog keeps serving.
 //! A warning is a real observation that is *not* a deterministic contract
-//! failure — an operator intent the negotiated protocol cannot honour, or a
-//! connector that published nothing — and it must never withdraw a connector on
-//! its own. Nothing here consults a model, because a stochastic signal cannot be
-//! allowed to take a working integration offline.
+//! failure — such as a connector that published nothing — and it must never
+//! withdraw a connector on its own. Nothing here consults a model, because a
+//! stochastic signal cannot be allowed to take a working integration offline.
 
 use moa_config::McpServerConfig;
 use moa_core::types::security::SensitivityClass;
@@ -27,8 +26,6 @@ use moa_core::types::security::SensitivityClass;
 pub struct ConnectorCandidateFacts<'a> {
     /// The operator's declared configuration for this connector.
     pub server: &'a McpServerConfig,
-    /// Protocol revision the connector selected during `initialize`.
-    pub negotiated_protocol_version: &'a str,
     /// Number of tools the candidate discovery pass listed.
     pub discovered_tools: usize,
 }
@@ -69,38 +66,7 @@ pub enum ConnectorPolicyDefect {
 /// deliberately have no path to withdrawing a connector.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectorPolicyWarning {
-    /// The connector selected a protocol revision MOA cannot order.
-    ///
-    /// Not a defect. An unorderable revision means MOA cannot conclude that the
-    /// connector supports anything optional, and every consequence of that
-    /// already fails closed — tool annotations go untrusted and every tool from
-    /// the connector is treated as non-idempotent. The connector's tools still
-    /// work, so withdrawing them would be a self-inflicted outage over a
-    /// malformed version string.
-    #[error(
-        "connector '{server}' negotiated an unrecognized MCP protocol revision '{protocol_version}'"
-    )]
-    UnrecognizedProtocolRevision {
-        /// Configured connector name.
-        server: String,
-        /// The revision string the connector returned.
-        protocol_version: String,
-    },
-    /// The operator asked to trust tool annotations the revision cannot carry.
-    ///
-    /// Not a defect: MOA already degrades every tool from this connector to
-    /// non-idempotent, so the connector is safe to serve — the operator's
-    /// intent simply has no effect.
-    #[error(
-        "connector '{server}' trusts tool annotations but revision '{protocol_version}' does not carry them"
-    )]
-    AnnotationTrustUnsupportedByRevision {
-        /// Configured connector name.
-        server: String,
-        /// Revision the connector negotiated.
-        protocol_version: String,
-    },
-    /// The connector handshake succeeded but it published no tools.
+    /// The connector discovery request succeeded but it published no tools.
     #[error("connector '{server}' published an empty tool catalog")]
     EmptyToolCatalog {
         /// Configured connector name.
@@ -125,9 +91,6 @@ impl ConnectorPolicyReport {
     }
 }
 
-/// First MCP revision that carries tool annotations.
-const ANNOTATION_REVISION: &str = "2025-03-26";
-
 /// Runs every deterministic policy check for one candidate connector.
 ///
 /// Total: it returns every violation and observation rather than the first, so a
@@ -137,16 +100,6 @@ const ANNOTATION_REVISION: &str = "2025-03-26";
 pub fn check_connector_policy(facts: ConnectorCandidateFacts<'_>) -> ConnectorPolicyReport {
     let server = facts.server.name.as_str();
     let mut report = ConnectorPolicyReport::default();
-
-    let revision = parse_protocol_revision(facts.negotiated_protocol_version);
-    if revision.is_none() {
-        report
-            .warnings
-            .push(ConnectorPolicyWarning::UnrecognizedProtocolRevision {
-                server: server.to_string(),
-                protocol_version: facts.negotiated_protocol_version.to_string(),
-            });
-    }
 
     let scheme = url_scheme(&facts.server.url);
     match scheme.as_str() {
@@ -179,17 +132,6 @@ pub fn check_connector_policy(facts: ConnectorCandidateFacts<'_>) -> ConnectorPo
             }),
     }
 
-    if facts.server.trust_tool_annotations
-        && !revision.is_some_and(|revision| revision >= annotation_revision())
-    {
-        report.warnings.push(
-            ConnectorPolicyWarning::AnnotationTrustUnsupportedByRevision {
-                server: server.to_string(),
-                protocol_version: facts.negotiated_protocol_version.to_string(),
-            },
-        );
-    }
-
     if facts.discovered_tools == 0 {
         report
             .warnings
@@ -199,27 +141,6 @@ pub fn check_connector_policy(facts: ConnectorCandidateFacts<'_>) -> ConnectorPo
     }
 
     report
-}
-
-/// Parses an MCP revision date, which is the revision's total order.
-fn parse_protocol_revision(protocol_version: &str) -> Option<chrono::NaiveDate> {
-    let bytes = protocol_version.as_bytes();
-    if bytes.len() != 10
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || !bytes[..4].iter().all(u8::is_ascii_digit)
-        || !bytes[5..7].iter().all(u8::is_ascii_digit)
-        || !bytes[8..].iter().all(u8::is_ascii_digit)
-    {
-        return None;
-    }
-    chrono::NaiveDate::parse_from_str(protocol_version, "%Y-%m-%d").ok()
-}
-
-/// Returns the annotation-carrying revision boundary.
-fn annotation_revision() -> chrono::NaiveDate {
-    parse_protocol_revision(ANNOTATION_REVISION)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2025, 3, 26).unwrap_or_default())
 }
 
 /// Returns the lowercase URL scheme, or an empty string when there is none.
@@ -260,42 +181,12 @@ mod tests {
         let server = server("https://connector.example/mcp");
         let report = check_connector_policy(ConnectorCandidateFacts {
             server: &server,
-            negotiated_protocol_version: "2025-03-26",
             discovered_tools: 3,
         });
 
         assert!(report.is_activatable());
         assert_eq!(report.defects, Vec::new());
         assert_eq!(report.warnings, Vec::new());
-    }
-
-    #[test]
-    fn an_unrecognized_protocol_revision_warns_without_quarantining_offline() {
-        // Pins: an unorderable revision is a warning, not a defect. Every
-        // consequence of not knowing the revision already fails closed — the
-        // connector's tools become non-idempotent and its annotations untrusted —
-        // so quarantining it would take a working integration offline over a
-        // malformed version string. Mutating this to a defect makes
-        // `discovery_trusts_idempotent_hint_only_for_explicit_capable_server`
-        // fail, which is the behaviour this preserves.
-        let server = server("https://connector.example/mcp");
-        let report = check_connector_policy(ConnectorCandidateFacts {
-            server: &server,
-            negotiated_protocol_version: "2025-04-31",
-            discovered_tools: 1,
-        });
-
-        assert!(report.is_activatable(), "{:?}", report.defects);
-        assert!(
-            report
-                .warnings
-                .contains(&ConnectorPolicyWarning::UnrecognizedProtocolRevision {
-                    server: "catalog".to_string(),
-                    protocol_version: "2025-04-31".to_string(),
-                }),
-            "unexpected warnings: {:?}",
-            report.warnings
-        );
     }
 
     #[test]
@@ -308,7 +199,6 @@ mod tests {
         config.allowed_data_classes = vec![SensitivityClass::Phi, SensitivityClass::Restricted];
         let report = check_connector_policy(ConnectorCandidateFacts {
             server: &config,
-            negotiated_protocol_version: "2025-03-26",
             discovered_tools: 1,
         });
 
@@ -338,7 +228,6 @@ mod tests {
         let config = server("http://127.0.0.1:8080");
         let report = check_connector_policy(ConnectorCandidateFacts {
             server: &config,
-            negotiated_protocol_version: "2025-03-26",
             discovered_tools: 2,
         });
 
@@ -352,7 +241,6 @@ mod tests {
         let config = server("ftp://connector.example/mcp");
         let report = check_connector_policy(ConnectorCandidateFacts {
             server: &config,
-            negotiated_protocol_version: "2025-03-26",
             discovered_tools: 1,
         });
 
@@ -366,32 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn unhonourable_annotation_trust_warns_without_quarantining_offline() {
-        // Pins: an operator intent the negotiated revision cannot carry is a
-        // warning. MOA already degrades these tools to non-idempotent, so the
-        // connector is safe to serve, and quarantining it would take a working
-        // integration offline over a configuration nuance.
-        let mut config = server("https://connector.example/mcp");
-        config.trust_tool_annotations = true;
-        let report = check_connector_policy(ConnectorCandidateFacts {
-            server: &config,
-            negotiated_protocol_version: "2024-11-05",
-            discovered_tools: 1,
-        });
-
-        assert!(report.is_activatable());
-        assert_eq!(
-            report.warnings,
-            vec![
-                ConnectorPolicyWarning::AnnotationTrustUnsupportedByRevision {
-                    server: "catalog".to_string(),
-                    protocol_version: "2024-11-05".to_string(),
-                }
-            ]
-        );
-    }
-
-    #[test]
     fn an_empty_tool_catalog_warns_without_quarantining_offline() {
         // Pins: a connector that published nothing keeps whatever it was
         // serving. Treating "zero tools this pass" as a defect would let a
@@ -399,7 +261,6 @@ mod tests {
         let config = server("https://connector.example/mcp");
         let report = check_connector_policy(ConnectorCandidateFacts {
             server: &config,
-            negotiated_protocol_version: "2025-06-18",
             discovered_tools: 0,
         });
 

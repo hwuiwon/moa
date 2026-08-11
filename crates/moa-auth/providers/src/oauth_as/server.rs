@@ -239,9 +239,7 @@ impl OAuthServer {
             return Err(OAuthError::UnsupportedResponseType);
         }
         if request.resource != self.resource {
-            return Err(OAuthError::InvalidRequest(
-                "resource must match the MCP endpoint",
-            ));
+            return Err(OAuthError::InvalidTarget);
         }
         let method = CodeChallengeMethod::parse(request.code_challenge_method).ok_or(
             OAuthError::InvalidRequest("code_challenge_method must be S256"),
@@ -331,7 +329,7 @@ impl OAuthServer {
             return Err(OAuthError::InvalidClientCredentials);
         }
         if request.resource != self.resource {
-            return Err(OAuthError::InvalidGrant);
+            return Err(OAuthError::InvalidTarget);
         }
         let now = Utc::now();
         let access = generate_opaque_token(ACCESS_TOKEN_PREFIX);
@@ -371,9 +369,13 @@ impl OAuthServer {
         client: &OAuthClient,
         client_secret: Option<&SecretString>,
         refresh_token: &SecretString,
+        resource: &str,
     ) -> Result<TokenGrant, OAuthError> {
         if !client.authenticate(client_secret) {
             return Err(OAuthError::InvalidClientCredentials);
+        }
+        if resource != self.resource {
+            return Err(OAuthError::InvalidTarget);
         }
         let now = Utc::now();
         let access = generate_opaque_token(ACCESS_TOKEN_PREFIX);

@@ -425,13 +425,58 @@ edge API adapter into existing product services and never supplies agent tools.
 Operator-owned deployment MCP is the only outbound MCP tool surface. Tenant
 connector connections support reviewed constrained HTTP actions, not MCP.
 
+Both surfaces use only MCP revision `2026-07-28` over Streamable HTTP. MOA does
+not implement the initialization handshake, `Mcp-Session-Id`, the standalone
+HTTP GET stream, SSE resumption, or the deprecated HTTP+SSE transport. A
+Streamable HTTP POST may still receive either one JSON result or a
+request-scoped `text/event-stream` response; that response format is not the
+deprecated two-endpoint transport.
+
+### Tenant-operations MCP protected resource
+
+`moa-edge` exposes one POST endpoint at `/mcp`. `server/discover` advertises the
+single supported protocol revision and the tools capability. The tool set is
+static and identical across authorized tenants, so discovery and `tools/list`
+return `cacheScope: public` with bounded `ttlMs` hints; every result carries
+`resultType` and server identity metadata. Ordinary tool results are complete;
+MOA does not advertise prompts, resources, subscriptions, deprecated Roots,
+Sampling, or Logging, or any protocol extension.
+
+Every request carries `io.modelcontextprotocol/protocolVersion`,
+`io.modelcontextprotocol/clientCapabilities`, and
+`io.modelcontextprotocol/clientInfo` in `_meta`. Streamable HTTP mirrors the
+protocol version, method, and tool name in
+`MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name`; mismatched or missing
+required metadata is rejected rather than inferred. There is no connection
+state, and any domain continuity is represented by ordinary MOA IDs returned
+from tools.
+
+The endpoint accepts the edge's configured API-key and OIDC identities and
+MOA-issued OAuth access tokens. The first-party authorization server publishes
+RFC 9728 protected-resource metadata for the canonical `/mcp` resource and RFC
+8414 authorization-server metadata, uses Authorization Code with PKCE and RFC
+8707 `resource`, and binds `mcp:read` or `mcp:write` to the requested operation.
+Client registration is deployment-owned pre-registration, not dynamic client
+registration.
+
 ### Operator-owned deployment MCP
 
 `OperatorOwnedMcp` is process-wide deployment configuration. Supported
-transports are SSE and Streamable HTTP. Startup or a background refresh
-discovers tools, then the router exposes the selected immutable catalog exactly
-like built-ins and hand tools. Servers must be remotely reachable so any
-Kubernetes replica can handle a request without a pod-local process.
+transport is Streamable HTTP at an operator-configured remote URL. Startup or a
+background refresh first calls `server/discover`, requires exact revision
+`2026-07-28` plus the tools capability, and then consumes every paginated
+`tools/list` page. Both operations must return `resultType: complete` and valid
+`ttlMs`/`cacheScope` fields. The router then exposes the selected immutable
+catalog exactly like built-ins and hand tools. Servers must be remotely
+reachable so any Kubernetes replica can handle a request without a pod-local
+process.
+
+Each outbound POST includes the required request `_meta`,
+`MCP-Protocol-Version`, `Mcp-Method`, and, for tool calls, `Mcp-Name`. MOA
+accepts either a JSON result or the request-scoped SSE response permitted by
+Streamable HTTP. It never opens a GET stream, sends an initialization
+notification, or attempts a legacy-version fallback. Cancellation drops the
+HTTP response stream rather than sending a protocol notification.
 
 A discovered operator tool registers as
 `mcp__{server_byte_len}_{server}__{remote_tool}`. This injective qualified name
@@ -453,10 +498,17 @@ transient refresh failure retains its last-known-good tools and reports
 
 An operator server may name one deployment environment variable using
 `bearer` or `api_key`, or omit credentials. The router fails startup when named
-material is missing. It marks headers sensitive and applies the same
-credential to initialize, initialized notification, discovery, and
-`tools/call`. Outbound operator MCP OAuth is not supported by this config.
+material is missing. It marks authentication headers sensitive and applies the
+same deployment-supplied credential to every POST, including
+`server/discover`, `tools/list`, and `tools/call`. The outbound client does not
+perform OAuth discovery, authorization-code acquisition, refresh, or dynamic
+client registration; operators must provision any bearer token outside MOA.
 
+For Streamable HTTP, the client validates `x-mcp-header` annotations on
+statically reachable primitive input properties. An invalid annotation excludes
+only that tool from the catalog. A valid annotation projects the matching tool
+argument into `Mcp-Param-*` using the protocol's ASCII/Base64 encoding rules;
+the model-visible argument remains the body source of truth.
 
 Tenant action tool names use deterministic `conn__...` lookup references, but
 the runtime never parses a name for authority. It dispatches only through the

@@ -43,7 +43,13 @@ tests and must not be exposed.
 MOA also ships a first-party OAuth 2.1 authorization server (authorization
 code + PKCE) in `crates/moa-auth/providers/src/oauth_as/`, exposed by
 `moa-edge` at `/oauth/authorize`, `/oauth/token`, `/oauth/introspect`, and
-`/oauth/revoke`.
+`/oauth/revoke`. It protects the MCP revision `2026-07-28` Streamable HTTP
+endpoint at `/mcp`, publishes RFC 9728 protected-resource metadata at the root
+and endpoint-derived well-known paths, and publishes RFC 8414 authorization
+server metadata at `/.well-known/oauth-authorization-server`. Authorization and
+token requests bind the RFC 8707 `resource`; public clients use S256 PKCE.
+Clients are deployment-pre-registered through `auth.oauth.clients` and
+converged into Postgres. Dynamic client registration is not exposed.
 
 ## Authorization Rules
 

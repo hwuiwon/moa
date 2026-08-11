@@ -63,7 +63,7 @@ those instances explicitly rather than installing process globals.
 | Scheduling | Restate `CronJob` virtual object |
 | Runtime cache | Redis-backed coordination for the orchestrator; in-process memory exists only for isolated non-orchestrator tests |
 | Security | `secrecy`, `shell-words`; `moa-crypto` envelope encryption backed by Postgres KMS state and mounted generation keyrings |
-| Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
+| Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP revision `2026-07-28` Streamable HTTP client/server |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
 `moa-migrations` owns the fresh-install-only, contiguous 57-file PostgreSQL

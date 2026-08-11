@@ -1,11 +1,15 @@
 //! Streamable HTTP configuration and authenticated request boundary for MCP.
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::header::WWW_AUTHENTICATE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
@@ -25,6 +29,7 @@ use crate::routes::{AppState, authenticate_edge_request, require_direct_authz};
 pub struct McpHttpConfig {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
+    tool_calls_per_minute: u32,
 }
 
 impl McpHttpConfig {
@@ -41,7 +46,17 @@ impl McpHttpConfig {
         Ok(Self {
             allowed_hosts,
             allowed_origins,
+            tool_calls_per_minute: 60,
         })
+    }
+
+    /// Set the maximum tool calls admitted per authenticated principal each minute.
+    pub fn with_tool_calls_per_minute(mut self, limit: u32) -> Result<Self, McpHttpConfigError> {
+        if limit == 0 {
+            return Err(McpHttpConfigError::ZeroToolRateLimit);
+        }
+        self.tool_calls_per_minute = limit;
+        Ok(self)
     }
 
     /// Local development allowlists for the default edge port.
@@ -57,6 +72,7 @@ impl McpHttpConfig {
                 "http://127.0.0.1:10000".to_string(),
                 "http://[::1]:10000".to_string(),
             ],
+            tool_calls_per_minute: 60,
         }
     }
 }
@@ -88,6 +104,54 @@ pub enum McpHttpConfigError {
         /// The rejected entry.
         value: String,
     },
+    /// A zero tool-call limit would make the configured MCP server unusable.
+    #[error("MCP tool calls per minute must be greater than zero")]
+    ZeroToolRateLimit,
+}
+
+#[derive(Clone)]
+struct McpAuthState {
+    app: AppState,
+    tool_limiter: Arc<ToolCallLimiter>,
+}
+
+struct ToolCallLimiter {
+    limit: u32,
+    windows: tokio::sync::Mutex<HashMap<(uuid::Uuid, uuid::Uuid), RateWindow>>,
+}
+
+struct RateWindow {
+    started_at: Instant,
+    calls: u32,
+}
+
+impl ToolCallLimiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            windows: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn admit(&self, tenant_id: uuid::Uuid, principal_id: uuid::Uuid) -> Result<(), u64> {
+        const WINDOW: Duration = Duration::from_secs(60);
+
+        let now = Instant::now();
+        let mut windows = self.windows.lock().await;
+        windows.retain(|_, window| now.duration_since(window.started_at) < WINDOW);
+        let window = windows
+            .entry((tenant_id, principal_id))
+            .or_insert(RateWindow {
+                started_at: now,
+                calls: 0,
+            });
+        if window.calls >= self.limit {
+            let remaining = WINDOW.saturating_sub(now.duration_since(window.started_at));
+            return Err(remaining.as_secs().max(1));
+        }
+        window.calls += 1;
+        Ok(())
+    }
 }
 
 /// Build the authenticated stateless Streamable HTTP MCP router.
@@ -99,6 +163,7 @@ pub(crate) fn router(
     // Build the tool router and contracts once; stateless mode invokes this
     // factory for every JSON-RPC request.
     let template = Server::new(state.clone());
+    let tool_calls_per_minute = config.tool_calls_per_minute;
     let service = StreamableHttpService::new(
         move || Ok(template.clone()),
         NeverSessionManager::default().into(),
@@ -106,18 +171,23 @@ pub(crate) fn router(
             .with_allowed_hosts(config.allowed_hosts)
             .with_allowed_origins(config.allowed_origins)
             .with_sse_keep_alive(None)
-            .with_stateful_mode(false)
+            .with_legacy_session_mode(false)
+            .with_stateless_protocol_metadata_required(true)
             .with_json_response(true)
             .with_cancellation_token(cancellation_token),
     );
+    let auth_state = McpAuthState {
+        app: state,
+        tool_limiter: Arc::new(ToolCallLimiter::new(tool_calls_per_minute)),
+    };
 
     Router::new()
         .route_service("/mcp", service)
-        .route_layer(middleware::from_fn_with_state(state, authenticate_mcp))
+        .route_layer(middleware::from_fn_with_state(auth_state, authenticate_mcp))
 }
 
 #[tracing::instrument(
-    skip(state, request, next),
+    skip(mcp_state, request, next),
     fields(
         http.route = "/mcp",
         http.status_code = tracing::field::Empty,
@@ -129,15 +199,23 @@ pub(crate) fn router(
     )
 )]
 async fn authenticate_mcp(
-    State(state): State<AppState>,
+    State(mcp_state): State<McpAuthState>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    let state = &mcp_state.app;
     let span = tracing::Span::current();
     crate::routes::adopt_client_trace_parent(&span, request.headers());
-    let principal = match authenticate_edge_request(&state, request.headers(), &span).await {
+    let principal = match authenticate_edge_request(state, request.headers(), &span).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(mut response) => {
+            if response.status() == StatusCode::UNAUTHORIZED
+                && let Some(challenge) = authorization_challenge(state, None)
+            {
+                response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+            }
+            return response;
+        }
     };
     if let Some(oauth) = principal.oauth.as_ref() {
         if oauth.resource != state.oauth_server.resource() {
@@ -161,7 +239,11 @@ async fn authenticate_mcp(
         };
         if !principal.has_oauth_scope(required_scope) {
             span.record("http.status_code", 403_i64);
-            return (StatusCode::FORBIDDEN, "insufficient OAuth scope").into_response();
+            let mut response = (StatusCode::FORBIDDEN, "insufficient OAuth scope").into_response();
+            if let Some(challenge) = authorization_challenge(state, Some(required_scope)) {
+                response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+            }
+            return response;
         }
         request = Request::from_parts(parts, Body::from(body));
     }
@@ -173,8 +255,27 @@ async fn authenticate_mcp(
         span.record("http.status_code", 403_i64);
         return (StatusCode::FORBIDDEN, "forbidden").into_response();
     }
+    if is_tool_call(request.headers())
+        && let Err(retry_after) = mcp_state
+            .tool_limiter
+            .admit(identity.tenant_id.0, identity.id)
+            .await
+    {
+        span.record("http.status_code", 429_i64);
+        let mut response = (
+            StatusCode::TOO_MANY_REQUESTS,
+            "MCP tool-call rate limit exceeded",
+        )
+            .into_response();
+        if let Ok(retry_after) = HeaderValue::from_str(&retry_after.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, retry_after);
+        }
+        return response;
+    }
     if let Err(response) = require_direct_authz(
-        &state,
+        state,
         &identity,
         ObjectType::Tenant,
         identity.tenant_id,
@@ -199,6 +300,39 @@ async fn authenticate_mcp(
     let response = next.run(request).await;
     span.record("http.status_code", response.status().as_u16() as i64);
     response
+}
+
+fn is_tool_call(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("Mcp-Method")
+        .and_then(|value| value.to_str().ok())
+        == Some("tools/call")
+}
+
+fn authorization_challenge(state: &AppState, scope: Option<&str>) -> Option<HeaderValue> {
+    let metadata = protected_resource_metadata_url(state.oauth_server.resource())?;
+    let challenge = match scope {
+        Some(scope) => format!(
+            "Bearer error=\"insufficient_scope\", scope=\"{scope}\", resource_metadata=\"{metadata}\""
+        ),
+        None => format!("Bearer resource_metadata=\"{metadata}\", scope=\"mcp:read mcp:write\""),
+    };
+    HeaderValue::from_str(&challenge).ok()
+}
+
+fn protected_resource_metadata_url(resource: &str) -> Option<Url> {
+    let resource = Url::parse(resource).ok()?;
+    let resource_path = resource.path().trim_end_matches('/');
+    let metadata_path = if resource_path.is_empty() {
+        "/.well-known/oauth-protected-resource".to_string()
+    } else {
+        format!("/.well-known/oauth-protected-resource{resource_path}")
+    };
+    let mut metadata = resource;
+    metadata.set_path(&metadata_path);
+    metadata.set_query(None);
+    metadata.set_fragment(None);
+    Some(metadata)
 }
 
 fn parse_csv(value: &str, kind: &'static str) -> Result<Vec<String>, McpHttpConfigError> {
@@ -250,7 +384,11 @@ fn validate_origin(value: &str) -> Result<(), McpHttpConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpHttpConfig, McpHttpConfigError};
+    use uuid::Uuid;
+
+    use super::{
+        McpHttpConfig, McpHttpConfigError, ToolCallLimiter, protected_resource_metadata_url,
+    };
 
     #[test]
     fn mcp_allowlists_reject_empty_wildcard_and_non_origin_entries_offline() {
@@ -279,5 +417,61 @@ mod tests {
         .expect("exact Host and Origin allowlists should validate");
         assert_eq!(config.allowed_hosts.len(), 2);
         assert_eq!(config.allowed_origins.len(), 2);
+    }
+
+    #[test]
+    fn mcp_http_config_rejects_a_disabled_tool_rate_limit_offline() {
+        // Pins: the MCP tool-call limiter cannot be accidentally configured away.
+        let config = McpHttpConfig::default();
+        assert_eq!(
+            config.with_tool_calls_per_minute(0),
+            Err(McpHttpConfigError::ZeroToolRateLimit)
+        );
+    }
+
+    #[test]
+    fn protected_resource_metadata_url_preserves_the_mcp_resource_path_offline() {
+        // Pins: the bearer challenge points at the RFC 9728 path-specific metadata document.
+        assert_eq!(
+            protected_resource_metadata_url("https://mcp.example.com/mcp")
+                .map(|url| url.to_string()),
+            Some("https://mcp.example.com/.well-known/oauth-protected-resource/mcp".to_string())
+        );
+        assert_eq!(
+            protected_resource_metadata_url("https://mcp.example.com").map(|url| url.to_string()),
+            Some("https://mcp.example.com/.well-known/oauth-protected-resource".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_call_limiter_is_scoped_per_principal_offline() {
+        // Pins: one principal is throttled at the configured bound without consuming another's budget.
+        let limiter = ToolCallLimiter::new(2);
+        let tenant = Uuid::now_v7();
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+
+        assert_eq!(limiter.admit(tenant, first).await, Ok(()));
+        assert_eq!(limiter.admit(tenant, first).await, Ok(()));
+        assert!(limiter.admit(tenant, first).await.is_err());
+        assert_eq!(limiter.admit(tenant, second).await, Ok(()));
+    }
+
+    #[test]
+    fn unsupported_mcp_method_is_not_an_oauth_scope_failure_offline() {
+        // Pins: a valid OAuth principal reaches rmcp's 404/-32601 response for
+        // an unsupported method instead of being rejected as a plain 403.
+        let body = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "unsupported/method",
+            "params": {}
+        }))
+        .expect("serialize unsupported request");
+
+        assert!(
+            crate::mcp::required_oauth_scope(&axum::http::Method::POST, &body).is_ok(),
+            "unsupported method was misclassified as an OAuth scope failure"
+        );
     }
 }

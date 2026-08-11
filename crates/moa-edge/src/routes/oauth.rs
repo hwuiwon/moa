@@ -100,6 +100,7 @@ pub(super) async fn authorize(
             &query.redirect_uri,
             error.error_code(),
             query.state.as_deref(),
+            state.oauth_server.issuer(),
         ),
     }
 }
@@ -143,11 +144,13 @@ pub(super) async fn authorize_decision(
                 &outcome.redirect_uri,
                 code.code.expose_secret(),
                 outcome.state.as_deref(),
+                state.oauth_server.issuer(),
             ),
             None => redirect_error(
                 &outcome.redirect_uri,
                 "access_denied",
                 outcome.state.as_deref(),
+                state.oauth_server.issuer(),
             ),
         },
         Err(error) => token_error(
@@ -166,12 +169,22 @@ pub(super) async fn token(
     headers: HeaderMap,
     Form(form): Form<TokenForm>,
 ) -> Response {
-    let Some((client_id, client_secret)) = client_credentials(
+    let (client_id, client_secret) = match client_credentials(
         &headers,
         form.client_id.as_deref(),
         form.client_secret.as_deref(),
-    ) else {
-        return invalid_client("client authentication required");
+    ) {
+        Ok(credentials) => credentials,
+        Err(ClientCredentialsError::MultipleMethods) => {
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "multiple client authentication methods",
+            );
+        }
+        Err(ClientCredentialsError::MissingOrInvalid) => {
+            return invalid_client("client authentication required");
+        }
     };
     let client = match state.oauth_server.client(&client_id).await {
         Ok(Some(client)) => client,
@@ -181,16 +194,22 @@ pub(super) async fn token(
 
     match form.grant_type.as_str() {
         "authorization_code" => {
-            let (Some(code), Some(redirect_uri), Some(resource), Some(verifier)) = (
+            let (Some(code), Some(redirect_uri), Some(verifier)) = (
                 form.code.as_deref(),
                 form.redirect_uri.as_deref(),
-                form.resource.as_deref(),
                 form.code_verifier.as_deref(),
             ) else {
                 return token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request",
-                    "code, redirect_uri, resource, and code_verifier are required",
+                    "code, redirect_uri, and code_verifier are required",
+                );
+            };
+            let Some(resource) = form.resource.as_deref() else {
+                return token_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_target",
+                    "resource is required",
                 );
             };
             let code = SecretString::from(code);
@@ -217,12 +236,20 @@ pub(super) async fn token(
                     "refresh_token is required",
                 );
             };
+            let Some(resource) = form.resource.as_deref() else {
+                return token_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_target",
+                    "resource is required",
+                );
+            };
             match state
                 .oauth_server
                 .refresh_token_grant(
                     &client,
                     client_secret.as_ref(),
                     &SecretString::from(refresh_token),
+                    resource,
                 )
                 .await
             {
@@ -246,12 +273,20 @@ pub(super) async fn introspect(
     headers: HeaderMap,
     Form(form): Form<TokenIntrospectForm>,
 ) -> Response {
-    let Some((client_id, client_secret)) = client_credentials(
+    let (client_id, client_secret) = match client_credentials(
         &headers,
         form.client_id.as_deref(),
         form.client_secret.as_deref(),
-    ) else {
-        return introspect_unauthorized();
+    ) {
+        Ok(credentials) => credentials,
+        Err(ClientCredentialsError::MultipleMethods) => {
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "multiple client authentication methods",
+            );
+        }
+        Err(ClientCredentialsError::MissingOrInvalid) => return introspect_unauthorized(),
     };
     let client = match state.oauth_server.client(&client_id).await {
         Ok(Some(client)) => client,
@@ -283,12 +318,22 @@ pub(super) async fn revoke(
     headers: HeaderMap,
     Form(form): Form<TokenIntrospectForm>,
 ) -> Response {
-    let Some((client_id, client_secret)) = client_credentials(
+    let (client_id, client_secret) = match client_credentials(
         &headers,
         form.client_id.as_deref(),
         form.client_secret.as_deref(),
-    ) else {
-        return invalid_client("client authentication required");
+    ) {
+        Ok(credentials) => credentials,
+        Err(ClientCredentialsError::MultipleMethods) => {
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "multiple client authentication methods",
+            );
+        }
+        Err(ClientCredentialsError::MissingOrInvalid) => {
+            return invalid_client("client authentication required");
+        }
     };
     let client = match state.oauth_server.client(&client_id).await {
         Ok(Some(client)) => client,
@@ -318,18 +363,24 @@ pub(super) async fn authorization_server_metadata(State(state): State<AppState>)
     let issuer = state.oauth_server.issuer();
     json_no_store(
         StatusCode::OK,
-        json!({
-            "issuer": issuer,
-            "authorization_endpoint": format!("{issuer}/oauth/authorize"),
-            "token_endpoint": format!("{issuer}/oauth/token"),
-            "introspection_endpoint": format!("{issuer}/oauth/introspect"),
-            "revocation_endpoint": format!("{issuer}/oauth/revoke"),
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
-            "code_challenge_methods_supported": ["S256"],
-            "scopes_supported": ["mcp:read", "mcp:write"],
-        }),
+        authorization_server_metadata_document(issuer),
     )
+}
+
+fn authorization_server_metadata_document(issuer: &str) -> serde_json::Value {
+    json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/oauth/authorize"),
+        "token_endpoint": format!("{issuer}/oauth/token"),
+        "introspection_endpoint": format!("{issuer}/oauth/introspect"),
+        "revocation_endpoint": format!("{issuer}/oauth/revoke"),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+        "authorization_response_iss_parameter_supported": true,
+        "scopes_supported": ["mcp:read", "mcp:write"],
+    })
 }
 
 // SAFETY: public RFC 9728 metadata contains deployment URLs only.
@@ -375,19 +426,32 @@ fn consent_page(pending: &moa_auth_providers::oauth_as::PendingAuthorization) ->
         .into_response()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientCredentialsError {
+    MissingOrInvalid,
+    MultipleMethods,
+}
+
 fn client_credentials(
     headers: &HeaderMap,
     form_client_id: Option<&str>,
     form_client_secret: Option<&str>,
-) -> Option<(String, Option<SecretString>)> {
-    if let Some((client_id, secret)) = basic_auth_credentials(headers) {
-        return Some((client_id, Some(secret)));
+) -> Result<(String, Option<SecretString>), ClientCredentialsError> {
+    if headers.contains_key(header::AUTHORIZATION) {
+        if form_client_id.is_some() || form_client_secret.is_some() {
+            return Err(ClientCredentialsError::MultipleMethods);
+        }
+        let (client_id, secret) =
+            basic_auth_credentials(headers).ok_or(ClientCredentialsError::MissingOrInvalid)?;
+        return Ok((client_id, Some(secret)));
     }
-    let client_id = form_client_id?.trim();
+    let client_id = form_client_id
+        .ok_or(ClientCredentialsError::MissingOrInvalid)?
+        .trim();
     if client_id.is_empty() {
-        return None;
+        return Err(ClientCredentialsError::MissingOrInvalid);
     }
-    Some((
+    Ok((
         client_id.to_string(),
         form_client_secret.map(SecretString::from),
     ))
@@ -412,19 +476,21 @@ fn split_scopes(scope: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn redirect_success(redirect_uri: &str, code: &str, state: Option<&str>) -> Response {
+fn redirect_success(redirect_uri: &str, code: &str, state: Option<&str>, issuer: &str) -> Response {
     let mut pairs = vec![("code", code.to_string())];
     if let Some(state) = state {
         pairs.push(("state", state.to_string()));
     }
+    pairs.push(("iss", issuer.to_string()));
     redirect_with_params(redirect_uri, &pairs)
 }
 
-fn redirect_error(redirect_uri: &str, error: &str, state: Option<&str>) -> Response {
+fn redirect_error(redirect_uri: &str, error: &str, state: Option<&str>, issuer: &str) -> Response {
     let mut pairs = vec![("error", error.to_string())];
     if let Some(state) = state {
         pairs.push(("state", state.to_string()));
     }
+    pairs.push(("iss", issuer.to_string()));
     redirect_with_params(redirect_uri, &pairs)
 }
 
@@ -483,7 +549,12 @@ fn token_error_from(client_id: &str, grant_type: &str, error: &OAuthError) -> Re
 }
 
 fn invalid_client(description: &str) -> Response {
-    token_error(StatusCode::UNAUTHORIZED, "invalid_client", description)
+    let mut response = token_error(StatusCode::UNAUTHORIZED, "invalid_client", description);
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        header::HeaderValue::from_static("Basic realm=\"oauth\""),
+    );
+    response
 }
 
 fn introspect_unauthorized() -> Response {
@@ -512,6 +583,7 @@ fn error_description(error: &OAuthError) -> &'static str {
         OAuthError::InvalidClientCredentials => "client authentication failed",
         OAuthError::InvalidRedirectUri => "redirect_uri mismatch",
         OAuthError::InvalidScope => "requested scope is not permitted",
+        OAuthError::InvalidTarget => "requested resource is not accepted",
         OAuthError::InvalidRequest(message) => message,
         OAuthError::UnsupportedResponseType => "unsupported response_type",
         OAuthError::UnsupportedGrantType => "unsupported grant_type",
@@ -549,18 +621,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn form_credentials_do_not_override_basic_auth() {
-        // Pins: HTTP Basic credentials take precedence over form credentials.
+    fn multiple_client_authentication_methods_are_rejected() {
+        // Pins: a token request cannot combine HTTP Basic with form credentials.
         let encoded = base64::engine::general_purpose::STANDARD.encode("header:secret");
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
             format!("Basic {encoded}").parse().expect("valid header"),
         );
-        let (client_id, secret) =
-            client_credentials(&headers, Some("form"), Some("wrong")).expect("credentials resolve");
-        assert_eq!(client_id, "header");
-        assert_eq!(secret.expect("secret").expose_secret(), "secret");
+        assert_eq!(
+            client_credentials(&headers, Some("form"), Some("wrong"))
+                .expect_err("mixed client authentication must fail"),
+            ClientCredentialsError::MultipleMethods
+        );
+    }
+
+    #[test]
+    fn authorization_redirects_identify_the_issuer() {
+        // Pins: RFC 9207 issuer identification is present on both successful
+        // and error authorization responses before a client redeems a code.
+        for response in [
+            redirect_success(
+                "https://client.example/callback",
+                "code",
+                Some("state"),
+                "https://moa.example",
+            ),
+            redirect_error(
+                "https://client.example/callback",
+                "access_denied",
+                Some("state"),
+                "https://moa.example",
+            ),
+        ] {
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .expect("authorization response redirects")
+                .to_str()
+                .expect("redirect location is text");
+            let url = Url::parse(location).expect("redirect location is a URL");
+            let params = url
+                .query_pairs()
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(
+                params.get("iss").map(|value| value.as_ref()),
+                Some("https://moa.example")
+            );
+            assert_eq!(
+                params.get("state").map(|value| value.as_ref()),
+                Some("state")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_client_challenges_basic_authentication() {
+        // Pins: OAuth 2.1 invalid_client responses advertise the matching HTTP
+        // authentication scheme required by confidential clients.
+        let response = invalid_client("client authentication required");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE),
+            Some(&header::HeaderValue::from_static("Basic realm=\"oauth\""))
+        );
+    }
+
+    #[test]
+    fn authorization_metadata_advertises_issuer_and_no_dynamic_registration() {
+        // Pins: clients can require RFC 9207 issuer responses and discover the
+        // supported token authentication methods without seeing deprecated DCR.
+        let metadata = authorization_server_metadata_document("https://moa.example");
+        assert_eq!(
+            metadata["authorization_response_iss_parameter_supported"],
+            json!(true)
+        );
+        assert_eq!(
+            metadata["token_endpoint_auth_methods_supported"],
+            json!(["client_secret_basic", "client_secret_post", "none"])
+        );
+        assert!(metadata.get("registration_endpoint").is_none());
     }
 
     #[test]

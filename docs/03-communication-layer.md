@@ -232,8 +232,12 @@ at `/mcp`. Every HTTP message is authenticated by the edge, authorized against
 `tenant:<authenticated tenant>#operator`, and then dispatched to an explicit
 tool allowlist. Read tools use the same edge read-model functions as the REST
 dashboard; command tools use shared wire DTOs and the existing sanitized
-edge-to-ingress proxy. MCP clients discover capabilities with `tools/list`; the
-server does not mirror them as MCP resources or prompts.
+edge-to-ingress proxy. The endpoint implements only MCP revision `2026-07-28`:
+each POST carries the protocol version, client identity/capabilities metadata,
+and matching Streamable HTTP routing headers. Clients call `server/discover`
+for the supported version and tools capability, then `tools/list` for the
+deterministically ordered catalog. The server does not mirror tools as MCP
+resources or prompts and advertises no protocol sessions or extensions.
 
 Execution controls use the common typed run APIs: list, start, status, cancel,
 review decision, signal delivery, and bounded task-result listing. A start

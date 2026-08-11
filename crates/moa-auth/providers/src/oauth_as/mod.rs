@@ -76,6 +76,9 @@ pub enum OAuthError {
     /// A requested scope is not allowed for the client.
     #[error("requested scope is not permitted")]
     InvalidScope,
+    /// The RFC 8707 resource target is missing, malformed, or not accepted.
+    #[error("requested resource target is not accepted")]
+    InvalidTarget,
     /// The request was malformed.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
@@ -111,6 +114,7 @@ impl OAuthError {
             Self::InvalidClient | Self::InvalidClientCredentials => "invalid_client",
             Self::InvalidRedirectUri | Self::InvalidRequest(_) => "invalid_request",
             Self::InvalidScope => "invalid_scope",
+            Self::InvalidTarget => "invalid_target",
             Self::UnsupportedResponseType => "unsupported_response_type",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::InvalidGrant => "invalid_grant",
@@ -178,6 +182,7 @@ mod tests {
         assert_eq!(OAuthError::InvalidClient.error_code(), "invalid_client");
         assert_eq!(OAuthError::InvalidGrant.error_code(), "invalid_grant");
         assert_eq!(OAuthError::InvalidScope.error_code(), "invalid_scope");
+        assert_eq!(OAuthError::InvalidTarget.error_code(), "invalid_target");
         assert!(OAuthError::InvalidRedirectUri.must_not_redirect());
         assert!(OAuthError::InvalidClient.must_not_redirect());
         assert!(!OAuthError::InvalidScope.must_not_redirect());

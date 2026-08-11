@@ -90,7 +90,7 @@ async fn configured_mcp_server_without_egress_guard_fails_before_connecting_offl
 
 #[tokio::test]
 async fn deployment_credentials_authenticate_the_full_mcp_exchange_offline() {
-    // Pins: initialize, initialized notification, discovery, and invocation all
+    // Pins: stateless discovery, tool discovery, and invocation all
     // use the deployment credential, and tools/call carries the durable MOA
     // ToolCallId rather than a provider transcript identifier.
     const TOOL_CALL_ID: Uuid = Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c499);
@@ -100,7 +100,7 @@ async fn deployment_credentials_authenticate_the_full_mcp_exchange_offline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        for request_index in 0..4 {
+        for request_index in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
@@ -111,30 +111,24 @@ async fn deployment_credentials_authenticate_the_full_mcp_exchange_offline() {
                     .contains("authorization: bearer deployment-secret"),
                 "request {request_index} must be authenticated: {request}"
             );
-            let expected_method = [
-                "initialize",
-                "notifications/initialized",
-                "tools/list",
-                "tools/call",
-            ][request_index];
+            let expected_method = ["server/discover", "tools/list", "tools/call"][request_index];
             assert!(
                 request.contains(&format!("\"method\":\"{expected_method}\"")),
                 "request {request_index} used the wrong MCP method: {request}"
             );
-            if request_index == 3 {
+            if request_index == 2 {
                 assert!(request.contains(&format!("\"moa/toolInvocationId\":\"{TOOL_CALL_ID}\"")));
                 assert!(!request.contains("provider-transcript-id"));
             }
             let body = match request_index {
                 0 => {
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#
                 }
-                1 => r"{}",
-                2 => {
-                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping","description":"Ping","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
+                1 => {
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"ping","description":"Ping","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],"ttlMs":300000,"cacheScope":"private"}}"#
                 }
                 _ => {
-                    r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"pong"}]}}"#
+                    r#"{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"pong"}]}}"#
                 }
             };
             let response = format!(
@@ -201,7 +195,7 @@ async fn cancellation_stops_an_in_flight_authenticated_mcp_call_offline() {
     let (call_seen_tx, call_seen_rx) = oneshot::channel();
     tokio::spawn(async move {
         let mut call_seen_tx = Some(call_seen_tx);
-        for request_index in 0..4 {
+        for request_index in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
@@ -212,17 +206,16 @@ async fn cancellation_stops_an_in_flight_authenticated_mcp_call_offline() {
                     .contains("authorization: bearer cancel-secret"),
                 "request {request_index} must be authenticated"
             );
-            if request_index == 3 {
+            if request_index == 2 {
                 call_seen_tx.take().unwrap().send(()).unwrap();
                 std::future::pending::<()>().await;
             }
             let body = match request_index {
                 0 => {
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#
                 }
-                1 => r"{}",
                 _ => {
-                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"wait","description":"Wait","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"wait","description":"Wait","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],"ttlMs":300000,"cacheScope":"private"}}"#
                 }
             };
             let response = format!(
@@ -282,23 +275,19 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        for request_index in 0..4 {
+        for request_index in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
             let body = match request_index {
                 0 => {
-                    assert!(request.contains("\"method\":\"initialize\""));
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
+                    assert!(request.contains("\"method\":\"server/discover\""));
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#
                 }
                 1 => {
-                    assert!(request.contains("\"method\":\"notifications/initialized\""));
-                    r"{}"
-                }
-                2 => {
                     assert!(request.contains("\"method\":\"tools/list\""));
-                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"lookup_filing","description":"Lookup filing","inputSchema":{"type":"object","properties":{"item_key":{"type":"string"}},"required":["item_key"],"additionalProperties":false}}]}}"#
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"lookup_filing","description":"Lookup filing","inputSchema":{"type":"object","properties":{"item_key":{"type":"string"}},"required":["item_key"],"additionalProperties":false}}],"ttlMs":300000,"cacheScope":"private"}}"#
                 }
                 _ => {
                     assert!(request.contains("\"method\":\"tools/call\""));
@@ -311,7 +300,7 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
                         "tools/call must carry the remote tool name: {request}"
                     );
                     assert!(request.contains("\"item_key\":\"AAPL-10K\""));
-                    r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"filing"}]}}"#
+                    r#"{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"filing"}]}}"#
                 }
             };
             let response = format!(
@@ -452,23 +441,19 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        for request_index in 0..4 {
+        for request_index in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
             let body = match request_index {
                 0 => {
-                    assert!(request.contains("\"method\":\"initialize\""));
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
+                    assert!(request.contains("\"method\":\"server/discover\""));
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#
                 }
                 1 => {
-                    assert!(request.contains("\"method\":\"notifications/initialized\""));
-                    r"{}"
-                }
-                2 => {
                     assert!(request.contains("\"method\":\"tools/list\""));
-                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"explode","description":"Fails","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"explode","description":"Fails","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],"ttlMs":300000,"cacheScope":"private"}}"#
                 }
                 _ => {
                     assert!(request.contains("\"method\":\"tools/call\""));
@@ -538,23 +523,19 @@ async fn connector_tool_named_like_a_local_tool_is_qualified_apart_offline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        for request_index in 0..3 {
+        for request_index in 0..2 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
             let body = match request_index {
                 0 => {
-                    assert!(request.contains("\"method\":\"initialize\""));
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
-                }
-                1 => {
-                    assert!(request.contains("\"method\":\"notifications/initialized\""));
-                    r"{}"
+                    assert!(request.contains("\"method\":\"server/discover\""));
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#
                 }
                 _ => {
                     assert!(request.contains("\"method\":\"tools/list\""));
-                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"bash","description":"Remote shell","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"bash","description":"Remote shell","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],"ttlMs":300000,"cacheScope":"private"}}"#
                 }
             };
             let response = format!(
@@ -612,26 +593,24 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        for request_index in 0..4 {
+        for request_index in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            let expected_method = ["server/discover", "tools/list", "tools/call"][request_index];
+            assert!(request.contains(&format!("\"method\":\"{expected_method}\"")));
             let (content_type, body) = match request_index {
                 0 => (
                     "application/json",
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#
                         .to_string(),
                 ),
-                1 => {
-                    assert!(request.contains("\"method\":\"notifications/initialized\""));
-                    ("application/json", "{}".to_string())
-                }
-                2 => (
+                1 => (
                     "text/event-stream",
                     concat!(
                         ": keep-alive\n\n",
-                        "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"sse_echo\",\"description\":\"Echoes text\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false}}]}}\n\n"
+                        "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"resultType\":\"complete\",\"tools\":[{\"name\":\"sse_echo\",\"description\":\"Echoes text\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false}}],\"ttlMs\":300000,\"cacheScope\":\"private\"}}\n\n"
                     )
                     .to_string(),
                 ),
@@ -639,7 +618,7 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
                     "text/event-stream",
                     concat!(
                         ": keep-alive\n\n",
-                        "data: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"sse-pong\"}]}}\n\n"
+                        "data: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"sse-pong\"}]}}\n\n"
                     )
                     .to_string(),
                 ),
@@ -703,7 +682,6 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
 
 async fn discovered_tool_idempotency(
     server_name: &str,
-    protocol_version: &str,
     trust_tool_annotations: bool,
     idempotent_hint: Option<bool>,
 ) -> IdempotencyClass {
@@ -711,24 +689,28 @@ async fn discovered_tool_idempotency(
         .await
         .expect("bind fake MCP server");
     let addr = listener.local_addr().expect("read fake MCP address");
-    let protocol_version = protocol_version.to_string();
     let server = tokio::spawn(async move {
-        for request_index in 0..3 {
+        for request_index in 0..2 {
             let (mut socket, _) = listener.accept().await.expect("accept MCP request");
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.expect("read MCP request");
             let request = String::from_utf8_lossy(&buffer[..bytes]);
             let body = match request_index {
                 0 => {
-                    assert!(request.contains("\"protocolVersion\":\"2025-03-26\""));
+                    assert!(request.contains("\"method\":\"server/discover\""));
                     json!({
                         "jsonrpc": "2.0",
                         "id": 1,
-                        "result": {"protocolVersion": protocol_version, "capabilities": {}}
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 60_000,
+                            "cacheScope": "private"
+                        }
                     })
                     .to_string()
                 }
-                1 => "{}".to_string(),
                 _ => {
                     let mut tool = json!({
                         "name": "retry_safe_read",
@@ -746,7 +728,12 @@ async fn discovered_tool_idempotency(
                     json!({
                         "jsonrpc": "2.0",
                         "id": 2,
-                        "result": {"tools": [tool]}
+                        "result": {
+                            "resultType": "complete",
+                            "tools": [tool],
+                            "ttlMs": 300_000,
+                            "cacheScope": "private"
+                        }
                     })
                     .to_string()
                 }
@@ -792,34 +779,22 @@ async fn discovered_tool_idempotency(
 
 #[tokio::test]
 async fn discovery_trusts_idempotent_hint_only_for_explicit_capable_server() {
-    // Pins: retry safety requires explicit per-server trust, a capable negotiated protocol,
-    // and idempotentHint=true; names never imply trust.
+    // Pins: with one hard-cut protocol revision, retry safety requires explicit
+    // per-server trust and idempotentHint=true; names never imply trust.
     assert_eq!(
-        discovered_tool_idempotency("ordinary-trusted", "2025-03-26", true, Some(true)).await,
+        discovered_tool_idempotency("ordinary-trusted", true, Some(true)).await,
         IdempotencyClass::Idempotent
     );
     assert_eq!(
-        discovered_tool_idempotency("newer-trusted", "2028-02-29", true, Some(true)).await,
-        IdempotencyClass::Idempotent
-    );
-    assert_eq!(
-        discovered_tool_idempotency("fixture-untrusted", "2025-03-26", false, Some(true)).await,
+        discovered_tool_idempotency("fixture-untrusted", false, Some(true)).await,
         IdempotencyClass::NonIdempotent
     );
     assert_eq!(
-        discovered_tool_idempotency("legacy-trusted", "2024-11-05", true, Some(true)).await,
+        discovered_tool_idempotency("absent-hint", true, None).await,
         IdempotencyClass::NonIdempotent
     );
     assert_eq!(
-        discovered_tool_idempotency("impossible-date", "2025-04-31", true, Some(true)).await,
-        IdempotencyClass::NonIdempotent
-    );
-    assert_eq!(
-        discovered_tool_idempotency("absent-hint", "2025-03-26", true, None).await,
-        IdempotencyClass::NonIdempotent
-    );
-    assert_eq!(
-        discovered_tool_idempotency("false-hint", "2025-03-26", true, Some(false)).await,
+        discovered_tool_idempotency("false-hint", true, Some(false)).await,
         IdempotencyClass::NonIdempotent
     );
 }
@@ -877,17 +852,58 @@ async fn spawn_method_routed_mcp_server(tools_json: &str) -> MethodRoutedMcpServ
                 continue;
             };
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
-            let body = if request.contains("\"method\":\"initialize\"") {
-                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
-                    .to_string()
-            } else if request.contains("\"method\":\"tools/list\"") {
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok());
+            let Some(request_body) = request_body else {
+                continue;
+            };
+            let id = request_body["id"].clone();
+            let method = request_body["method"].as_str().unwrap_or_default();
+            let body = if method == "server/discover" {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {"tools": {}},
+                        "ttlMs": 60_000,
+                        "cacheScope": "private"
+                    }
+                })
+                .to_string()
+            } else if method == "tools/list" {
                 let tools_json = served_tools.read().await;
-                format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":{tools_json}}}}}"#)
-            } else if request.contains("\"method\":\"tools/call\"") {
-                r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}}"#
-                    .to_string()
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "tools": serde_json::from_str::<serde_json::Value>(&tools_json)
+                            .unwrap_or_else(|_| json!([])),
+                        "ttlMs": 300_000,
+                        "cacheScope": "private"
+                    }
+                })
+                .to_string()
+            } else if method == "tools/call" {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "content": [{"type": "text", "text": "ok"}]
+                    }
+                })
+                .to_string()
             } else {
-                r"{}".to_string()
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32601, "message": "Method not found"}
+                })
+                .to_string()
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",

@@ -341,19 +341,45 @@ async fn post_mcp_with_bearer(
     edge: &EdgeServer,
     path: &str,
     token: &str,
-    body: Value,
+    mut body: Value,
 ) -> reqwest::Response {
-    client
+    let params = body
+        .as_object_mut()
+        .expect("MCP request must be an object")
+        .entry("params")
+        .or_insert_with(|| json!({}));
+    params
+        .as_object_mut()
+        .expect("MCP params must be an object")
+        .insert(
+            "_meta".to_string(),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "moa-edge-oauth-test",
+                    "version": "1",
+                },
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }),
+        );
+    let method = body["method"]
+        .as_str()
+        .expect("MCP request method")
+        .to_string();
+    let name = body.pointer("/params/name").and_then(Value::as_str);
+    let mut request = client
         .post(format!("{}{path}", edge.base_url))
         .header("Host", "localhost:10000")
         .header("Origin", "http://localhost:10000")
         .header("Authorization", format!("Bearer {token}"))
-        .header("MCP-Protocol-Version", "2025-06-18")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method)
         .header("Accept", "application/json, text/event-stream")
-        .json(&body)
-        .send()
-        .await
-        .expect("send OAuth MCP request")
+        .json(&body);
+    if let Some(name) = name {
+        request = request.header("Mcp-Name", name);
+    }
+    request.send().await.expect("send OAuth MCP request")
 }
 
 async fn start_purge_upstream() -> PurgeUpstream {
@@ -588,6 +614,15 @@ async fn oauth_bearers_are_mcp_only_resource_bound_scoped_and_fga_checked_db() {
     let read_cannot_write =
         post_mcp_with_bearer(&client, &edge, "/mcp", read_token, write_call.clone()).await;
     assert_eq!(read_cannot_write.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        read_cannot_write
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            "Bearer error=\"insufficient_scope\", scope=\"mcp:write\", resource_metadata=\"https://moa.test/.well-known/oauth-protected-resource/mcp\""
+        )
+    );
 
     let write_cannot_read =
         post_mcp_with_bearer(&client, &edge, "/mcp", write_token, read_call.clone()).await;

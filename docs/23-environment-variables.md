@@ -67,7 +67,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of operator-owned deployment MCP server objects. Every object requires `name` and `url`. `credentials` may name one deployment environment variable using `bearer` or `api_key`; omit it for an unauthenticated server. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. `required` defaults to `false`: an optional server that fails discovery removes only its own tools and is recorded as typed health, while a `required` server that fails discovery fails startup. `discovery` defaults to `eager`; `lazy` defers a server's tools to the first background catalog refresh. `required` combined with `lazy` is rejected. Duplicate server names are rejected. Tenant connector connections do not consume this configuration. |
+| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of operator-owned MCP revision `2026-07-28` Streamable HTTP endpoints. Every object requires `name` and `url`. `credentials` may name one deployment environment variable using `bearer` or `api_key`; omit it for an unauthenticated server. MOA does not acquire or refresh OAuth tokens. `trust_tool_annotations` defaults to `false` and must be enabled per server before a standard `idempotentHint` can permit retries. `required` defaults to `false`: an optional server that fails `server/discover` or `tools/list` removes only its own tools and is recorded as typed health, while a `required` server failure fails startup. `discovery` is MOA's catalog-load timing, not the protocol RPC: `eager` runs `server/discover` plus `tools/list` at startup; `lazy` defers both to the first background catalog refresh. `required` combined with `lazy` is rejected. Duplicate server names are rejected. Tenant connector connections do not consume this configuration. |
 
 ### `sandbox_policy`
 
@@ -397,10 +397,10 @@ capabilities, database bootstrap, and a fresh supervised reaper heartbeat.
 | `MOA_AUTH_OAUTH_ACCESS_TOKEN_TTL_SECONDS` | `auth.oauth.access_token_ttl_seconds` | 3600 | Lifetime of an issued access token, in seconds |
 | `MOA_AUTH_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS` | `auth.oauth.authorization_code_ttl_seconds` | 60 | Lifetime of a single-use authorization code, in seconds |
 | `MOA_AUTH_OAUTH_AUTHORIZATION_REQUEST_TTL_SECONDS` | `auth.oauth.authorization_request_ttl_seconds` | 300 | Lifetime of an unapproved authorization transaction, in seconds |
-| `MOA_AUTH_OAUTH_CLIENTS_JSON` | `auth.oauth.clients` | [] | JSON array of statically registered OAuth clients, validated and converged into Postgres at startup |
-| `MOA_AUTH_OAUTH_ISSUER` | `auth.oauth.issuer` | https://moa.local | Canonical authorization-server issuer URL |
+| `MOA_AUTH_OAUTH_CLIENTS_JSON` | `auth.oauth.clients` | [] | JSON array of deployment-pre-registered OAuth clients, validated and converged into Postgres at startup. This is the inbound MCP client-registration surface; dynamic registration is not exposed. |
+| `MOA_AUTH_OAUTH_ISSUER` | `auth.oauth.issuer` | https://moa.local | Canonical authorization-server issuer used by RFC 8414 metadata |
 | `MOA_AUTH_OAUTH_REFRESH_TOKEN_TTL_SECONDS` | `auth.oauth.refresh_token_ttl_seconds` | 1209600 | Lifetime of an issued refresh token, in seconds |
-| `MOA_AUTH_OAUTH_RESOURCE` | `auth.oauth.resource` | https://moa.local/mcp | Exact RFC 8707 protected resource accepted by this server |
+| `MOA_AUTH_OAUTH_RESOURCE` | `auth.oauth.resource` | https://moa.local/mcp | Exact RFC 8707 protected resource accepted by the inbound MCP server and published through RFC 9728 metadata |
 | `MOA_AUTH_OIDC_AUDIENCE` | `auth.oidc.audience` | _empty_ | Expected token audience |
 | `MOA_AUTH_OIDC_ISSUER` | `auth.oidc.issuer` | _empty_ | OIDC issuer URL |
 | `MOA_AUTH_OIDC_JWKS_URL` | `auth.oidc.jwks_url` | _empty_ | JWKS endpoint URL |
@@ -662,7 +662,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_POSTMARK_*` | Postmark live-email credentials |
 | `MOA_E2B_*` | E2B sandbox credentials |
 | `MOA_OPENROUTER_*` | OpenRouter credentials (deploy) |
-| `MOA_EDGE_*` | Edge binary bind/upstreams, connector rollout switch, and exact inbound MCP allowlists (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM`, `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`). Connector management defaults dark: when false, every `/v1/connectors/connections...` route returns 404 before authentication, translation, or proxying. The credential upstream must target the orchestrator's private port 10023, never Restate or a public endpoint. Local Compose explicitly opts in; the Kubernetes base explicitly remains false. |
+| `MOA_EDGE_*` | Edge binary bind/upstreams, connector rollout switch, and inbound MCP controls (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM`, `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`, `MOA_EDGE_MCP_TOOL_CALLS_PER_MINUTE`). The tool-call limit defaults to 60, must be greater than zero, and is enforced per authenticated tenant/principal by each edge replica; use an upstream distributed limiter as well when the number must be a fleet-wide quota. Connector management defaults dark: when false, every `/v1/connectors/connections...` route returns 404 before authentication, translation, or proxying. The credential upstream must target the orchestrator's private port 10023, never Restate or a public endpoint. Local Compose explicitly opts in; the Kubernetes base explicitly remains false. |
 | `MOA_RESTATE_DEPLOYMENT_*` | Restate deploy-registration (`MOA_RESTATE_DEPLOYMENT_HOST`/`_URI`) |
 
 ### Approved exact names
@@ -786,7 +786,9 @@ a pattern left stale by this rename surfaces instead of failing quietly. A
 pattern matching nothing is almost always a mistake regardless of cause.
 
 Model-visible tool names are part of the cached prompt prefix, so deployments
-running MCP servers should expect one cache-cold period per session on upgrade.
+running MCP servers should expect one cache-cold agent-context compilation on
+the first catalog publication after upgrade. This is MOA context state, not an
+MCP protocol session.
 
 ### Operator MCP tool permission posture
 
@@ -797,7 +799,7 @@ Builtin hands keep their own per-tool defaults. Operator rules always override
 the descriptor default.
 Operator MCP tool annotations are treated as untrusted hints by default. A tool becomes
 retry-safe only when its exact server config sets `trust_tool_annotations` to
-`true`, the negotiated protocol revision is `2025-03-26` or newer, and the
+`true`, the server supports the required protocol revision `2026-07-28`, and the
 discovered tool declares `idempotentHint=true`; server names never imply trust.
 
 Tenant connector actions do not inherit these deployment-name rules. They are

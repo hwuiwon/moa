@@ -67,16 +67,28 @@ boundary.
 The tenant-operations MCP protected resource is `/mcp`. Its tenant scope is
 always taken from the verified `Identity`; tools have no `tenant_id` override,
 and contact or agent identities are rejected before JSON-RPC dispatch. Exact
-Host and Origin allowlists protect the Streamable HTTP endpoint. Caller access
-tokens terminate at `moa-edge`: the proxy strips them and forwards only trusted
-`X-Moa-*` identity headers to the internal Restate ingress.
+Host and Origin allowlists protect the revision `2026-07-28` Streamable HTTP
+endpoint. Protocol version, method, and name headers must match the
+self-describing request body. Caller access tokens terminate at `moa-edge`: the
+proxy strips them and forwards only trusted `X-Moa-*` identity headers to the
+internal Restate ingress.
 
-A future dashboard OAuth flow may authorize MCP clients after customer login,
-but it must still map the audience-bound token through the existing
-`AuthProvider` and OpenFGA checks. The dashboard authorization server must use
-Authorization Code with PKCE and RFC 8707 `resource`, publish RFC 9728
-protected-resource metadata and RFC 8414/OIDC authorization-server metadata,
-and issue short-lived tokens whose resource is the canonical `/mcp` endpoint.
+MOA's first-party OAuth authorization server authorizes pre-registered MCP
+clients after customer login and maps each audience-bound token through the
+existing `AuthProvider` and OpenFGA checks. It uses Authorization Code with
+PKCE and RFC 8707 `resource`, publishes RFC 9728 protected-resource metadata
+and RFC 8414 authorization-server metadata, and issues short-lived tokens whose
+resource is the canonical `/mcp` endpoint. `mcp:read` covers discovery, catalog,
+and read-only tools; mutating tools require `mcp:write`. HTTP 401 responses name
+the path-specific RFC 9728 document in a `WWW-Authenticate` challenge, and an
+insufficient-scope HTTP 403 challenge names the exact missing scope.
+
+After authentication, `moa-edge` applies an in-process fixed-window limit to
+`tools/call`, keyed by the exact tenant and principal. The positive
+`MOA_EDGE_MCP_TOOL_CALLS_PER_MINUTE` value defaults to 60; rejection returns
+HTTP 429 with `Retry-After`. This limit is per edge replica, so production
+deployments that require a fleet-wide quota must also enforce one in a shared
+upstream gateway or distributed limiter.
 
 The public edge injects trusted `X-Moa-*` identity headers after stripping any
 caller-provided values. The orchestrator trusts those headers, so production
@@ -190,10 +202,17 @@ only the bounded tenant-purge actor may delete them.
 Operator-owned deployment MCP may use one deployment credential read from an
 operator-selected environment variable at router construction. Missing
 configured material fails startup. The MCP client marks authentication headers
-sensitive and applies them to the complete protocol exchange: initialize,
-initialized notification, discovery, and `tools/call`. Non-success response
+sensitive and applies them to every Streamable HTTP POST:
+`server/discover`, `tools/list`, and `tools/call`. It does not acquire or refresh
+OAuth tokens; credential provisioning stays outside MOA. Non-success response
 bodies are not copied into errors, so an upstream cannot reflect credentials
 into logs.
+
+Remote tool definitions are untrusted input. `x-mcp-header` is accepted only on
+statically reachable string, integer, or boolean properties, with unique valid
+HTTP-token names and bounded integer values. Invalid annotations remove the
+affected tool, and projected values use the protocol's safe ASCII/Base64
+encoding before entering an HTTP header.
 
 ## Connector Destination Admission
 

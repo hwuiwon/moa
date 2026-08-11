@@ -561,6 +561,7 @@ impl ToolRouter {
     /// refresh can split across revisions.
     #[must_use]
     pub fn activated_catalog(&self) -> Arc<ToolCatalogSnapshot> {
+        self.mcp.request_refresh_if_stale();
         self.catalog.activated()
     }
 

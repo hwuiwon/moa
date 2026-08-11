@@ -2491,51 +2491,102 @@ mod tests {
         }
     }
 
+    fn assert_modern_mcp_request(
+        request: &str,
+        expected_method: &str,
+        expected_name: Option<&str>,
+    ) -> serde_json::Value {
+        assert!(
+            request.contains("accept: application/json, text/event-stream\r\n"),
+            "modern MCP requests must accept JSON and SSE responses"
+        );
+        assert!(
+            request.contains("mcp-protocol-version: 2026-07-28\r\n"),
+            "modern MCP requests must carry the exact protocol header"
+        );
+        assert!(
+            request.contains(&format!("mcp-method: {expected_method}\r\n")),
+            "Mcp-Method must describe the JSON-RPC request"
+        );
+        if let Some(expected_name) = expected_name {
+            assert!(
+                request.contains(&format!("mcp-name: {expected_name}\r\n")),
+                "named MCP requests must carry Mcp-Name"
+            );
+        }
+
+        let (_, request_body) = request
+            .split_once("\r\n\r\n")
+            .expect("MCP request should contain an HTTP body");
+        let request_json: serde_json::Value =
+            serde_json::from_str(request_body).expect("MCP request body should be JSON");
+        assert_eq!(request_json["jsonrpc"], serde_json::json!("2.0"));
+        assert_eq!(request_json["method"], serde_json::json!(expected_method));
+        assert_eq!(
+            request_json.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion"),
+            Some(&serde_json::json!("2026-07-28"))
+        );
+        assert_eq!(
+            request_json.pointer("/params/_meta/io.modelcontextprotocol~1clientCapabilities"),
+            Some(&serde_json::json!({}))
+        );
+        assert!(
+            request_json
+                .pointer("/params/_meta/io.modelcontextprotocol~1clientInfo/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "every modern MCP request should identify the client"
+        );
+        request_json
+    }
+
     #[tokio::test]
     async fn execute_buffered_uses_durable_moa_identity_for_reviewed_mcp_request() {
-        // Pins: reviewed execution emits its fresh durable MOA tool-call identity in MCP
-        // `_meta`; the provider transcript identity is not reused for the new invocation.
+        // Pins: reviewed execution emits its fresh durable MOA tool-call identity in a stateless
+        // 2026-07-28 request; the provider transcript identity is not reused for the invocation.
         const TOOL_CALL_ID: &str = "00000000-0000-0000-0000-00000000beef";
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake MCP server");
         let addr = listener.local_addr().expect("read fake MCP address");
         let server = tokio::spawn(async move {
-            for request_index in 0..4 {
+            for request_index in 0..3 {
                 let (mut socket, _) = listener.accept().await.expect("accept MCP request");
                 let mut buffer = vec![0_u8; 4096];
                 let bytes = socket.read(&mut buffer).await.expect("read MCP request");
                 let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
                 let body = match request_index {
                     0 => {
-                        assert!(request.contains("\"method\":\"initialize\""));
-                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
+                        assert_modern_mcp_request(&request, "server/discover", None);
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"reviewed-test-server","version":"1"}},"ttlMs":60000,"cacheScope":"private"}}"#
                     }
                     1 => {
-                        assert!(request.contains("\"method\":\"notifications/initialized\""));
-                        r"{}"
-                    }
-                    2 => {
-                        assert!(request.contains("\"method\":\"tools/list\""));
-                        r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"reviewed_lookup","description":"Reviewed lookup","inputSchema":{"type":"object","properties":{"item_key":{"type":"string"}},"required":["item_key"],"additionalProperties":false}}]}}"#
+                        assert_modern_mcp_request(&request, "tools/list", None);
+                        r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"reviewed_lookup","description":"Reviewed lookup","inputSchema":{"type":"object","properties":{"item_key":{"type":"string","x-mcp-header":"Item-Key"}},"required":["item_key"],"additionalProperties":false}}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"reviewed-test-server","version":"1"}},"ttlMs":60000,"cacheScope":"private"}}"#
                     }
                     _ => {
-                        let (_, request_body) = request
-                            .split_once("\r\n\r\n")
-                            .expect("MCP request should contain an HTTP body");
-                        let request_json: serde_json::Value = serde_json::from_str(request_body)
-                            .expect("MCP request body should be JSON");
-                        assert_eq!(
-                            request_json["params"],
-                            serde_json::json!({
-                                "name": "reviewed_lookup",
-                                "arguments": {"item_key": "AAPL-10K"},
-                                "_meta": {
-                                    "moa/toolInvocationId": TOOL_CALL_ID
-                                }
-                            })
+                        let request_json = assert_modern_mcp_request(
+                            &request,
+                            "tools/call",
+                            Some("reviewed_lookup"),
                         );
-                        r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"filing"}]}}"#
+                        assert!(
+                            request.contains("mcp-param-item-key: AAPL-10K\r\n"),
+                            "the discovered x-mcp-header annotation must project the argument"
+                        );
+                        assert_eq!(
+                            request_json.pointer("/params/name"),
+                            Some(&serde_json::json!("reviewed_lookup"))
+                        );
+                        assert_eq!(
+                            request_json.pointer("/params/arguments"),
+                            Some(&serde_json::json!({"item_key": "AAPL-10K"}))
+                        );
+                        assert_eq!(
+                            request_json.pointer("/params/_meta/moa~1toolInvocationId"),
+                            Some(&serde_json::json!(TOOL_CALL_ID))
+                        );
+                        r#"{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"filing"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"reviewed-test-server","version":"1"}}}}"#
                     }
                 };
                 let response = format!(

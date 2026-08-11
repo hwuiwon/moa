@@ -1,6 +1,6 @@
 //! Consistent MCP tool success and execution-error results.
 
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, MetaObject};
 use serde::Serialize;
 use serde_json::json;
 
@@ -53,6 +53,25 @@ pub(crate) fn normalize(result: CallToolResult) -> CallToolResult {
         return execution_error(message);
     }
     result
+}
+
+/// Normalize a completed tool response and attach this server's per-response identity.
+pub(crate) fn normalize_response(
+    response: CallToolResponse,
+    server_meta: MetaObject,
+) -> CallToolResponse {
+    match response {
+        CallToolResponse::Complete(result) => {
+            let mut result = normalize(result);
+            let mut meta = result.meta.take().unwrap_or_default();
+            for (key, value) in server_meta.0 {
+                meta.insert(key, value);
+            }
+            result.meta = Some(meta);
+            CallToolResponse::Complete(result)
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]

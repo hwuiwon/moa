@@ -445,9 +445,7 @@ impl RegisteredTool {
         } else {
             IdempotencyClass::NonIdempotent
         };
-        let protocol_version = registration
-            .negotiated_protocol_version()
-            .map(ToOwned::to_owned);
+        let protocol_version = registration.protocol_version().map(ToOwned::to_owned);
         let tool = registration.into_tool();
         let remote_tool_name = tool.name;
         let name = mcp_tool_reference(server_name, &remote_tool_name);

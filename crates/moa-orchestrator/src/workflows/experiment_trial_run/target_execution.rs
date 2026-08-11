@@ -2364,6 +2364,71 @@ mod tests {
     const TRIAL_CONNECTOR: &str = "crm";
     const TRIAL_CONNECTOR_TOOL: &str = "create_deal";
 
+    fn assert_modern_mcp_request(
+        request: &str,
+        expected_method: &str,
+        expected_name: Option<&str>,
+    ) -> Value {
+        let header = |name: &str| {
+            request
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.trim())
+        };
+        assert_eq!(
+            header("MCP-Protocol-Version"),
+            Some("2026-07-28"),
+            "fixture request must pin the current MCP revision"
+        );
+        assert_eq!(
+            header("Mcp-Method"),
+            Some(expected_method),
+            "fixture method header must match the JSON-RPC method"
+        );
+        assert_eq!(
+            header("Mcp-Name"),
+            expected_name,
+            "fixture tool-name header must match tools/call params"
+        );
+
+        let (_, body) = request
+            .split_once("\r\n\r\n")
+            .expect("fixture MCP request should contain an HTTP body");
+        let request_json: Value =
+            serde_json::from_str(body).expect("fixture MCP request body should be JSON");
+        assert_eq!(
+            request_json.get("method").and_then(Value::as_str),
+            Some(expected_method)
+        );
+        assert_eq!(
+            request_json
+                .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+                .and_then(Value::as_str),
+            Some("2026-07-28")
+        );
+        assert_eq!(
+            request_json
+                .pointer("/params/_meta/io.modelcontextprotocol~1clientInfo/name")
+                .and_then(Value::as_str),
+            Some("moa")
+        );
+        assert!(
+            request_json
+                .pointer("/params/_meta/io.modelcontextprotocol~1clientInfo/version")
+                .and_then(Value::as_str)
+                .is_some_and(|version| !version.is_empty()),
+            "fixture request must identify the client version"
+        );
+        assert!(
+            request_json
+                .pointer("/params/_meta/io.modelcontextprotocol~1clientCapabilities")
+                .is_some_and(Value::is_object),
+            "fixture request must declare client capabilities"
+        );
+        request_json
+    }
+
     /// Spawns a connector that answers discovery and flags any `tools/call`.
     ///
     /// The flag is the proof a refusal happened before the network, not after a
@@ -2399,17 +2464,79 @@ mod tests {
                             .map(str::to_string)
                     });
                 let body = match method.as_deref() {
-                    Some("initialize") => {
-                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-                            .to_string()
+                    Some("server/discover") => {
+                        let request_json =
+                            assert_modern_mcp_request(&request, "server/discover", None);
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"],
+                            "result": {
+                                "resultType": "complete",
+                                "supportedVersions": ["2026-07-28"],
+                                "capabilities": {"tools": {}},
+                                "ttlMs": 60_000,
+                                "cacheScope": "private",
+                                "_meta": {
+                                    "io.modelcontextprotocol/serverInfo": {
+                                        "name": "moa-trial-test-connector",
+                                        "version": "1"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string()
                     }
-                    Some("tools/list") => format!(
-                        r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{TRIAL_CONNECTOR_TOOL}","description":"Create a CRM deal","inputSchema":{{"type":"object","properties":{{"account":{{"type":"string"}}}},"required":["account"],"additionalProperties":false}}}}]}}}}"#
-                    ),
+                    Some("tools/list") => {
+                        let request_json = assert_modern_mcp_request(&request, "tools/list", None);
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"],
+                            "result": {
+                                "resultType": "complete",
+                                "tools": [{
+                                    "name": TRIAL_CONNECTOR_TOOL,
+                                    "description": "Create a CRM deal",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {"account": {"type": "string"}},
+                                        "required": ["account"],
+                                        "additionalProperties": false
+                                    }
+                                }],
+                                "ttlMs": 60_000,
+                                "cacheScope": "private",
+                                "_meta": {
+                                    "io.modelcontextprotocol/serverInfo": {
+                                        "name": "moa-trial-test-connector",
+                                        "version": "1"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string()
+                    }
                     Some("tools/call") => {
+                        let request_json = assert_modern_mcp_request(
+                            &request,
+                            "tools/call",
+                            Some(TRIAL_CONNECTOR_TOOL),
+                        );
                         seen_calls.store(true, Ordering::SeqCst);
-                        r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"deal created"}]}}"#
-                            .to_string()
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"],
+                            "result": {
+                                "resultType": "complete",
+                                "content": [{"type": "text", "text": "deal created"}],
+                                "_meta": {
+                                    "io.modelcontextprotocol/serverInfo": {
+                                        "name": "moa-trial-test-connector",
+                                        "version": "1"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string()
                     }
                     _ => "{}".to_string(),
                 };

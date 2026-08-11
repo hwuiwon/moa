@@ -516,6 +516,13 @@ separate from the outbound operator-owned agent-tool MCP clients in
 `moa-hands`. Outbound MCP is immutable deployment configuration; tenant
 connector connections do not host MCP servers or MCP actions.
 
+Both surfaces implement only MCP revision `2026-07-28` over Streamable HTTP.
+There is no initialization handshake, protocol session, standalone GET stream,
+or legacy HTTP+SSE transport. Every request is self-describing, and
+`server/discover` is the capability/version boundary. The inbound server
+advertises only tools; it does not expose prompts, resources, deprecated client
+features, subscriptions, or protocol extensions.
+
 The binary composition root constructs one `RuntimeDeps`, including one shared
 `IngestRuntime`, one shared `MemoryRetrievalEngine`, connector services, provider
 delivery, credential storage, and explicit turn/authz dependencies. It passes

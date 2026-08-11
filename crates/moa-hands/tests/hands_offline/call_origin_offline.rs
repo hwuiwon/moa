@@ -98,19 +98,19 @@ async fn spawn_recording_connector() -> RecordingConnector {
                         .map(str::to_string)
                 });
             let body = match method.as_deref() {
-                Some("initialize") => {
-                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+                Some("server/discover") => {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"crm-test-server","version":"1.0.0"}},"ttlMs":60000,"cacheScope":"private"}}"#
                         .to_string()
                 }
                 Some("tools/list") => {
                     seen_discoveries.fetch_add(1, Ordering::SeqCst);
                     format!(
-                        r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{CONNECTOR_TOOL}","description":"Create a CRM deal","inputSchema":{{"type":"object","properties":{{"account":{{"type":"string"}}}},"required":["account"],"additionalProperties":false}}}}]}}}}"#
+                        r#"{{"jsonrpc":"2.0","id":2,"result":{{"resultType":"complete","tools":[{{"name":"{CONNECTOR_TOOL}","description":"Create a CRM deal","inputSchema":{{"type":"object","properties":{{"account":{{"type":"string"}}}},"required":["account"],"additionalProperties":false}}}}],"ttlMs":60000,"cacheScope":"private","_meta":{{"io.modelcontextprotocol/serverInfo":{{"name":"crm-test-server","version":"1.0.0"}}}}}}}}"#
                     )
                 }
                 Some("tools/call") => {
                     seen_calls.store(true, Ordering::SeqCst);
-                    r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"deal created"}]}}"#
+                    r#"{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"deal created"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"crm-test-server","version":"1.0.0"}}}}"#
                         .to_string()
                 }
                 _ => "{}".to_string(),
